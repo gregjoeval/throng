@@ -5,6 +5,8 @@ export const RESULT_PREFIX = "THRONG_RESULT ";
 
 export type TestResult = { ok: true } | { ok: false; output: string };
 
+export type PreviewResult = { ok: true; url: string } | { ok: false; output: string };
+
 export type LandResult =
   | { kind: "landed"; mainSha: string; attempts: number }
   | { kind: "failed"; output: string }
@@ -27,6 +29,30 @@ git fetch -q ${quote(forkRemote)} '+refs/heads/*:refs/remotes/fork/*' || exit 10
 git checkout -q --detach ${quote(sha)} || exit 11
 if npm test > ../test.log 2>&1; then result '{"ok":true}'; fi
 result "{\\"ok\\":false,\\"output\\":$(json < ../test.log)}"
+`;
+}
+
+/**
+ * Deploy the attempt's commit as a Worker Preview named `previewName`. The API token is a placeholder:
+ * the Worker's outbound intercept replaces it on requests it allows.
+ */
+export function previewScript(
+  forkRemote: string,
+  sha: string,
+  preview: { accountId: string; workerName: string; previewName: string },
+): string {
+  return `${PRELUDE}
+rm -rf preview && git init -q preview && cd preview
+git fetch -q ${quote(forkRemote)} '+refs/heads/*:refs/remotes/fork/*' || exit 10
+git checkout -q --detach ${quote(sha)} || exit 11
+export CLOUDFLARE_API_TOKEN=added-by-worker CLOUDFLARE_ACCOUNT_ID=${quote(preview.accountId)}
+export WRANGLER_SEND_METRICS=false CI=1
+if wrangler preview --worker-name ${quote(preview.workerName)} --name ${quote(preview.previewName)} --json > ../preview.json 2> ../preview.log; then
+  url=$(node -e 'const p = JSON.parse(require("fs").readFileSync(0, "utf8")); process.stdout.write(JSON.stringify(p.preview.urls[0]))' < ../preview.json) || exit 13
+  result "{\\"ok\\":true,\\"url\\":$url}"
+fi
+cat ../preview.json >> ../preview.log
+result "{\\"ok\\":false,\\"output\\":$(json < ../preview.log)}"
 `;
 }
 

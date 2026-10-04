@@ -35,6 +35,7 @@
       },
     ],
   },
-  "secrets": { "required": ["SPIKE_TOKEN"] },
+  "vars": { "CF_ACCOUNT_ID": "9ff7e9e225aeb0ab0c56b05b42ca2b13", "PREVIEW_WORKER": "throng-fixture-worker" },
+  "secrets": { "required": ["SPIKE_TOKEN", "CF_PREVIEW_TOKEN"] },
   "observability": { "enabled": true },
 }

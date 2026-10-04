@@ -11,7 +11,10 @@ export interface PushEvent {
   ref: string;
   before: string;
   after: string;
-  /** When Artifacts emitted the event (ms since epoch), if the payload says. */
+  /**
+   * When Artifacts emitted the event (ms since epoch). Queue deliveries carry `metadata.eventTimestamp`;
+   * events delivered by a Workflow trigger carry no `metadata`, so this is null there.
+   */
   emittedAt: number | null;
 }
 

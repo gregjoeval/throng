@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "types": ["node"],
+    "allowImportingTsExtensions": true
+  },
+  "include": ["scripts", "test", "vite.config.ts", "vitest.config.ts"]
+}

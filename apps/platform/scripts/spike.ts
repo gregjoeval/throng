@@ -2,7 +2,8 @@
 //
 //   THRONG_URL=https://throng.<subdomain>.workers.dev SPIKE_TOKEN=... pnpm spike [scenario...]
 //
-// Scenarios: happy (one attempt lands), coalesce (two quick pushes; only the newest sha is checked).
+// Scenarios: happy (one attempt lands), coalesce (two quick pushes; only the newest sha is checked),
+// conflict (two attempts edit the same line; the second is bounced with its conflicting hunks).
 
 import { execFile } from "node:child_process";
 import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -47,7 +48,7 @@ class Timeline {
   }
 }
 
-const scenarios: Record<string, () => Promise<void>> = { happy, coalesce };
+const scenarios: Record<string, () => Promise<void>> = { happy, coalesce, conflict };
 
 async function main(): Promise<void> {
   const names = process.argv.slice(2);
@@ -142,6 +143,50 @@ async function coalesce(): Promise<void> {
   addCheckTimings(timeline, journal);
   report(timeline, journal);
   await cleanUp(project, ["a1"], work);
+}
+
+/** Two attempts forked from the same main edit the same line: the first lands, the second bounces. */
+async function conflict(): Promise<void> {
+  const timeline = new Timeline();
+  const { project, work } = await setUpProject(timeline);
+  const base = (await git(work, "rev-parse", "HEAD")).trim();
+
+  // Fork both before either lands, so both start from the same main.
+  const a1 = await createAttempt(project, "a1", timeline);
+  const a2 = await createAttempt(project, "a2", timeline);
+
+  const first = await commitAndPush(work, a1, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
+  timeline.mark("a1 pushed");
+  const landed = await waitFor(project, (e) => e.kind === "check-finished" && e.detail.sha === first);
+  const landedOutcome = landed.detail.outcome as { kind: string; mainSha?: string };
+  assert(landedOutcome.kind === "landed", `expected a1 to land, got ${JSON.stringify(landedOutcome)}`);
+  const mainSha = landedOutcome.mainSha!;
+  timeline.mark("a1 landed");
+
+  await git(work, "checkout", "-q", "--detach", base);
+  const second = await commitAndPush(work, a2, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a2"'), "a2");
+  timeline.mark("a2 pushed");
+  const finished = await waitFor(project, (e) => e.kind === "check-finished" && e.detail.sha === second);
+  const outcome = finished.detail.outcome as { kind: string; files?: string[]; diff?: string };
+  assert(outcome.kind === "bounced", `expected a2 to bounce, got ${JSON.stringify(outcome)}`);
+  assert(
+    JSON.stringify(outcome.files) === JSON.stringify(["src/greeting.js"]),
+    `unexpected conflict files ${JSON.stringify(outcome.files)}`,
+  );
+  assert(/hello from a1[\s\S]*hello from a2/.test(outcome.diff ?? ""), "the hunks do not show both sides");
+
+  const journal = await settle(project);
+  const head = await api<{ sha: string }>("GET", `/spike/repos/${project}/head`);
+  assert(head.sha === mainSha, `main moved to ${head.sha} after the bounce; expected ${mainSha}`);
+  assert(
+    journal.filter((e) => e.kind === "main-advanced").length === 2,
+    "expected only the fixture and a1 to advance main",
+  );
+  console.log(`bounced: ${outcome.files!.join(", ")}`);
+  console.log(outcome.diff);
+  addCheckTimings(timeline, journal);
+  report(timeline, journal);
+  await cleanUp(project, ["a1", "a2"], work);
 }
 
 async function setUpProject(timeline: Timeline): Promise<{ project: string; work: string }> {

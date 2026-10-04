@@ -1,0 +1,9 @@
+# Allowlist: ignore everything at the repo root by default.
+# To track a file or folder, add a `!/<name>` line below.
+# An un-ignored folder is tracked in full; add normal ignore rules after it to exclude paths inside.
+/*
+
+!/.gitignore
+!/LICENSE
+!/AGENTS.md
+!/docs/

@@ -11,6 +11,9 @@ const EXEC_ENV = {
   GIT_SSL_CAINFO: CA_PATH,
   NODE_EXTRA_CA_CERTS: CA_PATH,
   GIT_TERMINAL_PROMPT: "0",
+  // npm's update check can't reach the registry (internet is off) and cost ~10 s per `npm test`.
+  npm_config_update_notifier: "false",
+  NO_UPDATE_NOTIFIER: "1",
   GIT_AUTHOR_NAME: "throng",
   GIT_AUTHOR_EMAIL: "throng@localhost",
   GIT_COMMITTER_NAME: "throng",

@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { forkName, type PushRoute } from "./events";
+import { CHECK_ROLES, sandboxName } from "./grants";
 
 /** Most Sandboxes one project may run at once. */
 export const SANDBOX_CAP = 3;
@@ -118,7 +119,9 @@ export class ProjectCoordinator extends DurableObject<Env> {
       try {
         const instance = await this.env.CHECK.get(check.instance_id);
         await instance.terminate();
-        await this.env.SANDBOX.getByName(check.instance_id).destroy();
+        await Promise.all(
+          CHECK_ROLES.map((role) => this.env.SANDBOX.getByName(sandboxName(check.instance_id, role)).destroy()),
+        );
         this.#log("check-cancelled", { instanceId: check.instance_id, sha: check.sha, supersededBy: newSha });
       } catch (cause) {
         // The check may already have finished; its result is discarded either way.

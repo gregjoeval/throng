@@ -1,19 +1,24 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import { forkName, routePush, type PushRoute } from "./events";
 import type { CheckOutcome, CheckParams } from "./project";
+import { CHECK_ROLES, grantsForRole, roleGetsPreview, sandboxName, type CheckGrants, type CheckRole } from "./grants";
 import { previewName, type PreviewGrant } from "./preview";
-import type { GitGrant, RunResult } from "./sandbox";
+import type { RunResult } from "./sandbox";
 import {
   landScript,
   parseResult,
   previewScript,
+  retestScript,
   testScript,
   type LandResult,
   type PreviewResult,
+  type RetestResult,
   type TestResult,
 } from "./scripts";
 
 const TOKEN_TTL_SECONDS = 30 * 60;
+/** Re-test and land rounds before giving up on a main that keeps moving. */
+const LAND_ROUNDS = 3;
 
 /** Started by the `cf.artifacts.repo.pushed` event trigger for every repo in the namespace. */
 export class IngestWorkflow extends WorkflowEntrypoint<Env, unknown> {
@@ -31,7 +36,10 @@ export class IngestWorkflow extends WorkflowEntrypoint<Env, unknown> {
   }
 }
 
-/** Tests an attempt's commit, then rebases it onto main, re-tests, and lands it. */
+/**
+ * Tests an attempt's commit, then rebases it onto main, re-tests, and lands it. Repo code runs only in
+ * containers without canonical write access; landing happens in its own container (see `grants.ts`).
+ */
 export class CheckWorkflow extends WorkflowEntrypoint<Env, CheckParams> {
   override async run(event: Readonly<WorkflowEvent<CheckParams>>, step: WorkflowStep): Promise<CheckOutcome> {
     const params = event.payload;
@@ -41,13 +49,16 @@ export class CheckWorkflow extends WorkflowEntrypoint<Env, CheckParams> {
       retries: { limit: 2, delay: "5 seconds", backoff: "constant" },
       timeout: "10 minutes",
     } as const;
+    // Each role runs in its own container with only that role's grants. Retest and land repeat per round.
+    const run = (role: CheckRole, script: (grants: CheckGrants) => string) =>
+      step.do(`${role}${role === "retest" || role === "land" ? ` ${round}` : ""}`, sandboxStep, async () => {
+        const grants = await this.#grants(params);
+        return this.#run(instanceId, role, script(grants), grants);
+      });
+    let round = 0;
 
     const outcome = await (async (): Promise<CheckOutcome> => {
-      const test = await step.do("test", sandboxStep, async () => {
-        const grants = await this.#grants(params);
-        const fork = grants[1]!.remote;
-        return this.#run(instanceId, testScript(fork, params.sha), grants);
-      });
+      const test = await run("test", (g) => testScript(g.forkRead.remote, params.sha));
       timings.testStartMs = test.startMs;
       timings.testRunMs = test.runMs;
       const tested = parseResult<TestResult>(test.stdout);
@@ -55,14 +66,9 @@ export class CheckWorkflow extends WorkflowEntrypoint<Env, CheckParams> {
       if (!tested.ok) return { kind: "failed", stage: "test", output: tested.output };
 
       // A preview is a convenience: a failed one is journaled but doesn't fail the check.
-      const preview = await step.do("preview", sandboxStep, async () => {
-        const grants = await this.#grants(params);
-        const script = previewScript(grants[1]!.remote, params.sha, {
-          ...this.#preview(),
-          previewName: previewName(params),
-        });
-        return this.#run(instanceId, script, grants);
-      });
+      const preview = await run("preview", (g) =>
+        previewScript(g.forkRead.remote, params.sha, { ...this.#preview(), previewName: previewName(params) }),
+      );
       timings.previewRunMs = preview.runMs;
       const previewed = parseResult<PreviewResult>(preview.stdout);
       await step.do("note preview", async () => {
@@ -73,29 +79,36 @@ export class CheckWorkflow extends WorkflowEntrypoint<Env, CheckParams> {
           await project.note("preview-failed", { ...detail, output: previewed?.output ?? preview.stderr.slice(-4000) });
       });
 
-      const land = await step.do("land", sandboxStep, async () => {
-        const grants = await this.#grants(params);
-        return this.#run(instanceId, landScript(grants[0]!.remote, grants[1]!.remote, params.sha), grants);
-      });
-      timings.landStartMs = land.startMs;
-      timings.landRunMs = land.runMs;
-      const landed = parseResult<LandResult>(land.stdout);
-      if (landed === null) return scriptError("land", land);
-      switch (landed.kind) {
-        case "landed":
-          timings.landAttempts = landed.attempts;
+      for (round = 1; round <= LAND_ROUNDS; round++) {
+        const retest = await run("retest", (g) => retestScript(g.canonicalRead.remote, g.forkRead.remote, params.sha));
+        timings.retestRunMs = retest.runMs;
+        const retested = parseResult<RetestResult>(retest.stdout);
+        if (retested === null) return scriptError("retest", retest);
+        if (retested.kind === "bounced") return retested;
+        if (retested.kind === "failed") return { kind: "failed", stage: "rebase-test", output: retested.output };
+
+        const land = await run("land", (g) =>
+          landScript(g.canonicalWrite.remote, g.forkRead.remote, params.sha, retested),
+        );
+        timings.landRunMs = land.runMs;
+        const landed = parseResult<LandResult>(land.stdout);
+        if (landed === null) return scriptError("land", land);
+        if (landed.kind === "landed") {
+          timings.landRounds = round;
           return { kind: "landed", mainSha: landed.mainSha };
-        case "failed":
-          return { kind: "failed", stage: "rebase-test", output: landed.output };
-        case "bounced":
-          return landed;
-        case "gave-up":
-          return { kind: "error", message: `main kept moving; gave up after ${landed.attempts} pushes` };
+        }
+        if (landed.kind === "mismatch") {
+          return {
+            kind: "error",
+            message: `land produced tree ${landed.tree}, but retest tested ${retested.tree}; refusing to push`,
+          };
+        }
       }
+      return { kind: "error", message: `main kept moving; gave up after ${LAND_ROUNDS} rounds` };
     })();
 
     await step.do("teardown", async () => {
-      await this.env.SANDBOX.getByName(instanceId).destroy();
+      await Promise.all(CHECK_ROLES.map((role) => this.env.SANDBOX.getByName(sandboxName(instanceId, role)).destroy()));
     });
     timings.finishedAt = Date.now();
     await step.do("report", async () => {
@@ -104,29 +117,33 @@ export class CheckWorkflow extends WorkflowEntrypoint<Env, CheckParams> {
     return outcome;
   }
 
-  /** Canonical repo (write) then attempt fork (read). Minted per step so a retry never holds a stale token. */
-  async #grants({ project, attempt }: CheckParams): Promise<[GitGrant, GitGrant]> {
+  /** Every token a check might need. Minted per step, so a retry never holds a stale one. */
+  async #grants({ project, attempt }: CheckParams): Promise<CheckGrants> {
     using canonical = await this.env.ARTIFACTS.get(project);
     using fork = await this.env.ARTIFACTS.get(forkName(project, attempt));
-    const [canonicalInfo, forkInfo, canonicalToken, forkToken] = await Promise.all([
+    const [canonicalInfo, forkInfo, canonicalRead, canonicalWrite, forkRead] = await Promise.all([
       canonical.info(),
       fork.info(),
+      canonical.createToken("read", TOKEN_TTL_SECONDS),
       canonical.createToken("write", TOKEN_TTL_SECONDS),
       fork.createToken("read", TOKEN_TTL_SECONDS),
     ]);
-    return [
-      { remote: canonicalInfo.remote, token: canonicalToken.plaintext },
-      { remote: forkInfo.remote, token: forkToken.plaintext },
-    ];
+    return {
+      canonicalRead: { remote: canonicalInfo.remote, token: canonicalRead.plaintext, access: "read" },
+      canonicalWrite: { remote: canonicalInfo.remote, token: canonicalWrite.plaintext, access: "write" },
+      forkRead: { remote: forkInfo.remote, token: forkRead.plaintext, access: "read" },
+    };
   }
 
   #preview(): PreviewGrant {
     return { accountId: this.env.CF_ACCOUNT_ID, workerName: this.env.PREVIEW_WORKER };
   }
 
-  async #run(instanceId: string, script: string, grants: GitGrant[]): Promise<RunResult> {
-    // Every run gets the preview grant: the container's intercepts are fixed when it starts.
-    const result = await this.env.SANDBOX.getByName(instanceId).run(script, grants, this.#preview());
+  /** Runs a script in the role's own container, which only ever gets that role's grants. */
+  async #run(instanceId: string, role: CheckRole, script: string, grants: CheckGrants): Promise<RunResult> {
+    const sandbox = this.env.SANDBOX.getByName(sandboxName(instanceId, role));
+    const preview = roleGetsPreview(role) ? this.#preview() : null;
+    const result = await sandbox.run(script, grantsForRole(role, grants), preview);
     // Exit codes 10+ are infrastructure failures (fetch, checkout); throw so the step retries.
     if (result.exitCode >= 10) {
       throw new Error(`sandbox script exited ${result.exitCode}: ${result.stderr.slice(-2000)}`);

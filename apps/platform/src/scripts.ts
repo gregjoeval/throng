@@ -7,11 +7,12 @@ export type TestResult = { ok: true } | { ok: false; output: string };
 
 export type PreviewResult = { ok: true; url: string } | { ok: false; output: string };
 
-export type LandResult =
-  | { kind: "landed"; mainSha: string; attempts: number }
+export type RetestResult =
+  | { kind: "tested"; base: string; tree: string }
   | { kind: "failed"; output: string }
-  | { kind: "bounced"; files: string[]; diff: string }
-  | { kind: "gave-up"; attempts: number };
+  | { kind: "bounced"; files: string[]; diff: string };
+
+export type LandResult = { kind: "landed"; mainSha: string } | { kind: "moved" } | { kind: "mismatch"; tree: string };
 
 const quote = (s: string): string => `'${s.replaceAll("'", "'\\''")}'`;
 
@@ -57,31 +58,57 @@ result "{\\"ok\\":false,\\"output\\":$(json < ../preview.log)}"
 }
 
 /**
- * Rebase the attempt onto the canonical repo's main, re-run the tests, and push to main. A push
- * rejected because main moved meanwhile is retried from a fresh fetch.
+ * Untrusted: rebase the attempt onto the canonical repo's current main and re-run the tests. Reports
+ * the main it rebased onto and the tree it tested, for the trusted land step to check against.
  */
-export function landScript(canonicalRemote: string, forkRemote: string, sha: string, maxAttempts = 3): string {
+export function retestScript(canonicalRemote: string, forkRemote: string, sha: string): string {
   return `${PRELUDE}
-rm -rf land && git init -q land && cd land
+rm -rf retest && git init -q retest && cd retest
 git fetch -q ${quote(forkRemote)} '+refs/heads/*:refs/remotes/fork/*' || exit 10
+git fetch -q ${quote(canonicalRemote)} '+refs/heads/main:refs/remotes/canonical/main' || exit 12
 git checkout -q -B attempt ${quote(sha)} || exit 11
-for n in $(seq 1 ${maxAttempts}); do
-  git fetch -q ${quote(canonicalRemote)} '+refs/heads/main:refs/remotes/canonical/main' || exit 12
-  if ! git rebase -q canonical/main > ../rebase.log 2>&1; then
-    files=$(git diff --name-only --diff-filter=U | node -e 'process.stdout.write(JSON.stringify(require("fs").readFileSync(0, "utf8").split("\\n").filter(Boolean)))')
-    diff=$(git diff | json)
-    git rebase --abort
-    result "{\\"kind\\":\\"bounced\\",\\"files\\":$files,\\"diff\\":$diff}"
-  fi
-  if ! npm test > ../test.log 2>&1; then
-    result "{\\"kind\\":\\"failed\\",\\"output\\":$(json < ../test.log)}"
-  fi
-  if git push -q ${quote(canonicalRemote)} HEAD:refs/heads/main 2> ../push.log; then
-    result "{\\"kind\\":\\"landed\\",\\"mainSha\\":\\"$(git rev-parse HEAD)\\",\\"attempts\\":$n}"
-  fi
-  cat ../push.log >&2
-done
-result '{"kind":"gave-up","attempts":${maxAttempts}}'
+base=$(git rev-parse canonical/main)
+if ! git rebase -q "$base" > ../rebase.log 2>&1; then
+  files=$(git diff --name-only --diff-filter=U | node -e 'process.stdout.write(JSON.stringify(require("fs").readFileSync(0, "utf8").split("\\n").filter(Boolean)))')
+  diff=$(git diff | json)
+  git rebase --abort
+  result "{\\"kind\\":\\"bounced\\",\\"files\\":$files,\\"diff\\":$diff}"
+fi
+if ! npm test > ../test.log 2>&1; then
+  result "{\\"kind\\":\\"failed\\",\\"output\\":$(json < ../test.log)}"
+fi
+result "{\\"kind\\":\\"tested\\",\\"base\\":\\"$base\\",\\"tree\\":\\"$(git rev-parse 'HEAD^{tree}')\\"}"
+`;
+}
+
+/**
+ * Trusted: holds canonical write, so it runs no repository code (no npm or node, no hooks, no config
+ * from the repo). It redoes the same rebase onto the pinned main and pushes only if the result is the
+ * exact tree the retest step tested, so an untrusted step can't hand over other content.
+ */
+export function landScript(
+  canonicalRemote: string,
+  forkRemote: string,
+  sha: string,
+  tested: { base: string; tree: string },
+): string {
+  return `
+set -uo pipefail
+result() { printf '${RESULT_PREFIX}%s\\n' "$1"; exit 0; }
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+rm -rf land && git init -q land && cd land
+git config core.hooksPath /dev/null
+git fetch -q ${quote(forkRemote)} '+refs/heads/*:refs/remotes/fork/*' || exit 10
+git fetch -q ${quote(canonicalRemote)} '+refs/heads/main:refs/remotes/canonical/main' || exit 12
+[ "$(git rev-parse canonical/main)" = ${quote(tested.base)} ] || result '{"kind":"moved"}'
+git checkout -q -B attempt ${quote(sha)} || exit 11
+git rebase -q ${quote(tested.base)} > /dev/null 2>&1 || exit 14
+tree=$(git rev-parse 'HEAD^{tree}')
+[ "$tree" = ${quote(tested.tree)} ] || result "{\\"kind\\":\\"mismatch\\",\\"tree\\":\\"$tree\\"}"
+if git push -q ${quote(canonicalRemote)} HEAD:refs/heads/main; then
+  result "{\\"kind\\":\\"landed\\",\\"mainSha\\":\\"$(git rev-parse HEAD)\\"}"
+fi
+result '{"kind":"moved"}'
 `;
 }
 

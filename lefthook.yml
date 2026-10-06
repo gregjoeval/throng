@@ -1,0 +1,11 @@
+# Git hooks, installed by `pnpm install`. CI runs the full checks; this catches the cheap ones first.
+pre-commit:
+  parallel: true
+  commands:
+    format:
+      glob: "*.{ts,js,json,jsonc,md,yml,yaml}"
+      run: pnpm exec oxfmt {staged_files}
+      stage_fixed: true
+    lint:
+      glob: "*.{ts,js}"
+      run: pnpm exec oxlint --deny-warnings {staged_files}

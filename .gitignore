@@ -13,6 +13,7 @@
 !/packages/
 !/.oxfmtrc.json
 !/.oxlintrc.json
+!/lefthook.yml
 !/package.json
 !/pnpm-lock.yaml
 !/pnpm-workspace.yaml

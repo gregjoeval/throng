@@ -8,13 +8,14 @@
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
-    "lint": "oxlint",
+    "lint": "oxlint --deny-warnings",
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check",
     "deploy": "pnpm --filter @throng/platform run deploy",
     "spike": "pnpm --filter @throng/platform run spike"
   },
   "devDependencies": {
+    "lefthook": "2.1.16",
     "oxfmt": "^0.71.0",
     "oxlint": "^1.86.0",
     "typescript": "^7.0.2"

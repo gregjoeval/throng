@@ -1,3 +1,4 @@
+import type { FailureStage } from "./scripts";
 import { DurableObject } from "cloudflare:workers";
 import { forkName, type PushRoute } from "./events";
 import { CHECK_ROLES, sandboxName } from "./grants";
@@ -13,7 +14,7 @@ export interface CheckParams {
 
 export type CheckOutcome =
   | { kind: "landed"; mainSha: string }
-  | { kind: "failed"; stage: "install" | "test" | "rebase-test"; output: string }
+  | { kind: "failed"; stage: FailureStage | "rebase-test"; output: string }
   | { kind: "bounced"; files: string[]; diff: string }
   | { kind: "error"; message: string };
 

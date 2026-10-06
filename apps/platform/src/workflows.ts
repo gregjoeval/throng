@@ -84,7 +84,11 @@ export class CheckWorkflow extends WorkflowEntrypoint<Env, CheckParams> {
         const project = this.env.PROJECT.getByName(params.project);
         if (previewed?.ok) await project.note("preview-ready", { ...detail, url: previewed.url });
         else
-          await project.note("preview-failed", { ...detail, output: previewed?.output ?? preview.stderr.slice(-4000) });
+          await project.note("preview-failed", {
+            ...detail,
+            stage: previewed?.stage ?? "deploy",
+            output: previewed?.output ?? preview.stderr.slice(-4000),
+          });
       });
 
       for (round = 1; round <= LAND_ROUNDS; round++) {
@@ -153,12 +157,12 @@ export class CheckWorkflow extends WorkflowEntrypoint<Env, CheckParams> {
   /** Runs a script in the role's own container, which only ever gets that role's grants. */
   async #run(instanceId: string, role: CheckRole, script: string, grants: CheckGrants): Promise<RunResult> {
     const sandbox = this.env.SANDBOX.getByName(sandboxName(instanceId, role));
-    const network = {
+    const result = await sandbox.run(script, {
+      grants: grantsForRole(role, grants),
       preview: roleGetsPreview(role) ? this.#preview() : null,
       // Installing dependencies is repo work; the trusted land container never reaches the registry.
       npmRegistry: RUNS_REPO_CODE[role],
-    };
-    const result = await sandbox.run(script, grantsForRole(role, grants), network);
+    });
     // Exit codes 10+ are infrastructure failures (fetch, checkout); throw so the step retries.
     if (result.exitCode >= 10) {
       throw new Error(`sandbox script exited ${result.exitCode}: ${result.stderr.slice(-2000)}`);

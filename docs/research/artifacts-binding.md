@@ -30,16 +30,16 @@ Each claim is tagged by evidence level:
 
 The [Workers binding reference](https://developers.cloudflare.com/artifacts/api/workers-binding/) (last updated Oct 1, 2026) says the repo handle supports "metadata lookup, token management, Git object inspection, path-based file reads, commit history, and forking" **[docs]**. Repository capability methods:
 
-| Method | Returns | Notes |
-| --- | --- | --- |
-| `info()` | `ArtifactsRepoInfo` | Fresh metadata lookup. Metadata is **not** exposed as properties on the handle. |
-| `log({ref?, limit?, offset?})` | `ArtifactsCommitMetadata[]` | First-parent chain, newest first. Default 50, max 1000. Unresolvable ref returns `[]`. |
-| `readCommit(hash)` | `ArtifactsCommitMetadata \| null` | |
-| `readTree(hash)` | `ArtifactsTreeEntry[] \| null` | Immediate children only, so walk recursively for a full tree. |
-| `readBlob(hash)` | `Blob \| null` | Untyped `Blob` (`type` is empty). Hash must be a lowercase 40-char SHA-1. |
-| `readFile({ref, path})` | `Blob \| null` | MIME-typed `Blob`. `null` if the path is missing or is a directory. Throws `INVALID_INPUT` on an empty ref or path. |
-| `createToken(scope?, ttl?)`, `listTokens()`, `revokeToken(tokenOrId)` | | `scope` defaults to `"write"`. |
-| `fork(name, {description?, readOnly?, defaultBranchOnly?})` | `ArtifactsCreateRepoResult` | |
+| Method                                                                | Returns                           | Notes                                                                                                               |
+| --------------------------------------------------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `info()`                                                              | `ArtifactsRepoInfo`               | Fresh metadata lookup. Metadata is **not** exposed as properties on the handle.                                     |
+| `log({ref?, limit?, offset?})`                                        | `ArtifactsCommitMetadata[]`       | First-parent chain, newest first. Default 50, max 1000. Unresolvable ref returns `[]`.                              |
+| `readCommit(hash)`                                                    | `ArtifactsCommitMetadata \| null` |                                                                                                                     |
+| `readTree(hash)`                                                      | `ArtifactsTreeEntry[] \| null`    | Immediate children only, so walk recursively for a full tree.                                                       |
+| `readBlob(hash)`                                                      | `Blob \| null`                    | Untyped `Blob` (`type` is empty). Hash must be a lowercase 40-char SHA-1.                                           |
+| `readFile({ref, path})`                                               | `Blob \| null`                    | MIME-typed `Blob`. `null` if the path is missing or is a directory. Throws `INVALID_INPUT` on an empty ref or path. |
+| `createToken(scope?, ttl?)`, `listTokens()`, `revokeToken(tokenOrId)` |                                   | `scope` defaults to `"write"`.                                                                                      |
+| `fork(name, {description?, readOnly?, defaultBranchOnly?})`           | `ArtifactsCreateRepoResult`       |                                                                                                                     |
 
 - Blob-returning methods over a `remote` binding in local dev need **Wrangler ≥ 4.145.0** **[docs]**.
 - `npx wrangler types` generates the `Artifacts` type. The docs say to treat `worker-configuration.d.ts` as the source of truth **[docs]**.
@@ -100,7 +100,7 @@ Not documented **[unverified]**. Evidence:
 - Wrangler: `wrangler artifacts repos issue-token <repo> --namespace --scope --ttl` **[docs]**.
 - `read` allows clone, fetch and pull. `write` adds push. Tokens are strictly repo-scoped, even within a namespace **[docs]**.
 - Tokens can be revoked with `revokeToken(tokenOrId)`. `token.created` and `token.revoked` events exist (repo-level) **[docs]**.
-- **Known bug [issue]:** [workers-sdk#15429](https://github.com/cloudflare/workers-sdk/issues/15429) (open, Wrangler 4.125). A token from `repo.createToken("read", 300)` on an *existing* repo got **HTTP 403** on `info/refs` when used from a Worker via isomorphic-git, but worked from a standalone process. The create and fork tokens worked. Our spike pushes from a dev machine with plain `git push`, which is the case reported as working. The Sandbox rebase-and-push hop, however, uses a Worker-minted token. **Test it early.**
+- **Known bug [issue]:** [workers-sdk#15429](https://github.com/cloudflare/workers-sdk/issues/15429) (open, Wrangler 4.125). A token from `repo.createToken("read", 300)` on an _existing_ repo got **HTTP 403** on `info/refs` when used from a Worker via isomorphic-git, but worked from a standalone process. The create and fork tokens worked. Our spike pushes from a dev machine with plain `git push`, which is the case reported as working. The Sandbox rebase-and-push hop, however, uses a Worker-minted token. **Test it early.**
 - Local dev: under `wrangler dev` with `remote: true`, every RPC result needs `dispose()`, otherwise the runtime logs warnings ([workers-sdk#15830](https://github.com/cloudflare/workers-sdk/issues/15830)) **[issue]**. Use `using`.
 
 ## 3. Push events
@@ -157,9 +157,13 @@ Announced in [Run CI/CD for millions of repos](https://blog.cloudflare.com/ci-wo
 - Create via REST: `POST /accounts/:id/event_subscriptions/subscriptions` with the body below. The API accepts only the short event names (`pushed`); `cf.artifacts.repo.pushed` is rejected. Delivered messages use camelCase `repoName` ([workers-sdk#16043](https://github.com/cloudflare/workers-sdk/issues/16043)) **[issue]**.
 
   ```json
-  {"name":"...","enabled":true,"events":["pushed"],
-   "source":{"type":"artifacts.repo","namespace":"<ns>","repo_name":"<repo>"},
-   "destination":{"type":"queues.queue","queue_id":"<id>"}}
+  {
+    "name": "...",
+    "enabled": true,
+    "events": ["pushed"],
+    "source": { "type": "artifacts.repo", "namespace": "<ns>", "repo_name": "<repo>" },
+    "destination": { "type": "queues.queue", "queue_id": "<id>" }
+  }
   ```
 
 - **Wrangler can't create it yet.** `wrangler queues subscription create --source artifacts.repo` has no `--namespace`/`--repo-name` flags and always fails validation (Wrangler 4.146/4.147). Fix PR [workers-sdk#16051](https://github.com/cloudflare/workers-sdk/pull/16051) is open **[issue, confirmed in 4.147.0 source]**.
@@ -176,6 +180,7 @@ Announced in [Run CI/CD for millions of repos](https://blog.cloudflare.com/ci-wo
   ```
 
   Pass `id` (for example `${repo}-${after}`) to `create()`. Instance IDs "Must be unique within the Workflow", so a redelivered message can't start a second run ([Workflows Workers API](https://developers.cloudflare.com/workflows/build/workers-api/)) **[docs]**. Whether `create()` with a duplicate id throws or returns the existing instance is **[unverified]**.
+
 - Queues delivery is **at-least-once** ([Delivery guarantees](https://developers.cloudflare.com/queues/reference/delivery-guarantees/)) **[docs]**. Batching defaults are `max_batch_size` 10 and `max_batch_timeout` 5 s, which adds up to about 5 s of latency ([Batching, retries](https://developers.cloudflare.com/queues/configuration/batching-retries/)) **[docs]**. Tune both down for the spike.
 - Event-to-queue latency is **[unverified]**.
 
@@ -187,15 +192,15 @@ The Sandbox's own push to `main` of the upstream repo also emits `pushed`. With 
 
 From [Limits](https://developers.cloudflare.com/artifacts/platform/limits/) **[docs]**:
 
-| Limit | Value |
-| --- | --- |
-| Control-plane requests | 2,000 / 10 s **per namespace** |
-| Git requests | 2,000 / 10 s **per repo** |
-| Repo size | 1 GB |
-| File/blob size | 32 MB |
-| Account storage | 1 TB (raisable) |
-| Repos, namespaces | unlimited |
-| Names | Namespace 2–63 chars. Namespace and repo names start with a letter or digit, then letters, digits, `.`, `_`, `-`. |
+| Limit                  | Value                                                                                                             |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Control-plane requests | 2,000 / 10 s **per namespace**                                                                                    |
+| Git requests           | 2,000 / 10 s **per repo**                                                                                         |
+| Repo size              | 1 GB                                                                                                              |
+| File/blob size         | 32 MB                                                                                                             |
+| Account storage        | 1 TB (raisable)                                                                                                   |
+| Repos, namespaces      | unlimited                                                                                                         |
+| Names                  | Namespace 2–63 chars. Namespace and repo names start with a letter or digit, then letters, digits, `.`, `_`, `-`. |
 
 Namespaces and jurisdiction:
 

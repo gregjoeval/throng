@@ -62,6 +62,7 @@ The Sandbox docs give clear guidance here. **[docs]** [Sandbox security](https:/
   - add `Bearer <full token>`.
 
   **[unverified]** Whether push through an HTTPS intercept to `*.artifacts.cloudflare.net` works. This includes streamed request bodies, receive-pack framing, and a Worker `fetch()` to the Artifacts host.
+
 - Intercepts also accept host globs, for example `*.artifacts.cloudflare.net`. There are 64 hostname targets per container, and an intercept must be registered again for each new container. **[docs]** [Intercept limit](https://developers.cloudflare.com/containers/api/durable-object-container/)
 - If `npm ci` needs the public registry, setting `enableInternet: true` also lets test code send anything it can read to any server. The safer pattern intercepts and allowlists `registry.npmjs.org` with Internet left off. **[docs]** [Sandbox security](https://developers.cloudflare.com/sandbox/concepts/security/#every-opening-is-also-a-way-out). For the spike fixture, the simplest choices are a repo with **no install step** (for example `node --test`) or dependencies baked into the image.
 
@@ -100,19 +101,19 @@ The Sandbox docs give clear guidance here. **[docs]** [Sandbox security](https:/
 - Implication for `.throng/checks.yml`: an `image:` field can only pick a name from an allowlist that Throng deploys, such as `node`, `python` or `bun`. Per-repo custom toolchains would have to be installed at runtime inside a generic image, optionally cached with a snapshot. This is a product-design question for the backlog.
 - **Instance sizes** **[docs]** ([Limits](https://developers.cloudflare.com/containers/platform/limits/)):
 
-  | Type | vCPU | Memory | Disk |
-  | --- | --- | --- | --- |
-  | lite (**default** for `start()`) | 1/16 | 256 MiB | 2 GB |
-  | basic | 1/4 | 1 GiB | 4 GB |
-  | standard-1 | 1/2 | 4 GiB | 8 GB |
-  | standard-2 | 1 | 6 GiB | 12 GB |
-  | standard-3 | 2 | 8 GiB | 16 GB |
-  | standard-4 | 4 | 12 GiB | 20 GB |
-
+  | Type                             | vCPU | Memory  | Disk  |
+  | -------------------------------- | ---- | ------- | ----- |
+  | lite (**default** for `start()`) | 1/16 | 256 MiB | 2 GB  |
+  | basic                            | 1/4  | 1 GiB   | 4 GB  |
+  | standard-1                       | 1/2  | 4 GiB   | 8 GB  |
+  | standard-2                       | 1    | 6 GiB   | 12 GB |
+  | standard-3                       | 2    | 8 GiB   | 16 GB |
+  | standard-4                       | 4    | 12 GiB  | 20 GB |
   - Custom sizes: 1–4 vCPU, at most 12 GiB memory and 20 GB disk, with at least 3 GiB per vCPU.
   - Pass the size via `start({ instance })`.
   - The `start()` reference lists `lite` and `standard-1..4` but omits `basic`. **[unverified]** Whether `basic` is accepted.
   - `lite` (256 MiB) is likely too small for `npm ci`/vitest. **[unverified]** Plan to start with `basic` or `standard-1`.
+
 - **Timeouts:**
   - Inactivity timeout: up to 6 h.
   - `exec()`: no limit.
@@ -130,12 +131,12 @@ The Sandbox docs give clear guidance here. **[docs]** [Sandbox security](https:/
 
 ## 3. Licenses
 
-| Package | Version (npm `latest`) | License | Source |
-| --- | --- | --- | --- |
-| `@cloudflare/sandbox` | 1.0.0 (2026-09-30) | **Apache-2.0** | npm `license` field; [`packages/sandbox/LICENSE`](https://github.com/cloudflare/sandbox-sdk/blob/main/packages/sandbox/LICENSE); [root `LICENSE`](https://github.com/cloudflare/sandbox-sdk/blob/main/LICENSE) |
-| `sandbox-shim` binary (from `cloudflare/sandbox:<ver>` image, crate `sandbox-tools`) | 1.0.0 | Apache-2.0 | [`crates/sandbox-tools/Cargo.toml`](https://github.com/cloudflare/sandbox-sdk/blob/main/crates/sandbox-tools/Cargo.toml) |
-| `agents` (Cloudflare Agents SDK) | 0.26.0 | **MIT** (© 2025 Cloudflare, Inc.) | npm; [`LICENSE`](https://github.com/cloudflare/agents/blob/main/LICENSE); [`NOTICE`](https://github.com/cloudflare/agents/blob/main/NOTICE) |
-| Runtime deps of `@cloudflare/sandbox` | `zod` 4.5.4, `aws4fetch` 1.0.20 | MIT, MIT | npm |
+| Package                                                                              | Version (npm `latest`)          | License                           | Source                                                                                                                                                                                                         |
+| ------------------------------------------------------------------------------------ | ------------------------------- | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@cloudflare/sandbox`                                                                | 1.0.0 (2026-09-30)              | **Apache-2.0**                    | npm `license` field; [`packages/sandbox/LICENSE`](https://github.com/cloudflare/sandbox-sdk/blob/main/packages/sandbox/LICENSE); [root `LICENSE`](https://github.com/cloudflare/sandbox-sdk/blob/main/LICENSE) |
+| `sandbox-shim` binary (from `cloudflare/sandbox:<ver>` image, crate `sandbox-tools`) | 1.0.0                           | Apache-2.0                        | [`crates/sandbox-tools/Cargo.toml`](https://github.com/cloudflare/sandbox-sdk/blob/main/crates/sandbox-tools/Cargo.toml)                                                                                       |
+| `agents` (Cloudflare Agents SDK)                                                     | 0.26.0                          | **MIT** (© 2025 Cloudflare, Inc.) | npm; [`LICENSE`](https://github.com/cloudflare/agents/blob/main/LICENSE); [`NOTICE`](https://github.com/cloudflare/agents/blob/main/NOTICE)                                                                    |
+| Runtime deps of `@cloudflare/sandbox`                                                | `zod` 4.5.4, `aws4fetch` 1.0.20 | MIT, MIT                          | npm                                                                                                                                                                                                            |
 
 - GitHub's license detector shows `cloudflare/sandbox-sdk` as `NOASSERTION`. The root `LICENSE` is Apache-2.0 text without the appendix. The npm metadata and the package-level `LICENSE` both say Apache-2.0. No `NOTICE` file exists in sandbox-sdk.
 - The `agents` repo has a `NOTICE` listing code it incorporates or adapts:
@@ -147,6 +148,7 @@ The Sandbox docs give clear guidance here. **[docs]** [Sandbox security](https:/
   - PartyServer (ISC, vendored)
 
   The published npm tarball ships only `LICENSE` (MIT), not the `NOTICE` file.
+
 - **Compatibility (this is my reading, not legal advice):**
   - An MIT- or Apache-2.0-licensed project may depend on both packages. Throng's own code keeps its own license, and the dependencies keep theirs.
   - Apache-2.0 §4 obligations apply only when we **redistribute** Apache code:

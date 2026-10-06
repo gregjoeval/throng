@@ -5,7 +5,8 @@
 // Scenarios: happy (one attempt lands), coalesce (two quick pushes; only the newest sha is checked),
 // conflict (two attempts edit the same line; the second is bounced with its conflicting hunks),
 // preview (an attempt gets a live Preview URL serving its change; its files are readable via the Worker),
-// intrusion (an attempt's tests try to push to the canonical main and call the Cloudflare API; both fail).
+// intrusion (an attempt's tests try to push to the canonical main and call the Cloudflare API; both fail),
+// deps (an attempt adds an npm dependency; the check installs it from the registry, lands, and previews).
 
 import { execFile } from "node:child_process";
 import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -51,7 +52,7 @@ class Timeline {
   }
 }
 
-const scenarios: Record<string, () => Promise<void>> = { happy, coalesce, conflict, preview, intrusion };
+const scenarios: Record<string, () => Promise<void>> = { happy, coalesce, conflict, preview, intrusion, deps };
 
 async function main(): Promise<void> {
   const names = process.argv.slice(2);
@@ -301,6 +302,59 @@ test("cannot reach the Cloudflare API", async () => {
   const head = await api<{ sha: string }>("GET", `/spike/repos/${project}/head`);
   assert(head.sha === outcome.mainSha, `main is ${head.sha}, expected the landed ${outcome.mainSha}`);
   console.log(`main history: ${log.map((c) => c.message).join(" <- ")}`);
+
+  const journal = await settle(project, 5_000);
+  addCheckTimings(timeline, journal);
+  report(timeline, journal);
+  await cleanUp(project, ["a1"], work);
+}
+
+/** An attempt adds an npm dependency: the check installs it, passes, lands, and its Preview is built with it. */
+async function deps(): Promise<void> {
+  const timeline = new Timeline();
+  const { project, work } = await setUpProject(timeline);
+  const fork = await createAttempt(project, "a1", timeline);
+
+  const pkg = JSON.parse(await readFile(join(work, "package.json"), "utf8")) as Record<string, unknown>;
+  await writeFile(
+    join(work, "package.json"),
+    `${JSON.stringify({ ...pkg, dependencies: { "is-number": "7.0.0" } }, null, 2)}\n`,
+  );
+  await run("npm", ["install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund"], { cwd: work });
+  await writeFile(
+    join(work, "test/deps.test.js"),
+    `import assert from "node:assert/strict";
+import { test } from "node:test";
+import isNumber from "is-number";
+
+test("the dependency is installed", () => {
+  assert.equal(isNumber(7), true);
+});
+`,
+  );
+  await git(work, "add", "package.json", "package-lock.json", "test/deps.test.js");
+  const sha = await commitAndPush(
+    work,
+    fork,
+    "src/greeting.js",
+    (s) => `import isNumber from "is-number";\n${s.replace('"hello"', 'isNumber(1) ? "hello with deps" : "no deps"')}`,
+    "a1: add is-number",
+  );
+  timeline.mark("attempt pushed");
+
+  const finished = await waitFor(project, (e) => e.kind === "check-finished" && e.detail.sha === sha);
+  const outcome = finished.detail.outcome as { kind: string; mainSha?: string };
+  assert(outcome.kind === "landed", `expected landed, got ${JSON.stringify(outcome)}`);
+  const lock = await apiText("GET", `/spike/repos/${project}/file?ref=main&path=package-lock.json`);
+  assert(lock.includes('"is-number"'), "main has no lockfile with the dependency");
+
+  const ready = await waitFor(
+    project,
+    (e) => (e.kind === "preview-ready" || e.kind === "preview-failed") && e.detail.sha === sha,
+  );
+  assert(ready.kind === "preview-ready", `preview failed: ${String(ready.detail.output)}`);
+  const body = await fetchUntil(`${String(ready.detail.url)}/?name=spike`, (b) => b === "hello with deps, spike");
+  timeline.mark(`preview served ${JSON.stringify(body)}`);
 
   const journal = await settle(project, 5_000);
   addCheckTimings(timeline, journal);

@@ -1,7 +1,15 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import { forkName, routePush, type PushRoute } from "./events";
 import type { CheckOutcome, CheckParams } from "./project";
-import { CHECK_ROLES, grantsForRole, roleGetsPreview, sandboxName, type CheckGrants, type CheckRole } from "./grants";
+import {
+  CHECK_ROLES,
+  grantsForRole,
+  roleGetsPreview,
+  RUNS_REPO_CODE,
+  sandboxName,
+  type CheckGrants,
+  type CheckRole,
+} from "./grants";
 import { previewName, type PreviewGrant } from "./preview";
 import type { RunResult } from "./sandbox";
 import {
@@ -63,7 +71,7 @@ export class CheckWorkflow extends WorkflowEntrypoint<Env, CheckParams> {
       timings.testRunMs = test.runMs;
       const tested = parseResult<TestResult>(test.stdout);
       if (tested === null) return scriptError("test", test);
-      if (!tested.ok) return { kind: "failed", stage: "test", output: tested.output };
+      if (!tested.ok) return { kind: "failed", stage: tested.stage, output: tested.output };
 
       // A preview is a convenience: a failed one is journaled but doesn't fail the check.
       const preview = await run("preview", (g) =>
@@ -85,7 +93,10 @@ export class CheckWorkflow extends WorkflowEntrypoint<Env, CheckParams> {
         const retested = parseResult<RetestResult>(retest.stdout);
         if (retested === null) return scriptError("retest", retest);
         if (retested.kind === "bounced") return retested;
-        if (retested.kind === "failed") return { kind: "failed", stage: "rebase-test", output: retested.output };
+        if (retested.kind === "failed") {
+          const stage = retested.stage === "install" ? "install" : "rebase-test";
+          return { kind: "failed", stage, output: retested.output };
+        }
 
         const land = await run("land", (g) =>
           landScript(g.canonicalWrite.remote, g.forkRead.remote, params.sha, retested),
@@ -142,8 +153,12 @@ export class CheckWorkflow extends WorkflowEntrypoint<Env, CheckParams> {
   /** Runs a script in the role's own container, which only ever gets that role's grants. */
   async #run(instanceId: string, role: CheckRole, script: string, grants: CheckGrants): Promise<RunResult> {
     const sandbox = this.env.SANDBOX.getByName(sandboxName(instanceId, role));
-    const preview = roleGetsPreview(role) ? this.#preview() : null;
-    const result = await sandbox.run(script, grantsForRole(role, grants), preview);
+    const network = {
+      preview: roleGetsPreview(role) ? this.#preview() : null,
+      // Installing dependencies is repo work; the trusted land container never reaches the registry.
+      npmRegistry: RUNS_REPO_CODE[role],
+    };
+    const result = await sandbox.run(script, grantsForRole(role, grants), network);
     // Exit codes 10+ are infrastructure failures (fetch, checkout); throw so the step retries.
     if (result.exitCode >= 10) {
       throw new Error(`sandbox script exited ${result.exitCode}: ${result.stderr.slice(-2000)}`);

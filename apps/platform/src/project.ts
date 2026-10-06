@@ -13,7 +13,7 @@ export interface CheckParams {
 
 export type CheckOutcome =
   | { kind: "landed"; mainSha: string }
-  | { kind: "failed"; stage: "test" | "rebase-test"; output: string }
+  | { kind: "failed"; stage: "install" | "test" | "rebase-test"; output: string }
   | { kind: "bounced"; files: string[]; diff: string }
   | { kind: "error"; message: string };
 

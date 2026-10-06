@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -62,13 +62,84 @@ beforeEach(() => {
   git(root, "clone", "-q", "--bare", canonical, fork);
 });
 
+/**
+ * Gives the repo a local `file:` dependency and a lockfile. Its tests pass only if the dependency was
+ * installed and the dependency's install script did not run.
+ */
+function addDependency(): void {
+  mkdirSync(join(work, "dep"));
+  writeFileSync(
+    join(work, "dep/package.json"),
+    JSON.stringify({
+      name: "dep",
+      version: "1.0.0",
+      main: "index.js",
+      scripts: {
+        postinstall: `node -e "require('fs').writeFileSync(process.env.INIT_CWD + '/ran-install-script', '')"`,
+      },
+    }),
+  );
+  writeFileSync(join(work, "dep/index.js"), "module.exports = 42;");
+  writeFileSync(
+    join(work, "package.json"),
+    JSON.stringify({ scripts: { test: "node check.js" }, dependencies: { dep: "file:./dep" } }),
+  );
+  writeFileSync(
+    join(work, "check.js"),
+    `const fs = require("fs");
+if (require("dep") !== 42) process.exit(1);
+if (fs.existsSync("ran-install-script")) { console.error("install script ran"); process.exit(1); }`,
+  );
+  execFileSync("npm", ["install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund"], { cwd: work });
+}
+
+describe("dependency install", () => {
+  it("installs from the lockfile without running install scripts", () => {
+    addDependency();
+    const sha = commit("a.txt", "one\ntwo\nthree\n", "with dependency");
+    git(work, "push", "-q", fork, "main");
+    expect(runScript<TestResult>(testScript(fork, sha))).toEqual({ ok: true });
+  });
+
+  it("skips the install when the repo has no lockfile", () => {
+    writeFileSync(
+      join(work, "package.json"),
+      JSON.stringify({ scripts: { test: "node check.js" }, dependencies: { missing: "file:./missing" } }),
+    );
+    const sha = commit("a.txt", "one\ntwo\nthree\n", "no lockfile");
+    git(work, "push", "-q", fork, "main");
+    expect(runScript<TestResult>(testScript(fork, sha))).toEqual({ ok: true });
+  });
+
+  it("installs before the retest after rebasing", () => {
+    addDependency();
+    const attempt = commit("a.txt", "one\ntwo\nthree\n", "with dependency");
+    git(work, "push", "-q", fork, "main");
+    git(work, "reset", "-q", "--hard", "HEAD~1");
+    commit("c.txt", "someone else\n", "main moved");
+    git(work, "push", "-q", canonical, "main");
+    expect(runScript<RetestResult>(retestScript(canonical, fork, attempt))).toMatchObject({ kind: "tested" });
+  });
+
+  it("reports a broken install as an install failure, not a test failure", () => {
+    addDependency();
+    writeFileSync(
+      join(work, "package.json"),
+      JSON.stringify({ scripts: { test: "node check.js" }, dependencies: { dep: "file:./dep", other: "1.0.0" } }),
+    );
+    const sha = commit("a.txt", "one\ntwo\nthree\n", "lockfile out of sync");
+    git(work, "push", "-q", fork, "main");
+    expect(runScript<TestResult>(testScript(fork, sha))).toMatchObject({ ok: false, stage: "install" });
+  });
+});
+
 describe("testScript", () => {
   it("passes a good commit and reports a failing one", () => {
     const good = commit("a.txt", "one\ntwo!\nthree\n", "good");
     const bad = commit("a.txt", "one\nbad\nthree\n", "bad");
     git(work, "push", "-q", fork, "main");
     expect(runScript<TestResult>(testScript(fork, good))).toEqual({ ok: true });
-    expect(runScript<TestResult>(testScript(fork, bad))).toMatchObject({ ok: false });
+    expect(runScript<TestResult>(testScript(fork, bad))).toMatchObject({ ok: false, stage: "test" });
   });
 });
 

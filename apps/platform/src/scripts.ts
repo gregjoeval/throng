@@ -3,13 +3,13 @@
 
 export const RESULT_PREFIX = "THRONG_RESULT ";
 
-export type TestResult = { ok: true } | { ok: false; output: string };
+export type TestResult = { ok: true } | { ok: false; stage: "install" | "test"; output: string };
 
 export type PreviewResult = { ok: true; url: string } | { ok: false; output: string };
 
 export type RetestResult =
   | { kind: "tested"; base: string; tree: string }
-  | { kind: "failed"; output: string }
+  | { kind: "failed"; stage: "install" | "test"; output: string }
   | { kind: "bounced"; files: string[]; diff: string };
 
 export type LandResult = { kind: "landed"; mainSha: string } | { kind: "moved" } | { kind: "mismatch"; tree: string };
@@ -22,14 +22,24 @@ result() { printf '${RESULT_PREFIX}%s\\n' "$1"; exit 0; }
 json() { node -e 'process.stdout.write(JSON.stringify(require("fs").readFileSync(0, "utf8").slice(-8000)))'; }
 `;
 
-/** Check out the attempt's commit and run its tests. */
+/**
+ * Install the repo's npm dependencies from its lockfile, if it has one. Install scripts never run:
+ * the binaries common packages need ship as ordinary platform-specific packages.
+ */
+const INSTALL = `if [ -f package-lock.json ] && ! npm ci --ignore-scripts --no-audit --no-fund > ../install.log 2>&1; then
+  install_failed
+fi`;
+
+/** Check out the attempt's commit, install its dependencies, and run its tests. */
 export function testScript(forkRemote: string, sha: string): string {
   return `${PRELUDE}
 rm -rf attempt && git init -q attempt && cd attempt
 git fetch -q ${quote(forkRemote)} '+refs/heads/*:refs/remotes/fork/*' || exit 10
 git checkout -q --detach ${quote(sha)} || exit 11
+install_failed() { result "{\\"ok\\":false,\\"stage\\":\\"install\\",\\"output\\":$(json < ../install.log)}"; }
+${INSTALL}
 if npm test > ../test.log 2>&1; then result '{"ok":true}'; fi
-result "{\\"ok\\":false,\\"output\\":$(json < ../test.log)}"
+result "{\\"ok\\":false,\\"stage\\":\\"test\\",\\"output\\":$(json < ../test.log)}"
 `;
 }
 
@@ -46,6 +56,8 @@ export function previewScript(
 rm -rf preview && git init -q preview && cd preview
 git fetch -q ${quote(forkRemote)} '+refs/heads/*:refs/remotes/fork/*' || exit 10
 git checkout -q --detach ${quote(sha)} || exit 11
+install_failed() { result "{\\"ok\\":false,\\"output\\":$(json < ../install.log)}"; }
+${INSTALL}
 export CLOUDFLARE_API_TOKEN=added-by-worker CLOUDFLARE_ACCOUNT_ID=${quote(preview.accountId)}
 export WRANGLER_SEND_METRICS=false CI=1
 if wrangler preview --worker-name ${quote(preview.workerName)} --name ${quote(preview.previewName)} --json > ../preview.json 2> ../preview.log; then
@@ -74,8 +86,10 @@ if ! git rebase -q "$base" > ../rebase.log 2>&1; then
   git rebase --abort
   result "{\\"kind\\":\\"bounced\\",\\"files\\":$files,\\"diff\\":$diff}"
 fi
+install_failed() { result "{\\"kind\\":\\"failed\\",\\"stage\\":\\"install\\",\\"output\\":$(json < ../install.log)}"; }
+${INSTALL}
 if ! npm test > ../test.log 2>&1; then
-  result "{\\"kind\\":\\"failed\\",\\"output\\":$(json < ../test.log)}"
+  result "{\\"kind\\":\\"failed\\",\\"stage\\":\\"test\\",\\"output\\":$(json < ../test.log)}"
 fi
 result "{\\"kind\\":\\"tested\\",\\"base\\":\\"$base\\",\\"tree\\":\\"$(git rev-parse 'HEAD^{tree}')\\"}"
 `;

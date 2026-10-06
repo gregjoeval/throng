@@ -1,5 +1,6 @@
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { grantFor, type GitGrant } from "./grants";
+import { NPM_REGISTRY_HOST, registryAllows } from "./network";
 import { previewPathAllowed, type PreviewGrant } from "./preview";
 
 const INACTIVITY_TIMEOUT_MS = 10 * 60 * 1_000;
@@ -35,6 +36,13 @@ interface OutboundAuthProps {
   preview: PreviewGrant | null;
 }
 
+/** What a container may reach beyond its git grants. */
+export interface NetworkAccess {
+  preview: PreviewGrant | null;
+  /** Read-only access to the npm registry, for installs. */
+  npmRegistry: boolean;
+}
+
 const CLOUDFLARE_API = "api.cloudflare.com";
 
 interface CheckSandboxState extends DurableObjectState {
@@ -53,6 +61,8 @@ export class OutboundAuth extends WorkerEntrypoint<Env, OutboundAuthProps> {
     const url = new URL(request.url);
     if (url.protocol !== "https:") return deny(url);
     if (url.host === CLOUDFLARE_API) return this.#cloudflare(request, url);
+    // Only registered for containers given registry access, so reaching here means it's allowed.
+    if (url.host === NPM_REGISTRY_HOST) return registryAllows(request.method, url) ? fetch(request) : deny(url);
     const grant = grantFor(this.ctx.props.grants, url);
     if (grant === undefined) return deny(url);
     return fetch(withBearer(request, grant.token));
@@ -90,8 +100,8 @@ export class CheckSandbox extends DurableObject<Env> {
   }
 
   /** Runs a bash script in /workspace, starting the container (with its grants) if needed. */
-  async run(script: string, grants: GitGrant[], preview: PreviewGrant | null = null): Promise<RunResult> {
-    const startMs = await this.#ensureStarted(grants, preview);
+  async run(script: string, grants: GitGrant[], network: NetworkAccess): Promise<RunResult> {
+    const startMs = await this.#ensureStarted(grants, network);
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), COMMAND_TIMEOUT_MS);
     const began = Date.now();
@@ -119,7 +129,7 @@ export class CheckSandbox extends DurableObject<Env> {
     if (this.#container.running) await this.#container.destroy();
   }
 
-  async #ensureStarted(grants: GitGrant[], preview: PreviewGrant | null): Promise<number> {
+  async #ensureStarted(grants: GitGrant[], { preview, npmRegistry }: NetworkAccess): Promise<number> {
     if (this.#container.running) return 0;
     const image = this.#container.images.sandbox;
     if (image === undefined) throw new Error("The sandbox image is not configured");
@@ -133,6 +143,7 @@ export class CheckSandbox extends DurableObject<Env> {
     const auth = this.#exports.OutboundAuth({ props: { grants, preview } });
     const hosts = new Set(grants.map((g) => new URL(g.remote).host));
     if (preview !== null) hosts.add(CLOUDFLARE_API);
+    if (npmRegistry) hosts.add(NPM_REGISTRY_HOST);
     for (const host of hosts) {
       await this.#container.interceptOutboundHttps(host, auth);
     }

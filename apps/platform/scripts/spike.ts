@@ -3,7 +3,8 @@
 //   THRONG_URL=https://throng.<subdomain>.workers.dev SPIKE_TOKEN=... pnpm spike [scenario...]
 //
 // Scenarios: happy (one attempt lands), coalesce (two quick pushes; only the newest sha is checked),
-// conflict (two attempts edit the same line; the second is bounced with its conflicting hunks).
+// conflict (two attempts edit the same line; the second is bounced with its conflicting hunks),
+// preview (an attempt gets a live Preview URL serving its change; its files are readable via the Worker).
 
 import { execFile } from "node:child_process";
 import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -48,7 +49,7 @@ class Timeline {
   }
 }
 
-const scenarios: Record<string, () => Promise<void>> = { happy, coalesce, conflict };
+const scenarios: Record<string, () => Promise<void>> = { happy, coalesce, conflict, preview };
 
 async function main(): Promise<void> {
   const names = process.argv.slice(2);
@@ -189,6 +190,72 @@ async function conflict(): Promise<void> {
   await cleanUp(project, ["a1", "a2"], work);
 }
 
+/** An attempt's passing check deploys a Preview serving its change; its files are readable without a clone. */
+async function preview(): Promise<void> {
+  const timeline = new Timeline();
+  const { project, work } = await setUpProject(timeline);
+  const fork = await createAttempt(project, "a1", timeline);
+  const sha = await commitAndPush(work, fork, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
+  timeline.mark("attempt pushed");
+  const forkRepo = `${project}--a1`;
+
+  // File reads through the binding, against the fork.
+  const began = Date.now();
+  const file = await apiText("GET", `/spike/repos/${forkRepo}/file?ref=main&path=src/greeting.js`);
+  assert(file.includes("hello from a1"), "file read does not show the attempt's change");
+  const root = await api<{ commit: string; entries: { name: string; type: string }[] }>(
+    "GET",
+    `/spike/repos/${forkRepo}/tree?ref=main`,
+  );
+  assert(root.commit === sha, `tree is at ${root.commit}, expected ${sha}`);
+  const names = root.entries.map((e) => e.name).toSorted();
+  assert(
+    ["package.json", "src", "test"].every((n) => names.includes(n)),
+    `unexpected root ${names.join(", ")}`,
+  );
+  const src = await api<{ entries: { name: string }[] }>("GET", `/spike/repos/${forkRepo}/tree?ref=main&path=src`);
+  assert(
+    src.entries.some((e) => e.name === "greeting.js"),
+    "src/ listing has no greeting.js",
+  );
+  const log = await api<{ hash: string; message: string }[]>("GET", `/spike/repos/${forkRepo}/log?ref=main&limit=5`);
+  assert(log[0]?.hash === sha && log.length === 2, `unexpected log ${JSON.stringify(log.map((c) => c.message))}`);
+  timeline.mark(`file, 2 trees and log read in ${Date.now() - began} ms`);
+
+  const ready = await waitFor(
+    project,
+    (e) => (e.kind === "preview-ready" || e.kind === "preview-failed") && e.detail.sha === sha,
+  );
+  assert(ready.kind === "preview-ready", `preview failed: ${String(ready.detail.output)}`);
+  const url = String(ready.detail.url);
+  timeline.mark(`preview ready (wrangler preview ${String(ready.detail.runMs)} ms): ${url}`);
+  const body = await fetchUntil(`${url}/?name=spike`, (b) => b === "hello from a1, spike");
+  timeline.mark(`preview served the change: ${JSON.stringify(body)}`);
+
+  await waitFor(project, (e) => e.kind === "check-finished" && e.detail.sha === sha);
+  const journal = await settle(project, 5_000);
+  addCheckTimings(timeline, journal);
+  report(timeline, journal);
+  await cleanUp(project, ["a1"], work);
+}
+
+/** Polls a public URL until its body matches; new Preview hostnames can take a moment to resolve. */
+async function fetchUntil(url: string, match: (body: string) => boolean, timeoutMs = 60_000): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  let last = "";
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(url);
+      last = `${response.status} ${await response.text()}`;
+      if (response.ok && match(last.slice(4))) return last.slice(4);
+    } catch (cause) {
+      last = String(cause);
+    }
+    await new Promise((r) => setTimeout(r, POLL_MS));
+  }
+  throw new Error(`${url} never matched; last: ${last}`);
+}
+
 async function setUpProject(timeline: Timeline): Promise<{ project: string; work: string }> {
   const project = `spike-${Date.now().toString(36)}`;
   console.log(`project ${project}`);
@@ -295,6 +362,13 @@ async function cleanUp(project: string, attempts: string[], work: string): Promi
     await api("DELETE", `/spike/repos/${name}`).catch((cause) => console.warn(`could not delete ${name}`, cause));
   }
   await rm(work, { recursive: true, force: true });
+}
+
+async function apiText(method: string, path: string): Promise<string> {
+  const response = await fetch(`${baseUrl}${path}`, { method, headers: { Authorization: `Bearer ${spikeToken}` } });
+  const body = await response.text();
+  if (!response.ok) throw new Error(`${method} ${path}: ${response.status} ${body}`);
+  return body;
 }
 
 async function api<T>(method: string, path: string): Promise<T> {

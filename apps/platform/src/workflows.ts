@@ -1,8 +1,17 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import { forkName, routePush, type PushRoute } from "./events";
 import type { CheckOutcome, CheckParams } from "./project";
+import { previewName, type PreviewGrant } from "./preview";
 import type { GitGrant, RunResult } from "./sandbox";
-import { landScript, parseResult, testScript, type LandResult, type TestResult } from "./scripts";
+import {
+  landScript,
+  parseResult,
+  previewScript,
+  testScript,
+  type LandResult,
+  type PreviewResult,
+  type TestResult,
+} from "./scripts";
 
 const TOKEN_TTL_SECONDS = 30 * 60;
 
@@ -44,6 +53,25 @@ export class CheckWorkflow extends WorkflowEntrypoint<Env, CheckParams> {
       const tested = parseResult<TestResult>(test.stdout);
       if (tested === null) return scriptError("test", test);
       if (!tested.ok) return { kind: "failed", stage: "test", output: tested.output };
+
+      // A preview is a convenience: a failed one is journaled but doesn't fail the check.
+      const preview = await step.do("preview", sandboxStep, async () => {
+        const grants = await this.#grants(params);
+        const script = previewScript(grants[1]!.remote, params.sha, {
+          ...this.#preview(),
+          previewName: previewName(params),
+        });
+        return this.#run(instanceId, script, grants);
+      });
+      timings.previewRunMs = preview.runMs;
+      const previewed = parseResult<PreviewResult>(preview.stdout);
+      await step.do("note preview", async () => {
+        const detail = { instanceId, attempt: params.attempt, sha: params.sha, runMs: preview.runMs };
+        const project = this.env.PROJECT.getByName(params.project);
+        if (previewed?.ok) await project.note("preview-ready", { ...detail, url: previewed.url });
+        else
+          await project.note("preview-failed", { ...detail, output: previewed?.output ?? preview.stderr.slice(-4000) });
+      });
 
       const land = await step.do("land", sandboxStep, async () => {
         const grants = await this.#grants(params);
@@ -92,8 +120,13 @@ export class CheckWorkflow extends WorkflowEntrypoint<Env, CheckParams> {
     ];
   }
 
+  #preview(): PreviewGrant {
+    return { accountId: this.env.CF_ACCOUNT_ID, workerName: this.env.PREVIEW_WORKER };
+  }
+
   async #run(instanceId: string, script: string, grants: GitGrant[]): Promise<RunResult> {
-    const result = await this.env.SANDBOX.getByName(instanceId).run(script, grants);
+    // Every run gets the preview grant: the container's intercepts are fixed when it starts.
+    const result = await this.env.SANDBOX.getByName(instanceId).run(script, grants, this.#preview());
     // Exit codes 10+ are infrastructure failures (fetch, checkout); throw so the step retries.
     if (result.exitCode >= 10) {
       throw new Error(`sandbox script exited ${result.exitCode}: ${result.stderr.slice(-2000)}`);

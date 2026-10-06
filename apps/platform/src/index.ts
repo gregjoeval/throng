@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { forkName } from "./events";
 
 export { ProjectCoordinator } from "./project";
-export { CheckSandbox, GitAuth } from "./sandbox";
+export { CheckSandbox, OutboundAuth } from "./sandbox";
 export { CheckWorkflow, IngestWorkflow } from "./workflows";
 
 const FORK_READY_TIMEOUT_MS = 60_000;
@@ -64,6 +64,39 @@ app.get("/spike/repos/:name/head", async (c) => {
   using repo = await c.env.ARTIFACTS.get(c.req.param("name"));
   const [head] = await repo.log({ ref: c.req.query("ref") ?? "main", limit: 1 });
   return c.json({ sha: head?.hash ?? null, message: head?.message ?? null });
+});
+
+// Read-only views a file/commit browser could use. All through the binding; nothing is cloned.
+
+app.get("/spike/repos/:name/log", async (c) => {
+  using repo = await c.env.ARTIFACTS.get(c.req.param("name"));
+  const limit = Math.min(Number(c.req.query("limit") ?? 20), 100);
+  return c.json(await repo.log({ ref: c.req.query("ref") ?? "main", limit }));
+});
+
+/** Directory listing at `path` (repo root by default) for a ref. */
+app.get("/spike/repos/:name/tree", async (c) => {
+  using repo = await c.env.ARTIFACTS.get(c.req.param("name"));
+  const ref = c.req.query("ref") ?? "main";
+  const [head] = await repo.log({ ref, limit: 1 });
+  if (head === undefined) return c.json({ error: `unknown ref ${ref}` }, 404);
+  let tree = head.treeHash;
+  for (const part of (c.req.query("path") ?? "").split("/").filter(Boolean)) {
+    const entries = await repo.readTree(tree);
+    const next = entries?.find((e) => e.name === part && e.type === "tree");
+    if (next === undefined) return c.json({ error: `no directory ${part}` }, 404);
+    tree = next.hash;
+  }
+  return c.json({ ref, commit: head.hash, tree, entries: await repo.readTree(tree) });
+});
+
+app.get("/spike/repos/:name/file", async (c) => {
+  const path = c.req.query("path");
+  if (path === undefined) return c.json({ error: "path is required" }, 400);
+  using repo = await c.env.ARTIFACTS.get(c.req.param("name"));
+  const blob = await repo.readFile({ ref: c.req.query("ref") ?? "main", path });
+  if (blob === null) return c.json({ error: `no file ${path}` }, 404);
+  return new Response(blob, { headers: { "Content-Type": blob.type || "application/octet-stream" } });
 });
 
 app.post("/spike/repos/:name/read-token", async (c) => {

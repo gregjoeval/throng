@@ -1,6 +1,5 @@
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
-import { grantFor, type GitGrant } from "./grants";
-import { previewPathAllowed, type PreviewGrant } from "./preview";
+import { CLOUDFLARE_API_HOST, interceptedHosts, outboundDecision, type OutboundAccess } from "./network";
 
 const INACTIVITY_TIMEOUT_MS = 10 * 60 * 1_000;
 const COMMAND_TIMEOUT_MS = 5 * 60 * 1_000;
@@ -30,13 +29,6 @@ export interface RunResult {
   runMs: number;
 }
 
-interface OutboundAuthProps {
-  grants: GitGrant[];
-  preview: PreviewGrant | null;
-}
-
-const CLOUDFLARE_API = "api.cloudflare.com";
-
 interface CheckSandboxState extends DurableObjectState {
   readonly exports: Cloudflare.Exports & {
     readonly OutboundAuth: LoopbackForExport<typeof OutboundAuth>;
@@ -44,26 +36,27 @@ interface CheckSandboxState extends DurableObjectState {
 }
 
 /**
- * Every intercepted HTTPS request from the sandbox lands here. The Worker adds the credential, so no
- * token ever enters the container (where `npm test` runs untrusted code), and each credential only
- * reaches the paths its grant names.
+ * Every intercepted HTTPS request from the sandbox lands here. The Worker adds any credential, so no
+ * token ever enters the container (where `npm test` runs untrusted code). What's allowed is decided
+ * by `outboundDecision`; this only carries it out.
  */
-export class OutboundAuth extends WorkerEntrypoint<Env, OutboundAuthProps> {
+export class OutboundAuth extends WorkerEntrypoint<Env, OutboundAccess> {
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    if (url.protocol !== "https:") return deny(url);
-    if (url.host === CLOUDFLARE_API) return this.#cloudflare(request, url);
-    const grant = grantFor(this.ctx.props.grants, url);
-    if (grant === undefined) return deny(url);
-    return fetch(withBearer(request, grant.token));
-  }
-
-  #cloudflare(request: Request, url: URL): Promise<Response> | Response {
-    const preview = this.ctx.props.preview;
-    const allowed = preview !== null && previewPathAllowed(url.pathname, preview);
-    console.log({ event: "sandbox.cloudflare-api", method: request.method, path: url.pathname, allowed });
-    if (!allowed) return deny(url);
-    return fetch(withBearer(request, this.env.CF_PREVIEW_TOKEN));
+    const decision = outboundDecision(request.method, url, this.ctx.props);
+    if (url.host === CLOUDFLARE_API_HOST) {
+      console.log({ event: "sandbox.cloudflare-api", method: request.method, path: url.pathname, decision });
+    }
+    switch (decision.action) {
+      case "deny":
+        return new Response(`no grant for ${request.method} ${url.host}${url.pathname}\n`, { status: 403 });
+      case "pass":
+        return fetch(request);
+      case "bearer":
+        return fetch(withBearer(request, decision.token));
+      case "preview-token":
+        return fetch(withBearer(request, this.env.CF_PREVIEW_TOKEN));
+    }
   }
 }
 
@@ -71,10 +64,6 @@ function withBearer(request: Request, token: string): Request {
   const headers = new Headers(request.headers);
   headers.set("Authorization", `Bearer ${token}`);
   return new Request(request, { headers });
-}
-
-function deny(url: URL): Response {
-  return new Response(`no grant for ${url.host}${url.pathname}\n`, { status: 403 });
 }
 
 /** One container per check, named by the check's Workflow instance id. */
@@ -90,8 +79,8 @@ export class CheckSandbox extends DurableObject<Env> {
   }
 
   /** Runs a bash script in /workspace, starting the container (with its grants) if needed. */
-  async run(script: string, grants: GitGrant[], preview: PreviewGrant | null = null): Promise<RunResult> {
-    const startMs = await this.#ensureStarted(grants, preview);
+  async run(script: string, access: OutboundAccess): Promise<RunResult> {
+    const startMs = await this.#ensureStarted(access);
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), COMMAND_TIMEOUT_MS);
     const began = Date.now();
@@ -119,7 +108,7 @@ export class CheckSandbox extends DurableObject<Env> {
     if (this.#container.running) await this.#container.destroy();
   }
 
-  async #ensureStarted(grants: GitGrant[], preview: PreviewGrant | null): Promise<number> {
+  async #ensureStarted(access: OutboundAccess): Promise<number> {
     if (this.#container.running) return 0;
     const image = this.#container.images.sandbox;
     if (image === undefined) throw new Error("The sandbox image is not configured");
@@ -130,10 +119,8 @@ export class CheckSandbox extends DurableObject<Env> {
       // Only intercepted HTTPS leaves the container.
       enableInternet: false,
     });
-    const auth = this.#exports.OutboundAuth({ props: { grants, preview } });
-    const hosts = new Set(grants.map((g) => new URL(g.remote).host));
-    if (preview !== null) hosts.add(CLOUDFLARE_API);
-    for (const host of hosts) {
+    const auth = this.#exports.OutboundAuth({ props: access });
+    for (const host of interceptedHosts(access)) {
       await this.#container.interceptOutboundHttps(host, auth);
     }
     await this.#container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS);

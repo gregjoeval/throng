@@ -3,13 +3,16 @@
 
 export const RESULT_PREFIX = "THRONG_RESULT ";
 
-export type TestResult = { ok: true } | { ok: false; output: string };
+/** Where a script that runs repo code failed: installing dependencies, or running/building the repo. */
+export type FailureStage = "install" | "test";
 
-export type PreviewResult = { ok: true; url: string } | { ok: false; output: string };
+export type TestResult = { ok: true } | { ok: false; stage: FailureStage; output: string };
+
+export type PreviewResult = { ok: true; url: string } | { ok: false; stage: "install" | "deploy"; output: string };
 
 export type RetestResult =
   | { kind: "tested"; base: string; tree: string }
-  | { kind: "failed"; output: string }
+  | { kind: "failed"; stage: FailureStage; output: string }
   | { kind: "bounced"; files: string[]; diff: string };
 
 export type LandResult = { kind: "landed"; mainSha: string } | { kind: "moved" } | { kind: "mismatch"; tree: string };
@@ -22,14 +25,27 @@ result() { printf '${RESULT_PREFIX}%s\\n' "$1"; exit 0; }
 json() { node -e 'process.stdout.write(JSON.stringify(require("fs").readFileSync(0, "utf8").slice(-8000)))'; }
 `;
 
-/** Check out the attempt's commit and run its tests. */
+/**
+ * Install the repo's npm dependencies from its lockfile, if it has one. Install scripts never run:
+ * the binaries common packages need ship as ordinary platform-specific packages. If the install fails,
+ * the script ends with a result made of `fields` (the caller's JSON fields, e.g. `"ok":false`) plus
+ * `"stage":"install"` and the install log as `output`.
+ */
+function install(fields: string): string {
+  return `if [ -f package-lock.json ] && ! npm ci --ignore-scripts --no-audit --no-fund > ../install.log 2>&1; then
+  result "{${fields.replaceAll('"', '\\"')},\\"stage\\":\\"install\\",\\"output\\":$(json < ../install.log)}"
+fi`;
+}
+
+/** Check out the attempt's commit, install its dependencies, and run its tests. */
 export function testScript(forkRemote: string, sha: string): string {
   return `${PRELUDE}
 rm -rf attempt && git init -q attempt && cd attempt
 git fetch -q ${quote(forkRemote)} '+refs/heads/*:refs/remotes/fork/*' || exit 10
 git checkout -q --detach ${quote(sha)} || exit 11
+${install('"ok":false')}
 if npm test > ../test.log 2>&1; then result '{"ok":true}'; fi
-result "{\\"ok\\":false,\\"output\\":$(json < ../test.log)}"
+result "{\\"ok\\":false,\\"stage\\":\\"test\\",\\"output\\":$(json < ../test.log)}"
 `;
 }
 
@@ -46,6 +62,7 @@ export function previewScript(
 rm -rf preview && git init -q preview && cd preview
 git fetch -q ${quote(forkRemote)} '+refs/heads/*:refs/remotes/fork/*' || exit 10
 git checkout -q --detach ${quote(sha)} || exit 11
+${install('"ok":false')}
 export CLOUDFLARE_API_TOKEN=added-by-worker CLOUDFLARE_ACCOUNT_ID=${quote(preview.accountId)}
 export WRANGLER_SEND_METRICS=false CI=1
 if wrangler preview --worker-name ${quote(preview.workerName)} --name ${quote(preview.previewName)} --json > ../preview.json 2> ../preview.log; then
@@ -53,7 +70,7 @@ if wrangler preview --worker-name ${quote(preview.workerName)} --name ${quote(pr
   result "{\\"ok\\":true,\\"url\\":$url}"
 fi
 cat ../preview.json >> ../preview.log
-result "{\\"ok\\":false,\\"output\\":$(json < ../preview.log)}"
+result "{\\"ok\\":false,\\"stage\\":\\"deploy\\",\\"output\\":$(json < ../preview.log)}"
 `;
 }
 
@@ -74,8 +91,9 @@ if ! git rebase -q "$base" > ../rebase.log 2>&1; then
   git rebase --abort
   result "{\\"kind\\":\\"bounced\\",\\"files\\":$files,\\"diff\\":$diff}"
 fi
+${install('"kind":"failed"')}
 if ! npm test > ../test.log 2>&1; then
-  result "{\\"kind\\":\\"failed\\",\\"output\\":$(json < ../test.log)}"
+  result "{\\"kind\\":\\"failed\\",\\"stage\\":\\"test\\",\\"output\\":$(json < ../test.log)}"
 fi
 result "{\\"kind\\":\\"tested\\",\\"base\\":\\"$base\\",\\"tree\\":\\"$(git rev-parse 'HEAD^{tree}')\\"}"
 `;

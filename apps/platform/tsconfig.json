@@ -5,7 +5,8 @@
     "moduleResolution": "bundler",
     "types": ["./worker-configuration.d.ts"],
     "exactOptionalPropertyTypes": true,
-    "isolatedModules": true
+    "isolatedModules": true,
+    "allowImportingTsExtensions": true
   },
   "include": ["src", "worker-configuration.d.ts"]
 }

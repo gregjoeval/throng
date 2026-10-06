@@ -12,20 +12,21 @@ Researched 2026-10-04. Versions are npm `latest` on that date.
 
 ## 1. Vite+ (VoidZero): status, license, install, contents
 
-| Fact | Value | Source |
-|---|---|---|
-| Release | `vite-plus@1.0.0`, published 2026-09-28 (rc.0 2026-09-22). The previous line was 0.3.x. | npm metadata (`npm view vite-plus time`) |
-| Status | "Vite+ 1.0 is out, stable, MIT licensed". The team also says it "is far from feature-complete". Remote caching, `vp release` and `vp docs` are planned for later. | [Announcing Vite+ 1.0](https://voidzero.dev/posts/announcing-vite-plus-1-0) |
-| License | MIT, with no paid tier mentioned | npm `license`; announcement |
-| Node engines | `^22.18.0 \|\| ^24.11.0 \|\| >=26.0.0` | npm `engines` |
-| Install | `pnpm add -D vite-plus` and run with `pnpm exec vp ...`. A global `vp` is optional (`curl -fsSL https://vite.plus \| bash`) and also manages Node and the package manager. `vp env off` opts out of that. | [viteplus.dev/guide](https://viteplus.dev/guide/) |
+| Fact                 | Value                                                                                                                                                                                                                    | Source                                                                        |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------- |
+| Release              | `vite-plus@1.0.0`, published 2026-09-28 (rc.0 2026-09-22). The previous line was 0.3.x.                                                                                                                                  | npm metadata (`npm view vite-plus time`)                                      |
+| Status               | "Vite+ 1.0 is out, stable, MIT licensed". The team also says it "is far from feature-complete". Remote caching, `vp release` and `vp docs` are planned for later.                                                        | [Announcing Vite+ 1.0](https://voidzero.dev/posts/announcing-vite-plus-1-0)   |
+| License              | MIT, with no paid tier mentioned                                                                                                                                                                                         | npm `license`; announcement                                                   |
+| Node engines         | `^22.18.0 \|\| ^24.11.0 \|\| >=26.0.0`                                                                                                                                                                                   | npm `engines`                                                                 |
+| Install              | `pnpm add -D vite-plus` and run with `pnpm exec vp ...`. A global `vp` is optional (`curl -fsSL https://vite.plus \| bash`) and also manages Node and the package manager. `vp env off` opts out of that.                | [viteplus.dev/guide](https://viteplus.dev/guide/)                             |
 | Bundles (1.0.0 deps) | `vite` → `@voidzero-dev/vite-plus-core@1.0.0` (Vite 8 with Rolldown), `vitest@5.0.1`, `oxlint@1.85.0`, `oxlint-tsgolint` (type-aware lint), `oxfmt@0.70.0`, tsdown (`vp pack`), Vite Task (`vp run`, cached task runner) | `npm view vite-plus@1.0.0 dependencies`; [guide](https://viteplus.dev/guide/) |
-| Commands | `vp dev / build / preview / test / lint / fmt / check / pack / run / migrate / install` | [guide](https://viteplus.dev/guide/) |
-| Test specifics | `vp test` uses the bundled Vitest 5.0.1. Import from `vite-plus/test`. Test config belongs in `vite.config.ts` (a separate `vitest.config.ts` is "not recommended"). Custom Vitest pools and plugins are not documented. | [viteplus.dev/guide/test](https://viteplus.dev/guide/test) |
+| Commands             | `vp dev / build / preview / test / lint / fmt / check / pack / run / migrate / install`                                                                                                                                  | [guide](https://viteplus.dev/guide/)                                          |
+| Test specifics       | `vp test` uses the bundled Vitest 5.0.1. Import from `vite-plus/test`. Test config belongs in `vite.config.ts` (a separate `vitest.config.ts` is "not recommended"). Custom Vitest pools and plugins are not documented. | [viteplus.dev/guide/test](https://viteplus.dev/guide/test)                    |
 
 **Usable today?** Yes for a plain web app. For a Workers project it's blocked on the test runner (§3). Vite+ pins Vitest exactly (`5.0.1`), so you can't run it on Vitest 4. The last release that bundled Vitest 4 was `vite-plus@0.3.3` (`vitest 4.1.11`). It's pre-1.0, and we don't recommend it.
 
 The Vite+ issue tracker also has open issues involving Cloudflare:
+
 - [vite-plus#2481](https://github.com/voidzero-dev/vite-plus/issues/2481): the dev server wedges on restart with `@cloudflare/vite-plugin`, but only on the Vite+/Rolldown pipeline.
 - [vite-plus#1671](https://github.com/voidzero-dev/vite-plus/issues/1671): React duplication with TanStack Start in workerd (not relevant to us).
 
@@ -36,15 +37,15 @@ An earlier `vp test` + pool-workers crash ([#1076](https://github.com/voidzero-d
 - Version: `@cloudflare/vite-plugin@1.62.5`. Peers: `vite ^6.1 || ^7 || ^8` and `wrangler ^4.147.0` (wrangler latest = 4.147.0). A `2.0.0-beta` is on the `beta` tag.
 - It runs the Worker in workerd through Miniflare and reads the same Wrangler config, so local binding support matches `wrangler dev`. Cloudflare says remote bindings "are supported by Wrangler, the Cloudflare Vite plugin, and `@cloudflare/vitest-plugin`" ([Local development](https://developers.cloudflare.com/workers/development-testing/)). The one exception is legacy `wrangler dev --remote`, which the Vite plugin doesn't support.
 
-| Binding | Local simulation | Remote binding | Notes |
-|---|---|---|---|
-| D1 | yes | yes | |
-| Durable Objects | yes | no (always local) | |
-| Queues | yes | yes | |
-| Workflows | yes | no (always local) | Plugin changelog: Workflows exposed on `ctx.exports`; the local explorer (`e` in `vite dev`) inspects D1/R2/KV/DO/Workflows |
-| Containers | yes | no | The plugin builds or pulls container images in dev and cleans them up on close ([changelog](https://github.com/cloudflare/workers-sdk/blob/main/packages/vite-plugin-cloudflare/CHANGELOG.md)). Needs a local container engine. |
-| Sandbox (`@cloudflare/sandbox@1.0.0`) | via Containers + DO | n/a | Sandbox is built on Containers + Durable Objects, so Containers support covers it |
-| Artifacts | **no** (no simulator) | **yes, always remote** | Wrangler rejects `remote: false` on "always-remote bindings (AI, AI Search, Media, Artifacts, …)" (wrangler 4.84.0 [changelog](https://github.com/cloudflare/workers-sdk/blob/main/packages/wrangler/CHANGELOG.md)). Dev needs Cloudflare auth and touches real repos. Artifacts entered open beta per the wrangler 4.146.0 changelog. |
+| Binding                               | Local simulation      | Remote binding         | Notes                                                                                                                                                                                                                                                                                                                                  |
+| ------------------------------------- | --------------------- | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| D1                                    | yes                   | yes                    |                                                                                                                                                                                                                                                                                                                                        |
+| Durable Objects                       | yes                   | no (always local)      |                                                                                                                                                                                                                                                                                                                                        |
+| Queues                                | yes                   | yes                    |                                                                                                                                                                                                                                                                                                                                        |
+| Workflows                             | yes                   | no (always local)      | Plugin changelog: Workflows exposed on `ctx.exports`; the local explorer (`e` in `vite dev`) inspects D1/R2/KV/DO/Workflows                                                                                                                                                                                                            |
+| Containers                            | yes                   | no                     | The plugin builds or pulls container images in dev and cleans them up on close ([changelog](https://github.com/cloudflare/workers-sdk/blob/main/packages/vite-plugin-cloudflare/CHANGELOG.md)). Needs a local container engine.                                                                                                        |
+| Sandbox (`@cloudflare/sandbox@1.0.0`) | via Containers + DO   | n/a                    | Sandbox is built on Containers + Durable Objects, so Containers support covers it                                                                                                                                                                                                                                                      |
+| Artifacts                             | **no** (no simulator) | **yes, always remote** | Wrangler rejects `remote: false` on "always-remote bindings (AI, AI Search, Media, Artifacts, …)" (wrangler 4.84.0 [changelog](https://github.com/cloudflare/workers-sdk/blob/main/packages/wrangler/CHANGELOG.md)). Dev needs Cloudflare auth and touches real repos. Artifacts entered open beta per the wrangler 4.146.0 changelog. |
 
 Sources: [binding support per environment](https://developers.cloudflare.com/workers/local-development/bindings-per-env/) (updated 2026-06-25; it doesn't list Artifacts or Sandbox), [Vite plugin docs](https://developers.cloudflare.com/workers/vite-plugin/), wrangler and vite-plugin changelogs.
 
@@ -66,6 +67,7 @@ Sources: [binding support per environment](https://developers.cloudflare.com/wor
   - Workflows: `introspectWorkflowInstance`
 
   Source: [Test APIs](https://developers.cloudflare.com/workers/testing/vitest-integration/test-apis/). Containers aren't covered on the test-API or known-issues pages. Treat Containers and Sandbox as integration-test territory, or mock them.
+
 - Known limits:
   - Coverage must use Istanbul, not V8.
   - Fake timers don't affect the KV, R2 and cache simulators.
@@ -79,20 +81,21 @@ Sources: [binding support per environment](https://developers.cloudflare.com/wor
 
 ### Recommended now (scaffold)
 
-| Concern | Package | Version |
-|---|---|---|
-| Dev/build | `vite` | `8.3.2` |
-| Workers integration | `@cloudflare/vite-plugin` | `1.62.5` (or `1.57.3` if you hit #15969 and must share one config) |
-| Deploy/types/CLI | `wrangler` | `4.147.0` |
-| Test runner | `vitest` | `4.1.11` (pin `~4.1`, **not** `latest`, which is 5.x) |
-| Workers test pool | `@cloudflare/vitest-plugin` | `1.3.6` |
-| Coverage (optional) | `@vitest/coverage-istanbul` | `~4.1` |
-| Lint | `oxlint` | `1.86.0` |
-| Format | `oxfmt` | `0.71.0` |
-| Typecheck | `tsc --noEmit` (or `oxlint --type-aware` via `oxlint-tsgolint`) | |
-| Tasks | `pnpm` scripts | |
+| Concern             | Package                                                         | Version                                                            |
+| ------------------- | --------------------------------------------------------------- | ------------------------------------------------------------------ |
+| Dev/build           | `vite`                                                          | `8.3.2`                                                            |
+| Workers integration | `@cloudflare/vite-plugin`                                       | `1.62.5` (or `1.57.3` if you hit #15969 and must share one config) |
+| Deploy/types/CLI    | `wrangler`                                                      | `4.147.0`                                                          |
+| Test runner         | `vitest`                                                        | `4.1.11` (pin `~4.1`, **not** `latest`, which is 5.x)              |
+| Workers test pool   | `@cloudflare/vitest-plugin`                                     | `1.3.6`                                                            |
+| Coverage (optional) | `@vitest/coverage-istanbul`                                     | `~4.1`                                                             |
+| Lint                | `oxlint`                                                        | `1.86.0`                                                           |
+| Format              | `oxfmt`                                                         | `0.71.0`                                                           |
+| Typecheck           | `tsc --noEmit` (or `oxlint --type-aware` via `oxlint-tsgolint`) |                                                                    |
+| Tasks               | `pnpm` scripts                                                  |                                                                    |
 
 Config shape:
+
 - `vite.config.ts` holds `cloudflare()`.
 - A separate `vitest.config.ts` holds `cloudflareTest({ wrangler: { configPath: "./wrangler.jsonc" } })`.
 - Pin `vitest` exactly, because pnpm will otherwise resolve 5.x.
@@ -106,6 +109,7 @@ Config shape:
 ### Upgrade trigger
 
 When `npm view @cloudflare/vitest-plugin peerDependencies` includes `vitest ^5`:
+
 1. Run `vp migrate`.
 2. Drop `vite`, `vitest`, `oxlint` and `oxfmt` in favour of `vite-plus@^1`.
 3. Change imports to `vite-plus/test`.

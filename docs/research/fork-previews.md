@@ -68,13 +68,13 @@ Worker Previews launched on 2026-09-22 ([blog](https://blog.cloudflare.com/worke
 
 ## Options compared
 
-| Path | Per-fork automation | Fits the map? | Cost / limits |
-| --- | --- | --- | --- |
-| A. Workers Builds connection per fork | No. Each fork needs a dashboard connection, and the API has no `artifacts` provider. | No | One Worker per fork, 6 concurrent builds |
-| B. Push attempts as branches of the canonical repo, with one Builds connection | Yes. Each branch becomes a Preview automatically. | Breaks "one fork per attempt" and fork-scoped tokens | 6 concurrent builds, build minutes, no hook into our check result |
-| C. Builds manual-trigger API / Deploy Hook | Only for the connected repo's branches | Same issue as A and B | 10/min per Worker |
-| **D. `wrangler preview --name <attempt>` in our Sandbox** | Yes, fully programmatic | Yes. It reuses the Workflow and Sandbox from the spike. | 500 Previews per Worker with LRU eviction, no Builds minutes |
-| E. `versions upload --preview-alias` in our Sandbox | Yes | Fails if the Worker has DOs, and uses production resources | 1,000 aliases |
+| Path                                                                           | Per-fork automation                                                                  | Fits the map?                                              | Cost / limits                                                     |
+| ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------ | ---------------------------------------------------------- | ----------------------------------------------------------------- |
+| A. Workers Builds connection per fork                                          | No. Each fork needs a dashboard connection, and the API has no `artifacts` provider. | No                                                         | One Worker per fork, 6 concurrent builds                          |
+| B. Push attempts as branches of the canonical repo, with one Builds connection | Yes. Each branch becomes a Preview automatically.                                    | Breaks "one fork per attempt" and fork-scoped tokens       | 6 concurrent builds, build minutes, no hook into our check result |
+| C. Builds manual-trigger API / Deploy Hook                                     | Only for the connected repo's branches                                               | Same issue as A and B                                      | 10/min per Worker                                                 |
+| **D. `wrangler preview --name <attempt>` in our Sandbox**                      | Yes, fully programmatic                                                              | Yes. It reuses the Workflow and Sandbox from the spike.    | 500 Previews per Worker with LRU eviction, no Builds minutes      |
+| E. `versions upload --preview-alias` in our Sandbox                            | Yes                                                                                  | Fails if the Worker has DOs, and uses production resources | 1,000 aliases                                                     |
 
 **Recommendation: D.** After the check passes in the Sandbox, run `wrangler preview --name <attempt-slug> --worker-name <fixture-worker> --json`. Read `.preview.urls[0]` and store it on the attempt. Name Previews after the attempt or fork, not the branch: every fork's branch is `main`, and the default name comes from the git branch. When an attempt is merged or bounced, delete its Preview. Path B is the fallback if we ever want zero custom build code.
 

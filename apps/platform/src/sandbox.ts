@@ -1,4 +1,5 @@
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
+import { grantFor, type GitGrant } from "./grants";
 import { previewPathAllowed, type PreviewGrant } from "./preview";
 
 const INACTIVITY_TIMEOUT_MS = 10 * 60 * 1_000;
@@ -19,12 +20,6 @@ const EXEC_ENV = {
   GIT_COMMITTER_NAME: "throng",
   GIT_COMMITTER_EMAIL: "throng@localhost",
 };
-
-/** Git remotes the sandbox may reach, each with the token the Worker adds on its behalf. */
-export interface GitGrant {
-  remote: string;
-  token: string;
-}
 
 export interface RunResult {
   exitCode: number;
@@ -58,12 +53,7 @@ export class OutboundAuth extends WorkerEntrypoint<Env, OutboundAuthProps> {
     const url = new URL(request.url);
     if (url.protocol !== "https:") return deny(url);
     if (url.host === CLOUDFLARE_API) return this.#cloudflare(request, url);
-    const grant = this.ctx.props.grants.find((g) => {
-      const remote = new URL(g.remote);
-      return (
-        url.host === remote.host && (url.pathname === remote.pathname || url.pathname.startsWith(`${remote.pathname}/`))
-      );
-    });
+    const grant = grantFor(this.ctx.props.grants, url);
     if (grant === undefined) return deny(url);
     return fetch(withBearer(request, grant.token));
   }

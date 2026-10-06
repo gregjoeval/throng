@@ -4,7 +4,8 @@
 //
 // Scenarios: happy (one attempt lands), coalesce (two quick pushes; only the newest sha is checked),
 // conflict (two attempts edit the same line; the second is bounced with its conflicting hunks),
-// preview (an attempt gets a live Preview URL serving its change; its files are readable via the Worker).
+// preview (an attempt gets a live Preview URL serving its change; its files are readable via the Worker),
+// intrusion (an attempt's tests try to push to the canonical main and call the Cloudflare API; both fail).
 
 import { execFile } from "node:child_process";
 import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -14,6 +15,7 @@ import { promisify } from "node:util";
 
 const run = promisify(execFile);
 const FIXTURE = new URL("../fixtures/fixture-worker/", import.meta.url).pathname;
+const WRANGLER_CONFIG = new URL("../wrangler.jsonc", import.meta.url).pathname;
 const POLL_MS = 1_000;
 const CHECK_TIMEOUT_MS = 10 * 60 * 1_000;
 
@@ -49,7 +51,7 @@ class Timeline {
   }
 }
 
-const scenarios: Record<string, () => Promise<void>> = { happy, coalesce, conflict, preview };
+const scenarios: Record<string, () => Promise<void>> = { happy, coalesce, conflict, preview, intrusion };
 
 async function main(): Promise<void> {
   const names = process.argv.slice(2);
@@ -254,6 +256,56 @@ async function fetchUntil(url: string, match: (body: string) => boolean, timeout
     await new Promise((r) => setTimeout(r, POLL_MS));
   }
   throw new Error(`${url} never matched; last: ${last}`);
+}
+
+/**
+ * The attempt's own test tries to push a forged commit to the canonical main and to reach the Cloudflare
+ * API with the Preview grant. The test passes only if both are blocked, so a leak fails the check.
+ */
+async function intrusion(): Promise<void> {
+  const timeline = new Timeline();
+  const { project, work } = await setUpProject(timeline);
+  const canonical = (await git(work, "remote", "get-url", "canonical")).trim();
+  const accountId = /"CF_ACCOUNT_ID":\s*"(\w+)"/.exec(await readFile(WRANGLER_CONFIG, "utf8"))?.[1];
+  assert(accountId !== undefined, "CF_ACCOUNT_ID not found in wrangler.jsonc");
+  const fork = await createAttempt(project, "a1", timeline);
+
+  const probe = `import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { test } from "node:test";
+
+test("cannot push to the canonical repo", () => {
+  const tree = execFileSync("git", ["rev-parse", "HEAD^{tree}"]).toString().trim();
+  const forged = execFileSync("git", ["commit-tree", tree, "-p", "HEAD", "-m", "intrusion"]).toString().trim();
+  assert.throws(() =>
+    execFileSync("git", ["push", ${JSON.stringify(canonical)}, \`\${forged}:refs/heads/main\`], { stdio: "pipe", timeout: 30_000 }),
+  );
+});
+
+test("cannot reach the Cloudflare API", async () => {
+  const url = "https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/throng-fixture-worker";
+  const status = await fetch(url, { signal: AbortSignal.timeout(5_000) }).then((r) => r.status, () => "blocked");
+  assert.notEqual(status, 200);
+});
+`;
+  await writeFile(join(work, "test/intrusion.test.js"), probe);
+  await git(work, "add", "test/intrusion.test.js");
+  const sha = await commitAndPush(work, fork, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
+  timeline.mark("attempt pushed");
+
+  const finished = await waitFor(project, (e) => e.kind === "check-finished" && e.detail.sha === sha);
+  const outcome = finished.detail.outcome as { kind: string; mainSha?: string; output?: string };
+  assert(outcome.kind === "landed", `expected the check to pass and land, got ${JSON.stringify(outcome)}`);
+  const log = await api<{ message: string }[]>("GET", `/spike/repos/${project}/log?ref=main&limit=20`);
+  assert(!log.some((c) => c.message === "intrusion"), "the forged commit reached main");
+  const head = await api<{ sha: string }>("GET", `/spike/repos/${project}/head`);
+  assert(head.sha === outcome.mainSha, `main is ${head.sha}, expected the landed ${outcome.mainSha}`);
+  console.log(`main history: ${log.map((c) => c.message).join(" <- ")}`);
+
+  const journal = await settle(project, 5_000);
+  addCheckTimings(timeline, journal);
+  report(timeline, journal);
+  await cleanUp(project, ["a1"], work);
 }
 
 async function setUpProject(timeline: Timeline): Promise<{ project: string; work: string }> {

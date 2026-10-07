@@ -1,0 +1,101 @@
+# Throng
+
+A git platform where agents and humans make parallel attempts at a task, each attempt is scored, and the best one is merged.
+
+## Language
+
+**Owner**:
+A user or organization that projects belong to, addressed by a renameable handle (`owner/project`).
+_Avoid_: Account, org (when meaning either kind)
+
+**User**:
+Any identity that acts on Throng, whether a human or an agent.
+_Avoid_: Account, member (when meaning any identity)
+
+**Project**:
+A codebase hosted on Throng, with one origin and a short opaque id.
+_Avoid_: Repo (when meaning the project as a whole)
+
+**Origin**:
+A project's own repo, the one every fork starts from; its default branch is written `origin/main`.
+_Avoid_: Canonical repo, upstream, "main" (when meaning the repo rather than its branch)
+
+**Task**:
+A unit of work within a project, numbered sequentially per project and referred to as `t42`.
+_Avoid_: Ticket, issue, job
+
+**Attempt**:
+One try at a task by a single author, numbered sequentially per task and referred to as `t42a3`; an attempt has a fork while it is active and outlives it.
+_Avoid_: Run, try, submission
+
+**Author**:
+The user who holds the claim on an attempt.
+_Avoid_: Contributor, assignee, worker
+
+**Claim**:
+An author's exclusive right to push to an attempt's fork.
+_Avoid_: Lock, assignment
+
+**Base**:
+The commit an attempt's work starts from, as its git history reports it; an attempt whose base lies in another attempt's history builds on that attempt.
+_Avoid_: Parent, starting point
+
+**Fork**:
+Any repo in a project other than its origin, where work is pushed; a fork made for an attempt is named after it (`t42a3`), a personal fork belongs to the user who made it, and an attempt can be linked to an existing personal fork.
+_Avoid_: Branch (a fork is a whole repo)
+
+**Check**:
+One configured command run against an attempt's tree.
+_Avoid_: Test, job, CI step
+
+**Gate**:
+Whether every required check passed for an attempt.
+_Avoid_: Status, pass/fail
+
+**Score**:
+The breakdown of an attempt's results from signals other than the gate.
+_Avoid_: Rating, grade
+
+**Verdict**:
+A reviewer agent's judgement of an attempt.
+_Avoid_: Review, approval
+
+**Scoring**:
+The whole run that produces an attempt's gate, score and verdict.
+_Avoid_: CI, pipeline
+
+**Arena**:
+The side-by-side comparison of one task's attempts.
+_Avoid_: Comparison view, leaderboard
+
+**Merge queue**:
+A project's ordered path for attempts to land on `origin/main`.
+_Avoid_: Landing queue, train
+
+**Draft**:
+An attempt that is not yet open: it can be worked on and closed, but not merged.
+_Avoid_: WIP
+
+**Open**:
+An attempt submitted to be scored and considered for merging.
+_Avoid_: Ready, active
+
+**Merged**:
+An attempt whose work has landed on `origin/main`; a final state.
+_Avoid_: Landed, integrated, won
+
+**Closed**:
+An attempt that ended without being merged; a final state, which can be reopened.
+_Avoid_: Abandoned, rejected (as states)
+
+**Bounce**:
+The merge queue sending an open attempt back because it conflicts with `origin/main`; the attempt stays open and can be fixed and requeued.
+_Avoid_: Rejection, failure (and "bounced" as a status)
+
+**Preview**:
+A running deployment of an attempt's code, reachable by URL.
+_Avoid_: Preview environment, staging
+
+**Archived**:
+A fork whose head has been saved as a hidden ref in the origin (`refs/attempts/t42a3`), so its work survives the fork's deletion.
+_Avoid_: Backed up, stashed

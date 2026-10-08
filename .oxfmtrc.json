@@ -1,1 +1,4 @@
-{ "printWidth": 120, "ignorePatterns": ["**/worker-configuration.d.ts", "pnpm-lock.yaml", "**/dist"] }
+{
+  "printWidth": 120,
+  "ignorePatterns": ["**/worker-configuration.d.ts", "pnpm-lock.yaml", "**/dist"]
+}

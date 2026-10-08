@@ -9,12 +9,12 @@ A user or organization that projects belong to, addressed by a renameable handle
 _Avoid_: Account, org (when meaning either kind)
 
 **User**:
-Any identity that acts on Throng, whether a human or an agent.
-_Avoid_: Account, member (when meaning any identity)
+A human with an identity on Throng.
+_Avoid_: Account, member
 
 **Agent**:
-A user that acts on behalf of one human; it can do an attempt's work but is never its author.
-_Avoid_: Bot, worker
+A named alias one user acts under, such as `greg (claude)`; its work is attributed to both, and it is never an author on its own.
+_Avoid_: Bot, worker, service account
 
 **Project**:
 A codebase hosted on Throng, with one origin and a short opaque id.

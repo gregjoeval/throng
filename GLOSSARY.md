@@ -12,6 +12,10 @@ _Avoid_: Account, org (when meaning either kind)
 Any identity that acts on Throng, whether a human or an agent.
 _Avoid_: Account, member (when meaning any identity)
 
+**Agent**:
+A user that acts on behalf of one human; it can do an attempt's work but is never its author.
+_Avoid_: Bot, worker
+
 **Project**:
 A codebase hosted on Throng, with one origin and a short opaque id.
 _Avoid_: Repo (when meaning the project as a whole)
@@ -29,7 +33,7 @@ One try at a task by a single author, numbered sequentially per task and referre
 _Avoid_: Run, try, submission
 
 **Author**:
-The user who holds the claim on an attempt.
+The human who holds the claim on an attempt and is its final authority.
 _Avoid_: Contributor, assignee, worker
 
 **Claim**:
@@ -77,7 +81,7 @@ An attempt that is not yet open: it can be worked on and closed, but not merged.
 _Avoid_: WIP
 
 **Open**:
-An attempt submitted to be scored and considered for merging.
+An attempt submitted to be scored and considered for merging; its author can return it to draft.
 _Avoid_: Ready, active
 
 **Merged**:
@@ -85,8 +89,32 @@ An attempt whose work has landed on `origin/main`; a final state.
 _Avoid_: Landed, integrated, won
 
 **Closed**:
-An attempt that ended without being merged; a final state, which can be reopened.
+An attempt that ended without being merged; it can be reopened.
 _Avoid_: Abandoned, rejected (as states)
+
+**Active**:
+A draft or open attempt, which has a fork and a claim.
+_Avoid_: In progress, working
+
+**Passing**:
+An open attempt whose current head passed the gate in its latest scoring.
+_Avoid_: Ready, green
+
+**Queued**:
+An open attempt that entered the merge queue and has not since merged, bounced or returned to draft.
+_Avoid_: Pending
+
+**Stale**:
+An active attempt with no push for longer than its project's stale threshold.
+_Avoid_: Idle, abandoned
+
+**Obsolete**:
+A task or attempt taken out of use because it was deleted or migrated; it is kept, left out of normal lists, and can be restored to closed.
+_Avoid_: Deleted, removed, hidden, defunct
+
+**Superseded**:
+Scoring results for a head that is no longer the attempt's current head.
+_Avoid_: Outdated, stale (when meaning results)
 
 **Bounce**:
 The merge queue sending an open attempt back because it conflicts with `origin/main`; the attempt stays open and can be fixed and requeued.

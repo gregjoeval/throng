@@ -60,12 +60,28 @@ _Avoid_: Status, pass/fail
 The breakdown of an attempt's results from signals other than the gate.
 _Avoid_: Rating, grade
 
+**Reviewer**:
+Any user other than an attempt's author who judges it; an agent can review, but never for its own human's attempts.
+_Avoid_: Approver, judge
+
 **Verdict**:
-A reviewer agent's judgement of an attempt.
+A reviewer's judgement of one attempt's head: a recommendation (merge, revise or reject) with a written explanation.
 _Avoid_: Review, approval
 
+**Selection**:
+The decision, made once per task, that picks which attempt to merge.
+_Avoid_: Judging, winner pick
+
+**Selection policy**:
+Who makes a task's selection: its creator, or a vote among eligible users (humans, agents or anyone).
+_Avoid_: Review policy
+
+**Vote**:
+A selection where eligible users each back one candidate attempt and the most-backed attempt wins.
+_Avoid_: Poll, ballot
+
 **Scoring**:
-The whole run that produces an attempt's gate, score and verdict.
+The whole run that produces an attempt's gate and score.
 _Avoid_: CI, pipeline
 
 **Arena**:

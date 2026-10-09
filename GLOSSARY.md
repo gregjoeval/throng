@@ -28,6 +28,10 @@ _Avoid_: Canonical repo, upstream, "main" (when meaning the repo rather than its
 A unit of work within a project, numbered sequentially per project and referred to as `t42`.
 _Avoid_: Ticket, issue, job
 
+**Changeset**:
+A set of changes to a codebase; each attempt is a changeset, and so is a merge request.
+_Avoid_: Patch set, diff (when meaning the change itself)
+
 **Attempt**:
 One try at a task by a single author, numbered sequentially per task and referred to as `t42a3`; an attempt has a fork while it is active and outlives it.
 _Avoid_: Run, try, submission
@@ -69,7 +73,7 @@ A reviewer's judgement of one attempt's head: a recommendation (merge, revise or
 _Avoid_: Review, approval
 
 **Selection**:
-The decision, made once per task, that picks which attempt to merge.
+The decision, made once per task, that picks the attempt that becomes the task's merge request.
 _Avoid_: Judging, winner pick
 
 **Selection policy**:
@@ -88,8 +92,12 @@ _Avoid_: CI, pipeline
 The side-by-side comparison of one task's attempts.
 _Avoid_: Comparison view, leaderboard
 
+**Merge request**:
+The changeset chosen from a task's selection to land on `origin/main`; for now it is exactly the selected attempt, and a task has at most one open merge request.
+_Avoid_: Pull request
+
 **Merge queue**:
-A project's ordered path for attempts to land on `origin/main`.
+A project's ordered path for merge requests to land on `origin/main`.
 _Avoid_: Landing queue, train
 
 **Draft**:
@@ -101,7 +109,7 @@ An attempt submitted to be scored and considered for merging; its author can ret
 _Avoid_: Ready, active
 
 **Merged**:
-An attempt whose work has landed on `origin/main`; a final state.
+An attempt whose work has landed on `origin/main` through a merge request; a final state.
 _Avoid_: Landed, integrated, won
 
 **Closed**:
@@ -117,7 +125,7 @@ An open attempt whose current head passed the gate in its latest scoring.
 _Avoid_: Ready, green
 
 **Queued**:
-An open attempt that entered the merge queue and has not since merged, bounced or returned to draft.
+A merge request in the merge queue that has not yet landed or been dequeued.
 _Avoid_: Pending
 
 **Stale**:
@@ -132,9 +140,9 @@ _Avoid_: Deleted, removed, hidden, defunct
 Scoring results for a head that is no longer the attempt's current head.
 _Avoid_: Outdated, stale (when meaning results)
 
-**Bounce**:
-The merge queue sending an open attempt back because it conflicts with `origin/main`; the attempt stays open and can be fixed and requeued.
-_Avoid_: Rejection, failure (and "bounced" as a status)
+**Dequeue**:
+A merge request leaving the merge queue without landing, for a reason (conflict, failed checks, a new push, or cancelled); it can be fixed and requeued.
+_Avoid_: Bounce, rejection
 
 **Preview**:
 A running deployment of an attempt's code, reachable by URL.

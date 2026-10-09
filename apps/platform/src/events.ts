@@ -1,7 +1,6 @@
 // Artifacts push events and how a project routes them.
 
-/** A canonical repo is named after its project; an attempt fork is `<project>--<attempt>`. */
-export const FORK_SEPARATOR = "--";
+import { parseRepoName } from "./repos.ts";
 
 const ZERO_SHA = "0".repeat(40);
 
@@ -22,10 +21,6 @@ export type PushRoute =
   | { kind: "main-advanced"; project: string; push: PushEvent }
   | { kind: "attempt"; project: string; attempt: string; push: PushEvent }
   | { kind: "ignored"; reason: string; push: PushEvent | null };
-
-export function forkName(project: string, attempt: string): string {
-  return `${project}${FORK_SEPARATOR}${attempt}`;
-}
 
 /** Parses a `cf.artifacts.repo.pushed` event; returns null for anything else. */
 export function parsePushEvent(event: unknown): PushEvent | null {
@@ -55,24 +50,19 @@ export function parsePushEvent(event: unknown): PushEvent | null {
   };
 }
 
-/** Decides what a push means: `main` moved on a canonical repo, an attempt wants a check, or neither. */
+/** Decides what a push means: `main` moved on an origin, an attempt wants a check, or neither. */
 export function routePush(event: unknown, defaultBranch = "main"): PushRoute {
   const push = parsePushEvent(event);
   if (push === null) return { kind: "ignored", reason: "not a push event", push: null };
   if (push.after === ZERO_SHA) return { kind: "ignored", reason: "ref deleted", push };
 
-  const at = push.repo.indexOf(FORK_SEPARATOR);
-  if (at === -1) {
-    if (push.ref !== `refs/heads/${defaultBranch}`) {
-      return { kind: "ignored", reason: `canonical push to ${push.ref}`, push };
-    }
-    return { kind: "main-advanced", project: push.repo, push };
+  const repo = parseRepoName(push.repo);
+  if (repo === null) return { kind: "ignored", reason: `unrecognised repo ${push.repo}`, push };
+  if (repo.kind === "fork") return { kind: "attempt", project: repo.project, attempt: repo.attempt, push };
+  if (push.ref !== `refs/heads/${defaultBranch}`) {
+    return { kind: "ignored", reason: `origin push to ${push.ref}`, push };
   }
-
-  const project = push.repo.slice(0, at);
-  const attempt = push.repo.slice(at + FORK_SEPARATOR.length);
-  if (project === "" || attempt === "") return { kind: "ignored", reason: "malformed fork name", push };
-  return { kind: "attempt", project, attempt, push };
+  return { kind: "main-advanced", project: repo.project, push };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

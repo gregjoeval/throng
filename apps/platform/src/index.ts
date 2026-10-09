@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { apiRoutes } from "./api";
-import { forkName } from "./events";
+import { reposFor } from "./artifacts";
+import { forkRepo, originRepo } from "./repos";
 
 export { ProjectCoordinator } from "./project";
 export { CheckSandbox, OutboundAuth } from "./sandbox";
@@ -19,37 +20,34 @@ app.use("/spike/*", async (c, next) => {
   await next();
 });
 
-/** Creates the canonical repo and returns a write token so the caller can push the fixture. */
+/** Creates the project's origin and returns a write token so the caller can push the fixture. */
 app.post("/spike/projects/:project", async (c) => {
   const project = c.req.param("project");
   const began = Date.now();
-  const repo = await c.env.ARTIFACTS.create(project, { setDefaultBranch: "main" });
+  const repo = await reposFor(c.env).create(originRepo(project));
   const createMs = Date.now() - began;
   await c.env.PROJECT.getByName(project).note("repo-created", { project, createMs });
   return c.json({ remote: repo.remote, token: repo.token, createMs });
 });
 
-/** Forks the canonical repo for an attempt, waits until the fork is usable, and mints a write token. */
+/** Forks the origin for an attempt (`t1a1`), waits until the fork is usable, and mints a write token. */
 app.post("/spike/projects/:project/attempts/:attempt", async (c) => {
   const project = c.req.param("project");
-  const name = forkName(project, c.req.param("attempt"));
+  const name = forkRepo(project, c.req.param("attempt"));
+  const repos = reposFor(c.env);
   const began = Date.now();
-  {
-    using canonical = await c.env.ARTIFACTS.get(project);
-    await canonical.fork(name, { defaultBranchOnly: true });
-  }
+  await repos.fork(originRepo(project), name);
   const forkMs = Date.now() - began;
 
   let polls = 0;
   for (;;) {
     polls++;
     try {
-      using fork = await c.env.ARTIFACTS.get(name);
-      const info = await fork.info();
+      const fork = await repos.get(name);
       const readyMs = Date.now() - began;
-      const token = await fork.createToken("write", PUSH_TOKEN_TTL_SECONDS);
+      const { token } = await repos.mintToken(name, "write", PUSH_TOKEN_TTL_SECONDS);
       await c.env.PROJECT.getByName(project).note("fork-ready", { name, forkMs, readyMs, polls });
-      return c.json({ remote: info.remote, token: token.plaintext, forkMs, readyMs, polls });
+      return c.json({ remote: fork.remote, token, forkMs, readyMs, polls });
     } catch (cause) {
       if (Date.now() - began > FORK_READY_TIMEOUT_MS) throw cause;
       await new Promise((r) => setTimeout(r, 250));
@@ -64,52 +62,43 @@ app.get("/spike/projects/:project/journal", async (c) => {
 
 /** Head of a repo's branch, read through the binding (no clone). */
 app.get("/spike/repos/:name/head", async (c) => {
-  using repo = await c.env.ARTIFACTS.get(c.req.param("name"));
-  const [head] = await repo.log({ ref: c.req.query("ref") ?? "main", limit: 1 });
+  const ref = c.req.query("ref") ?? "main";
+  const [head] = await reposFor(c.env).listCommits(c.req.param("name"), { ref, limit: 1 });
   return c.json({ sha: head?.hash ?? null, message: head?.message ?? null });
 });
 
 // Read-only views a file/commit browser could use. All through the binding; nothing is cloned.
 
 app.get("/spike/repos/:name/log", async (c) => {
-  using repo = await c.env.ARTIFACTS.get(c.req.param("name"));
+  const ref = c.req.query("ref") ?? "main";
   const limit = Math.min(Number(c.req.query("limit") ?? 20), 100);
-  return c.json(await repo.log({ ref: c.req.query("ref") ?? "main", limit }));
+  return c.json(await reposFor(c.env).listCommits(c.req.param("name"), { ref, limit }));
 });
 
 /** Directory listing at `path` (repo root by default) for a ref. */
 app.get("/spike/repos/:name/tree", async (c) => {
-  using repo = await c.env.ARTIFACTS.get(c.req.param("name"));
   const ref = c.req.query("ref") ?? "main";
-  const [head] = await repo.log({ ref, limit: 1 });
-  if (head === undefined) return c.json({ error: `unknown ref ${ref}` }, 404);
-  let tree = head.treeHash;
-  for (const part of (c.req.query("path") ?? "").split("/").filter(Boolean)) {
-    const entries = await repo.readTree(tree);
-    const next = entries?.find((e) => e.name === part && e.type === "tree");
-    if (next === undefined) return c.json({ error: `no directory ${part}` }, 404);
-    tree = next.hash;
-  }
-  return c.json({ ref, commit: head.hash, tree, entries: await repo.readTree(tree) });
+  const path = c.req.query("path") ?? "";
+  const tree = await reposFor(c.env).readTree(c.req.param("name"), { ref, path });
+  if (tree === null) return c.json({ error: `no directory ${path || "/"} at ${ref}` }, 404);
+  return c.json({ ref, ...tree });
 });
 
 app.get("/spike/repos/:name/file", async (c) => {
   const path = c.req.query("path");
   if (path === undefined) return c.json({ error: "path is required" }, 400);
-  using repo = await c.env.ARTIFACTS.get(c.req.param("name"));
-  const blob = await repo.readFile({ ref: c.req.query("ref") ?? "main", path });
+  const blob = await reposFor(c.env).readFile(c.req.param("name"), { ref: c.req.query("ref") ?? "main", path });
   if (blob === null) return c.json({ error: `no file ${path}` }, 404);
   return new Response(blob, { headers: { "Content-Type": blob.type || "application/octet-stream" } });
 });
 
 app.post("/spike/repos/:name/read-token", async (c) => {
-  using repo = await c.env.ARTIFACTS.get(c.req.param("name"));
-  const token = await repo.createToken("read", PUSH_TOKEN_TTL_SECONDS);
-  return c.json({ token: token.plaintext });
+  const { token } = await reposFor(c.env).mintToken(c.req.param("name"), "read", PUSH_TOKEN_TTL_SECONDS);
+  return c.json({ token });
 });
 
 app.delete("/spike/repos/:name", async (c) => {
-  return c.json({ deleted: await c.env.ARTIFACTS.delete(c.req.param("name")) });
+  return c.json({ deleted: await reposFor(c.env).delete(c.req.param("name")) });
 });
 
 app.onError((err, c) => {

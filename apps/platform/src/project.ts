@@ -1,7 +1,8 @@
 import type { FailureStage } from "./scripts";
 import { DurableObject } from "cloudflare:workers";
-import { forkName, type PushRoute } from "./events";
+import type { PushRoute } from "./events";
 import { CHECK_ROLES, sandboxName } from "./grants";
+import { forkRepo } from "./repos";
 
 /** Most Sandboxes one project may run at once. */
 export const SANDBOX_CAP = 3;
@@ -140,7 +141,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
       .toArray();
     for (const { attempt, sha } of next) {
       this.#sql.exec("DELETE FROM pending WHERE attempt = ?", attempt);
-      const instanceId = `${forkName(project, attempt)}-${sha.slice(0, 12)}`;
+      const instanceId = `${forkRepo(project, attempt)}-${sha.slice(0, 12)}`;
       const params: CheckParams = { project, attempt, sha };
       try {
         await this.env.CHECK.create({ id: instanceId, params });

@@ -13,6 +13,7 @@ import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { forkRepo, originRepo } from "../src/repos.ts";
 
 const run = promisify(execFile);
 const FIXTURE = new URL("../fixtures/fixture-worker/", import.meta.url).pathname;
@@ -78,7 +79,7 @@ async function happy(): Promise<void> {
   const timeline = new Timeline();
   const { project, work } = await setUpProject(timeline);
 
-  const fork = await createAttempt(project, "a1", timeline);
+  const fork = await createAttempt(project, "t1a1", timeline);
   const sha = await commitAndPush(
     work,
     fork,
@@ -94,7 +95,7 @@ async function happy(): Promise<void> {
   const mainSha = outcome.mainSha!;
   await waitFor(project, (e) => e.kind === "main-advanced" && e.detail.sha === mainSha);
 
-  const head = await api<{ sha: string }>("GET", `/spike/repos/${project}/head`);
+  const head = await api<{ sha: string }>("GET", `/spike/repos/${originRepo(project)}/head`);
   assert(head.sha === mainSha, `main is ${head.sha}, expected ${mainSha}`);
   const greeting = await gitShow(work, project, mainSha, "src/greeting.js");
   assert(greeting.includes("hello from a1"), "main does not contain the attempt's change");
@@ -104,7 +105,7 @@ async function happy(): Promise<void> {
   assert(checks.length === 1, `expected one check, got ${checks.length}`);
   addCheckTimings(timeline, journal);
   report(timeline, journal);
-  await cleanUp(project, ["a1"], work);
+  await cleanUp(project, ["t1a1"], work);
 }
 
 /** Two quick pushes to one attempt: the first check is cancelled (or never starts); only the newest sha lands. */
@@ -112,7 +113,7 @@ async function coalesce(): Promise<void> {
   const timeline = new Timeline();
   const { project, work } = await setUpProject(timeline);
 
-  const fork = await createAttempt(project, "a1", timeline);
+  const fork = await createAttempt(project, "t1a1", timeline);
   const first = await commitAndPush(work, fork, "src/greeting.js", (s) => s.replace('"hello"', '"hi"'), "a1: first");
   timeline.mark("first push");
   // Wait until the first check is running, so the second push has something to cancel.
@@ -146,7 +147,7 @@ async function coalesce(): Promise<void> {
   assert(greeting.includes('"hi again"'), "main does not contain the newest change");
   addCheckTimings(timeline, journal);
   report(timeline, journal);
-  await cleanUp(project, ["a1"], work);
+  await cleanUp(project, ["t1a1"], work);
 }
 
 /** Two attempts forked from the same main edit the same line: the first lands, the second bounces. */
@@ -156,8 +157,8 @@ async function conflict(): Promise<void> {
   const base = (await git(work, "rev-parse", "HEAD")).trim();
 
   // Fork both before either lands, so both start from the same main.
-  const a1 = await createAttempt(project, "a1", timeline);
-  const a2 = await createAttempt(project, "a2", timeline);
+  const a1 = await createAttempt(project, "t1a1", timeline);
+  const a2 = await createAttempt(project, "t1a2", timeline);
 
   const first = await commitAndPush(work, a1, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
   timeline.mark("a1 pushed");
@@ -180,7 +181,7 @@ async function conflict(): Promise<void> {
   assert(/hello from a1[\s\S]*hello from a2/.test(outcome.diff ?? ""), "the hunks do not show both sides");
 
   const journal = await settle(project);
-  const head = await api<{ sha: string }>("GET", `/spike/repos/${project}/head`);
+  const head = await api<{ sha: string }>("GET", `/spike/repos/${originRepo(project)}/head`);
   assert(head.sha === mainSha, `main moved to ${head.sha} after the bounce; expected ${mainSha}`);
   assert(
     journal.filter((e) => e.kind === "main-advanced").length === 2,
@@ -190,25 +191,25 @@ async function conflict(): Promise<void> {
   console.log(outcome.diff);
   addCheckTimings(timeline, journal);
   report(timeline, journal);
-  await cleanUp(project, ["a1", "a2"], work);
+  await cleanUp(project, ["t1a1", "t1a2"], work);
 }
 
 /** An attempt's passing check deploys a Preview serving its change; its files are readable without a clone. */
 async function preview(): Promise<void> {
   const timeline = new Timeline();
   const { project, work } = await setUpProject(timeline);
-  const fork = await createAttempt(project, "a1", timeline);
+  const fork = await createAttempt(project, "t1a1", timeline);
   const sha = await commitAndPush(work, fork, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
   timeline.mark("attempt pushed");
-  const forkRepo = `${project}--a1`;
+  const forkName = forkRepo(project, "t1a1");
 
   // File reads through the binding, against the fork.
   const began = Date.now();
-  const file = await apiText("GET", `/spike/repos/${forkRepo}/file?ref=main&path=src/greeting.js`);
+  const file = await apiText("GET", `/spike/repos/${forkName}/file?ref=main&path=src/greeting.js`);
   assert(file.includes("hello from a1"), "file read does not show the attempt's change");
   const root = await api<{ commit: string; entries: { name: string; type: string }[] }>(
     "GET",
-    `/spike/repos/${forkRepo}/tree?ref=main`,
+    `/spike/repos/${forkName}/tree?ref=main`,
   );
   assert(root.commit === sha, `tree is at ${root.commit}, expected ${sha}`);
   const names = root.entries.map((e) => e.name).toSorted();
@@ -216,12 +217,12 @@ async function preview(): Promise<void> {
     ["package.json", "src", "test"].every((n) => names.includes(n)),
     `unexpected root ${names.join(", ")}`,
   );
-  const src = await api<{ entries: { name: string }[] }>("GET", `/spike/repos/${forkRepo}/tree?ref=main&path=src`);
+  const src = await api<{ entries: { name: string }[] }>("GET", `/spike/repos/${forkName}/tree?ref=main&path=src`);
   assert(
     src.entries.some((e) => e.name === "greeting.js"),
     "src/ listing has no greeting.js",
   );
-  const log = await api<{ hash: string; message: string }[]>("GET", `/spike/repos/${forkRepo}/log?ref=main&limit=5`);
+  const log = await api<{ hash: string; message: string }[]>("GET", `/spike/repos/${forkName}/log?ref=main&limit=5`);
   assert(log[0]?.hash === sha && log.length === 2, `unexpected log ${JSON.stringify(log.map((c) => c.message))}`);
   timeline.mark(`file, 2 trees and log read in ${Date.now() - began} ms`);
 
@@ -239,7 +240,7 @@ async function preview(): Promise<void> {
   const journal = await settle(project, 5_000);
   addCheckTimings(timeline, journal);
   report(timeline, journal);
-  await cleanUp(project, ["a1"], work);
+  await cleanUp(project, ["t1a1"], work);
 }
 
 /** Polls a public URL until its body matches; new Preview hostnames can take a moment to resolve. */
@@ -269,7 +270,7 @@ async function intrusion(): Promise<void> {
   const canonical = (await git(work, "remote", "get-url", "canonical")).trim();
   const accountId = /"CF_ACCOUNT_ID":\s*"(\w+)"/.exec(await readFile(WRANGLER_CONFIG, "utf8"))?.[1];
   assert(accountId !== undefined, "CF_ACCOUNT_ID not found in wrangler.jsonc");
-  const fork = await createAttempt(project, "a1", timeline);
+  const fork = await createAttempt(project, "t1a1", timeline);
 
   const probe = `import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -297,23 +298,23 @@ test("cannot reach the Cloudflare API", async () => {
   const finished = await waitFor(project, (e) => e.kind === "check-finished" && e.detail.sha === sha);
   const outcome = finished.detail.outcome as { kind: string; mainSha?: string; output?: string };
   assert(outcome.kind === "landed", `expected the check to pass and land, got ${JSON.stringify(outcome)}`);
-  const log = await api<{ message: string }[]>("GET", `/spike/repos/${project}/log?ref=main&limit=20`);
+  const log = await api<{ message: string }[]>("GET", `/spike/repos/${originRepo(project)}/log?ref=main&limit=20`);
   assert(!log.some((c) => c.message === "intrusion"), "the forged commit reached main");
-  const head = await api<{ sha: string }>("GET", `/spike/repos/${project}/head`);
+  const head = await api<{ sha: string }>("GET", `/spike/repos/${originRepo(project)}/head`);
   assert(head.sha === outcome.mainSha, `main is ${head.sha}, expected the landed ${outcome.mainSha}`);
   console.log(`main history: ${log.map((c) => c.message).join(" <- ")}`);
 
   const journal = await settle(project, 5_000);
   addCheckTimings(timeline, journal);
   report(timeline, journal);
-  await cleanUp(project, ["a1"], work);
+  await cleanUp(project, ["t1a1"], work);
 }
 
 /** An attempt adds an npm dependency: the check installs it, passes, lands, and its Preview is built with it. */
 async function deps(): Promise<void> {
   const timeline = new Timeline();
   const { project, work } = await setUpProject(timeline);
-  const fork = await createAttempt(project, "a1", timeline);
+  const fork = await createAttempt(project, "t1a1", timeline);
 
   const pkg = JSON.parse(await readFile(join(work, "package.json"), "utf8")) as Record<string, unknown>;
   await writeFile(
@@ -345,7 +346,7 @@ test("the dependency is installed", () => {
   const finished = await waitFor(project, (e) => e.kind === "check-finished" && e.detail.sha === sha);
   const outcome = finished.detail.outcome as { kind: string; mainSha?: string };
   assert(outcome.kind === "landed", `expected landed, got ${JSON.stringify(outcome)}`);
-  const lock = await apiText("GET", `/spike/repos/${project}/file?ref=main&path=package-lock.json`);
+  const lock = await apiText("GET", `/spike/repos/${originRepo(project)}/file?ref=main&path=package-lock.json`);
   assert(lock.includes('"is-number"'), "main has no lockfile with the dependency");
 
   const ready = await waitFor(
@@ -359,11 +360,12 @@ test("the dependency is installed", () => {
   const journal = await settle(project, 5_000);
   addCheckTimings(timeline, journal);
   report(timeline, journal);
-  await cleanUp(project, ["a1"], work);
+  await cleanUp(project, ["t1a1"], work);
 }
 
 async function setUpProject(timeline: Timeline): Promise<{ project: string; work: string }> {
-  const project = `spike-${Date.now().toString(36)}`;
+  // Project ids are lowercase alphanumeric; repo names take a `-main` or `-t1a1` suffix.
+  const project = `spike${Date.now().toString(36)}`;
   console.log(`project ${project}`);
   const work = await mkdtemp(join(tmpdir(), `${project}-`));
   await cp(FIXTURE, work, { recursive: true, filter: (src) => !src.includes("node_modules") });
@@ -408,7 +410,7 @@ async function commitAndPush(
 }
 
 async function gitShow(work: string, project: string, sha: string, path: string): Promise<string> {
-  const { token } = await api<{ token: string }>("POST", `/spike/repos/${project}/read-token`);
+  const { token } = await api<{ token: string }>("POST", `/spike/repos/${originRepo(project)}/read-token`);
   await git(work, ...auth(token), "fetch", "-q", "canonical", "main");
   return git(work, "show", `${sha}:${path}`);
 }
@@ -464,7 +466,7 @@ async function waitFor(project: string, match: (e: JournalEntry) => boolean): Pr
 
 async function cleanUp(project: string, attempts: string[], work: string): Promise<void> {
   if (process.env.SPIKE_KEEP === "1") return;
-  for (const name of [project, ...attempts.map((a) => `${project}--${a}`)]) {
+  for (const name of [originRepo(project), ...attempts.map((a) => forkRepo(project, a))]) {
     await api("DELETE", `/spike/repos/${name}`).catch((cause) => console.warn(`could not delete ${name}`, cause));
   }
   await rm(work, { recursive: true, force: true });

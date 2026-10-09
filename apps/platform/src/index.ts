@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { apiRoutes } from "./api";
 import { forkName } from "./events";
 
 export { ProjectCoordinator } from "./project";
@@ -9,6 +10,8 @@ const FORK_READY_TIMEOUT_MS = 60_000;
 const PUSH_TOKEN_TTL_SECONDS = 60 * 60;
 
 const app = new Hono<{ Bindings: Env }>();
+
+app.route("/api", apiRoutes());
 
 // Spike-only control plane; the real product API is backlog.
 app.use("/spike/*", async (c, next) => {

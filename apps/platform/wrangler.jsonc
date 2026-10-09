@@ -35,7 +35,22 @@
       },
     ],
   },
-  "vars": { "CF_ACCOUNT_ID": "9ff7e9e225aeb0ab0c56b05b42ca2b13", "PREVIEW_WORKER": "throng-fixture-worker" },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "throng",
+      // PLACEHOLDER: run `wrangler d1 create throng` and paste the id it prints here.
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations",
+    },
+  ],
+  "vars": {
+    "CF_ACCOUNT_ID": "9ff7e9e225aeb0ab0c56b05b42ca2b13",
+    "PREVIEW_WORKER": "throng-fixture-worker",
+    // PLACEHOLDER: the Zero Trust team domain and the Access application's audience (AUD) tag.
+    "ACCESS_TEAM_DOMAIN": "<team>.cloudflareaccess.com",
+    "ACCESS_AUD": "<access-application-aud>",
+  },
   "secrets": { "required": ["SPIKE_TOKEN", "CF_PREVIEW_TOKEN"] },
   "observability": { "enabled": true },
 }

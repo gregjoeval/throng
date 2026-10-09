@@ -57,8 +57,12 @@ Whether every required check passed for an attempt.
 _Avoid_: Status, pass/fail
 
 **Score**:
-The breakdown of an attempt's results from signals other than the gate.
+The breakdown of an attempt's results from signals other than the gate: its optional checks and its metrics.
 _Avoid_: Rating, grade
+
+**Metric**:
+One named number in an attempt's score, either reported by a check or measured by Throng, with an order that says which value is best.
+_Avoid_: Stat, KPI
 
 **Reviewer**:
 Any user other than an attempt's author who judges it; an agent can review, but never for its own human's attempts.

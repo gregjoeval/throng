@@ -1,0 +1,16 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // Production. `ci` and `dev-<name>` below follow the platform's environments: each binds to the
+  // matching platform Worker (`throng-ci`, `throng-dev-<name>`).
+  "name": "throng-web",
+  "main": "@tanstack/react-start/server-entry",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "services": [{ "binding": "PLATFORM", "service": "throng" }],
+  "observability": { "enabled": true },
+  "env": {
+    "ci": {
+      "services": [{ "binding": "PLATFORM", "service": "throng-ci" }],
+    },
+  },
+}

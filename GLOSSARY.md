@@ -74,7 +74,7 @@ _Avoid_: Approver, judge
 
 **Verdict**:
 A reviewer's judgement of one attempt's head: a recommendation (merge, revise or reject) with a written explanation.
-_Avoid_: Review, approval
+_Avoid_: Review, approval (an approval is the decider's sign-off, not advice)
 
 **Selection**:
 The decision, made once per task, that picks the attempt that becomes the task's merge request.
@@ -99,6 +99,10 @@ _Avoid_: Comparison view, leaderboard
 **Merge request**:
 The changeset chosen from a task's selection to land on `origin/main`; for now it is exactly the selected attempt, and a task has at most one open merge request.
 _Avoid_: Pull request
+
+**Approval**:
+The selection maker's sign-off on one head of a merge request; only the approved head can land, and any new push needs a new approval.
+_Avoid_: Verdict, review (when meaning the sign-off)
 
 **Merge queue**:
 A project's ordered path for merge requests to land on `origin/main`.

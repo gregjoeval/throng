@@ -45,7 +45,7 @@ The commit an attempt's work starts from, as its git history reports it; an atte
 _Avoid_: Parent, starting point
 
 **Fork**:
-Any repo in a project other than its origin, where work is pushed; a fork made for an attempt is named after it (`t42a3`), a personal fork belongs to the user who made it, and an attempt can be linked to an existing personal fork.
+Any repo in a project other than its origin, where work is pushed; a fork made for an attempt is named after it (`t42a3`), and a personal fork belongs to the user who made it.
 _Avoid_: Branch (a fork is a whole repo)
 
 **Check**:

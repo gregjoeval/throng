@@ -1,3 +1,4 @@
+import { Hono } from "hono";
 import { describe, expect, it } from "vitest";
 import type { AccessVerifier } from "../src/access.ts";
 import { apiRoutes } from "../src/api.ts";
@@ -5,27 +6,220 @@ import { testDatabase } from "./support/d1.ts";
 
 const verify: AccessVerifier = async (token) => (token === "valid" ? { email: "greg@example.com" } : null);
 
+const HOUR = 60 * 60;
+const DAY = 24 * HOUR;
+
+type Json = Record<string, any>;
+type As = { access?: string; bearer?: string };
+
 function setup() {
-  const api = apiRoutes(() => verify);
+  let clock = new Date("2026-10-10T12:00:00.000Z");
+  const api = apiRoutes({ verifierFor: () => verify, now: () => clock });
   const env = { DB: testDatabase(), ACCESS_TEAM_DOMAIN: "throng.cloudflareaccess.com", ACCESS_AUD: "aud" };
-  const me = (token?: string) =>
-    api.request("/me", token === undefined ? {} : { headers: { "Cf-Access-Jwt-Assertion": token } }, env);
-  return { me };
+
+  /** Sends as an Access session (`{access}`) or a bearer token (`{bearer}`), or anonymously. */
+  const call = async (method: string, path: string, as: As = {}, body?: unknown) => {
+    const headers: Record<string, string> = {};
+    if (as.access !== undefined) headers["Cf-Access-Jwt-Assertion"] = as.access;
+    if (as.bearer !== undefined) headers["Authorization"] = `Bearer ${as.bearer}`;
+    if (body !== undefined) headers["Content-Type"] = "application/json";
+    const init = { method, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) };
+    const res = await api.request(path, init, env);
+    return { status: res.status, body: (await res.json()) as Json };
+  };
+  const human = { access: "valid" };
+  const mint = async (body: unknown = {}, as: As = human) => {
+    const res = await call("POST", "/tokens", as, body);
+    expect(res.status).toBe(201);
+    return res.body;
+  };
+  const advance = (seconds: number) => {
+    clock = new Date(clock.getTime() + seconds * 1000);
+  };
+  return { api, call, mint, human, advance, env };
 }
 
 describe("GET /api/me", () => {
-  it("is 401 without an Access session", async () => {
-    const { me } = setup();
-    expect((await me()).status).toBe(401);
-    expect((await me("forged")).status).toBe(401);
+  it("is 401 with the shared error shape without a session or token", async () => {
+    const { call } = setup();
+    for (const as of [{}, { access: "forged" }, { bearer: "thr_nope" }, { bearer: "not-a-throng-token" }]) {
+      const res = await call("GET", "/me", as);
+      expect(res.status).toBe(401);
+      expect(res.body).toEqual({ error: { code: "unauthorized", message: expect.any(String) } });
+    }
   });
 
-  it("returns the signed-in user, created on first sight", async () => {
-    const { me } = setup();
-    const first = await me("valid");
+  it("returns the signed-in user, created on first sight, with no agent or token", async () => {
+    const { call, human } = setup();
+    const first = await call("GET", "/me", human);
     expect(first.status).toBe(200);
-    const user = await first.json();
-    expect(user).toMatchObject({ handle: "greg", email: "greg@example.com" });
-    expect(await (await me("valid")).json()).toEqual(user);
+    expect(first.body).toMatchObject({ user: { handle: "greg", email: "greg@example.com" }, agent: null, token: null });
+    expect((await call("GET", "/me", human)).body).toEqual(first.body);
+  });
+
+  it("returns the agent alias and token expiry for a bearer token", async () => {
+    const { call, mint, human } = setup();
+    const user = (await call("GET", "/me", human)).body["user"];
+    const minted = await mint({ agent: "claude" });
+    const res = await call("GET", "/me", { bearer: minted["token"] });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ user, agent: "claude", token: { id: minted["id"], expires_at: minted["expires_at"] } });
+  });
+});
+
+describe("POST /api/tokens", () => {
+  it("mints a thr_ token that expires in 24 h by default and stores only its hash", async () => {
+    const { mint, env } = setup();
+    const minted = await mint();
+    expect(minted).toEqual({
+      id: expect.stringMatching(/^[a-z0-9]{12}$/),
+      agent: null,
+      token: expect.stringMatching(/^thr_[A-Za-z0-9_-]{43}$/),
+      created_at: "2026-10-10T12:00:00.000Z",
+      expires_at: "2026-10-11T12:00:00.000Z",
+      revoked_at: null,
+    });
+    const row = await env.DB.prepare("SELECT * FROM tokens WHERE id = ?").bind(minted["id"]).first<Json>();
+    expect(row?.["hash"]).toMatch(/^[0-9a-f]{64}$/);
+    expect(Object.values(row ?? {}).includes(minted["token"])).toBe(false);
+  });
+
+  it("accepts an agent alias and an expiry of up to 7 days", async () => {
+    const { mint } = setup();
+    expect(await mint({ agent: "claude", expires_in: 7 * DAY })).toMatchObject({
+      agent: "claude",
+      expires_at: "2026-10-17T12:00:00.000Z",
+    });
+  });
+
+  it("rejects an expiry above 7 days, and malformed requests", async () => {
+    const { call, human } = setup();
+    const bodies = [
+      { expires_in: 7 * DAY + 1 },
+      { expires_in: 0 },
+      { expires_in: 1.5 },
+      { agent: "" },
+      { agent: "a(b)" },
+    ];
+    for (const body of bodies) {
+      const res = await call("POST", "/tokens", human, body);
+      expect(res.status).toBe(400);
+      expect(res.body["error"]["code"]).toBe("invalid_request");
+    }
+  });
+
+  it("is 401 without a session or token", async () => {
+    const { call } = setup();
+    expect((await call("POST", "/tokens", {}, {})).status).toBe(401);
+  });
+
+  it("lets a token mint another, no longer-lived than itself", async () => {
+    const { call, mint } = setup();
+    const parent = await mint({ expires_in: 2 * HOUR });
+    const bearer = { bearer: parent["token"] };
+    expect((await mint({}, bearer))["expires_at"]).toBe(parent["expires_at"]);
+    expect((await mint({ expires_in: HOUR, agent: "claude" }, bearer))["agent"]).toBe("claude");
+    expect((await call("POST", "/tokens", bearer, { expires_in: 3 * HOUR })).status).toBe(400);
+  });
+
+  it("only lets an agent's token mint for that agent", async () => {
+    const { call, mint } = setup();
+    const agent = { bearer: (await mint({ agent: "claude" }))["token"] };
+    expect((await mint({}, agent))["agent"]).toBe("claude");
+    expect((await call("POST", "/tokens", agent, { agent: "codex" })).body["error"]["code"]).toBe("forbidden");
+  });
+});
+
+describe("GET /api/tokens", () => {
+  it("lists the caller's tokens newest first without secrets", async () => {
+    const { call, mint, human, advance } = setup();
+    const first = await mint();
+    advance(60);
+    const second = await mint({ agent: "claude" });
+    const res = await call("GET", "/tokens", human);
+    expect(res.status).toBe(200);
+    expect(res.body["tokens"].map((t: Json) => t["id"])).toEqual([second["id"], first["id"]]);
+    for (const token of res.body["tokens"]) {
+      expect(Object.keys(token).toSorted()).toEqual(["agent", "created_at", "expires_at", "id", "revoked_at"]);
+    }
+  });
+
+  it("shows an agent only its own tokens", async () => {
+    const { call, mint } = setup();
+    await mint();
+    const claude = await mint({ agent: "claude" });
+    await mint({ agent: "codex" });
+    const res = await call("GET", "/tokens", { bearer: claude["token"] });
+    expect(res.body["tokens"].map((t: Json) => t["id"])).toEqual([claude["id"]]);
+  });
+});
+
+describe("DELETE /api/tokens/{id}", () => {
+  it("revokes a token, which is rejected on its next request", async () => {
+    const { call, mint, human, advance } = setup();
+    const minted = await mint();
+    const bearer = { bearer: minted["token"] };
+    expect((await call("GET", "/me", bearer)).status).toBe(200);
+
+    const revoked = await call("DELETE", `/tokens/${minted["id"]}`, human);
+    expect(revoked.status).toBe(200);
+    expect(revoked.body["revoked_at"]).toBe("2026-10-10T12:00:00.000Z");
+    expect((await call("GET", "/me", bearer)).status).toBe(401);
+
+    advance(60);
+    const again = await call("DELETE", `/tokens/${minted["id"]}`, human);
+    expect(again.body["revoked_at"]).toBe("2026-10-10T12:00:00.000Z");
+  });
+
+  it("lets a token revoke itself", async () => {
+    const { call, mint } = setup();
+    const minted = await mint();
+    const bearer = { bearer: minted["token"] };
+    expect((await call("DELETE", `/tokens/${minted["id"]}`, bearer)).status).toBe(200);
+    expect((await call("GET", "/me", bearer)).status).toBe(401);
+  });
+
+  it("is 404 for unknown ids and other callers' tokens", async () => {
+    const { call, mint, human } = setup();
+    expect((await call("DELETE", "/tokens/nope", human)).body).toEqual({
+      error: { code: "not_found", message: "no such token" },
+    });
+    const humanToken = await mint();
+    const agent = { bearer: (await mint({ agent: "claude" }))["token"] };
+    expect((await call("DELETE", `/tokens/${humanToken["id"]}`, agent)).status).toBe(404);
+  });
+});
+
+describe("token expiry", () => {
+  it("accepts a token until the instant it expires, then rejects it", async () => {
+    const { call, mint, advance } = setup();
+    const bearer = { bearer: (await mint({ expires_in: HOUR }))["token"] };
+    advance(HOUR - 1);
+    expect((await call("GET", "/me", bearer)).status).toBe(200);
+    advance(1);
+    expect((await call("GET", "/me", bearer)).status).toBe(401);
+  });
+});
+
+describe("errors", () => {
+  it("turns unexpected failures into the shared error shape, also when mounted", async () => {
+    const { api } = setup();
+    api.get("/boom", () => {
+      throw new Error("boom");
+    });
+    const app = new Hono().route("/api", api);
+    const res = await app.request("/api/boom");
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: { code: "internal", message: "internal error" } });
+  });
+});
+
+describe("GET /api/openapi.json", () => {
+  it("describes the token routes and the error shape", async () => {
+    const { call } = setup();
+    const { status, body } = await call("GET", "/openapi.json");
+    expect(status).toBe(200);
+    expect(Object.keys(body["paths"])).toEqual(expect.arrayContaining(["/me", "/tokens", "/tokens/{id}"]));
+    expect(body["components"]["schemas"]["Error"]).toBeDefined();
   });
 });

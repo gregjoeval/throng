@@ -8,6 +8,7 @@ export interface Database {
 export interface Statement {
   bind(...values: unknown[]): Statement;
   first<T = Record<string, unknown>>(): Promise<T | null>;
+  all<T = Record<string, unknown>>(): Promise<{ results: T[] }>;
 }
 
 export interface User {
@@ -18,20 +19,25 @@ export interface User {
 }
 
 const ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
-const ID_LENGTH = 8;
+const USER_ID_LENGTH = 8;
 /** Bytes at or above this would bias the alphabet (256 isn't a multiple of 36), so they are redrawn. */
 const ID_BYTE_LIMIT = 256 - (256 % ID_ALPHABET.length);
 const MAX_INSERT_ATTEMPTS = 20;
 
-/** An opaque user id: 8 lowercase alphanumeric characters, never `-`, so it can't be mistaken for a handle. */
-export function randomUserId(): string {
+/** A random string of `length` lowercase alphanumeric characters, uniformly drawn. */
+export function randomId(length: number): string {
   let id = "";
-  while (id.length < ID_LENGTH) {
-    for (const byte of crypto.getRandomValues(new Uint8Array(ID_LENGTH))) {
-      if (byte < ID_BYTE_LIMIT && id.length < ID_LENGTH) id += ID_ALPHABET[byte % ID_ALPHABET.length];
+  while (id.length < length) {
+    for (const byte of crypto.getRandomValues(new Uint8Array(length))) {
+      if (byte < ID_BYTE_LIMIT && id.length < length) id += ID_ALPHABET[byte % ID_ALPHABET.length];
     }
   }
   return id;
+}
+
+/** An opaque user id: 8 lowercase alphanumeric characters, never `-`, so it can't be mistaken for a handle. */
+export function randomUserId(): string {
+  return randomId(USER_ID_LENGTH);
 }
 
 /** The user for an Access email, creating one on first sight. */

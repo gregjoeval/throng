@@ -14,8 +14,10 @@
     "spike": "tsx scripts/spike.ts"
   },
   "dependencies": {
+    "@hono/zod-openapi": "1.6.3",
     "hono": "^4.13.12",
-    "jose": "^6.2.12"
+    "jose": "^6.2.12",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.63.1",

@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { apiRoutes } from "./api";
 import { reposFor } from "./artifacts";
+import { gitAuth } from "./auth";
 import { forkRepo, originRepo } from "./repos";
 
 export { ProjectCoordinator } from "./project";
@@ -13,6 +14,9 @@ const PUSH_TOKEN_TTL_SECONDS = 60 * 60;
 const app = new Hono<{ Bindings: Env }>();
 
 app.route("/api", apiRoutes());
+
+// The git proxy lands later; every `/git/*` request already needs a Throng token.
+app.use("/git/*", gitAuth());
 
 // Spike-only control plane; the real product API is backlog.
 app.use("/spike/*", async (c, next) => {

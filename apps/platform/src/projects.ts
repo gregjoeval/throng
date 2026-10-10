@@ -109,6 +109,15 @@ export function projectService({ db, repos, newId = randomProjectId }: ProjectDe
       return project(row);
     },
 
+    /** The projects owned by the actor's human, by handle. */
+    async list(actor: Actor): Promise<Project[]> {
+      const { results } = await db
+        .prepare(`${SELECT_PROJECT} WHERE p.owner_id = ? ORDER BY p.handle`)
+        .bind(actor.user.id)
+        .all<ProjectRow>();
+      return results.map(project);
+    },
+
     /** The project at `owner/project`. Any signed-in actor may read any project in P0. */
     async get(_actor: Actor, input: { owner: string; project: string }): Promise<Project> {
       const found = await resolveProject(db, input.owner, input.project);

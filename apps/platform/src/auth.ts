@@ -87,6 +87,27 @@ export function bearerOrAccess({
   });
 }
 
+/**
+ * Accepts a bearer token or, with `trustForwardedIdentity` and no `Authorization` header, the email
+ * throng-web forwards for its signed-in user. Unlike `bearerOrAccess` it never takes an Access JWT
+ * directly, so on the public hostname it is exactly `bearerAuth`: the routes the browser needs stay
+ * token-only for everyone else.
+ */
+export function bearerOrForwarded({ now, trustForwardedIdentity = false }: AuthOptions = {}) {
+  const bearer = bearerAuth(now === undefined ? {} : { now });
+  if (!trustForwardedIdentity) return bearer;
+  return createMiddleware<AuthEnv>(async (c, next) => {
+    if (c.req.header("Authorization") !== undefined) return bearer(c, next);
+    const identity = forwardedIdentity(c.req.header(FORWARDED_EMAIL_HEADER));
+    if (identity === null) {
+      return c.json(errorBody("unauthorized", "a bearer token is required"), 401, BEARER_CHALLENGE);
+    }
+    c.set("actor", { user: await userForEmail(c.env.DB, identity.email), agent: null });
+    c.set("token", null);
+    await next();
+  });
+}
+
 async function accessIdentity(jwt: string | undefined, verify: AccessVerifier) {
   return jwt === undefined ? null : await verify(jwt);
 }

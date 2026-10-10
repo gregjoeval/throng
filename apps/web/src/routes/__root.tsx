@@ -1,5 +1,7 @@
 import { HeadContent, Outlet, ScriptOnce, Scripts, createRootRoute } from "@tanstack/react-router";
 import type { ReactNode } from "react";
+import { AppHeader } from "@/components/app-header";
+import { ErrorState, NotFound } from "@/components/states";
 import { themeScript } from "@/lib/theme";
 import appCss from "@/styles.css?url";
 
@@ -13,14 +15,14 @@ export const Route = createRootRoute({
     links: [{ rel: "stylesheet", href: appCss }],
   }),
   shellComponent: Shell,
-  component: Outlet,
-  // With `defaultSsr: false` the server renders this in place of the first client-only route.
+  component: Layout,
+  notFoundComponent: NotFound,
+  errorComponent: ({ error }) => <ErrorState error={error} />,
   pendingComponent: () => null,
 });
 
 function Shell({ children }: { children: ReactNode }) {
   return (
-    // The theme script sets the `dark` class before React hydrates.
     <html lang="en" suppressHydrationWarning>
       <head>
         <ScriptOnce>{themeScript}</ScriptOnce>
@@ -31,5 +33,17 @@ function Shell({ children }: { children: ReactNode }) {
         <Scripts />
       </body>
     </html>
+  );
+}
+
+/** The app shell: the header, then the current view. */
+export function Layout() {
+  return (
+    <>
+      <AppHeader />
+      <main className="mx-auto max-w-6xl p-4">
+        <Outlet />
+      </main>
+    </>
   );
 }

@@ -37,6 +37,27 @@ The platform trusts that header only on `WebEntrypoint`, a named entrypoint that
 
 In the browser, `src/lib/api.ts` has the typed `hc` client, built from the platform's `AppType`, and `apiQuery`, which turns a client call into TanStack Query options.
 
+Over the binding, the forwarded user can call `/api/me`, `/api/tokens` and the project routes (`GET` and `POST /api/projects`, `GET /api/projects/{owner}/{project}`). On the public hostname the project routes stay bearer-only.
+
+Raw file URLs (`/:owner/:project/raw/:ref/*`) are forwarded the same way, to the platform's `/api/projects/:owner/:project/raw/:ref/*`.
+
+### Signing out
+
+The header's **Sign out** links to `/cdn-cgi/access/logout` on the app's own host. Access ends the session for every Access application, since it can't sign out of just one, and clears this app's cookie at once. The team-domain logout URL would also work, but it only clears the cookie on the team domain.
+
+## Routes
+
+`src/lib/paths.ts` builds and parses the project views' URLs. Use it for every link, so paths with spaces, `#` or unicode are encoded the same way everywhere:
+
+- `/:owner/:project`: project home
+- `/:owner/:project/tree/:ref/*`: a directory
+- `/:owner/:project/blob/:ref/*`: a file
+- `/:owner/:project/raw/:ref/*`: raw bytes, proxied to the platform
+- `/:owner/:project/commits/:ref`: the commit log
+- `/:owner/:project/commit/:sha`: one commit
+
+A ref is `main`, an attempt (`t42a3`) or a full sha. A sha can carry `?attempt=t42a3`, naming the attempt fork to look it up in.
+
 ### Setting it up for a new account
 
 1. **Zero Trust team.** Open Zero Trust in the Cloudflare dashboard and pick a team name. It's account-wide, so it doesn't need to be Throng-specific. Choose the Free plan.

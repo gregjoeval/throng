@@ -1,13 +1,16 @@
 // The product API, mounted at `/api` and described by the OpenAPI document at `/api/openapi.json`.
 // Access does not sit in front of it: machine clients use Throng bearer tokens. Only `/me` and
-// `/tokens` also accept an Access session, so a human can mint their first token. Handlers stay
-// thin: they call services, which throw `ServiceError`s that `onError` turns into the error shape.
+// `/tokens` also accept an Access session, so a human can mint their first token. Over the service
+// binding (see `app.ts`), those and the project routes the browser needs also take throng-web's
+// forwarded identity. Handlers stay thin: they call services, which throw `ServiceError`s that
+// `onError` turns into the error shape.
 
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import type { AccessBindings } from "./access.ts";
-import { bearerAuth, bearerOrAccess, type AuthEnv, type AuthOptions } from "./auth.ts";
+import { bearerAuth, bearerOrAccess, bearerOrForwarded, type AuthEnv, type AuthOptions } from "./auth.ts";
 import { CONFIG_NAME, MAX_CHECK_TIMEOUT_MS, MAX_CONFIG_BYTES, parseConfig } from "./config.ts";
 import { errorBody, errorResponse, ServiceError } from "./errors.ts";
+import { FORWARDED_EMAIL_HEADER } from "./forwarded.ts";
 import { MAX_PROJECT_HANDLE, PROJECT_HANDLE, projectService } from "./projects.ts";
 import type { Repos } from "./repos.ts";
 import { ATTEMPT_STATES, TASK_STATES } from "./task-store.ts";
@@ -231,6 +234,7 @@ const ConfigResultSchema = z
 
 const security: Record<string, string[]>[] = [{ bearer: [] }, { access: [] }];
 const bearerOnly: Record<string, string[]>[] = [{ bearer: [] }];
+const bearerOrWeb: Record<string, string[]>[] = [{ bearer: [] }, { web: [] }];
 const unauthorized = errorResponse("No valid bearer token or Access session.");
 const unauthorizedBearer = errorResponse("No valid bearer token.");
 
@@ -323,6 +327,7 @@ export function apiRoutes(options: ApiOptions = {}) {
   const now = options.now ?? (() => new Date());
   const auth = bearerOrAccess(options);
   const bearer = bearerAuth(options.now === undefined ? {} : { now: options.now });
+  const browser = bearerOrForwarded(options);
   const reposFor = options.repos ?? noRepos;
   const projects = (env: AccessBindings) => projectService({ db: env.DB, repos: reposFor(env) });
   const backendFor = options.tasks ?? noTasks;
@@ -347,6 +352,14 @@ export function apiRoutes(options: ApiOptions = {}) {
     in: "header",
     name: "Cf-Access-Jwt-Assertion",
     description: "A Cloudflare Access session, added by Access for signed-in humans.",
+  });
+  api.openAPIRegistry.registerComponent("securitySchemes", "web", {
+    type: "apiKey",
+    in: "header",
+    name: FORWARDED_EMAIL_HEADER,
+    description:
+      "The signed-in user throng-web forwards over its service binding. The public hostname rejects any " +
+      "request carrying this header.",
   });
 
   const routes = api
@@ -472,6 +485,31 @@ export function apiRoutes(options: ApiOptions = {}) {
     )
     .openapi(
       createRoute({
+        method: "get",
+        path: "/projects",
+        operationId: "listProjects",
+        tags: ["Projects"],
+        summary: "List the projects the caller owns",
+        description:
+          "The projects owned by the caller's human, also when an agent's token calls, ordered by handle. " +
+          "Other owners' projects can still be read by `owner/project`.",
+        security: bearerOrWeb,
+        middleware: [browser] as const,
+        responses: {
+          200: {
+            description: "The caller's projects.",
+            content: { "application/json": { schema: z.object({ projects: z.array(ProjectSchema) }) } },
+          },
+          401: unauthorizedBearer,
+        },
+      }),
+      async (c) => {
+        const list = await projects(c.env).list(c.var.actor);
+        return c.json({ projects: list }, 200);
+      },
+    )
+    .openapi(
+      createRoute({
         method: "post",
         path: "/projects",
         operationId: "createProject",
@@ -480,8 +518,8 @@ export function apiRoutes(options: ApiOptions = {}) {
         description:
           "The caller's human becomes the owner, also when an agent's token calls. Creates the project's " +
           "origin repo with `main` as its default branch.",
-        security: bearerOnly,
-        middleware: [bearer] as const,
+        security: bearerOrWeb,
+        middleware: [browser] as const,
         request: { body: { required: true, content: { "application/json": { schema: CreateProjectSchema } } } },
         responses: {
           201: { description: "The new project.", content: { "application/json": { schema: ProjectSchema } } },
@@ -502,8 +540,8 @@ export function apiRoutes(options: ApiOptions = {}) {
         operationId: "getProject",
         tags: ["Projects"],
         summary: "Get a project by its owner's handle and its own",
-        security: bearerOnly,
-        middleware: [bearer] as const,
+        security: bearerOrWeb,
+        middleware: [browser] as const,
         request: { params: ProjectPathSchema },
         responses: {
           200: { description: "The project.", content: { "application/json": { schema: ProjectSchema } } },

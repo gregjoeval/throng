@@ -13,7 +13,7 @@
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check",
     "deploy": "pnpm --filter @throng/platform run deploy",
-    "spike": "pnpm --filter @throng/platform run spike"
+    "e2e": "pnpm --filter @throng/platform run e2e"
   },
   "devDependencies": {
     "lefthook": "2.1.16",

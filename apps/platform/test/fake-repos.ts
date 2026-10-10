@@ -47,6 +47,11 @@ export class FakeRepos implements Repos {
     return this.#repos.delete(name);
   }
 
+  async list(prefix: string): Promise<string[]> {
+    this.#record("list", prefix);
+    return [...this.#repos.keys()].filter((n) => n.startsWith(prefix)).toSorted();
+  }
+
   async mintToken(name: string, scope: TokenScope, ttl: number): Promise<RepoToken> {
     this.#record("mintToken", name, scope, ttl);
     return this.#mint(name, scope, ttl);

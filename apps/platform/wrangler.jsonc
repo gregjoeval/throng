@@ -53,4 +53,60 @@
   },
   "secrets": { "required": ["SPIKE_TOKEN", "CF_PREVIEW_TOKEN"] },
   "observability": { "enabled": true },
+  "env": {
+    // The Worker the manual Integration workflow (.github/workflows/integration.yml) deploys and runs
+    // `pnpm spike` against. Select it with `CLOUDFLARE_ENV=ci`. Wrangler doesn't inherit bindings into
+    // environments, so everything is repeated here with `throng-ci` resources.
+    "ci": {
+      "name": "throng-ci",
+      "artifacts": [{ "binding": "ARTIFACTS", "namespace": "throng-ci" }],
+      "durable_objects": {
+        "bindings": [
+          { "name": "PROJECT", "class_name": "ProjectCoordinator" },
+          { "name": "SANDBOX", "class_name": "CheckSandbox" },
+        ],
+      },
+      "exports": {
+        "ProjectCoordinator": { "type": "durable-object", "storage": "sqlite" },
+        "CheckSandbox": { "type": "durable-object", "storage": "sqlite" },
+      },
+      "containers": [
+        {
+          "class_name": "CheckSandbox",
+          "scheduling_policy": "durable_object",
+          "images": { "sandbox": { "dockerfile": "./container/Dockerfile" } },
+        },
+      ],
+      // Workflow names are account-wide, so they can't reuse production's.
+      "workflows": [
+        { "name": "throng-ci-ingest", "binding": "INGEST", "class_name": "IngestWorkflow" },
+        { "name": "throng-ci-check", "binding": "CHECK", "class_name": "CheckWorkflow" },
+      ],
+      "triggers": {
+        "events": [
+          {
+            "type": "cf.artifacts.repo.pushed",
+            "filter": { "namespace": "throng-ci" },
+            "targets": [{ "type": "workflow", "workflow_name": "throng-ci-ingest" }],
+          },
+        ],
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "throng-ci",
+          "database_id": "9a5b31f2-3bc8-418a-9e3a-b50539d4f03d",
+          "migrations_dir": "migrations",
+        },
+      ],
+      "vars": {
+        "CF_ACCOUNT_ID": "9ff7e9e225aeb0ab0c56b05b42ca2b13",
+        "PREVIEW_WORKER": "throng-fixture-worker",
+        "ACCESS_TEAM_DOMAIN": "gregjoeval.cloudflareaccess.com",
+        "ACCESS_AUD": "2a713dce7fdf28f6d07c5954b0a9d57e867717b5af65ba730b98473b3366712b",
+      },
+      "secrets": { "required": ["SPIKE_TOKEN", "CF_PREVIEW_TOKEN"] },
+      "observability": { "enabled": true },
+    },
+  },
 }

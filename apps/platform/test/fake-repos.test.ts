@@ -35,6 +35,16 @@ describe("FakeRepos", () => {
     await expect(repos.get("k3x9q2-main")).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
 
+  it("lists repo names by prefix", async () => {
+    const repos = new FakeRepos();
+    await repos.create("k3x9q2-main");
+    await repos.fork("k3x9q2-main", "k3x9q2-t1a1");
+    await repos.create("p7m4r1-main");
+    expect(await repos.list("k3x9q2")).toEqual(["k3x9q2-main", "k3x9q2-t1a1"]);
+    expect(await repos.list("")).toEqual(["k3x9q2-main", "k3x9q2-t1a1", "p7m4r1-main"]);
+    expect(await repos.list("zzz")).toEqual([]);
+  });
+
   it("mints distinct tokens and remembers them per repo", async () => {
     const repos = new FakeRepos();
     await repos.create("k3x9q2-main");

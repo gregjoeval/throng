@@ -96,6 +96,8 @@ export interface Repos {
   fork(source: string, name: string): Promise<void>;
   /** Returns whether the repo existed. */
   delete(name: string): Promise<boolean>;
+  /** Names of the namespace's repos that start with `prefix`, sorted. */
+  list(prefix: string): Promise<string[]>;
   /** A token for the repo's git remote, valid for `ttl` seconds. */
   mintToken(name: string, scope: TokenScope, ttl: number): Promise<RepoToken>;
   /** A file's bytes at `ref`, or null if the ref or path doesn't resolve to a file. */

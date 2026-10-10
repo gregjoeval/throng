@@ -57,11 +57,58 @@ describe("FakeRepos", () => {
     await expect(repos.mintToken("k3x9q2-t1a1", "read", 60)).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
 
-  it("has no git content", async () => {
+  it("starts with no git content", async () => {
     const repos = new FakeRepos();
     await repos.create("k3x9q2-main");
     expect(await repos.readFile("k3x9q2-main", { ref: "main", path: "README.md" })).toBeNull();
     expect(await repos.listCommits("k3x9q2-main", { ref: "main", limit: 1 })).toEqual([]);
-    expect(await repos.readTree("k3x9q2-main", { ref: "main", path: "" })).toBeNull();
+    expect(await repos.readCommit("k3x9q2-main", "0".repeat(40))).toBeNull();
+    await expect(repos.readTree("k3x9q2-main", "main")).rejects.toMatchObject({ code: "INVALID_INPUT" });
+  });
+
+  it("commits snapshots with git's object ids and reads them back", async () => {
+    const repos = new FakeRepos();
+    await repos.create("k3x9q2-main");
+    const first = repos.commit("k3x9q2-main", { files: { "README.md": "hello\n" }, message: "first" });
+    const second = repos.commit("k3x9q2-main", {
+      files: { "README.md": "hello\n", "src/a.ts": "a\n", "bin/run": { content: "#!/bin/sh\n", type: "exec" } },
+    });
+
+    // `printf 'hello\n' | git hash-object --stdin`
+    const [readme] = (await repos.readTree("k3x9q2-main", first.treeHash)) ?? [];
+    expect(readme).toEqual({
+      name: "README.md",
+      mode: "100644",
+      hash: "ce013625030ba8dba906f756967f9e9ca394464a",
+      type: "blob",
+    });
+    expect(second.parents).toEqual([first.hash]);
+    const root = (await repos.readTree("k3x9q2-main", second.treeHash)) ?? [];
+    expect(root.map((e) => [e.name, e.type, e.mode])).toEqual([
+      ["README.md", "blob", "100644"],
+      ["bin", "tree", "40000"],
+      ["src", "tree", "40000"],
+    ]);
+    expect(await (await repos.readBlob("k3x9q2-main", readme!.hash))?.text()).toBe("hello\n");
+    expect(await (await repos.readFile("k3x9q2-main", { ref: "main", path: "src/a.ts" }))?.text()).toBe("a\n");
+    expect(await repos.readCommit("k3x9q2-main", first.hash)).toEqual(first);
+
+    const log = await repos.listCommits("k3x9q2-main", { ref: "main", limit: 10 });
+    expect(log.map((c) => c.hash)).toEqual([second.hash, first.hash]);
+    expect(await repos.listCommits("k3x9q2-main", { ref: second.hash, limit: 1, offset: 1 })).toEqual([first]);
+  });
+
+  it("forks a repo's history and pushes refs between repos", async () => {
+    const repos = new FakeRepos();
+    await repos.create("k3x9q2-main");
+    const base = repos.commit("k3x9q2-main", { files: { a: "1" } });
+    await repos.fork("k3x9q2-main", "k3x9q2-t1a1");
+    const work = repos.commit("k3x9q2-t1a1", { files: { a: "2" } });
+    expect(await repos.readCommit("k3x9q2-main", work.hash)).toBeNull();
+    expect(work.parents).toEqual([base.hash]);
+
+    repos.push("k3x9q2-t1a1", "k3x9q2-main", "refs/attempts/t1a1", work.hash);
+    const [archived] = await repos.listCommits("k3x9q2-main", { ref: "refs/attempts/t1a1", limit: 1 });
+    expect(archived?.hash).toBe(work.hash);
   });
 });

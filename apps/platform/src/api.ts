@@ -1,13 +1,14 @@
 // The product API, mounted at `/api` and described by the OpenAPI document at `/api/openapi.json`.
 // Access does not sit in front of it: machine clients use Throng bearer tokens. Only `/me` and
 // `/tokens` also accept an Access session, so a human can mint their first token. Over the service
-// binding (see `app.ts`), those and the project routes the browser needs also take throng-web's
-// forwarded identity. Handlers stay thin: they call services, which throw `ServiceError`s that
-// `onError` turns into the error shape.
+// binding (see `app.ts`), those, the project routes and the read API (`browse-api.ts`) the browser
+// needs also take throng-web's forwarded identity. Handlers stay thin: they call services, which
+// throw `ServiceError`s that `onError` turns into the error shape.
 
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import type { AccessBindings } from "./access.ts";
 import { bearerAuth, bearerOrAccess, bearerOrForwarded, type AuthEnv, type AuthOptions } from "./auth.ts";
+import { browseRoutes } from "./browse-api.ts";
 import { CONFIG_NAME, MAX_CHECK_TIMEOUT_MS, MAX_CONFIG_BYTES, parseConfig } from "./config.ts";
 import { errorBody, errorResponse, ServiceError } from "./errors.ts";
 import { FORWARDED_EMAIL_HEADER } from "./forwarded.ts";
@@ -856,7 +857,8 @@ export function apiRoutes(options: ApiOptions = {}) {
         },
       }),
       async (c) => c.json(parseConfig(await c.req.text()), 200),
-    );
+    )
+    .route("/", browseRoutes({ auth: browser, repos: reposFor, tasks: backendFor }));
 
   api.doc31("/openapi.json", { openapi: "3.1.0", info: { title: "Throng API", version: "0.0.0" } });
 

@@ -518,6 +518,13 @@ export class TaskStore {
     return rows.map(toAttempt);
   }
 
+  /** Every attempt in the project, by task and then number, leaving out obsolete ones. For the ref list. */
+  listProjectAttempts(_project: ProjectContext, _actor: Actor): StoredAttempt[] {
+    return this.#sql
+      .exec<AttemptRow>("SELECT * FROM attempts WHERE state != 'obsolete' ORDER BY task, number")
+      .map(toAttempt);
+  }
+
   /** The active attempt pushed from an origin branch, if any. */
   attemptForBranch(_project: ProjectContext, _actor: Actor, input: { branch: string }): StoredAttempt | null {
     const [row] = this.#sql.exec<AttemptRow>(
@@ -1223,6 +1230,7 @@ export const TASK_METHODS = [
   "createAttempts",
   "getAttempt",
   "listAttempts",
+  "listProjectAttempts",
   "attemptForBranch",
   "editAttempt",
   "openAttempt",

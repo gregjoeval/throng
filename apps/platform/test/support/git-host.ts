@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import { promisify } from "node:util";
 import { copyRepoRef } from "../../src/git-client.ts";
-import type { Commit, CopyRef, RepoInfo, Repos, RepoToken, TokenScope, Tree } from "../../src/repos.ts";
+import type { Commit, CopyRef, RepoInfo, Repos, RepoToken, TokenScope, TreeEntry } from "../../src/repos.ts";
 
 const exec = promisify(execFile);
 
@@ -227,13 +227,21 @@ export class LocalGitHost implements Repos {
       });
   }
 
-  async readTree(): Promise<Tree | null> {
+  async readCommit(): Promise<Commit | null> {
+    throw new Error("LocalGitHost doesn't read commits");
+  }
+
+  async readTree(): Promise<TreeEntry[] | null> {
     throw new Error("LocalGitHost doesn't read trees");
   }
 
   /** The production client, over real smart HTTP to `git http-backend`. */
   async copyRef(args: CopyRef): Promise<string | null> {
     return copyRepoRef(this, fetch, args);
+  }
+
+  async readBlob(): Promise<Blob | null> {
+    throw new Error("LocalGitHost doesn't read blobs");
   }
 
   // --- internals -------------------------------------------------------------------------------

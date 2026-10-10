@@ -1,6 +1,7 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 import { publicApp, webApp } from "./app";
 import { reposFor } from "./artifacts";
+import { walk } from "./browse";
 import { gitRoutes, type GitProxyOptions } from "./git-proxy";
 import { forkRepo, originRepo } from "./repos";
 
@@ -114,9 +115,15 @@ app.get("/spike/repos/:name/log", async (c) => {
 app.get("/spike/repos/:name/tree", async (c) => {
   const ref = c.req.query("ref") ?? "main";
   const path = c.req.query("path") ?? "";
-  const tree = await reposFor(c.env).readTree(c.req.param("name"), { ref, path });
-  if (tree === null) return c.json({ error: `no directory ${path || "/"} at ${ref}` }, 404);
-  return c.json({ ref, ...tree });
+  const name = c.req.param("name");
+  const repos = reposFor(c.env);
+  const [head] = await repos.listCommits(name, { ref, limit: 1 });
+  const dir = head === undefined ? null : await walk(repos, name, head.treeHash, path);
+  const entries = dir?.type === "tree" ? await repos.readTree(name, dir.hash) : null;
+  if (head === undefined || dir === null || entries === null) {
+    return c.json({ error: `no directory ${path || "/"} at ${ref}` }, 404);
+  }
+  return c.json({ ref, commit: head.hash, tree: dir.hash, entries });
 });
 
 app.get("/spike/repos/:name/file", async (c) => {

@@ -1,6 +1,5 @@
-import type { Commit, CopyRef, RepoInfo, Repos, RepoToken, Tree, TokenScope } from "../src/repos.ts";
-
-type FakeRepo = RepoInfo & { tokens: RepoToken[]; refs: Map<string, string> };
+import { createHash } from "node:crypto";
+import type { Commit, CopyRef, RepoInfo, Repos, RepoToken, TokenScope, TreeEntry } from "../src/repos.ts";
 
 /** One call made through the fake, in order. */
 export interface RepoCall {
@@ -11,16 +10,57 @@ export interface RepoCall {
 /** Artifacts' default token lifetime, used for the write token `create` returns. */
 const CREATE_TOKEN_TTL_SECONDS = 24 * 60 * 60;
 
+/** Commit times in the fake start here and tick a minute per commit, so history is deterministic. */
+const EPOCH_SECONDS = 1_790_000_000;
+
+/** A file to commit: its content, or its content and how git should classify it. */
+export type FakeFile = string | Uint8Array | { content: string | Uint8Array; type: "blob" | "exec" | "symlink" };
+
+/** What `commit` writes: a whole snapshot, as paths to files. Directories come from the paths. */
+export interface FakeCommit {
+  files: Record<string, FakeFile>;
+  /** The branch to commit on and advance; `main` by default. */
+  branch?: string;
+  message?: string;
+  /** Defaults to the branch's head, or none for a root commit. */
+  parents?: string[];
+  author?: { name: string; email: string };
+}
+
+type FakeObject =
+  | { kind: "commit"; commit: Commit }
+  | { kind: "tree"; entries: TreeEntry[] }
+  | { kind: "blob"; bytes: Uint8Array };
+
+interface FakeRepo extends RepoInfo {
+  tokens: RepoToken[];
+  /** Full ref names (`refs/heads/main`) to commit shas. */
+  refs: Map<string, string>;
+  /** Git objects by sha. A fork starts with a copy of its source's. */
+  objects: Map<string, FakeObject>;
+}
+
+const MODES: Record<TreeEntry["type"], string> = {
+  blob: "100644",
+  exec: "100755",
+  symlink: "120000",
+  tree: "40000",
+  gitlink: "160000",
+};
+
+const SHA = /^[0-9a-f]{40}$/;
+
 /**
- * An in-memory `Repos` for tests. It records every call and holds each repo's metadata and minted
- * tokens. It has no history: commit and tree reads come back empty, and `readFile` returns only
- * what a test put there with `writeFile`.
+ * An in-memory `Repos` for tests. It records every call and holds each repo's metadata, minted
+ * tokens, refs and git objects. Tests build history with `commit` (objects get real git shas) and
+ * copy refs between repos with `push`; `writeFile` is a shortcut only `readFile` sees.
  */
 export class FakeRepos implements Repos {
   readonly calls: RepoCall[] = [];
   readonly #repos = new Map<string, FakeRepo>();
   readonly #files = new Map<string, string>();
   #minted = 0;
+  #commits = 0;
 
   constructor(readonly namespace = "throng-test") {}
 
@@ -33,6 +73,37 @@ export class FakeRepos implements Repos {
   writeFile(name: string, ref: string, path: string, content: string): void {
     this.#repo(name);
     this.#files.set(fileKey(name, ref, path), content);
+  }
+
+  /** Commits a snapshot of `files` to a branch of `name` and returns the commit. Not recorded as a call. */
+  commit(name: string, { files, branch = "main", message, parents, author }: FakeCommit): Commit {
+    const repo = this.#repo(name);
+    const head = repo.refs.get(`refs/heads/${branch}`);
+    const at = EPOCH_SECONDS + 60 * ++this.#commits;
+    const who = author ?? { name: "Ada", email: "ada@example.com" };
+    const commit: Omit<Commit, "hash"> = {
+      treeHash: writeTree(repo, files),
+      message: message ?? `commit ${this.#commits}`,
+      author: who,
+      committer: who,
+      parents: parents ?? (head === undefined ? [] : [head]),
+      authoredAt: at,
+      committedAt: at,
+    };
+    const hash = put(repo, "commit", commitBody(commit), (sha) => ({
+      kind: "commit",
+      commit: { hash: sha, ...commit },
+    }));
+    repo.refs.set(`refs/heads/${branch}`, hash);
+    return { hash, ...commit };
+  }
+
+  /** Copies every object of `from` into `to` and points `to`'s full `ref` at `sha`, as a push would. */
+  push(from: string, to: string, ref: string, sha: string): void {
+    const source = this.#repo(from);
+    const target = this.#repo(to);
+    for (const [hash, object] of source.objects) target.objects.set(hash, object);
+    target.refs.set(ref, sha);
   }
 
   async create(name: string, opts: { defaultBranch?: string } = {}): Promise<RepoInfo & { token: string }> {
@@ -50,11 +121,11 @@ export class FakeRepos implements Repos {
   async fork(source: string, name: string): Promise<void> {
     this.#record("fork", source, name);
     const from = this.#repo(source);
-    const repo = this.#add(name, from.defaultBranch, source);
-    // Artifacts forks copy the default branch only.
-    const head = `refs/heads/${from.defaultBranch}`;
-    const sha = from.refs.get(head);
-    if (sha !== undefined) repo.refs.set(head, sha);
+    const fork = this.#add(name, from.defaultBranch, source);
+    for (const [hash, object] of from.objects) fork.objects.set(hash, object);
+    const branch = `refs/heads/${from.defaultBranch}`;
+    const head = from.refs.get(branch);
+    if (head !== undefined) fork.refs.set(branch, head);
   }
 
   async delete(name: string): Promise<boolean> {
@@ -74,21 +145,50 @@ export class FakeRepos implements Repos {
 
   async readFile(name: string, args: { ref: string; path: string }): Promise<Blob | null> {
     this.#record("readFile", name, args);
-    this.#repo(name);
+    const repo = this.#repo(name);
     const content = this.#files.get(fileKey(name, args.ref, args.path));
-    return content === undefined ? null : new Blob([content]);
+    if (content !== undefined) return new Blob([content]);
+    const commit = resolve(repo, args.ref);
+    if (commit === null) return null;
+    let hash: string | undefined = commit.treeHash;
+    for (const part of args.path.split("/")) {
+      const object: FakeObject | undefined = hash === undefined ? undefined : repo.objects.get(hash);
+      hash = object?.kind === "tree" ? object.entries.find((e) => e.name === part)?.hash : undefined;
+    }
+    const blob = hash === undefined ? undefined : repo.objects.get(hash);
+    return blob?.kind === "blob" ? new Blob([blob.bytes]) : null;
   }
 
-  async listCommits(name: string, args: { ref: string; limit: number }): Promise<Commit[]> {
+  async listCommits(name: string, args: { ref: string; limit: number; offset?: number }): Promise<Commit[]> {
     this.#record("listCommits", name, args);
-    this.#repo(name);
-    return [];
+    const repo = this.#repo(name);
+    const found: Commit[] = [];
+    for (let commit = resolve(repo, args.ref); commit !== null;) {
+      found.push(commit);
+      const parent = commit.parents[0];
+      const object = parent === undefined ? undefined : repo.objects.get(parent);
+      commit = object?.kind === "commit" ? object.commit : null;
+    }
+    const offset = args.offset ?? 0;
+    return found.slice(offset, offset + args.limit);
   }
 
-  async readTree(name: string, args: { ref: string; path: string }): Promise<Tree | null> {
-    this.#record("readTree", name, args);
-    this.#repo(name);
-    return null;
+  async readCommit(name: string, hash: string): Promise<Commit | null> {
+    this.#record("readCommit", name, hash);
+    const object = this.#object(name, hash);
+    return object?.kind === "commit" ? object.commit : null;
+  }
+
+  async readTree(name: string, hash: string): Promise<TreeEntry[] | null> {
+    this.#record("readTree", name, hash);
+    const object = this.#object(name, hash);
+    return object?.kind === "tree" ? object.entries.map((e) => ({ ...e })) : null;
+  }
+
+  async readBlob(name: string, hash: string): Promise<Blob | null> {
+    this.#record("readBlob", name, hash);
+    const object = this.#object(name, hash);
+    return object?.kind === "blob" ? new Blob([object.bytes]) : null;
   }
 
   async copyRef(args: CopyRef): Promise<string | null> {
@@ -97,6 +197,7 @@ export class FakeRepos implements Repos {
     const sha = this.#repo(args.from).refs.get(args.fromRef) ?? null;
     if (sha === null) return null;
     if (args.expect !== undefined && sha !== args.expect) throw new Error(`${args.fromRef} is at ${sha}`);
+    for (const [hash, object] of this.#repo(args.from).objects) target.objects.set(hash, object);
     target.refs.set(args.toRef, sha);
     return sha;
   }
@@ -118,7 +219,7 @@ export class FakeRepos implements Repos {
   #add(name: string, defaultBranch: string, parent: string | null): FakeRepo {
     if (this.#repos.has(name)) throw repoError("ALREADY_EXISTS", name);
     const remote = `https://artifacts.test/git/${this.namespace}/${name}.git`;
-    const repo: FakeRepo = { name, remote, defaultBranch, parent, tokens: [], refs: new Map() };
+    const repo: FakeRepo = { name, remote, defaultBranch, parent, tokens: [], refs: new Map(), objects: new Map() };
     this.#repos.set(name, repo);
     return repo;
   }
@@ -127,6 +228,13 @@ export class FakeRepos implements Repos {
     const repo = this.#repos.get(name);
     if (repo === undefined) throw repoError("NOT_FOUND", name);
     return repo;
+  }
+
+  /** An object by sha, read as the binding does: a malformed sha throws `INVALID_INPUT`. */
+  #object(name: string, hash: string): FakeObject | undefined {
+    const repo = this.#repo(name);
+    if (!SHA.test(hash)) throw repoError("INVALID_INPUT", hash);
+    return repo.objects.get(hash);
   }
 
   #mint(name: string, scope: TokenScope, ttl: number): RepoToken {
@@ -140,6 +248,70 @@ export class FakeRepos implements Repos {
   }
 }
 
+/** A branch, tag, full ref name or commit sha, resolved as the binding's `log` and `readFile` do. */
+function resolve(repo: FakeRepo, ref: string): Commit | null {
+  const sha = SHA.test(ref)
+    ? ref
+    : (repo.refs.get(ref) ?? repo.refs.get(`refs/heads/${ref}`) ?? repo.refs.get(`refs/tags/${ref}`));
+  const object = sha === undefined ? undefined : repo.objects.get(sha);
+  return object?.kind === "commit" ? object.commit : null;
+}
+
+/** Writes `files` as nested trees into `repo` and returns the root tree's sha. */
+function writeTree(repo: FakeRepo, files: Record<string, FakeFile>): string {
+  const here = new Map<string, FakeFile>();
+  const below = new Map<string, Record<string, FakeFile>>();
+  for (const [path, file] of Object.entries(files)) {
+    const slash = path.indexOf("/");
+    if (slash === -1) {
+      here.set(path, file);
+    } else {
+      const dir = path.slice(0, slash);
+      below.set(dir, { ...below.get(dir), [path.slice(slash + 1)]: file });
+    }
+  }
+  const entries: TreeEntry[] = [];
+  for (const [name, file] of here) {
+    const { content, type } =
+      typeof file === "string" || file instanceof Uint8Array ? { content: file, type: "blob" as const } : file;
+    const bytes = typeof content === "string" ? new TextEncoder().encode(content) : content;
+    const hash = put(repo, "blob", bytes, () => ({ kind: "blob", bytes }));
+    entries.push({ name, mode: MODES[type], hash, type });
+  }
+  for (const [name, sub] of below) {
+    entries.push({ name, mode: MODES.tree, hash: writeTree(repo, sub), type: "tree" });
+  }
+  entries.sort((a, b) => Buffer.compare(treeOrderKey(a), treeOrderKey(b)));
+  const body = Buffer.concat(
+    entries.map((e) => Buffer.concat([Buffer.from(`${e.mode} ${e.name}\0`), Buffer.from(e.hash, "hex")])),
+  );
+  return put(repo, "tree", body, () => ({ kind: "tree", entries }));
+}
+
+/** Git orders a tree's entries by name, comparing a directory's name as if it ended in "/". */
+function treeOrderKey(e: TreeEntry): Buffer {
+  return Buffer.from(e.type === "tree" ? `${e.name}/` : e.name);
+}
+
+function commitBody(c: Omit<Commit, "hash">): Uint8Array {
+  const lines = [
+    `tree ${c.treeHash}`,
+    ...c.parents.map((p) => `parent ${p}`),
+    `author ${c.author.name} <${c.author.email}> ${c.authoredAt} +0000`,
+    `committer ${c.committer.name} <${c.committer.email}> ${c.committedAt} +0000`,
+    "",
+    `${c.message}\n`,
+  ];
+  return new TextEncoder().encode(lines.join("\n"));
+}
+
+/** Stores an object under its git sha (the SHA-1 of `<kind> <size>\0<body>`) and returns the sha. */
+function put(repo: FakeRepo, kind: string, body: Uint8Array, make: (sha: string) => FakeObject): string {
+  const sha = createHash("sha1").update(`${kind} ${body.length}\0`).update(body).digest("hex");
+  repo.objects.set(sha, make(sha));
+  return sha;
+}
+
 function fileKey(name: string, ref: string, path: string): string {
   return JSON.stringify([name, ref, path]);
 }
@@ -149,6 +321,6 @@ function info({ name, remote, defaultBranch, parent }: RepoInfo): RepoInfo {
 }
 
 /** Shaped like the binding's `ArtifactsError`, so callers can match on `code` either way. */
-function repoError(code: "NOT_FOUND" | "ALREADY_EXISTS", name: string): Error & { code: string } {
+function repoError(code: "NOT_FOUND" | "ALREADY_EXISTS" | "INVALID_INPUT", name: string): Error & { code: string } {
   return Object.assign(new Error(`${code}: ${name}`), { name: "ArtifactsError", code });
 }

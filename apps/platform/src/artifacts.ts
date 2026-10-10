@@ -1,5 +1,5 @@
 import { copyRepoRef } from "./git-client.ts";
-import type { Commit, CopyRef, RepoInfo, Repos, RepoToken, Tree, TokenScope } from "./repos";
+import type { Commit, CopyRef, RepoInfo, Repos, RepoToken, TokenScope, TreeEntry } from "./repos";
 
 /** The most repos Artifacts returns per `list` page. */
 const LIST_PAGE_SIZE = 200;
@@ -61,23 +61,24 @@ class ArtifactsRepos implements Repos {
     return repo.readFile(args);
   }
 
-  async listCommits(name: string, args: { ref: string; limit: number }): Promise<Commit[]> {
+  async listCommits(name: string, args: { ref: string; limit: number; offset?: number }): Promise<Commit[]> {
     using repo = await this.#artifacts.get(name);
     return repo.log(args);
   }
 
-  async readTree(name: string, { ref, path }: { ref: string; path: string }): Promise<Tree | null> {
+  async readCommit(name: string, hash: string): Promise<Commit | null> {
     using repo = await this.#artifacts.get(name);
-    const [head] = await repo.log({ ref, limit: 1 });
-    if (head === undefined) return null;
-    let tree = head.treeHash;
-    for (const part of path.split("/").filter(Boolean)) {
-      const next = (await repo.readTree(tree))?.find((e) => e.name === part && e.type === "tree");
-      if (next === undefined) return null;
-      tree = next.hash;
-    }
-    const entries = await repo.readTree(tree);
-    return entries === null ? null : { commit: head.hash, tree, entries };
+    return repo.readCommit(hash);
+  }
+
+  async readTree(name: string, hash: string): Promise<TreeEntry[] | null> {
+    using repo = await this.#artifacts.get(name);
+    return repo.readTree(hash);
+  }
+
+  async readBlob(name: string, hash: string): Promise<Blob | null> {
+    using repo = await this.#artifacts.get(name);
+    return repo.readBlob(hash);
   }
 
   /**

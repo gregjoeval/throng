@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { describe, expect, it } from "vitest";
 import type { AccessVerifier } from "../src/access.ts";
 import { apiRoutes } from "../src/api.ts";
+import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
 
 const verify: AccessVerifier = async (token) => (token === "valid" ? { email: "greg@example.com" } : null);
@@ -14,7 +15,8 @@ type As = { access?: string; bearer?: string };
 
 function setup() {
   let clock = new Date("2026-10-10T12:00:00.000Z");
-  const api = apiRoutes({ verifierFor: () => verify, now: () => clock });
+  const repos = new FakeRepos();
+  const api = apiRoutes({ verifierFor: () => verify, now: () => clock, repos: () => repos });
   const env = { DB: testDatabase(), ACCESS_TEAM_DOMAIN: "throng.cloudflareaccess.com", ACCESS_AUD: "aud" };
 
   /** Sends as an Access session (`{access}`) or a bearer token (`{bearer}`), or anonymously. */
@@ -36,7 +38,7 @@ function setup() {
   const advance = (seconds: number) => {
     clock = new Date(clock.getTime() + seconds * 1000);
   };
-  return { api, call, mint, human, advance, env };
+  return { api, call, mint, human, advance, env, repos };
 }
 
 describe("GET /api/me", () => {
@@ -201,6 +203,75 @@ describe("token expiry", () => {
   });
 });
 
+describe("POST /api/projects", () => {
+  it("creates a project owned by the token's human, with its origin repo", async () => {
+    const { call, mint, repos } = setup();
+    const bearer = { bearer: (await mint({ agent: "claude" }))["token"] };
+    const res = await call("POST", "/projects", bearer, { handle: "throng" });
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual({
+      id: expect.stringMatching(/^[a-z0-9]{6}$/),
+      handle: "throng",
+      owner: { id: expect.any(String), handle: "greg" },
+      created_at: expect.any(String),
+    });
+    expect(await repos.list(res.body["id"])).toEqual([`${res.body["id"]}-main`]);
+  });
+
+  it("is 409 for a handle the caller already uses", async () => {
+    const { call, mint } = setup();
+    const bearer = { bearer: (await mint())["token"] };
+    expect((await call("POST", "/projects", bearer, { handle: "throng" })).status).toBe(201);
+    const res = await call("POST", "/projects", bearer, { handle: "throng" });
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: { code: "conflict", message: "project greg/throng already exists" } });
+  });
+
+  it("is 400 for an invalid handle", async () => {
+    const { call, mint } = setup();
+    const bearer = { bearer: (await mint())["token"] };
+    for (const body of [{}, { handle: "Throng" }, { handle: "a/b" }, { handle: 1 }]) {
+      const res = await call("POST", "/projects", bearer, body);
+      expect(res.status).toBe(400);
+      expect(res.body["error"]["code"]).toBe("invalid_request");
+    }
+  });
+
+  it("needs a bearer token; an Access session is not enough", async () => {
+    const { call, human } = setup();
+    for (const as of [{}, human]) {
+      expect((await call("POST", "/projects", as, { handle: "throng" })).status).toBe(401);
+    }
+  });
+});
+
+describe("GET /api/projects/{owner}/{project}", () => {
+  it("resolves handles to the project", async () => {
+    const { call, mint } = setup();
+    const bearer = { bearer: (await mint())["token"] };
+    const created = (await call("POST", "/projects", bearer, { handle: "throng" })).body;
+    const res = await call("GET", "/projects/greg/throng", bearer);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(created);
+  });
+
+  it("is 404 for an unknown owner or project", async () => {
+    const { call, mint } = setup();
+    const bearer = { bearer: (await mint())["token"] };
+    await call("POST", "/projects", bearer, { handle: "throng" });
+    for (const path of ["/projects/nobody/throng", "/projects/greg/nothing"]) {
+      const res = await call("GET", path, bearer);
+      expect(res.status).toBe(404);
+      expect(res.body["error"]["code"]).toBe("not_found");
+    }
+  });
+
+  it("is 401 without a token", async () => {
+    const { call } = setup();
+    expect((await call("GET", "/projects/greg/throng")).status).toBe(401);
+  });
+});
+
 describe("errors", () => {
   it("turns unexpected failures into the shared error shape, also when mounted", async () => {
     const { api } = setup();
@@ -219,7 +290,25 @@ describe("GET /api/openapi.json", () => {
     const { call } = setup();
     const { status, body } = await call("GET", "/openapi.json");
     expect(status).toBe(200);
-    expect(Object.keys(body["paths"])).toEqual(expect.arrayContaining(["/me", "/tokens", "/tokens/{id}"]));
+    expect(Object.keys(body["paths"])).toEqual(
+      expect.arrayContaining(["/me", "/tokens", "/tokens/{id}", "/projects", "/projects/{owner}/{project}"]),
+    );
     expect(body["components"]["schemas"]["Error"]).toBeDefined();
+    expect(body["components"]["schemas"]["Project"]).toBeDefined();
+  });
+
+  it("gives every operation an id, a summary and tags", async () => {
+    const { call } = setup();
+    const { body } = await call("GET", "/openapi.json");
+    const operations = Object.values(body["paths"]).flatMap((path) => Object.values(path as Json)) as Json[];
+    const operationIds = operations.map((op) => op["operationId"]);
+    expect(operationIds).toEqual(
+      expect.arrayContaining(["getMe", "mintToken", "listTokens", "revokeToken", "createProject", "getProject"]),
+    );
+    expect(new Set(operationIds).size).toBe(operations.length);
+    for (const op of operations) {
+      expect(op["summary"]).toEqual(expect.any(String));
+      expect(op["tags"]).toEqual([expect.any(String)]);
+    }
   });
 });

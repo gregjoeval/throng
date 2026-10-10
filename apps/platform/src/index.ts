@@ -13,7 +13,8 @@ const PUSH_TOKEN_TTL_SECONDS = 60 * 60;
 
 const app = new Hono<{ Bindings: Env }>();
 
-app.route("/api", apiRoutes());
+// The API is typed against the bindings it reads; at runtime its env is this Worker's.
+app.route("/api", apiRoutes({ repos: (env) => reposFor(env as Env) }));
 
 // The git proxy lands later; every `/git/*` request already needs a Throng token.
 app.use("/git/*", gitAuth());

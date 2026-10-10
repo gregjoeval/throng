@@ -2,7 +2,9 @@ import type { FailureStage } from "./scripts";
 import { DurableObject } from "cloudflare:workers";
 import type { PushRoute } from "./events";
 import { CHECK_ROLES, sandboxName } from "./grants";
+import { reposFor } from "./artifacts";
 import { forkRepo } from "./repos";
+import { runTaskMethod, TaskStore, type Sql, type TaskOutcome } from "./task-store";
 
 /** Most Sandboxes one project may run at once. */
 export const SANDBOX_CAP = 3;
@@ -37,9 +39,13 @@ interface CheckRow extends Record<string, SqlStorageValue> {
  * One per project: the inbox for its push events. Dedupes deliveries on (repo, sha), keeps at most
  * one live check per attempt (a newer push cancels the older check), and caps concurrent Sandboxes.
  * It also keeps a journal of every hop so the e2e suite can read timings back.
+ *
+ * It is also the source of truth for the project's tasks and attempts (`task-store.ts`): their
+ * rows, their per-project counters, and journal events for every transition.
  */
 export class ProjectCoordinator extends DurableObject<Env> {
   readonly #sql: SqlStorage;
+  readonly #tasks: TaskStore;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -54,6 +60,17 @@ export class ProjectCoordinator extends DurableObject<Env> {
         id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER, kind TEXT, detail TEXT
       );
     `);
+    const sql: Sql = {
+      exec: <T>(query: string, ...bindings: unknown[]) =>
+        ctx.storage.sql.exec(query, ...(bindings as SqlStorageValue[])).toArray() as T[],
+      transaction: (fn) => ctx.storage.transactionSync(fn),
+    };
+    this.#tasks = new TaskStore({ sql, repos: reposFor(env) });
+  }
+
+  /** Runs one task or attempt operation (a `TaskStore` method) for the services in `tasks.ts`. */
+  async tasks(method: string, args: unknown[]): Promise<TaskOutcome> {
+    return runTaskMethod(this.#tasks, method, args);
   }
 
   async receive(route: PushRoute, ingest: { startedAt: number; instanceId: string }): Promise<void> {

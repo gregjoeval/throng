@@ -11,11 +11,13 @@ const CREATE_TOKEN_TTL_SECONDS = 24 * 60 * 60;
 
 /**
  * An in-memory `Repos` for tests. It records every call and holds each repo's metadata and minted
- * tokens; it has no git content, so file, commit and tree reads come back empty.
+ * tokens. It has no history: commit and tree reads come back empty, and `readFile` returns only
+ * what a test put there with `writeFile`.
  */
 export class FakeRepos implements Repos {
   readonly calls: RepoCall[] = [];
   readonly #repos = new Map<string, RepoInfo & { tokens: RepoToken[] }>();
+  readonly #files = new Map<string, string>();
   #minted = 0;
 
   constructor(readonly namespace = "throng-test") {}
@@ -23,6 +25,12 @@ export class FakeRepos implements Repos {
   /** Every token minted for a repo, including the one `create` returned. */
   tokens(name: string): RepoToken[] {
     return [...(this.#repos.get(name)?.tokens ?? [])];
+  }
+
+  /** Makes `readFile(name, {ref, path})` return `content`, as if it were committed there. */
+  writeFile(name: string, ref: string, path: string, content: string): void {
+    this.#repo(name);
+    this.#files.set(fileKey(name, ref, path), content);
   }
 
   async create(name: string, opts: { defaultBranch?: string } = {}): Promise<RepoInfo & { token: string }> {
@@ -60,7 +68,8 @@ export class FakeRepos implements Repos {
   async readFile(name: string, args: { ref: string; path: string }): Promise<Blob | null> {
     this.#record("readFile", name, args);
     this.#repo(name);
-    return null;
+    const content = this.#files.get(fileKey(name, args.ref, args.path));
+    return content === undefined ? null : new Blob([content]);
   }
 
   async listCommits(name: string, args: { ref: string; limit: number }): Promise<Commit[]> {
@@ -102,6 +111,10 @@ export class FakeRepos implements Repos {
     this.#repo(name).tokens.push(token);
     return token;
   }
+}
+
+function fileKey(name: string, ref: string, path: string): string {
+  return JSON.stringify([name, ref, path]);
 }
 
 function info({ name, remote, defaultBranch, parent }: RepoInfo): RepoInfo {

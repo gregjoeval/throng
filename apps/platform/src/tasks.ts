@@ -1,0 +1,225 @@
+// The task and attempt services. Each resolves `owner/project` through D1, then runs the state
+// machine in the project's Durable Object (`task-store.ts`), where the permission checks sit next
+// to the state they guard. Answers carry users as `{id, handle}`, resolved from D1 at read time.
+
+import { ServiceError } from "./errors.ts";
+import { resolveProject } from "./projects.ts";
+import {
+  parseAttemptRef,
+  parseTaskRef,
+  taskRef,
+  type AttemptInput,
+  type AttemptState,
+  type ProjectContext,
+  type StoredAttempt,
+  type StoredTask,
+  type TaskMethod,
+  type TaskOutcome,
+  type TaskState,
+  type TaskStore,
+} from "./task-store.ts";
+import type { Actor } from "./tokens.ts";
+import type { Database } from "./users.ts";
+
+/** A project's Durable Object, as the services call it: one store method per call. */
+export interface TaskBackend {
+  call(method: TaskMethod, args: unknown[]): Promise<TaskOutcome>;
+}
+
+export interface TaskServiceDeps {
+  db: Database;
+  /** The backend for a project id: its Durable Object in production, an in-process store in tests. */
+  backend: (projectId: string) => TaskBackend;
+}
+
+export interface UserRef {
+  id: string;
+  handle: string;
+}
+
+export interface Task extends Omit<StoredTask, "creator" | "closed_by"> {
+  ref: string;
+  creator: UserRef;
+  closed_by: UserRef | null;
+}
+
+export interface Attempt extends Omit<StoredAttempt, "author"> {
+  ref: string;
+  author: UserRef;
+}
+
+interface ProjectPath {
+  owner: string;
+  project: string;
+}
+
+type TaskPath = ProjectPath & { task: string };
+type AttemptPath = ProjectPath & { attempt: string };
+
+type StoreArgs<K extends TaskMethod> = Parameters<TaskStore[K]>;
+type StoreResult<K extends TaskMethod> = Awaited<ReturnType<TaskStore[K]>>;
+
+/** The task and attempt services. Any signed-in actor may read any project's tasks in P0. */
+export function taskService({ db, backend }: TaskServiceDeps) {
+  async function project(path: ProjectPath): Promise<ProjectContext> {
+    const found = await resolveProject(db, path.owner, path.project);
+    if (found === null) throw new ServiceError("not_found", `no project ${path.owner}/${path.project}`);
+    return { id: found.id, owner: found.owner.id };
+  }
+
+  async function invoke<K extends TaskMethod>(method: K, ...args: StoreArgs<K>): Promise<StoreResult<K>> {
+    const [ctx] = args as unknown as [ProjectContext];
+    const outcome = await backend(ctx.id).call(method, args);
+    if (!outcome.ok) throw new ServiceError(outcome.code, outcome.message);
+    return outcome.value as StoreResult<K>;
+  }
+
+  const tasks = async (list: StoredTask[]) => {
+    const users = await handles(
+      db,
+      list.flatMap((t) => [t.creator, t.closed_by]),
+    );
+    return list.map((t) => publicTask(t, users));
+  };
+  const attempts = async (list: StoredAttempt[]) => {
+    const users = await handles(
+      db,
+      list.map((a) => a.author),
+    );
+    return list.map((a) => publicAttempt(a, users));
+  };
+
+  /** A task transition: resolves the project and task reference, then runs `method`. */
+  const taskMove =
+    (method: "closeTask" | "reopenTask" | "obsoleteTask" | "restoreTask") =>
+    async (actor: Actor, input: TaskPath): Promise<Task> =>
+      one(await invoke(method, await project(input), actor, { task: taskNumber(input.task) }), tasks);
+
+  /** An attempt transition: resolves the project and attempt reference, then runs `method`. */
+  const attemptMove =
+    (
+      method: "openAttempt" | "draftAttempt" | "closeAttempt" | "reopenAttempt" | "obsoleteAttempt" | "restoreAttempt",
+    ) =>
+    async (actor: Actor, input: AttemptPath): Promise<Attempt> =>
+      one(await invoke(method, await project(input), actor, attemptRefOf(input.attempt)), attempts);
+
+  return {
+    /** Creates an open task; the caller's human is its creator. Any signed-in user may. */
+    async createTask(
+      actor: Actor,
+      input: ProjectPath & { title: string; body?: string | undefined; attempt_limit?: number | null | undefined },
+    ): Promise<Task> {
+      const { title, body, attempt_limit } = input;
+      return one(await invoke("createTask", await project(input), actor, { title, body, attempt_limit }), tasks);
+    },
+
+    async getTask(actor: Actor, input: TaskPath): Promise<Task> {
+      return one(await invoke("getTask", await project(input), actor, { task: taskNumber(input.task) }), tasks);
+    },
+
+    /** The project's tasks; obsolete ones only when `state` is `obsolete`. */
+    async listTasks(actor: Actor, input: ProjectPath & { state?: TaskState | undefined }): Promise<Task[]> {
+      return tasks(await invoke("listTasks", await project(input), actor, { state: input.state }));
+    },
+
+    /** Edits a task. The project owner or the task's creator may. */
+    async editTask(
+      actor: Actor,
+      input: TaskPath & {
+        title?: string | undefined;
+        body?: string | undefined;
+        attempt_limit?: number | null | undefined;
+      },
+    ): Promise<Task> {
+      const { title, body, attempt_limit } = input;
+      const edit = { task: taskNumber(input.task), title, body, attempt_limit };
+      return one(await invoke("editTask", await project(input), actor, edit), tasks);
+    },
+
+    closeTask: taskMove("closeTask"),
+    reopenTask: taskMove("reopenTask"),
+    obsoleteTask: taskMove("obsoleteTask"),
+    restoreTask: taskMove("restoreTask"),
+
+    /** Creates `count` draft attempts, each with its own fork. Any signed-in user may. */
+    async createAttempts(
+      actor: Actor,
+      input: TaskPath & { count?: number | undefined; note?: string | undefined },
+    ): Promise<Attempt[]> {
+      const create = { task: taskNumber(input.task), count: input.count, note: input.note };
+      return attempts(await invoke("createAttempts", await project(input), actor, create));
+    },
+
+    async getAttempt(actor: Actor, input: AttemptPath): Promise<Attempt> {
+      return one(await invoke("getAttempt", await project(input), actor, attemptRefOf(input.attempt)), attempts);
+    },
+
+    /** A task's attempts; obsolete ones only when `state` is `obsolete`. */
+    async listAttempts(actor: Actor, input: TaskPath & { state?: AttemptState | undefined }): Promise<Attempt[]> {
+      const list = { task: taskNumber(input.task), state: input.state };
+      return attempts(await invoke("listAttempts", await project(input), actor, list));
+    },
+
+    /** Edits an attempt's note. Only its author (or their agents) may. */
+    async editAttempt(actor: Actor, input: AttemptPath & { note: string }): Promise<Attempt> {
+      const edit = { ...attemptRefOf(input.attempt), note: input.note };
+      return one(await invoke("editAttempt", await project(input), actor, edit), attempts);
+    },
+
+    openAttempt: attemptMove("openAttempt"),
+    draftAttempt: attemptMove("draftAttempt"),
+    closeAttempt: attemptMove("closeAttempt"),
+    reopenAttempt: attemptMove("reopenAttempt"),
+    obsoleteAttempt: attemptMove("obsoleteAttempt"),
+    restoreAttempt: attemptMove("restoreAttempt"),
+  };
+}
+
+export type TaskService = ReturnType<typeof taskService>;
+
+/** Renders one item with a renderer for lists. */
+async function one<T, U>(item: T, render: (list: T[]) => Promise<U[]>): Promise<U> {
+  return (await render([item]))[0] as U;
+}
+
+/** A task reference (`t42` or `42`) as its number. */
+function taskNumber(ref: string): number {
+  const number = parseTaskRef(ref);
+  if (number === null) throw new ServiceError("invalid_request", `not a task reference: ${ref}`);
+  return number;
+}
+
+/** An attempt reference (`t42a3`) as its task and attempt numbers. */
+function attemptRefOf(ref: string): AttemptInput {
+  const parsed = parseAttemptRef(ref);
+  if (parsed === null) throw new ServiceError("invalid_request", `not an attempt reference: ${ref}`);
+  return parsed;
+}
+
+/** Handles for user ids, read from D1 in one query. */
+async function handles(db: Database, ids: (string | null)[]): Promise<Map<string, string>> {
+  const unique = [...new Set(ids.filter((id): id is string => id !== null))];
+  if (unique.length === 0) return new Map();
+  const { results } = await db
+    .prepare(`SELECT id, handle FROM users WHERE id IN (${unique.map(() => "?").join(", ")})`)
+    .bind(...unique)
+    .all<UserRef>();
+  return new Map(results.map((u) => [u.id, u.handle]));
+}
+
+function userRef(id: string, users: Map<string, string>): UserRef {
+  return { id, handle: users.get(id) ?? id };
+}
+
+function publicTask(t: StoredTask, users: Map<string, string>): Task {
+  return {
+    ...t,
+    ref: taskRef(t.number),
+    creator: userRef(t.creator, users),
+    closed_by: t.closed_by === null ? null : userRef(t.closed_by, users),
+  };
+}
+
+function publicAttempt(a: StoredAttempt, users: Map<string, string>): Attempt {
+  return { ...a, ref: a.fork, author: userRef(a.author, users) };
+}

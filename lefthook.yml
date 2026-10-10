@@ -3,9 +3,9 @@ pre-commit:
   parallel: true
   commands:
     format:
-      glob: "*.{ts,js,json,jsonc,md,yml,yaml}"
+      glob: "*.{ts,tsx,js,css,json,jsonc,md,yml,yaml}"
       run: pnpm exec oxfmt {staged_files}
       stage_fixed: true
     lint:
-      glob: "*.{ts,js}"
+      glob: "*.{ts,tsx,js}"
       run: pnpm exec oxlint --deny-warnings {staged_files}

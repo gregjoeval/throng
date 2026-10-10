@@ -1,4 +1,4 @@
 {
   "printWidth": 120,
-  "ignorePatterns": ["**/worker-configuration.d.ts", "pnpm-lock.yaml", "**/dist"]
+  "ignorePatterns": ["**/worker-configuration.d.ts", "**/routeTree.gen.ts", "pnpm-lock.yaml", "**/dist"]
 }

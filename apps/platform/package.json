@@ -17,11 +17,11 @@
     "hono": "^4.13.12"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "1.62.5",
+    "@cloudflare/vite-plugin": "1.63.1",
     "@types/node": "^22.20.5",
     "tsx": "^4.23.15",
     "vite": "8.3.2",
     "vitest": "4.1.11",
-    "wrangler": "4.147.0"
+    "wrangler": "4.149.0"
   }
 }

@@ -1,8 +1,7 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
-import type { ApiOptions } from "./api";
 import { publicApp, webApp } from "./app";
 import { reposFor } from "./artifacts";
-import { gitAuth } from "./auth";
+import { gitRoutes, type GitProxyOptions } from "./git-proxy";
 import { forkRepo, originRepo } from "./repos";
 
 export { ProjectCoordinator } from "./project";
@@ -12,8 +11,8 @@ export { CheckWorkflow, IngestWorkflow } from "./workflows";
 const FORK_READY_TIMEOUT_MS = 60_000;
 const PUSH_TOKEN_TTL_SECONDS = 60 * 60;
 
-// The API is typed against the bindings it reads; at runtime its env is this Worker's.
-const apiOptions: ApiOptions = {
+// The API and the git proxy are typed against the bindings they read; at runtime their env is this Worker's.
+const apiOptions: GitProxyOptions = {
   repos: (env) => reposFor(env as Env),
   tasks: (env) => (projectId) => ({
     call: (method, args) => (env as Env).PROJECT.getByName(projectId).tasks(method, args),
@@ -22,6 +21,7 @@ const apiOptions: ApiOptions = {
 
 // The public hostname. It refuses forwarded identities; see `./app.ts`.
 const app = publicApp<Env>(apiOptions);
+app.route("/git", gitRoutes(apiOptions));
 
 const web = webApp<Env>(apiOptions);
 
@@ -35,9 +35,6 @@ export class WebEntrypoint extends WorkerEntrypoint<Env> {
     return web.fetch(request, this.env, this.ctx);
   }
 }
-
-// The git proxy lands later; every `/git/*` request already needs a Throng token.
-app.use("/git/*", gitAuth());
 
 // Spike-only control plane; the real product API is backlog.
 app.use("/spike/*", async (c, next) => {

@@ -6,6 +6,7 @@
 // Users are stored by id only, so renaming a handle never rewrites history; the service resolves
 // handles when it answers.
 
+import { archiveRef } from "./archive.ts";
 import { CONFIG_PATH, loadConfig, type ConfigResult } from "./config.ts";
 import { ServiceError, type ErrorCode } from "./errors.ts";
 import { forkRepo, originRepo, type Repos } from "./repos.ts";
@@ -29,6 +30,11 @@ export const MAX_TITLE = 200;
  * older than this belongs to a push that died part way; the next push of an origin branch sweeps it.
  */
 export const BRANCH_PUSH_TTL_MS = 15 * 60 * 1000;
+/** The fork ref that is an attempt's head: what gets archived, and what reopening restores. */
+const FORK_HEAD = "refs/heads/main";
+/** How often, and from what first delay (doubling), a restore waits for a new fork to be ready. */
+const FORK_READY_RETRIES = 6;
+const FORK_READY_BACKOFF_MS = 250;
 
 export interface StoredTask {
   number: number;
@@ -351,17 +357,21 @@ export class TaskStore {
 
   /**
    * Closes an open task, and closes its active attempts with it: a closed task can't merge, so
-   * they would hold forks for nothing. The project owner or the task's creator may.
+   * they would hold forks for nothing. Their forks are archived and deleted. The project owner or
+   * the task's creator may.
    */
-  closeTask(project: ProjectContext, actor: Actor, input: { task: number }): StoredTask {
+  async closeTask(project: ProjectContext, actor: Actor, input: { task: number }): Promise<StoredTask> {
     const current = this.#task(input.task);
     this.#mayManageTask(project, actor, current);
     this.#expect(current, ["open"], "close");
-    return this.#sql.transaction(() => {
+    const ended = this.#sql.transaction(() => {
       this.#endTask(actor, current.number, "closed");
-      for (const attempt of this.#activeAttempts(current.number)) this.#endAttempt(actor, attempt, "closed");
-      return this.#task(current.number);
+      const active = this.#activeAttempts(current.number);
+      for (const attempt of active) this.#endAttempt(actor, attempt, "closed");
+      return active;
     });
+    await this.#archive(project, ended);
+    return this.#task(current.number);
   }
 
   /**
@@ -384,16 +394,22 @@ export class TaskStore {
     });
   }
 
-  /** Makes a task obsolete, and its active attempts with it. Only the project owner may. */
-  obsoleteTask(project: ProjectContext, actor: Actor, input: { task: number }): StoredTask {
+  /**
+   * Makes a task obsolete, and its active attempts with it; their forks are archived and deleted.
+   * Only the project owner may.
+   */
+  async obsoleteTask(project: ProjectContext, actor: Actor, input: { task: number }): Promise<StoredTask> {
     const current = this.#task(input.task);
     mayOwn(project, actor);
     this.#expect(current, ["open", "closed"], "make obsolete");
-    return this.#sql.transaction(() => {
+    const ended = this.#sql.transaction(() => {
       this.#endTask(actor, current.number, "obsolete");
-      for (const attempt of this.#activeAttempts(current.number)) this.#endAttempt(actor, attempt, "obsolete");
-      return this.#task(current.number);
+      const active = this.#activeAttempts(current.number);
+      for (const attempt of active) this.#endAttempt(actor, attempt, "obsolete");
+      return active;
     });
+    await this.#archive(project, ended);
+    return this.#task(current.number);
   }
 
   /** Restores an obsolete task to closed. Its attempts stay as they are. Only the project owner may. */
@@ -535,63 +551,76 @@ export class TaskStore {
     return this.#authorMoves(actor, input, ["open"], "draft", "returned_to_draft");
   }
 
-  /** draft or open → closed. Only its author may. */
-  closeAttempt(_project: ProjectContext, actor: Actor, input: AttemptInput): StoredAttempt {
+  /** draft or open → closed, archiving and deleting its fork. Only its author may. */
+  async closeAttempt(project: ProjectContext, actor: Actor, input: AttemptInput): Promise<StoredAttempt> {
     const current = this.#attempt(input);
     mayAuthor(actor, current);
     this.#expect(current, ACTIVE, "close");
-    return this.#sql.transaction(() => {
-      this.#endAttempt(actor, current, "closed");
-      return this.#attempt(current);
-    });
+    this.#sql.transaction(() => this.#endAttempt(actor, current, "closed"));
+    await this.#archive(project, [current]);
+    return this.#attempt(current);
   }
 
   /**
    * closed → draft. The task must be open and have room under its cap, since the attempt becomes
-   * active again. Only its author may.
+   * active again. Its fork is made again from the origin and its `main` restored from the archive.
+   * Either the attempt is back in draft with its fork, or nothing changed. Only its author may.
    */
   async reopenAttempt(project: ProjectContext, actor: Actor, input: AttemptInput): Promise<StoredAttempt> {
     const projectLimit = await this.#projectLimit(project);
+    // From here to the reservation nothing awaits, so a concurrent batch can't take the same slot.
     const current = this.#attempt(input);
     mayAuthor(actor, current);
     this.#expect(current, ["closed"], "reopen");
     const parent = this.#task(current.task);
     this.#expect(parent, ["open"], "reopen an attempt of");
     const limit = parent.attempt_limit ?? projectLimit;
-    const active =
-      this.#activeAttempts(parent.number).length +
-      (this.#reserved.get(parent.number) ?? 0) +
-      this.#branchPushes(parent.number);
+    const reserved = this.#reserved.get(parent.number) ?? 0;
+    const active = this.#activeAttempts(parent.number).length + reserved + this.#branchPushes(parent.number);
     if (active + 1 > limit) {
       throw new ServiceError("attempt_limit", `${taskRef(parent.number)} has ${active} of ${limit} active attempts`);
     }
-    if (
-      current.branch !== null &&
-      (this.attemptForBranch(project, actor, { branch: current.branch }) !== null ||
-        this.#branchPush(current.branch) !== undefined)
-    ) {
-      throw new ServiceError("conflict", `another active attempt has branch ${current.branch}`);
+    this.#checkReopenBranch(current);
+    this.#reserved.set(parent.number, reserved + 1);
+
+    let forked = false;
+    try {
+      forked = await this.#restore(project, current);
+      return this.#sql.transaction(() => {
+        // Another call may have moved the attempt, the task or the branch while the fork was made.
+        const now = this.#attempt(current);
+        this.#expect(now, ["closed"], "reopen");
+        this.#expect(this.#task(current.task), ["open"], "reopen an attempt of");
+        this.#checkReopenBranch(now);
+        this.#sql.exec(
+          "UPDATE attempts SET state = 'draft', closed_at = NULL WHERE task = ? AND number = ?",
+          current.task,
+          current.number,
+        );
+        this.#journal(actor, "reopened", current.task, current.number);
+        return this.#attempt(current);
+      });
+    } catch (err) {
+      if (forked) await this.#deleteForks(project, current.task, [current.number]);
+      throw err;
+    } finally {
+      const left = (this.#reserved.get(parent.number) ?? 1) - 1;
+      if (left > 0) this.#reserved.set(parent.number, left);
+      else this.#reserved.delete(parent.number);
     }
-    return this.#sql.transaction(() => {
-      this.#sql.exec(
-        "UPDATE attempts SET state = 'draft', closed_at = NULL WHERE task = ? AND number = ?",
-        current.task,
-        current.number,
-      );
-      this.#journal(actor, "reopened", current.task, current.number);
-      return this.#attempt(current);
-    });
   }
 
-  /** Makes a draft, open or closed attempt obsolete. Only the project owner may. */
-  obsoleteAttempt(project: ProjectContext, actor: Actor, input: AttemptInput): StoredAttempt {
+  /**
+   * Makes a draft, open or closed attempt obsolete. An active one's fork is archived and deleted,
+   * as on close. Only the project owner may.
+   */
+  async obsoleteAttempt(project: ProjectContext, actor: Actor, input: AttemptInput): Promise<StoredAttempt> {
     const current = this.#attempt(input);
     mayOwn(project, actor);
     this.#expect(current, ["draft", "open", "closed"], "make obsolete");
-    return this.#sql.transaction(() => {
-      this.#endAttempt(actor, current, "obsolete");
-      return this.#attempt(current);
-    });
+    this.#sql.transaction(() => this.#endAttempt(actor, current, "obsolete"));
+    if ((ACTIVE as readonly AttemptState[]).includes(current.state)) await this.#archive(project, [current]);
+    return this.#attempt(current);
   }
 
   /** Restores an obsolete attempt to closed. Only the project owner may. */
@@ -636,13 +665,18 @@ export class TaskStore {
 
   /**
    * open → merged, for the merge queue: records the landed sha, closes the task and closes its
-   * other active attempts. The merge queue decides who may merge, so this checks no permission.
+   * other active attempts. All their forks, the merged one's too, are archived and deleted. The
+   * merge queue decides who may merge, so this checks no permission.
    */
-  markMerged(_project: ProjectContext, actor: Actor, input: AttemptInput & { sha: string }): StoredAttempt {
+  async markMerged(
+    project: ProjectContext,
+    actor: Actor,
+    input: AttemptInput & { sha: string },
+  ): Promise<StoredAttempt> {
     const current = this.#attempt(input);
     this.#expect(current, ["open"], "merge");
     this.#expect(this.#task(current.task), ["open"], "merge into");
-    return this.#sql.transaction(() => {
+    const ended = this.#sql.transaction(() => {
       const at = this.#stamp();
       this.#sql.exec(
         "UPDATE attempts SET state = 'merged', merged_sha = ?, closed_at = ? WHERE task = ? AND number = ?",
@@ -652,10 +686,13 @@ export class TaskStore {
         current.number,
       );
       this.#journal(actor, "merged", current.task, current.number, { sha: input.sha });
-      for (const other of this.#activeAttempts(current.task)) this.#endAttempt(actor, other, "closed");
+      const others = this.#activeAttempts(current.task);
+      for (const other of others) this.#endAttempt(actor, other, "closed");
       this.#endTask(actor, current.task, "closed");
-      return this.#attempt(current);
+      return [current, ...others];
     });
+    await this.#archive(project, ended);
+    return this.#attempt(current);
   }
 
   /**
@@ -927,8 +964,8 @@ export class TaskStore {
   }
 
   /**
-   * Moves an attempt to closed or obsolete. The close-and-archive slice will archive and delete
-   * its fork here; until it lands, closing deletes nothing.
+   * Moves an attempt to closed or obsolete, which ends its claim: the git proxy refuses its next
+   * push. A caller ending an active attempt then runs `#archive` on it, once this has committed.
    */
   #endAttempt(actor: Actor, current: StoredAttempt, to: "closed" | "obsolete"): void {
     this.#sql.exec(
@@ -939,6 +976,105 @@ export class TaskStore {
       current.number,
     );
     this.#journal(actor, to === "closed" ? "closed" : "made_obsolete", current.task, current.number);
+  }
+
+  /**
+   * Archives each ended attempt's fork and then deletes it: pushes the fork's `main` to
+   * `refs/attempts/<attempt>` in the origin, records the sha as `archived_sha`, and only then
+   * deletes the fork. The attempt has already ended, so its claim is gone and no new push can
+   * race the archive.
+   *
+   * Archiving never fails the close: the state change is what the caller asked for, and it has
+   * committed. If the archive fails, the fork is kept (nothing is lost), `archived_sha` stays
+   * null, and `attempt.archive_failed` is logged; reopening such an attempt reuses the kept fork.
+   */
+  async #archive(project: ProjectContext, attempts: StoredAttempt[]): Promise<void> {
+    const origin = originRepo(project.id);
+    await Promise.all(
+      attempts.map(async (attempt) => {
+        const fork = forkRepo(project.id, attempt.fork);
+        let sha: string | null;
+        try {
+          sha = await this.#repos.copyRef({
+            from: fork,
+            fromRef: FORK_HEAD,
+            to: origin,
+            toRef: archiveRef(attempt.fork),
+          });
+        } catch (cause) {
+          console.error({ event: "attempt.archive_failed", repo: fork, error: String(cause) });
+          return;
+        }
+        if (sha !== null) {
+          this.#sql.exec(
+            "UPDATE attempts SET archived_sha = ? WHERE task = ? AND number = ?",
+            sha,
+            attempt.task,
+            attempt.number,
+          );
+        }
+        await this.#deleteForks(project, attempt.task, [attempt.number]);
+      }),
+    );
+  }
+
+  /**
+   * Makes a closed attempt's fork again for reopening, and returns whether it made one. A fork
+   * that still exists (its archive failed on close) is kept as it is. A new fork starts from the
+   * origin's `main` and has its `main` force-set to `archived_sha`, read back from the archive ref.
+   * If the restore fails the new fork is deleted again and the reopen fails.
+   */
+  async #restore(project: ProjectContext, attempt: StoredAttempt): Promise<boolean> {
+    const origin = originRepo(project.id);
+    const fork = forkRepo(project.id, attempt.fork);
+    try {
+      await this.#repos.fork(origin, fork);
+    } catch (err) {
+      if ((err as { code?: unknown }).code === "ALREADY_EXISTS") return false;
+      throw err;
+    }
+    if (attempt.archived_sha === null) return true;
+    try {
+      await this.#untilReady(() =>
+        this.#repos.copyRef({
+          from: origin,
+          fromRef: archiveRef(attempt.fork),
+          to: fork,
+          toRef: FORK_HEAD,
+          expect: attempt.archived_sha ?? undefined,
+        }),
+      );
+    } catch (cause) {
+      await this.#deleteForks(project, attempt.task, [attempt.number]);
+      console.error({ event: "attempt.restore_failed", repo: fork, error: String(cause) });
+      throw new ServiceError("internal", `couldn't restore ${attempt.fork} from its archive; it is still closed`);
+    }
+    return true;
+  }
+
+  /** Runs `work`, retrying with backoff while a just-made fork isn't ready yet. */
+  async #untilReady<T>(work: () => Promise<T>): Promise<T> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await work();
+      } catch (err) {
+        const code = (err as { code?: unknown }).code;
+        if (attempt >= FORK_READY_RETRIES || (code !== "FORK_IN_PROGRESS" && code !== "NOT_FOUND")) throw err;
+        await new Promise((resolve) => setTimeout(resolve, FORK_READY_BACKOFF_MS * 2 ** attempt));
+      }
+    }
+  }
+
+  /** Reopening may not take a branch another active attempt holds now. */
+  #checkReopenBranch(current: StoredAttempt): void {
+    if (current.branch === null) return;
+    const [taken] = this.#sql.exec<AttemptRow>(
+      "SELECT * FROM attempts WHERE branch = ? AND state IN ('draft', 'open')",
+      current.branch,
+    );
+    if (taken !== undefined || this.#branchPush(current.branch) !== undefined) {
+      throw new ServiceError("conflict", `another active attempt has branch ${current.branch}`);
+    }
   }
 
   /** A branch can carry only one attempt, and a `t<n>/` branch only an attempt on `t<n>`. */

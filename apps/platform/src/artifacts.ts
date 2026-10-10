@@ -1,4 +1,5 @@
-import type { Commit, RepoInfo, Repos, RepoToken, Tree, TokenScope } from "./repos";
+import { copyRepoRef } from "./git-client.ts";
+import type { Commit, CopyRef, RepoInfo, Repos, RepoToken, Tree, TokenScope } from "./repos";
 
 /** The most repos Artifacts returns per `list` page. */
 const LIST_PAGE_SIZE = 200;
@@ -77,6 +78,14 @@ class ArtifactsRepos implements Repos {
     }
     const entries = await repo.readTree(tree);
     return entries === null ? null : { commit: head.hash, tree, entries };
+  }
+
+  /**
+   * The binding can't write refs, so this speaks git to the two remotes from the Worker (see
+   * `git-client.ts`) with tokens minted here. It never passes through the public `/git` proxy.
+   */
+  async copyRef(args: CopyRef): Promise<string | null> {
+    return copyRepoRef(this, (input, init) => fetch(input, init), args);
   }
 }
 

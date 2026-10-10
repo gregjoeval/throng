@@ -89,6 +89,19 @@ app.get("/spike/repos/:name/head", async (c) => {
   return c.json({ sha: head?.hash ?? null, message: head?.message ?? null });
 });
 
+/**
+ * Copies a ref between repos the way closing and reopening an attempt does (`Repos.copyRef`), so
+ * the e2e suite can check the Worker-side git client against real Artifacts.
+ */
+app.post("/spike/repos/:name/copy-ref", async (c) => {
+  const [fromRef, to, toRef] = [c.req.query("from_ref"), c.req.query("to"), c.req.query("to_ref")];
+  if (fromRef === undefined || to === undefined || toRef === undefined) {
+    return c.json({ error: "from_ref, to and to_ref are required" }, 400);
+  }
+  const sha = await reposFor(c.env).copyRef({ from: c.req.param("name"), fromRef, to, toRef });
+  return c.json({ sha });
+});
+
 // Read-only views a file/commit browser could use. All through the binding; nothing is cloned.
 
 app.get("/spike/repos/:name/log", async (c) => {

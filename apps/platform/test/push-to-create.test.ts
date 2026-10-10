@@ -344,13 +344,14 @@ describe("joining a task with a t<n>/ branch", () => {
     expect(await rejection("t1/x")).toBe("t1 has an open merge request, so it takes no new attempts");
     mergeRequest.mockRestore();
 
-    tasks.closeTask(project, ada.actor, { task: 1 });
+    await tasks.closeTask(project, ada.actor, { task: 1 });
     expect(await rejection("t1/x")).toBe("can't add attempts to t1: it is closed");
 
-    tasks.obsoleteTask(project, greg.actor, { task: 1 });
+    await tasks.obsoleteTask(project, greg.actor, { task: 1 });
     expect(await rejection("t1/x")).toBe("can't add attempts to t1: it is obsolete");
 
-    expect(await host.list(`${project.id}-t1a`)).toEqual([`${project.id}-t1a1`]);
+    // No rejected join left a fork; closing t1 archived and deleted t1a1's.
+    expect(await host.list(`${project.id}-t1a`)).toEqual([]);
     expect(await host.list(`${project.id}-t9`)).toEqual([]);
     expect(pending()).toEqual([]);
   });

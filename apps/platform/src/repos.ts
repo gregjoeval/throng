@@ -84,6 +84,18 @@ export interface Tree {
   entries: TreeEntry[];
 }
 
+/** One ref copied from one repo to another: see `Repos.copyRef`. */
+export interface CopyRef {
+  from: string;
+  /** A full ref name in `from`, such as `refs/heads/main`. */
+  fromRef: string;
+  to: string;
+  /** The full ref name to create or force-update in `to`. */
+  toRef: string;
+  /** When set, the copy fails unless `fromRef` points at this sha. */
+  expect?: string | undefined;
+}
+
 /**
  * Repos in this environment's namespace. Methods on a repo that doesn't exist throw an error whose
  * `code` is `NOT_FOUND`; creating or forking onto a name that's taken throws `ALREADY_EXISTS`.
@@ -106,4 +118,10 @@ export interface Repos {
   listCommits(name: string, args: { ref: string; limit: number }): Promise<Commit[]>;
   /** The directory at `path` (the root when empty) at `ref`, or null if either doesn't resolve. */
   readTree(name: string, args: { ref: string; path: string }): Promise<Tree | null>;
+  /**
+   * Points `toRef` in `to` at the commit `fromRef` points at in `from`, copying whatever objects
+   * `to` lacks, and returns that commit's sha. Null, with nothing changed, when `fromRef` doesn't
+   * exist. `toRef` is force-updated, so it may move to a commit that doesn't descend from it.
+   */
+  copyRef(args: CopyRef): Promise<string | null>;
 }

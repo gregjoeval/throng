@@ -29,6 +29,17 @@ Go to **Actions → E2E → Run workflow** on `main`. Leave **scenarios** empty 
 gh workflow run e2e.yml -f scenarios="happy"
 ```
 
+### Scenarios
+
+- `happy`, `coalesce`, `conflict`, `preview`, `intrusion`, `deps`: the check pipeline; see the header of `scripts/e2e.ts`.
+- `refs`: attempt archives. Closing an attempt pushes its fork's `main` to `refs/attempts/t42a3` in the origin (`ARCHIVE_REF_PREFIX` in `src/archive.ts`), and reopening copies it back. The scenario checks, against real Artifacts, that:
+  1. a plain `git push` to a ref under that prefix succeeds and `git ls-remote` lists it;
+  2. the Worker's own git client (`src/git-client.ts`, behind `POST /spike/repos/:name/copy-ref`) copies one origin's `main` into another origin's archive ref, and an archive ref back out again;
+  3. both refs are still there after a later push to `main`;
+  4. no archive push started a check.
+
+  If step 1 fails because Artifacts rejects or drops custom refs, set `ARCHIVE_REF_PREFIX` to `refs/heads/archive/attempts/` and run the scenario again.
+
 ### Setup (once per account)
 
 1. **D1 database.** `throng-ci` exists and its id is in `env.ci.d1_databases` in `wrangler.jsonc`. For a new account, run `pnpm --filter @throng/platform exec wrangler d1 create throng-ci` and replace the id.

@@ -33,17 +33,21 @@ export function testSql(): Sql & { db: DatabaseSync } {
  * results are structured-cloned, as RPC would, so nothing leaks across by reference.
  */
 export function testTaskBackends(repos: Repos, now?: () => Date) {
-  const stores = new Map<string, TaskStore>();
-  const store = (projectId: string): TaskStore => {
+  const stores = new Map<string, { store: TaskStore; sql: ReturnType<typeof testSql> }>();
+  const open = (projectId: string) => {
     let found = stores.get(projectId);
     if (found === undefined) {
-      found = new TaskStore(now === undefined ? { sql: testSql(), repos } : { sql: testSql(), repos, now });
+      const sql = testSql();
+      found = { store: new TaskStore(now === undefined ? { sql, repos } : { sql, repos, now }), sql };
       stores.set(projectId, found);
     }
     return found;
   };
+  const store = (projectId: string): TaskStore => open(projectId).store;
+  /** The project's SQLite, for reading back what the store wrote (its journal, say). */
+  const sql = (projectId: string) => open(projectId).sql;
   const backend = (projectId: string): TaskBackend => ({
     call: async (method, args) => structuredClone(await runTaskMethod(store(projectId), method, structuredClone(args))),
   });
-  return { backend, store };
+  return { backend, store, sql };
 }

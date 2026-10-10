@@ -152,6 +152,13 @@ export interface AttemptInput {
   number: number;
 }
 
+/** One ref a push updated: its full name and its ids before and after (all zeros for none). */
+export interface PushedRef {
+  ref: string;
+  before: string;
+  after: string;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Store
 
@@ -575,6 +582,34 @@ export class TaskStore {
     });
   }
 
+  /**
+   * Checks the actor holds the claim on an attempt, so the git proxy may let them push to its
+   * fork: the attempt is active and the actor's human is its author. Checked on every push, so a
+   * hand-off or close takes effect on the next one.
+   */
+  authorizePush(_project: ProjectContext, actor: Actor, input: AttemptInput): StoredAttempt {
+    const current = this.#attempt(input);
+    if (!(ACTIVE as readonly AttemptState[]).includes(current.state)) {
+      throw invalidState(`${current.fork} is ${current.state}; only an active attempt's fork takes pushes`);
+    }
+    mayAuthor(actor, current);
+    return current;
+  }
+
+  /**
+   * Journals a `pushed` event for each ref a push through the git proxy updated on an attempt's
+   * fork, with the old and new ids so force-pushes show up afterwards. The proxy checked the
+   * claim before forwarding the push, and the push has landed, so this checks nothing.
+   */
+  recordPush(_project: ProjectContext, actor: Actor, input: AttemptInput & { updates: PushedRef[] }): void {
+    const current = this.#attempt(input);
+    this.#sql.transaction(() => {
+      for (const { ref, before, after } of input.updates) {
+        this.#journal(actor, "pushed", current.task, current.number, { git_ref: ref, before, after });
+      }
+    });
+  }
+
   // --- internals -------------------------------------------------------------------------------
 
   #task(number: number): StoredTask {
@@ -764,6 +799,8 @@ export const TASK_METHODS = [
   "obsoleteAttempt",
   "restoreAttempt",
   "markMerged",
+  "authorizePush",
+  "recordPush",
 ] as const satisfies readonly (keyof TaskStore)[];
 
 export type TaskMethod = (typeof TASK_METHODS)[number];

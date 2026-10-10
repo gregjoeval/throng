@@ -9,6 +9,8 @@ import { bearerAuth, bearerOrAccess, type AuthEnv, type AuthOptions } from "./au
 import { errorBody, errorResponse, ServiceError } from "./errors.ts";
 import { MAX_PROJECT_HANDLE, PROJECT_HANDLE, projectService } from "./projects.ts";
 import type { Repos } from "./repos.ts";
+import { ATTEMPT_STATES, TASK_STATES } from "./task-store.ts";
+import { taskService, type TaskBackend } from "./tasks.ts";
 import { DEFAULT_TOKEN_TTL_SECONDS, listTokens, MAX_TOKEN_TTL_SECONDS, mintToken, revokeToken } from "./tokens.ts";
 
 const UserSchema = z
@@ -84,6 +86,87 @@ const ProjectPathSchema = z.object({
   project: z.string().openapi({ description: "The project's handle.", example: "throng" }),
 });
 
+const UserRefSchema = z.object({ id: z.string(), handle: z.string().openapi({ example: "greg" }) }).openapi("UserRef");
+
+const TaskSchema = z
+  .object({
+    ref: z.string().openapi({ description: "The task's reference.", example: "t42" }),
+    number: z.number().int().openapi({ description: "Per project, 1-based and never reused.", example: 42 }),
+    title: z.string(),
+    body: z.string().openapi({ description: "Markdown." }),
+    creator: UserRefSchema,
+    state: z.enum(TASK_STATES),
+    created_at: z.string(),
+    closed_at: z.string().nullable(),
+    closed_by: UserRefSchema.nullable(),
+    attempt_limit: z
+      .number()
+      .int()
+      .nullable()
+      .openapi({ description: "Overrides the project's cap on active attempts; null to use the project's." }),
+  })
+  .openapi("Task");
+
+const AttemptSchema = z
+  .object({
+    ref: z.string().openapi({ description: "The attempt's reference.", example: "t42a3" }),
+    task: z.number().int().openapi({ example: 42 }),
+    number: z.number().int().openapi({ description: "Per task, 1-based and never reused.", example: 3 }),
+    author: UserRefSchema,
+    state: z.enum(ATTEMPT_STATES),
+    fork: z.string().openapi({ description: "The logical fork name, kept for the attempt's life.", example: "t42a3" }),
+    branch: z.string().nullable().openapi({ description: "The origin branch a push created it from." }),
+    note: z.string().openapi({ description: "Markdown." }),
+    created_at: z.string(),
+    closed_at: z.string().nullable(),
+    merged_sha: z.string().nullable(),
+    archived_sha: z.string().nullable(),
+  })
+  .openapi("Attempt");
+
+const AttemptLimitSchema = z
+  .number()
+  .int()
+  .min(1)
+  .max(1000)
+  .nullable()
+  .openapi({ description: "Overrides the project's cap on active attempts; null to use the project's." });
+
+const CreateTaskSchema = z
+  .object({
+    title: z.string().trim().min(1).max(200),
+    body: z.string().max(65_536).optional().openapi({ description: "Markdown." }),
+    attempt_limit: AttemptLimitSchema.optional(),
+  })
+  .openapi("CreateTask");
+
+const EditTaskSchema = z
+  .object({
+    title: z.string().trim().min(1).max(200).optional(),
+    body: z.string().max(65_536).optional().openapi({ description: "Markdown." }),
+    attempt_limit: AttemptLimitSchema.optional(),
+  })
+  .openapi("EditTask");
+
+const CreateAttemptsSchema = z
+  .object({
+    count: z.number().int().min(1).max(100).optional().openapi({ description: "Attempts to create. Defaults to 1." }),
+    note: z.string().max(65_536).optional().openapi({ description: "Markdown, set on every new attempt." }),
+  })
+  .openapi("CreateAttempts");
+
+const EditAttemptSchema = z
+  .object({ note: z.string().max(65_536).openapi({ description: "Markdown." }) })
+  .openapi("EditAttempt");
+
+const TaskPathSchema = ProjectPathSchema.extend({
+  t: z.string().openapi({ description: "A task reference: `t42` or `42`.", example: "t42" }),
+});
+
+const AttemptPathSchema = ProjectPathSchema.extend({
+  a: z.string().openapi({ description: "An attempt reference.", example: "t42a3" }),
+});
+
 const security: Record<string, string[]>[] = [{ bearer: [] }, { access: [] }];
 const bearerOnly: Record<string, string[]>[] = [{ bearer: [] }];
 const unauthorized = errorResponse("No valid bearer token or Access session.");
@@ -92,11 +175,83 @@ const unauthorizedBearer = errorResponse("No valid bearer token.");
 export interface ApiOptions extends AuthOptions {
   /** The environment's repos: production passes the Artifacts-backed `reposFor`, tests a fake. */
   repos?: (env: AccessBindings) => Repos;
+  /** A project's task backend: production passes its Durable Object, tests an in-process store. */
+  tasks?: (env: AccessBindings) => (projectId: string) => TaskBackend;
 }
 
 function noRepos(): Repos {
   throw new Error("this API was built without repos");
 }
+
+function noTasks(): (projectId: string) => TaskBackend {
+  throw new Error("this API was built without a task backend");
+}
+
+type Bearer = ReturnType<typeof bearerAuth>;
+
+const json = <T>(schema: T) => ({ content: { "application/json": { schema } } });
+
+/** A task transition route: `POST …/tasks/{t}/<verb>`. */
+function taskTransition(
+  bearer: Bearer,
+  verb: string,
+  operationId: string,
+  summary: string,
+  forbidden: string,
+  conflicts: string[],
+) {
+  return createRoute({
+    method: "post",
+    path: `/projects/{owner}/{project}/tasks/{t}/${verb}`,
+    operationId,
+    tags: ["Tasks"],
+    summary,
+    security: bearerOnly,
+    middleware: [bearer] as const,
+    request: { params: TaskPathSchema },
+    responses: {
+      200: { description: "The task after the transition.", ...json(TaskSchema) },
+      400: errorResponse("The task reference is invalid."),
+      401: unauthorizedBearer,
+      403: errorResponse(forbidden),
+      404: errorResponse("No such project or task."),
+      409: errorResponse(`\`invalid_state\`: ${conflicts.join(" ")}`),
+    },
+  });
+}
+
+/** An attempt transition route: `POST …/attempts/{a}/<verb>`. */
+function attemptTransition(
+  bearer: Bearer,
+  verb: string,
+  operationId: string,
+  summary: string,
+  forbidden: string,
+  conflicts: string[],
+) {
+  return createRoute({
+    method: "post",
+    path: `/projects/{owner}/{project}/attempts/{a}/${verb}`,
+    operationId,
+    tags: ["Attempts"],
+    summary,
+    security: bearerOnly,
+    middleware: [bearer] as const,
+    request: { params: AttemptPathSchema },
+    responses: {
+      200: { description: "The attempt after the transition.", ...json(AttemptSchema) },
+      400: errorResponse("The attempt reference is invalid."),
+      401: unauthorizedBearer,
+      403: errorResponse(forbidden),
+      404: errorResponse("No such project or attempt."),
+      409: errorResponse(conflicts.join(" ")),
+    },
+  });
+}
+
+const AUTHOR_ONLY = "Only the attempt's author, or their agents, may.";
+const OWNER_ONLY = "Only the project owner may.";
+const TASK_MANAGERS = "Only the project owner or the task's creator may.";
 
 function publicToken({ id, agent, expires_at, revoked_at, created_at }: z.infer<typeof TokenSchema>) {
   return { id, agent, expires_at, revoked_at, created_at };
@@ -108,6 +263,10 @@ export function apiRoutes(options: ApiOptions = {}) {
   const bearer = bearerAuth(options.now === undefined ? {} : { now: options.now });
   const reposFor = options.repos ?? noRepos;
   const projects = (env: AccessBindings) => projectService({ db: env.DB, repos: reposFor(env) });
+  const backendFor = options.tasks ?? noTasks;
+  const tasks = (env: AccessBindings) => taskService({ db: env.DB, backend: backendFor(env) });
+  const taskPath = ({ t, ...rest }: z.infer<typeof TaskPathSchema>) => ({ ...rest, task: t });
+  const attemptPath = ({ a, ...rest }: z.infer<typeof AttemptPathSchema>) => ({ ...rest, attempt: a });
 
   const api = new OpenAPIHono<AuthEnv>({
     defaultHook: (result, c) => {
@@ -294,6 +453,250 @@ export function apiRoutes(options: ApiOptions = {}) {
         const project = await projects(c.env).get(c.var.actor, c.req.valid("param"));
         return c.json(project, 200);
       },
+    )
+    .openapi(
+      createRoute({
+        method: "post",
+        path: "/projects/{owner}/{project}/tasks",
+        operationId: "createTask",
+        tags: ["Tasks"],
+        summary: "Create a task in a project",
+        description: "Any signed-in user may. The caller's human is its creator. The task starts open.",
+        security: bearerOnly,
+        middleware: [bearer] as const,
+        request: { params: ProjectPathSchema, body: { required: true, ...json(CreateTaskSchema) } },
+        responses: {
+          201: { description: "The new task.", ...json(TaskSchema) },
+          400: errorResponse("The request is invalid."),
+          401: unauthorizedBearer,
+          404: errorResponse("No such project."),
+        },
+      }),
+      async (c) => {
+        const task = await tasks(c.env).createTask(c.var.actor, { ...c.req.valid("param"), ...c.req.valid("json") });
+        return c.json(task, 201);
+      },
+    )
+    .openapi(
+      createRoute({
+        method: "get",
+        path: "/projects/{owner}/{project}/tasks",
+        operationId: "listTasks",
+        tags: ["Tasks"],
+        summary: "List a project's tasks",
+        description: "Obsolete tasks are left out unless `state=obsolete` asks for them.",
+        security: bearerOnly,
+        middleware: [bearer] as const,
+        request: { params: ProjectPathSchema, query: z.object({ state: z.enum(TASK_STATES).optional() }) },
+        responses: {
+          200: { description: "The tasks, by number.", ...json(z.object({ tasks: z.array(TaskSchema) })) },
+          400: errorResponse("The request is invalid."),
+          401: unauthorizedBearer,
+          404: errorResponse("No such project."),
+        },
+      }),
+      async (c) => {
+        const list = await tasks(c.env).listTasks(c.var.actor, { ...c.req.valid("param"), ...c.req.valid("query") });
+        return c.json({ tasks: list }, 200);
+      },
+    )
+    .openapi(
+      createRoute({
+        method: "get",
+        path: "/projects/{owner}/{project}/tasks/{t}",
+        operationId: "getTask",
+        tags: ["Tasks"],
+        summary: "Get a task by its reference",
+        security: bearerOnly,
+        middleware: [bearer] as const,
+        request: { params: TaskPathSchema },
+        responses: {
+          200: { description: "The task.", ...json(TaskSchema) },
+          400: errorResponse("The task reference is invalid."),
+          401: unauthorizedBearer,
+          404: errorResponse("No such project or task."),
+        },
+      }),
+      async (c) => c.json(await tasks(c.env).getTask(c.var.actor, taskPath(c.req.valid("param"))), 200),
+    )
+    .openapi(
+      createRoute({
+        method: "patch",
+        path: "/projects/{owner}/{project}/tasks/{t}",
+        operationId: "editTask",
+        tags: ["Tasks"],
+        summary: "Edit a task's title, body or attempt limit",
+        description: "The project owner or the task's creator may. Obsolete tasks can't be edited.",
+        security: bearerOnly,
+        middleware: [bearer] as const,
+        request: { params: TaskPathSchema, body: { required: true, ...json(EditTaskSchema) } },
+        responses: {
+          200: { description: "The edited task.", ...json(TaskSchema) },
+          400: errorResponse("The request is invalid."),
+          401: unauthorizedBearer,
+          403: errorResponse(TASK_MANAGERS),
+          404: errorResponse("No such project or task."),
+          409: errorResponse("`invalid_state`: the task is obsolete."),
+        },
+      }),
+      async (c) => {
+        const input = { ...taskPath(c.req.valid("param")), ...c.req.valid("json") };
+        return c.json(await tasks(c.env).editTask(c.var.actor, input), 200);
+      },
+    )
+    .openapi(
+      taskTransition(bearer, "close", "closeTask", "Close an open task, and its active attempts", TASK_MANAGERS, [
+        "the task isn't open.",
+      ]),
+      async (c) => c.json(await tasks(c.env).closeTask(c.var.actor, taskPath(c.req.valid("param"))), 200),
+    )
+    .openapi(
+      taskTransition(bearer, "reopen", "reopenTask", "Reopen a closed task", TASK_MANAGERS, [
+        "the task isn't closed, or one of its attempts merged.",
+      ]),
+      async (c) => c.json(await tasks(c.env).reopenTask(c.var.actor, taskPath(c.req.valid("param"))), 200),
+    )
+    .openapi(
+      taskTransition(bearer, "obsolete", "obsoleteTask", "Make a task obsolete, and its active attempts", OWNER_ONLY, [
+        "the task is already obsolete.",
+      ]),
+      async (c) => c.json(await tasks(c.env).obsoleteTask(c.var.actor, taskPath(c.req.valid("param"))), 200),
+    )
+    .openapi(
+      taskTransition(bearer, "restore", "restoreTask", "Restore an obsolete task to closed", OWNER_ONLY, [
+        "the task isn't obsolete.",
+      ]),
+      async (c) => c.json(await tasks(c.env).restoreTask(c.var.actor, taskPath(c.req.valid("param"))), 200),
+    )
+    .openapi(
+      createRoute({
+        method: "post",
+        path: "/projects/{owner}/{project}/tasks/{t}/attempts",
+        operationId: "createAttempts",
+        tags: ["Attempts"],
+        summary: "Fan a task out to new draft attempts, each with its own fork",
+        description:
+          "Any signed-in user may; the caller's human authors every attempt. Creates `count` attempts or none: " +
+          "the batch fails whole if it would exceed the task's cap on active attempts or a fork fails.",
+        security: bearerOnly,
+        middleware: [bearer] as const,
+        request: { params: TaskPathSchema, body: { required: false, ...json(CreateAttemptsSchema) } },
+        responses: {
+          201: { description: "The new attempts.", ...json(z.object({ attempts: z.array(AttemptSchema) })) },
+          400: errorResponse("The request is invalid."),
+          401: unauthorizedBearer,
+          404: errorResponse("No such project or task."),
+          409: errorResponse("`invalid_state`: the task isn't open; `attempt_limit`: the batch would exceed the cap."),
+        },
+      }),
+      async (c) => {
+        const input = { ...taskPath(c.req.valid("param")), ...c.req.valid("json") };
+        return c.json({ attempts: await tasks(c.env).createAttempts(c.var.actor, input) }, 201);
+      },
+    )
+    .openapi(
+      createRoute({
+        method: "get",
+        path: "/projects/{owner}/{project}/tasks/{t}/attempts",
+        operationId: "listAttempts",
+        tags: ["Attempts"],
+        summary: "List a task's attempts",
+        description: "Obsolete attempts are left out unless `state=obsolete` asks for them.",
+        security: bearerOnly,
+        middleware: [bearer] as const,
+        request: { params: TaskPathSchema, query: z.object({ state: z.enum(ATTEMPT_STATES).optional() }) },
+        responses: {
+          200: { description: "The attempts, by number.", ...json(z.object({ attempts: z.array(AttemptSchema) })) },
+          400: errorResponse("The request is invalid."),
+          401: unauthorizedBearer,
+          404: errorResponse("No such project or task."),
+        },
+      }),
+      async (c) => {
+        const input = { ...taskPath(c.req.valid("param")), ...c.req.valid("query") };
+        return c.json({ attempts: await tasks(c.env).listAttempts(c.var.actor, input) }, 200);
+      },
+    )
+    .openapi(
+      createRoute({
+        method: "get",
+        path: "/projects/{owner}/{project}/attempts/{a}",
+        operationId: "getAttempt",
+        tags: ["Attempts"],
+        summary: "Get an attempt by its reference",
+        security: bearerOnly,
+        middleware: [bearer] as const,
+        request: { params: AttemptPathSchema },
+        responses: {
+          200: { description: "The attempt.", ...json(AttemptSchema) },
+          400: errorResponse("The attempt reference is invalid."),
+          401: unauthorizedBearer,
+          404: errorResponse("No such project or attempt."),
+        },
+      }),
+      async (c) => c.json(await tasks(c.env).getAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
+    )
+    .openapi(
+      createRoute({
+        method: "patch",
+        path: "/projects/{owner}/{project}/attempts/{a}",
+        operationId: "editAttempt",
+        tags: ["Attempts"],
+        summary: "Edit an attempt's note",
+        description: "Only the attempt's author, or their agents, may. Obsolete attempts can't be edited.",
+        security: bearerOnly,
+        middleware: [bearer] as const,
+        request: { params: AttemptPathSchema, body: { required: true, ...json(EditAttemptSchema) } },
+        responses: {
+          200: { description: "The edited attempt.", ...json(AttemptSchema) },
+          400: errorResponse("The request is invalid."),
+          401: unauthorizedBearer,
+          403: errorResponse(AUTHOR_ONLY),
+          404: errorResponse("No such project or attempt."),
+          409: errorResponse("`invalid_state`: the attempt is obsolete."),
+        },
+      }),
+      async (c) => {
+        const input = { ...attemptPath(c.req.valid("param")), ...c.req.valid("json") };
+        return c.json(await tasks(c.env).editAttempt(c.var.actor, input), 200);
+      },
+    )
+    .openapi(
+      attemptTransition(bearer, "open", "openAttempt", "Open a draft attempt for scoring and merging", AUTHOR_ONLY, [
+        "`invalid_state`: the attempt isn't a draft.",
+      ]),
+      async (c) => c.json(await tasks(c.env).openAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
+    )
+    .openapi(
+      attemptTransition(bearer, "draft", "draftAttempt", "Return an open attempt to draft", AUTHOR_ONLY, [
+        "`invalid_state`: the attempt isn't open.",
+      ]),
+      async (c) => c.json(await tasks(c.env).draftAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
+    )
+    .openapi(
+      attemptTransition(bearer, "close", "closeAttempt", "Close a draft or open attempt", AUTHOR_ONLY, [
+        "`invalid_state`: the attempt isn't active.",
+      ]),
+      async (c) => c.json(await tasks(c.env).closeAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
+    )
+    .openapi(
+      attemptTransition(bearer, "reopen", "reopenAttempt", "Reopen a closed attempt as a draft", AUTHOR_ONLY, [
+        "`invalid_state`: the attempt isn't closed or its task isn't open;",
+        "`attempt_limit`: the task is at its cap; `conflict`: another active attempt has its branch.",
+      ]),
+      async (c) => c.json(await tasks(c.env).reopenAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
+    )
+    .openapi(
+      attemptTransition(bearer, "obsolete", "obsoleteAttempt", "Make an attempt obsolete", OWNER_ONLY, [
+        "`invalid_state`: the attempt is merged or already obsolete.",
+      ]),
+      async (c) => c.json(await tasks(c.env).obsoleteAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
+    )
+    .openapi(
+      attemptTransition(bearer, "restore", "restoreAttempt", "Restore an obsolete attempt to closed", OWNER_ONLY, [
+        "`invalid_state`: the attempt isn't obsolete.",
+      ]),
+      async (c) => c.json(await tasks(c.env).restoreAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     );
 
   api.doc31("/openapi.json", { openapi: "3.1.0", info: { title: "Throng API", version: "0.0.0" } });

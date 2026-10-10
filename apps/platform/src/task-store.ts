@@ -22,6 +22,14 @@ export type AttemptState = (typeof ATTEMPT_STATES)[number];
 /** Draft and open attempts are active: they have a fork and a claim, and count toward the cap. */
 const ACTIVE = ["draft", "open"] as const;
 
+/** The longest task title; a push-created task's title is cut to it. */
+export const MAX_TITLE = 200;
+/**
+ * How long a push-to-create may hold its branch between forking and creating the attempt. A row
+ * older than this belongs to a push that died part way; the next push of an origin branch sweeps it.
+ */
+export const BRANCH_PUSH_TTL_MS = 15 * 60 * 1000;
+
 export interface StoredTask {
   number: number;
   title: string;
@@ -152,6 +160,21 @@ export interface AttemptInput {
   number: number;
 }
 
+/**
+ * Where a push of an origin branch goes: the pusher's own active attempt on that branch, or a new
+ * attempt (on a new task, or on `t<n>` for a `t<n>/` branch) whose fork has just been made.
+ */
+export type BranchRoute =
+  | { kind: "attempt"; attempt: StoredAttempt }
+  | { kind: "create"; task: number; number: number; new_task: boolean };
+
+export interface CompleteBranchPushInput extends AttemptInput {
+  /** The commit the push left on the fork's `main`. */
+  head: string;
+  /** The refs the push updated on the fork, for the `pushed` event. */
+  updates: PushedRef[];
+}
+
 /** One ref a push updated: its full name and its ids before and after (all zeros for none). */
 export interface PushedRef {
   ref: string;
@@ -172,6 +195,18 @@ interface TaskRow {
   closed_at: string | null;
   closed_by: string | null;
   attempt_limit: number | null;
+}
+
+/** A push-to-create between forking and creating its attempt. */
+interface BranchPushRow {
+  branch: string;
+  task: number;
+  attempt: number;
+  user_id: string;
+  /** 1 when the push creates its task too. */
+  new_task: number;
+  /** Ms since epoch. */
+  started_at: number;
 }
 
 interface AttemptRow {
@@ -217,6 +252,16 @@ const SCHEMA = [
   `CREATE UNIQUE INDEX IF NOT EXISTS attempts_active_branch ON attempts (branch)
     WHERE branch IS NOT NULL AND state IN ('draft', 'open')`,
   `CREATE TABLE IF NOT EXISTS journal (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER, kind TEXT, detail TEXT)`,
+  // Pushes creating an attempt from an origin branch, between forking and creating the attempt
+  // (and task). A row holds its branch, and its attempt counts toward the task's cap.
+  `CREATE TABLE IF NOT EXISTS branch_pushes (
+    branch TEXT PRIMARY KEY,
+    task INTEGER NOT NULL,
+    attempt INTEGER NOT NULL,
+    user_id TEXT NOT NULL,
+    new_task INTEGER NOT NULL,
+    started_at INTEGER NOT NULL
+  )`,
 ];
 
 /** Columns added to the spike's journal, so task and attempt events record who acted on what. */
@@ -387,7 +432,7 @@ export class TaskStore {
     this.#expect(current, ["open"], "add attempts to");
     const limit = current.attempt_limit ?? projectLimit;
     const reserved = this.#reserved.get(current.number) ?? 0;
-    const active = this.#activeAttempts(current.number).length + reserved;
+    const active = this.#activeAttempts(current.number).length + reserved + this.#branchPushes(current.number);
     if (active + count > limit) {
       throw new ServiceError(
         "attempt_limit",
@@ -513,11 +558,18 @@ export class TaskStore {
     const parent = this.#task(current.task);
     this.#expect(parent, ["open"], "reopen an attempt of");
     const limit = parent.attempt_limit ?? projectLimit;
-    const active = this.#activeAttempts(parent.number).length + (this.#reserved.get(parent.number) ?? 0);
+    const active =
+      this.#activeAttempts(parent.number).length +
+      (this.#reserved.get(parent.number) ?? 0) +
+      this.#branchPushes(parent.number);
     if (active + 1 > limit) {
       throw new ServiceError("attempt_limit", `${taskRef(parent.number)} has ${active} of ${limit} active attempts`);
     }
-    if (current.branch !== null && this.attemptForBranch(project, actor, { branch: current.branch }) !== null) {
+    if (
+      current.branch !== null &&
+      (this.attemptForBranch(project, actor, { branch: current.branch }) !== null ||
+        this.#branchPush(current.branch) !== undefined)
+    ) {
       throw new ServiceError("conflict", `another active attempt has branch ${current.branch}`);
     }
     return this.#sql.transaction(() => {
@@ -632,6 +684,181 @@ export class TaskStore {
         this.#journal(actor, "pushed", current.task, current.number, { git_ref: ref, before, after });
       }
     });
+  }
+
+  // --- push-to-create --------------------------------------------------------------------------
+  //
+  // A push of branch `B` to the origin never lands there. The git proxy asks `routeBranchPush`
+  // where it goes: the pusher's own active attempt on `B`, or a new attempt. For a new one the
+  // store draws its numbers, holds `B` in `branch_pushes` and forks the origin, all before the task
+  // exists: the task's title comes from the pushed head commit, which can only be read once its pack
+  // has been indexed somewhere, and the fork is the one place it may land. The proxy forwards the
+  // push to the fork's `main` and then calls `completeBranchPush`, which reads the head commit back
+  // through `Repos` and creates the task and opened attempt in one transaction. If anything fails
+  // in between, the proxy calls `abandonBranchPush`, which frees the branch and deletes the fork;
+  // a push that dies without doing either is swept after `BRANCH_PUSH_TTL_MS`. Numbers drawn for
+  // an abandoned push are never reused, so it leaves a gap.
+
+  /**
+   * Routes a push of origin branch `branch` by the actor:
+   * - the actor's own active attempt on `branch` takes it;
+   * - another user's active attempt on `branch` refuses it, naming that attempt's task;
+   * - `t<n>/<anything>` adds an attempt to `t<n>`, refused when the task doesn't exist, isn't open,
+   *   has an open merge request or is at its attempt limit;
+   * - any other branch creates a task.
+   * A new attempt's fork exists when this returns; the caller must complete or abandon it.
+   */
+  async routeBranchPush(project: ProjectContext, actor: Actor, input: { branch: string }): Promise<BranchRoute> {
+    const { branch } = input;
+    await this.#sweepBranchPushes(project);
+    const reserved = reservedTask(branch);
+    const projectLimit = reserved === null ? DEFAULT_ATTEMPT_LIMIT : await this.#projectLimit(project);
+
+    // From here to the `branch_pushes` row nothing awaits, so two pushes of a branch can't both pass.
+    const active = this.attemptForBranch(project, actor, { branch });
+    if (active !== null) {
+      if (active.author === actor.user.id) return { kind: "attempt", attempt: active };
+      throw new ServiceError(
+        "conflict",
+        `branch ${branch} belongs to ${active.fork}, another user's attempt on ${taskRef(active.task)}; ` +
+          `push a branch named ${taskRef(active.task)}/<name> to make your own attempt`,
+      );
+    }
+    if (this.#branchPush(branch) !== undefined) {
+      throw new ServiceError("conflict", `another push of branch ${branch} is creating its attempt; try again shortly`);
+    }
+
+    let task: number | null = null;
+    if (reserved !== null) {
+      const [row] = this.#sql.exec<TaskRow>("SELECT * FROM tasks WHERE number = ?", reserved);
+      if (row === undefined) {
+        throw new ServiceError("not_found", `branch ${branch} is for ${taskRef(reserved)}, which doesn't exist`);
+      }
+      const current = toTask(row);
+      this.#expect(current, ["open"], "add attempts to");
+      if (this.hasOpenMergeRequest(project, actor, { task: current.number })) {
+        throw invalidState(`${taskRef(current.number)} has an open merge request, so it takes no new attempts`);
+      }
+      const limit = current.attempt_limit ?? projectLimit;
+      const count =
+        this.#activeAttempts(current.number).length +
+        (this.#reserved.get(current.number) ?? 0) +
+        this.#branchPushes(current.number);
+      if (count + 1 > limit) {
+        throw new ServiceError("attempt_limit", `${taskRef(current.number)} has ${count} of ${limit} active attempts`);
+      }
+      task = current.number;
+    }
+
+    const route = this.#sql.transaction(() => {
+      const number = task ?? this.#next("tasks");
+      const attempt = this.#next(attemptCounter(number));
+      this.#sql.exec(
+        "INSERT INTO branch_pushes (branch, task, attempt, user_id, new_task, started_at) VALUES (?, ?, ?, ?, ?, ?)",
+        branch,
+        number,
+        attempt,
+        actor.user.id,
+        task === null ? 1 : 0,
+        this.#now().getTime(),
+      );
+      return { kind: "create", task: number, number: attempt, new_task: task === null } as const;
+    });
+    try {
+      await this.#fork(project, route.task, [route.number]);
+    } catch (err) {
+      // A failed fork deletes what it made; only the branch is left to free.
+      this.#dropBranchPush(route);
+      throw err;
+    }
+    return route;
+  }
+
+  /**
+   * Creates the attempt (and, for a new branch, the task) for a push `routeBranchPush` sent to a new
+   * fork, once the push has landed on the fork's `main` at `head`. A new task takes its title from
+   * the head commit's subject and its body from the rest of the message. The attempt is opened
+   * straight away, and the push is journalled. Only the pusher may.
+   */
+  async completeBranchPush(
+    project: ProjectContext,
+    actor: Actor,
+    input: CompleteBranchPushInput,
+  ): Promise<{ task: StoredTask; attempt: StoredAttempt }> {
+    const pending = this.#pendingPush(input, actor);
+    let created: { title: string; body: string } | null = null;
+    if (pending.new_task === 1) {
+      const fork = forkRepo(project.id, attemptRef(pending.task, pending.attempt));
+      const [head] = await this.#repos.listCommits(fork, { ref: "main", limit: 1 });
+      if (head?.hash !== input.head) {
+        throw new ServiceError(
+          "conflict",
+          `the pushed commit isn't the head of ${attemptRef(pending.task, pending.attempt)}`,
+        );
+      }
+      created = taskFromCommit(head.message, pending.branch);
+    }
+
+    return this.#sql.transaction(() => {
+      const row = this.#pendingPush(input, actor);
+      const at = this.#stamp();
+      if (created !== null) {
+        this.#sql.exec(
+          `INSERT INTO tasks (number, title, body, creator, state, created_at, attempt_limit)
+           VALUES (?, ?, ?, ?, 'open', ?, NULL)`,
+          row.task,
+          created.title,
+          created.body,
+          actor.user.id,
+          at,
+        );
+        this.#journal(actor, "created", row.task, null);
+      } else {
+        // The task may have been closed while the push was forwarded.
+        this.#expect(this.#task(row.task), ["open"], "add attempts to");
+      }
+      this.#sql.exec(
+        `INSERT INTO attempts (task, number, author, state, branch, note, created_at)
+         VALUES (?, ?, ?, 'open', ?, '', ?)`,
+        row.task,
+        row.attempt,
+        actor.user.id,
+        row.branch,
+        at,
+      );
+      this.#journal(actor, "created", row.task, row.attempt);
+      this.#journal(actor, "opened", row.task, row.attempt);
+      for (const { ref, before, after } of input.updates) {
+        this.#journal(actor, "pushed", row.task, row.attempt, { git_ref: ref, before, after });
+      }
+      this.#dropBranchPush({ task: row.task, number: row.attempt });
+      return { task: this.#task(row.task), attempt: this.#attempt({ task: row.task, number: row.attempt }) };
+    });
+  }
+
+  /**
+   * Undoes a push `routeBranchPush` sent to a new fork that won't be completed: frees its branch and
+   * deletes its fork. Only the pusher may; once the push is completed there is nothing to undo.
+   */
+  async abandonBranchPush(project: ProjectContext, actor: Actor, input: AttemptInput): Promise<void> {
+    const [row] = this.#sql.exec<BranchPushRow>(
+      "SELECT * FROM branch_pushes WHERE task = ? AND attempt = ? AND user_id = ?",
+      input.task,
+      input.number,
+      actor.user.id,
+    );
+    if (row === undefined) return;
+    this.#dropBranchPush(input);
+    await this.#deleteForks(project, row.task, [row.attempt]);
+  }
+
+  /**
+   * Whether a task has an open merge request; such a task takes no new attempts. Merge requests
+   * don't exist yet (#139), so none does: this is where that check reads them once they land.
+   */
+  hasOpenMergeRequest(_project: ProjectContext, _actor: Actor, input: { task: number }): boolean {
+    this.#task(input.task);
+    return false;
   }
 
   // --- internals -------------------------------------------------------------------------------
@@ -758,6 +985,52 @@ export class TaskStore {
     );
   }
 
+  /** The push-to-create holding `branch`, if any. */
+  #branchPush(branch: string): BranchPushRow | undefined {
+    return this.#sql.exec<BranchPushRow>("SELECT * FROM branch_pushes WHERE branch = ?", branch)[0];
+  }
+
+  /** How many push-to-creates are making attempts on `task`. */
+  #branchPushes(task: number): number {
+    const [row] = this.#sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM branch_pushes WHERE task = ?", task);
+    return row?.n ?? 0;
+  }
+
+  /** The actor's push-to-create of an attempt, or an error saying there is none. */
+  #pendingPush(input: AttemptInput, actor: Actor): BranchPushRow {
+    const [row] = this.#sql.exec<BranchPushRow>(
+      "SELECT * FROM branch_pushes WHERE task = ? AND attempt = ? AND user_id = ?",
+      input.task,
+      input.number,
+      actor.user.id,
+    );
+    if (row === undefined) {
+      throw invalidState(`no push is creating ${attemptRef(input.task, input.number)}; push the branch again`);
+    }
+    return row;
+  }
+
+  #dropBranchPush(input: AttemptInput): void {
+    this.#sql.exec("DELETE FROM branch_pushes WHERE task = ? AND attempt = ?", input.task, input.number);
+  }
+
+  /** Clears push-to-creates that died part way, deleting their forks. */
+  async #sweepBranchPushes(project: ProjectContext): Promise<void> {
+    const stale = this.#sql.exec<BranchPushRow>(
+      "SELECT * FROM branch_pushes WHERE started_at < ?",
+      this.#now().getTime() - BRANCH_PUSH_TTL_MS,
+    );
+    for (const row of stale) {
+      this.#dropBranchPush({ task: row.task, number: row.attempt });
+      console.warn({
+        event: "attempt.branch_push_expired",
+        branch: row.branch,
+        attempt: attemptRef(row.task, row.attempt),
+      });
+    }
+    await Promise.all(stale.map((row) => this.#deleteForks(project, row.task, [row.attempt])));
+  }
+
   /** Draws the next number from a counter. */
   #next(counter: string): number {
     return this.#advance(counter, 1);
@@ -826,6 +1099,9 @@ export const TASK_METHODS = [
   "markMerged",
   "authorizePush",
   "recordPush",
+  "routeBranchPush",
+  "completeBranchPush",
+  "abandonBranchPush",
 ] as const satisfies readonly (keyof TaskStore)[];
 
 export type TaskMethod = (typeof TASK_METHODS)[number];
@@ -862,6 +1138,19 @@ export function attemptLimitFromConfig(result: ConfigResult): number {
   }
   if (result.kind === "none") return DEFAULT_ATTEMPT_LIMIT;
   return result.config.attempts.limit ?? DEFAULT_ATTEMPT_LIMIT;
+}
+
+/**
+ * A push-created task's title and body from its head commit's message: the subject (its first
+ * paragraph, on one line) cut to `MAX_TITLE`, and the rest. A commit with no subject is titled
+ * after its branch.
+ */
+export function taskFromCommit(message: string, branch: string): { title: string; body: string } {
+  const text = message.replace(/\r\n/g, "\n").trim();
+  const split = text.search(/\n[ \t]*\n/);
+  const subject = (split === -1 ? text : text.slice(0, split)).replace(/\s+/g, " ").trim();
+  const body = split === -1 ? "" : text.slice(split).trim();
+  return { title: (subject || branch).slice(0, MAX_TITLE).trim(), body };
 }
 
 function attemptCounter(task: number): string {

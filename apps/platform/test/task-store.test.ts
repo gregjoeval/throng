@@ -1,13 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { CONFIG_PATH, parseConfig } from "../src/config.ts";
 import { ServiceError } from "../src/errors.ts";
 import {
   attemptLimitFromConfig,
+  BRANCH_PUSH_TTL_MS,
   DEFAULT_ATTEMPT_LIMIT,
+  MAX_TITLE,
   migrate,
   parseAttemptRef,
   parseTaskRef,
   reservedTask,
+  taskFromCommit,
   TaskStore,
   type AttemptState,
   type ProjectContext,
@@ -529,5 +532,141 @@ describe("migrate", () => {
     const columns = sql.exec<{ name: string }>("PRAGMA table_info(journal)").map((c) => c.name);
     expect(columns).toEqual(["id", "at", "kind", "detail", "user_id", "agent", "task", "attempt"]);
     expect(sql.exec("SELECT kind FROM journal")).toEqual([{ kind: "duplicate" }]);
+  });
+});
+
+/** A store whose clock a test can move, over a FakeRepos that has the origin. */
+function clocked() {
+  let clock = Date.parse("2026-10-10T12:00:00.000Z");
+  const repos = new FakeRepos();
+  void repos.create("abc123-main", { defaultBranch: "main" });
+  const sql = testSql();
+  const store = new TaskStore({ sql, repos, now: () => new Date(clock) });
+  const forks = () => repos.calls.filter((c) => c.method === "fork").map((c) => c.args[1]);
+  const exists = async (name: string) => (await repos.list(name)).includes(name);
+  const advance = (ms: number) => {
+    clock += ms;
+  };
+  return { store, repos, sql, forks, exists, advance };
+}
+
+describe("push-to-create", () => {
+  it("titles a task from the head commit's subject and bodies it from the rest", () => {
+    expect(taskFromCommit("Add search\n\nIndex titles.\nAnd bodies.\n", "b")).toEqual({
+      title: "Add search",
+      body: "Index titles.\nAnd bodies.",
+    });
+    expect(taskFromCommit("Wrapped\nsubject line\n\nBody", "b")).toEqual({
+      title: "Wrapped subject line",
+      body: "Body",
+    });
+    expect(taskFromCommit("\n", "my-branch")).toEqual({ title: "my-branch", body: "" });
+    expect(taskFromCommit("x".repeat(300), "b").title).toHaveLength(MAX_TITLE);
+  });
+
+  it("routes a new branch to a new task's first attempt, forked before the task exists", async () => {
+    const { store, forks, exists } = clocked();
+    const route = await store.routeBranchPush(PROJECT, ada, { branch: "search" });
+    expect(route).toEqual({ kind: "create", task: 1, number: 1, new_task: true });
+    expect(forks()).toEqual(["abc123-t1a1"]);
+    expect(await code(() => store.getTask(PROJECT, ada, { task: 1 }))).toBe("not_found");
+
+    // A second push of the branch while the first is in flight is refused, by anyone.
+    expect((await failure(store.routeBranchPush(PROJECT, ada, { branch: "search" }))).message).toMatch(
+      /another push of branch search is creating its attempt/,
+    );
+    // Only the pusher may complete or abandon it.
+    await store.abandonBranchPush(PROJECT, bob, { task: 1, number: 1 });
+    expect(await exists("abc123-t1a1")).toBe(true);
+    expect(await code(store.completeBranchPush(PROJECT, bob, { task: 1, number: 1, head: "x", updates: [] }))).toBe(
+      "invalid_state",
+    );
+
+    await store.abandonBranchPush(PROJECT, ada, { task: 1, number: 1 });
+    expect(await exists("abc123-t1a1")).toBe(false);
+    // Numbers are never reused: the next push takes t2.
+    expect(await store.routeBranchPush(PROJECT, ada, { branch: "search" })).toMatchObject({ task: 2, number: 1 });
+  });
+
+  it("refuses to complete a new task when the fork's head isn't the pushed commit", async () => {
+    const { store } = clocked();
+    await store.routeBranchPush(PROJECT, ada, { branch: "search" });
+    // FakeRepos has no history, so the head can't be read back.
+    expect(await code(store.completeBranchPush(PROJECT, ada, { task: 1, number: 1, head: "abc", updates: [] }))).toBe(
+      "conflict",
+    );
+  });
+
+  it("joins a t<n>/ branch to its task, counting the push toward the cap until it completes", async () => {
+    const { store } = clocked();
+    const task = store.createTask(PROJECT, ada, { title: "Fix it", attempt_limit: 2 });
+    await store.createAttempts(PROJECT, ada, { task: task.number });
+
+    const route = await store.routeBranchPush(PROJECT, bob, { branch: "t1/bob" });
+    expect(route).toEqual({ kind: "create", task: 1, number: 2, new_task: false });
+    expect(await code(store.createAttempts(PROJECT, ada, { task: 1 }))).toBe("attempt_limit");
+
+    const done = await store.completeBranchPush(PROJECT, bob, {
+      task: 1,
+      number: 2,
+      head: "b".repeat(40),
+      updates: [{ ref: "refs/heads/main", before: "a".repeat(40), after: "b".repeat(40) }],
+    });
+    expect(done.attempt).toMatchObject({ author: bob.user.id, state: "open", branch: "t1/bob", fork: "t1a2" });
+    expect(done.task.title).toBe("Fix it");
+    expect(await store.routeBranchPush(PROJECT, bob, { branch: "t1/bob" })).toEqual({
+      kind: "attempt",
+      attempt: done.attempt,
+    });
+    expect((await failure(store.routeBranchPush(PROJECT, ada, { branch: "t1/bob" }))).message).toMatch(
+      /branch t1\/bob belongs to t1a2, another user's attempt on t1/,
+    );
+  });
+
+  it("refuses to complete a join when the task closed while the push was forwarded", async () => {
+    const { store, exists } = clocked();
+    store.createTask(PROJECT, ada, { title: "Fix it" });
+    await store.routeBranchPush(PROJECT, bob, { branch: "t1/bob" });
+    store.closeTask(PROJECT, ada, { task: 1 });
+    expect(await code(store.completeBranchPush(PROJECT, bob, { task: 1, number: 1, head: "b", updates: [] }))).toBe(
+      "invalid_state",
+    );
+    await store.abandonBranchPush(PROJECT, bob, { task: 1, number: 1 });
+    expect(await exists("abc123-t1a1")).toBe(false);
+    expect(store.listAttempts(PROJECT, bob, { task: 1 })).toEqual([]);
+  });
+
+  it("frees the branch when the fork can't be made", async () => {
+    const { store, repos, sql } = clocked();
+    const fork = vi.spyOn(repos, "fork").mockRejectedValueOnce(new Error("FORK_IN_PROGRESS"));
+    await expect(store.routeBranchPush(PROJECT, ada, { branch: "search" })).rejects.toThrow("FORK_IN_PROGRESS");
+    fork.mockRestore();
+    expect(sql.exec("SELECT * FROM branch_pushes")).toEqual([]);
+    expect(await store.routeBranchPush(PROJECT, ada, { branch: "search" })).toMatchObject({ kind: "create" });
+  });
+
+  it("sweeps a push that died part way, deleting its fork", async () => {
+    const { store, exists, advance } = clocked();
+    await store.routeBranchPush(PROJECT, ada, { branch: "search" });
+    advance(BRANCH_PUSH_TTL_MS + 1);
+    expect(await store.routeBranchPush(PROJECT, bob, { branch: "search" })).toMatchObject({ task: 2 });
+    expect(await exists("abc123-t1a1")).toBe(false);
+    expect(await exists("abc123-t2a1")).toBe(true);
+  });
+
+  it("keeps a closed attempt from reopening onto a branch a push is creating", async () => {
+    const { store } = clocked();
+    store.createTask(PROJECT, ada, { title: "Fix it" });
+    await store.routeBranchPush(PROJECT, ada, { branch: "t1/x" });
+    await store.completeBranchPush(PROJECT, ada, { task: 1, number: 1, head: "b", updates: [] });
+    store.closeAttempt(PROJECT, ada, { task: 1, number: 1 });
+    await store.routeBranchPush(PROJECT, ada, { branch: "t1/x" });
+    expect(await code(store.reopenAttempt(PROJECT, ada, { task: 1, number: 1 }))).toBe("conflict");
+  });
+
+  it("has no open merge requests until merge requests exist (#139)", () => {
+    const { store } = clocked();
+    store.createTask(PROJECT, ada, { title: "Fix it" });
+    expect(store.hasOpenMergeRequest(PROJECT, ada, { task: 1 })).toBe(false);
   });
 });

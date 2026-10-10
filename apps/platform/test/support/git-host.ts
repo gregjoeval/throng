@@ -182,8 +182,48 @@ export class LocalGitHost implements Repos {
     return found.ok ? new Blob([found.stdout]) : null;
   }
 
-  async listCommits(): Promise<Commit[]> {
-    throw new Error("LocalGitHost doesn't list commits");
+  async listCommits(name: string, args: { ref: string; limit: number }): Promise<Commit[]> {
+    if (!(await this.#exists(name))) throw repoError("NOT_FOUND", name);
+    const format = ["%H", "%T", "%P", "%an", "%ae", "%cn", "%ce", "%at", "%ct", "%B"].join("%x00");
+    const found = await tryGit(
+      this.path(name),
+      gitEnv(this.root),
+      "log",
+      "--first-parent",
+      `--max-count=${args.limit}`,
+      `--format=${format}%x1e`,
+      args.ref,
+      "--",
+    );
+    if (!found.ok) return [];
+    return found.stdout
+      .split("\x1e")
+      .map((entry) => entry.replace(/^\n/, ""))
+      .filter((entry) => entry !== "")
+      .map((entry) => {
+        const [
+          hash = "",
+          treeHash = "",
+          parents = "",
+          an = "",
+          ae = "",
+          cn = "",
+          ce = "",
+          at = "0",
+          ct = "0",
+          message = "",
+        ] = entry.split("\0");
+        return {
+          hash,
+          treeHash,
+          message,
+          author: { name: an, email: ae },
+          committer: { name: cn, email: ce },
+          parents: parents.split(" ").filter(Boolean),
+          authoredAt: Number(at),
+          committedAt: Number(ct),
+        };
+      });
   }
 
   async readTree(): Promise<Tree | null> {
@@ -236,6 +276,9 @@ export class LocalGitHost implements Repos {
         ...(req.headers["git-protocol"] === undefined ? {} : { GIT_PROTOCOL: String(req.headers["git-protocol"]) }),
       },
     });
+    // git may answer and exit before reading the whole body (a refused push, say); its reply is
+    // what counts, so a broken pipe on the way in isn't an error.
+    child.stdin.on("error", () => {});
     child.stdin.end(body);
     const [out] = await Promise.all([readAll(child.stdout), new Promise((resolve) => child.on("close", resolve))]);
     const split = out.indexOf("\r\n\r\n");

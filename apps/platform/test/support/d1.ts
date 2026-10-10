@@ -15,6 +15,7 @@ export function testDatabase(): Database {
   const statement = (sql: string, values: SQLInputValue[]): Statement => ({
     bind: (...next) => statement(sql, next as SQLInputValue[]),
     first: async <T>() => (db.prepare(sql).get(...values) as T | undefined) ?? null,
+    all: async <T>() => ({ results: db.prepare(sql).all(...values) as T[] }),
   });
   return { prepare: (sql) => statement(sql, []) };
 }

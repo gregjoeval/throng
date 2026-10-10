@@ -128,3 +128,77 @@
     @apply font-sans;
   }
 }
+
+/* Shiki output (`Code`, Markdown code blocks). Shiki renders both themes; the
+   app's `.dark` class picks the dark one. */
+@layer components {
+  .shiki {
+    @apply overflow-x-auto rounded-md border p-3 font-mono text-sm leading-relaxed;
+  }
+  .dark .shiki {
+    color: var(--shiki-dark) !important;
+    background-color: var(--shiki-dark-bg) !important;
+  }
+  .dark .shiki span {
+    color: var(--shiki-dark) !important;
+  }
+  .shiki.line-numbers .line::before {
+    content: attr(data-line);
+    @apply mr-4 inline-block w-8 text-right text-muted-foreground select-none;
+  }
+  .shiki .line.highlighted {
+    @apply -mx-3 inline-block w-[calc(100%+1.5rem)] bg-yellow-200/50 px-3 dark:bg-yellow-500/15;
+  }
+
+  .markdown {
+    @apply leading-7 break-words;
+  }
+  .markdown > * + * {
+    @apply mt-4;
+  }
+  .markdown :where(h1, h2, h3, h4, h5, h6) {
+    @apply mt-6 font-heading font-semibold;
+  }
+  .markdown h1 {
+    @apply border-b pb-2 text-2xl;
+  }
+  .markdown h2 {
+    @apply border-b pb-1 text-xl;
+  }
+  .markdown h3 {
+    @apply text-lg;
+  }
+  .markdown a {
+    @apply text-primary underline underline-offset-4;
+  }
+  .markdown :where(ul, ol) {
+    @apply pl-6;
+  }
+  .markdown ul {
+    @apply list-disc;
+  }
+  .markdown ol {
+    @apply list-decimal;
+  }
+  .markdown li.task-list-item {
+    @apply list-none;
+  }
+  .markdown blockquote {
+    @apply border-l-4 pl-4 text-muted-foreground;
+  }
+  .markdown :not(pre) > code {
+    @apply rounded bg-muted px-1 py-0.5 font-mono text-sm;
+  }
+  .markdown table {
+    @apply block w-max max-w-full overflow-x-auto;
+  }
+  .markdown :where(th, td) {
+    @apply border px-3 py-1.5;
+  }
+  .markdown th {
+    @apply bg-muted font-semibold;
+  }
+  .markdown img {
+    @apply inline max-w-full;
+  }
+}

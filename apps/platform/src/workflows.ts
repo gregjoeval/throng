@@ -1,5 +1,6 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
-import { forkName, routePush, type PushRoute } from "./events";
+import { reposFor } from "./artifacts";
+import { routePush, type PushRoute } from "./events";
 import type { CheckOutcome, CheckParams } from "./project";
 import {
   CHECK_ROLES,
@@ -11,6 +12,7 @@ import {
   type CheckRole,
 } from "./grants";
 import { previewName, type PreviewGrant } from "./preview";
+import { forkRepo, originRepo } from "./repos";
 import type { RunResult } from "./sandbox";
 import {
   landScript,
@@ -134,19 +136,20 @@ export class CheckWorkflow extends WorkflowEntrypoint<Env, CheckParams> {
 
   /** Every token a check might need. Minted per step, so a retry never holds a stale one. */
   async #grants({ project, attempt }: CheckParams): Promise<CheckGrants> {
-    using canonical = await this.env.ARTIFACTS.get(project);
-    using fork = await this.env.ARTIFACTS.get(forkName(project, attempt));
-    const [canonicalInfo, forkInfo, canonicalRead, canonicalWrite, forkRead] = await Promise.all([
-      canonical.info(),
-      fork.info(),
-      canonical.createToken("read", TOKEN_TTL_SECONDS),
-      canonical.createToken("write", TOKEN_TTL_SECONDS),
-      fork.createToken("read", TOKEN_TTL_SECONDS),
+    const repos = reposFor(this.env);
+    const origin = originRepo(project);
+    const fork = forkRepo(project, attempt);
+    const [originInfo, forkInfo, canonicalRead, canonicalWrite, forkRead] = await Promise.all([
+      repos.get(origin),
+      repos.get(fork),
+      repos.mintToken(origin, "read", TOKEN_TTL_SECONDS),
+      repos.mintToken(origin, "write", TOKEN_TTL_SECONDS),
+      repos.mintToken(fork, "read", TOKEN_TTL_SECONDS),
     ]);
     return {
-      canonicalRead: { remote: canonicalInfo.remote, token: canonicalRead.plaintext, access: "read" },
-      canonicalWrite: { remote: canonicalInfo.remote, token: canonicalWrite.plaintext, access: "write" },
-      forkRead: { remote: forkInfo.remote, token: forkRead.plaintext, access: "read" },
+      canonicalRead: { remote: originInfo.remote, token: canonicalRead.token, access: "read" },
+      canonicalWrite: { remote: originInfo.remote, token: canonicalWrite.token, access: "write" },
+      forkRead: { remote: forkInfo.remote, token: forkRead.token, access: "read" },
     };
   }
 

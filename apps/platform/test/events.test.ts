@@ -13,20 +13,26 @@ function pushed(repoName: string, ref = "refs/heads/main", after = sha("b")) {
 }
 
 describe("routePush", () => {
-  it("treats a canonical push to main as main advancing", () => {
-    const route = routePush(pushed("demo"));
-    expect(route).toMatchObject({ kind: "main-advanced", project: "demo", push: { after: sha("b") } });
+  it("treats an origin push to main as main advancing", () => {
+    const route = routePush(pushed("k3x9q2-main"));
+    expect(route).toMatchObject({ kind: "main-advanced", project: "k3x9q2", push: { after: sha("b") } });
     expect(route.push?.emittedAt).toBe(Date.parse("2026-10-04T12:00:00.000Z"));
   });
 
   it("treats a fork push as an attempt wanting a check", () => {
-    expect(routePush(pushed("demo--a1"))).toMatchObject({ kind: "attempt", project: "demo", attempt: "a1" });
+    expect(routePush(pushed("k3x9q2-t42a3"))).toMatchObject({ kind: "attempt", project: "k3x9q2", attempt: "t42a3" });
   });
 
-  it("ignores ref deletions, other canonical branches, and other events", () => {
-    expect(routePush(pushed("demo", "refs/heads/main", sha("0"))).kind).toBe("ignored");
-    expect(routePush(pushed("demo", "refs/heads/wip")).kind).toBe("ignored");
+  it("ignores ref deletions, other origin branches, and other events", () => {
+    expect(routePush(pushed("k3x9q2-main", "refs/heads/main", sha("0"))).kind).toBe("ignored");
+    expect(routePush(pushed("k3x9q2-main", "refs/heads/wip")).kind).toBe("ignored");
+    expect(routePush(pushed("k3x9q2-main", "refs/attempts/t42a3")).kind).toBe("ignored");
     expect(routePush({ type: "cf.artifacts.repo.forked" }).kind).toBe("ignored");
-    expect(routePush(pushed("--a1")).kind).toBe("ignored");
+  });
+
+  it("ignores repos whose names aren't an origin or attempt fork", () => {
+    for (const name of ["k3x9q2", "demo--a1", "-t1a1", "k3x9q2-wip"]) {
+      expect(routePush(pushed(name)), name).toMatchObject({ kind: "ignored", reason: `unrecognised repo ${name}` });
+    }
   });
 });

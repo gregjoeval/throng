@@ -6,7 +6,8 @@
 // conflict (two attempts edit the same line; the second is bounced with its conflicting hunks),
 // preview (an attempt gets a live Preview URL serving its change; its files are readable via the Worker),
 // intrusion (an attempt's tests try to push to the canonical main and call the Cloudflare API; both fail),
-// deps (an attempt adds an npm dependency; the check installs it from the registry, lands, and previews).
+// deps (an attempt adds an npm dependency; the check installs it from the registry, lands, and previews),
+// refs (attempt archive refs: pushable, listed, kept across pushes to main, and copied by the Worker).
 //
 // Every project id starts with E2E_PROJECT_PREFIX (default `e2e`; lowercase alphanumeric).
 // `pnpm e2e cleanup` deletes every repo whose name starts with an explicitly set E2E_PROJECT_PREFIX,
@@ -17,6 +18,7 @@ import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { ARCHIVE_REF_PREFIX, archiveRef } from "../src/archive.ts";
 import { forkRepo, originRepo } from "../src/repos.ts";
 
 const run = promisify(execFile);
@@ -59,7 +61,7 @@ class Timeline {
   }
 }
 
-const scenarios: Record<string, () => Promise<void>> = { happy, coalesce, conflict, preview, intrusion, deps };
+const scenarios: Record<string, () => Promise<void>> = { happy, coalesce, conflict, preview, intrusion, deps, refs };
 
 async function main(): Promise<void> {
   const names = process.argv.slice(2);
@@ -381,7 +383,76 @@ test("the dependency is installed", () => {
   await cleanUp(project, ["t1a1"], work);
 }
 
-async function setUpProject(timeline: Timeline): Promise<{ project: string; work: string }> {
+/**
+ * Attempt archives: a custom ref under ARCHIVE_REF_PREFIX can be pushed to an origin, is listed by
+ * ls-remote, survives a later push to main, and starts no check. Then the Worker's own git client
+ * (what closing and reopening an attempt use) copies a ref into an origin's archive namespace and
+ * back out of it, across two unrelated repos so a real pack has to move.
+ */
+async function refs(): Promise<void> {
+  const timeline = new Timeline();
+  const a = await setUpProject(timeline);
+  const b = await setUpProject(timeline);
+  const raw = `${ARCHIVE_REF_PREFIX}raw`;
+
+  // A plain git push of a commit main doesn't have, straight to the custom ref.
+  await writeFile(join(a.work, "archived.txt"), "archived\n");
+  await git(a.work, "add", "-A");
+  await git(a.work, "commit", "-q", "-m", "archived");
+  const archived = (await git(a.work, "rev-parse", "HEAD")).trim();
+  await git(a.work, ...auth(a.origin.token), "push", "-q", a.origin.remote, `HEAD:${raw}`);
+  timeline.mark(`pushed ${raw}`);
+  assert((await lsRemote(a.work, a.origin, raw)) === archived, `${raw} is not listed at ${archived}`);
+
+  // The Worker copies b's main into a's archive namespace, as closing an attempt does.
+  const bMain = (await git(b.work, "rev-parse", "HEAD")).trim();
+  const copied = await api<{ sha: string | null }>(
+    "POST",
+    `/spike/repos/${originRepo(b.project)}/copy-ref?from_ref=refs/heads/main&to=${originRepo(a.project)}&to_ref=${archiveRef("t1a1")}`,
+  );
+  timeline.mark("worker archived b's main into a");
+  assert(copied.sha === bMain, `copy-ref returned ${copied.sha}, expected ${bMain}`);
+  assert((await lsRemote(a.work, a.origin, archiveRef("t1a1"))) === bMain, "the archive ref is not listed");
+
+  // main moves on; both archive refs stay where they were.
+  await git(a.work, "checkout", "-q", "-b", "next", "HEAD~1");
+  await writeFile(join(a.work, "later.txt"), "later\n");
+  await git(a.work, "add", "-A");
+  await git(a.work, "commit", "-q", "-m", "later");
+  await git(a.work, ...auth(a.origin.token), "push", "-q", a.origin.remote, "HEAD:refs/heads/main");
+  const later = (await git(a.work, "rev-parse", "HEAD")).trim();
+  await waitFor(a.project, (e) => e.kind === "main-advanced" && e.detail.sha === later);
+  timeline.mark("a's main advanced");
+  assert((await lsRemote(a.work, a.origin, raw)) === archived, `${raw} moved or vanished after a push to main`);
+  assert((await lsRemote(a.work, a.origin, archiveRef("t1a1"))) === bMain, "the archive ref moved or vanished");
+
+  // And back out of an archive ref into another repo, as reopening an attempt does.
+  const restored = await api<{ sha: string | null }>(
+    "POST",
+    `/spike/repos/${originRepo(a.project)}/copy-ref?from_ref=${raw}&to=${originRepo(b.project)}&to_ref=${archiveRef("t9a9")}`,
+  );
+  timeline.mark("worker restored a's archive into b");
+  assert(restored.sha === archived, `copy-ref returned ${restored.sha}, expected ${archived}`);
+  assert((await lsRemote(b.work, b.origin, archiveRef("t9a9"))) === archived, "the restored ref is not listed");
+
+  // Archive pushes are ignored by push routing: nothing but main moving reached either journal.
+  for (const project of [a.project, b.project]) {
+    const kinds = new Set((await settle(project, 5_000)).map((e) => e.kind));
+    assert(!kinds.has("check-started") && !kinds.has("attempt-pushed"), `${project} started work on an archive push`);
+  }
+  timeline.print();
+  await cleanUp(a.project, [], a.work);
+  await cleanUp(b.project, [], b.work);
+}
+
+/** The sha `ref` points at in a remote, through `git ls-remote`; null if it isn't listed. */
+async function lsRemote(work: string, remote: Grant, ref: string): Promise<string | null> {
+  const listed = await git(work, ...auth(remote.token), "ls-remote", remote.remote, ref);
+  const line = listed.split("\n").find((l) => l.endsWith(`\t${ref}`));
+  return line?.split("\t")[0] ?? null;
+}
+
+async function setUpProject(timeline: Timeline): Promise<{ project: string; work: string; origin: Grant }> {
   // Project ids are lowercase alphanumeric; repo names take a `-main` or `-t1a1` suffix.
   const project = `${projectPrefix}${Date.now().toString(36)}`;
   console.log(`project ${project}`);
@@ -400,7 +471,7 @@ async function setUpProject(timeline: Timeline): Promise<{ project: string; work
   // The fixture push itself is a "main advanced" event; let it land in the journal before forking.
   await waitFor(project, (e) => e.kind === "main-advanced");
   timeline.mark("fixture main-advanced journaled");
-  return { project, work };
+  return { project, work, origin: repo };
 }
 
 async function createAttempt(project: string, attempt: string, timeline: Timeline): Promise<Grant> {

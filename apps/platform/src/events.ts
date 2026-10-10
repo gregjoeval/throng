@@ -1,5 +1,6 @@
 // Artifacts push events and how a project routes them.
 
+import { isArchiveRef } from "./archive.ts";
 import { parseRepoName } from "./repos.ts";
 
 const ZERO_SHA = "0".repeat(40);
@@ -55,6 +56,8 @@ export function routePush(event: unknown, defaultBranch = "main"): PushRoute {
   const push = parsePushEvent(event);
   if (push === null) return { kind: "ignored", reason: "not a push event", push: null };
   if (push.after === ZERO_SHA) return { kind: "ignored", reason: "ref deleted", push };
+  // Closing an attempt archives its head into the origin; that is bookkeeping, never new work.
+  if (isArchiveRef(push.ref)) return { kind: "ignored", reason: `attempt archive ${push.ref}`, push };
 
   const repo = parseRepoName(push.repo);
   if (repo === null) return { kind: "ignored", reason: `unrecognised repo ${push.repo}`, push };

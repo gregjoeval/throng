@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { archiveRef } from "../src/archive.ts";
 import { routePush } from "../src/events.ts";
 
 const sha = (c: string) => c.repeat(40);
@@ -26,7 +27,10 @@ describe("routePush", () => {
   it("ignores ref deletions, other origin branches, and other events", () => {
     expect(routePush(pushed("k3x9q2-main", "refs/heads/main", sha("0"))).kind).toBe("ignored");
     expect(routePush(pushed("k3x9q2-main", "refs/heads/wip")).kind).toBe("ignored");
-    expect(routePush(pushed("k3x9q2-main", "refs/attempts/t42a3")).kind).toBe("ignored");
+    expect(routePush(pushed("k3x9q2-main", archiveRef("t42a3")))).toMatchObject({
+      kind: "ignored",
+      reason: `attempt archive ${archiveRef("t42a3")}`,
+    });
     expect(routePush({ type: "cf.artifacts.repo.forked" }).kind).toBe("ignored");
   });
 

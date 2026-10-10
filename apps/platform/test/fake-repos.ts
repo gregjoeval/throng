@@ -1,4 +1,6 @@
-import type { Commit, RepoInfo, Repos, RepoToken, Tree, TokenScope } from "../src/repos.ts";
+import type { Commit, CopyRef, RepoInfo, Repos, RepoToken, Tree, TokenScope } from "../src/repos.ts";
+
+type FakeRepo = RepoInfo & { tokens: RepoToken[]; refs: Map<string, string> };
 
 /** One call made through the fake, in order. */
 export interface RepoCall {
@@ -16,7 +18,7 @@ const CREATE_TOKEN_TTL_SECONDS = 24 * 60 * 60;
  */
 export class FakeRepos implements Repos {
   readonly calls: RepoCall[] = [];
-  readonly #repos = new Map<string, RepoInfo & { tokens: RepoToken[] }>();
+  readonly #repos = new Map<string, FakeRepo>();
   readonly #files = new Map<string, string>();
   #minted = 0;
 
@@ -47,7 +49,12 @@ export class FakeRepos implements Repos {
 
   async fork(source: string, name: string): Promise<void> {
     this.#record("fork", source, name);
-    this.#add(name, this.#repo(source).defaultBranch, source);
+    const from = this.#repo(source);
+    const repo = this.#add(name, from.defaultBranch, source);
+    // Artifacts forks copy the default branch only.
+    const head = `refs/heads/${from.defaultBranch}`;
+    const sha = from.refs.get(head);
+    if (sha !== undefined) repo.refs.set(head, sha);
   }
 
   async delete(name: string): Promise<boolean> {
@@ -84,19 +91,39 @@ export class FakeRepos implements Repos {
     return null;
   }
 
+  async copyRef(args: CopyRef): Promise<string | null> {
+    this.#record("copyRef", args);
+    const target = this.#repo(args.to);
+    const sha = this.#repo(args.from).refs.get(args.fromRef) ?? null;
+    if (sha === null) return null;
+    if (args.expect !== undefined && sha !== args.expect) throw new Error(`${args.fromRef} is at ${sha}`);
+    target.refs.set(args.toRef, sha);
+    return sha;
+  }
+
+  /** The sha a full ref name points at in a repo, or null. */
+  ref(name: string, ref: string): string | null {
+    return this.#repo(name).refs.get(ref) ?? null;
+  }
+
+  /** Points a full ref name in a repo at `sha`, as if it had been pushed there. */
+  setRef(name: string, ref: string, sha: string): void {
+    this.#repo(name).refs.set(ref, sha);
+  }
+
   #record(method: keyof Repos, ...args: unknown[]): void {
     this.calls.push({ method, args });
   }
 
-  #add(name: string, defaultBranch: string, parent: string | null): RepoInfo & { tokens: RepoToken[] } {
+  #add(name: string, defaultBranch: string, parent: string | null): FakeRepo {
     if (this.#repos.has(name)) throw repoError("ALREADY_EXISTS", name);
     const remote = `https://artifacts.test/git/${this.namespace}/${name}.git`;
-    const repo = { name, remote, defaultBranch, parent, tokens: [] };
+    const repo: FakeRepo = { name, remote, defaultBranch, parent, tokens: [], refs: new Map() };
     this.#repos.set(name, repo);
     return repo;
   }
 
-  #repo(name: string): RepoInfo & { tokens: RepoToken[] } {
+  #repo(name: string): FakeRepo {
     const repo = this.#repos.get(name);
     if (repo === undefined) throw repoError("NOT_FOUND", name);
     return repo;

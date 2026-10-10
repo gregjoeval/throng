@@ -151,7 +151,7 @@ describe("git proxy", () => {
     const { ada, clone, commit, env, host, project, store } = await setup();
     const dir = await clone("throng/t1a1.git", ada.token);
     await commit(dir, "late");
-    store(project.id).closeAttempt(project, ada.actor, { task: 1, number: 1 });
+    await store(project.id).closeAttempt(project, ada.actor, { task: 1, number: 1 });
     const before = await host.head(forkRepo(project.id, "t1a1"));
     const pushed = await tryGit(dir, env, "push", "origin", "HEAD:main");
     expect(pushed.ok).toBe(false);
@@ -161,7 +161,9 @@ describe("git proxy", () => {
 
   it("checks the claim on every push, so a hand-off or close between requests still counts", async () => {
     const { ada, server, project, store, host } = await setup();
-    store(project.id).closeAttempt(project, ada.actor, { task: 1, number: 1 });
+    await store(project.id).closeAttempt(project, ada.actor, { task: 1, number: 1 });
+    // Closing pushed the archive to the origin itself; only what follows is the proxy's doing.
+    const seen = host.requests.length;
     // Receive-pack POSTs without the `info/refs` before them: a probe, then a push.
     const post = (body: string) =>
       fetch(`${server.origin}/git/greg/throng/t1a1.git/git-receive-pack`, {
@@ -180,7 +182,7 @@ describe("git proxy", () => {
     const push = await post(`${(command.length + 4).toString(16).padStart(4, "0")}${command}0000PACK`);
     expect(push.status).toBe(200);
     expect(await push.text()).toContain("ng refs/heads/main t1a1 is closed");
-    expect(host.requests.filter((r) => r.path.includes("git-receive-pack"))).toEqual([]);
+    expect(host.requests.slice(seen).filter((r) => r.path.includes("git-receive-pack"))).toEqual([]);
   });
 
   it("rejects a push to origin main per ref with a readable message", async () => {

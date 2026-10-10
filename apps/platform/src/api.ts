@@ -160,6 +160,12 @@ const EditAttemptSchema = z
   .object({ note: z.string().max(65_536).openapi({ description: "Markdown." }) })
   .openapi("EditAttempt");
 
+const HandOffSchema = z
+  .object({
+    to: z.string().min(1).openapi({ description: "The handle of the user who becomes the author.", example: "bob" }),
+  })
+  .openapi("HandOff");
+
 const TaskPathSchema = ProjectPathSchema.extend({
   t: z.string().openapi({ description: "A task reference: `t42` or `42`.", example: "t42" }),
 });
@@ -753,6 +759,34 @@ export function apiRoutes(options: ApiOptions = {}) {
         "`invalid_state`: the attempt isn't obsolete.",
       ]),
       async (c) => c.json(await tasks(c.env).restoreAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
+    )
+    .openapi(
+      createRoute({
+        method: "post",
+        path: "/projects/{owner}/{project}/attempts/{a}/handoff",
+        operationId: "handOffAttempt",
+        tags: ["Attempts"],
+        summary: "Hand an active attempt to another user",
+        description:
+          "Only the attempt's author, or their agents, may, and only while it is a draft or open. " +
+          "The user named by `to` becomes its author at once, and the git proxy checks the new author " +
+          "on the next push, so the old author's pushes are refused from then on. Journals `handed_off`.",
+        security: bearerOnly,
+        middleware: [bearer] as const,
+        request: { params: AttemptPathSchema, body: { required: true, ...json(HandOffSchema) } },
+        responses: {
+          200: { description: "The attempt with its new author.", ...json(AttemptSchema) },
+          400: errorResponse("The request is invalid, or `to` already authors the attempt."),
+          401: unauthorizedBearer,
+          403: errorResponse(AUTHOR_ONLY),
+          404: errorResponse("No such project, attempt or user."),
+          409: errorResponse("`invalid_state`: the attempt isn't active."),
+        },
+      }),
+      async (c) => {
+        const input = { ...attemptPath(c.req.valid("param")), ...c.req.valid("json") };
+        return c.json(await tasks(c.env).handOffAttempt(c.var.actor, input), 200);
+      },
     )
     .openapi(
       createRoute({

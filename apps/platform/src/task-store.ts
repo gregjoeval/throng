@@ -559,6 +559,30 @@ export class TaskStore {
   }
 
   /**
+   * Hands a draft or open attempt to another user, `to` (a user id), who becomes its author at
+   * once. Only its author (or their agents) may, and not to themselves. Pushes check the claim
+   * on every request, so the old author's next push is refused and nothing needs revoking.
+   */
+  handOffAttempt(_project: ProjectContext, actor: Actor, input: AttemptInput & { to: string }): StoredAttempt {
+    const current = this.#attempt(input);
+    mayAuthor(actor, current);
+    this.#expect(current, ACTIVE, "hand off");
+    if (input.to === current.author) {
+      throw new ServiceError("invalid_request", `${current.fork} is already theirs: hand it to another user`);
+    }
+    return this.#sql.transaction(() => {
+      this.#sql.exec(
+        "UPDATE attempts SET author = ? WHERE task = ? AND number = ?",
+        input.to,
+        current.task,
+        current.number,
+      );
+      this.#journal(actor, "handed_off", current.task, current.number, { from: current.author, to: input.to });
+      return this.#attempt(current);
+    });
+  }
+
+  /**
    * open → merged, for the merge queue: records the landed sha, closes the task and closes its
    * other active attempts. The merge queue decides who may merge, so this checks no permission.
    */
@@ -798,6 +822,7 @@ export const TASK_METHODS = [
   "reopenAttempt",
   "obsoleteAttempt",
   "restoreAttempt",
+  "handOffAttempt",
   "markMerged",
   "authorizePush",
   "recordPush",

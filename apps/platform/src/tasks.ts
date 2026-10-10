@@ -172,6 +172,19 @@ export function taskService({ db, backend }: TaskServiceDeps) {
     reopenAttempt: attemptMove("reopenAttempt"),
     obsoleteAttempt: attemptMove("obsoleteAttempt"),
     restoreAttempt: attemptMove("restoreAttempt"),
+
+    /**
+     * Hands an active attempt to the user with handle `to`, who becomes its author. Only its
+     * author (or their agents) may. An unknown handle is `not_found`; handing it to its own author
+     * is `invalid_request`.
+     */
+    async handOffAttempt(actor: Actor, input: AttemptPath & { to: string }): Promise<Attempt> {
+      const ref = attemptRefOf(input.attempt);
+      const ctx = await project(input);
+      const to = await db.prepare("SELECT id FROM users WHERE handle = ?").bind(input.to).first<{ id: string }>();
+      if (to === null) throw new ServiceError("not_found", `no user ${input.to}`);
+      return one(await invoke("handOffAttempt", ctx, actor, { ...ref, to: to.id }), attempts);
+    },
   };
 }
 

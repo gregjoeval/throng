@@ -5,25 +5,42 @@
 //
 // and passes `info/refs`, `git-upload-pack` and `git-receive-pack` through to Artifacts with a
 // token minted by Throng, which never reaches the client. Callers authenticate with a Throng token
-// as the Basic password. Any valid token may read; pushes are checked against claims first. See
-// the spec's "Git proxy" section and `docs/research/git-proxy.md`.
+// as the Basic password. Any valid token may read; pushes are checked against claims first. A push
+// of a branch to the origin never lands there: push-to-create sends it to an attempt's fork (see
+// `pushToCreate`). See the spec's "Git proxy" and "Push-to-create" sections and
+// `docs/research/git-proxy.md`.
 
 import { Hono, type Context } from "hono";
 import { gitAuth, type AuthEnv, type AuthOptions } from "./auth.ts";
 import { ServiceError } from "./errors.ts";
 import {
+  commandList,
   concat,
   isDelete,
   ProtocolError,
   readPushRequest,
+  readReport,
   rejectionReport,
+  renameRefs,
   updatedRefs,
+  writeReport,
+  type PushReport,
   type PushRequest,
   type RefUpdate,
 } from "./pkt-line.ts";
 import { resolveProject } from "./projects.ts";
 import { forkRepo, originRepo, type Repos, type TokenScope } from "./repos.ts";
-import { attemptRef, parseAttemptRef, type AttemptInput, type ProjectContext, type TaskMethod } from "./task-store.ts";
+import {
+  attemptRef,
+  parseAttemptRef,
+  taskRef,
+  type AttemptInput,
+  type BranchRoute,
+  type ProjectContext,
+  type StoredAttempt,
+  type StoredTask,
+  type TaskMethod,
+} from "./task-store.ts";
 import type { TaskBackend } from "./tasks.ts";
 import type { AccessBindings } from "./access.ts";
 
@@ -44,6 +61,10 @@ const FORWARDED_REQUEST_HEADERS = ["Accept", "Content-Encoding", "Content-Type",
 const FORWARDED_RESPONSE_HEADERS = ["Cache-Control", "Content-Type", "Expires", "Pragma"];
 
 const MAIN = "refs/heads/main";
+const BRANCH_PREFIX = "refs/heads/";
+/** How long push-to-create waits for a new fork to be readable before giving up on the push. */
+const FORK_READY_TIMEOUT_MS = 60_000;
+const FORK_READY_POLL_MS = 250;
 
 export interface GitProxyOptions extends AuthOptions {
   /** The environment's repos: production passes the Artifacts-backed `reposFor`, tests a local git server. */
@@ -94,14 +115,18 @@ export function gitRoutes(options: GitProxyOptions) {
         const read = await readCommands(c);
         if (read instanceof Response) return read;
         pushed = read;
-        const refusal = claim?.message ?? (target.attempt === null ? originRefusal(pushed.updates) : null);
+        const refusal = claim?.message ?? (target.attempt === null ? originRefusal(pushed) : null);
         if (refusal !== null) return reject(c, target, pushed, refusal);
+        if (target.attempt === null && pushed.updates.length > 0) {
+          return pushToCreate(c, target, pushed, backend, { repos, tokens, fetch: upstreamFetch });
+        }
       }
     }
 
     let upstream: Response;
     try {
-      upstream = await forward(c, target, scope, pushed, { repos, tokens, fetch: upstreamFetch });
+      const prefix = pushed === null ? null : { bytes: pushed.consumed, length: contentLength(c) };
+      upstream = await forward(c, target, scope, prefix, { repos, tokens, fetch: upstreamFetch });
     } catch (err) {
       if ((err as { code?: unknown }).code === "NOT_FOUND") return text(404, `No repository at ${c.req.path}`);
       throw err;
@@ -171,16 +196,206 @@ async function resolveTarget(c: GitContext): Promise<Target | Response> {
 
 /**
  * Why a push to the origin is refused, or null to let it through. `main` only advances through the
- * merge queue. Every other branch belongs to push-to-create, which turns it into an attempt; until
- * that lands (#108), those are refused too. A probe, with no updates, goes through.
+ * merge queue, and the origin keeps no other refs. A push of one branch goes to push-to-create,
+ * which sends it to an attempt's fork; one pack can only land in one fork, so a push of several
+ * refs is refused whole. A probe, with no updates, goes through.
  */
-function originRefusal(updates: RefUpdate[]): Refusal | null {
-  if (updates.length === 0) return null;
-  return (update) => {
+function originRefusal(push: PushRequest): Refusal | null {
+  const { updates } = push;
+  const reasons = updates.map((update): string | null => {
     if (update.ref === MAIN) return "main only advances through the merge queue; push to an attempt's fork instead";
+    if (!update.ref.startsWith(BRANCH_PREFIX))
+      return "the origin keeps no refs but main; push a branch to make an attempt";
     if (isDelete(update)) return "the origin keeps no branches but main";
-    return "pushing a branch to the origin isn't supported yet; push to an attempt's fork instead";
+    if (updates.length > 1) return "push one branch at a time to the origin; each becomes its own attempt";
+    if (!push.capabilities.has("report-status") && !push.capabilities.has("report-status-v2")) {
+      return "pushing a branch to the origin needs a git that asks for report-status";
+    }
+    return null;
+  });
+  if (reasons.every((r) => r === null)) return null;
+  return (update) => reasons[updates.indexOf(update)] ?? "rejected";
+}
+
+/**
+ * Push-to-create: sends a push of origin branch `B` to an attempt's fork as its `main`. The task
+ * store routes it (`routeBranchPush`) to the pusher's own active attempt on `B`, or to a new
+ * attempt, refusing it when `B` is someone else's or a `t<n>/` task can't take it. For a new
+ * attempt the order is:
+ *
+ * 1. the store holds `B`, draws the numbers and forks the origin;
+ * 2. the proxy waits for the fork and forwards the push to it, renamed to `refs/heads/main`;
+ * 3. once the fork reports the ref updated, the store reads the head commit back through `Repos`
+ *    and creates the task (titled from the commit) and the opened attempt (`completeBranchPush`).
+ *
+ * The task needs the commit's message, which can only be read once the pack is indexed, and the
+ * new fork is the one place it may land: the origin never stores branches but `main`. Any failure
+ * after step 1, a refused push included, abandons it (`abandonBranchPush`): the fork is deleted
+ * and the branch freed, so no fork, attempt or task is left behind. The client only sees `ok` once
+ * the attempt exists.
+ *
+ * The response is buffered so the report can name `B` rather than the fork's `main`, and carry
+ * `remote:` lines with the task's URL and the attempt's remote. A receive-pack response is a
+ * report and some progress, never a pack, so buffering it is cheap.
+ *
+ * The client builds its pack against the origin's `main`, so a later push lands only if the fork
+ * has those objects: after `main` moves on, a push that builds on the new `main` must go to the
+ * attempt's own remote instead.
+ */
+async function pushToCreate(
+  c: GitContext,
+  target: Target,
+  push: PushRequest,
+  backend: TaskBackend,
+  upstream: Upstream,
+): Promise<Response> {
+  const [update] = push.updates as [RefUpdate];
+  const branch = update.ref.slice(BRANCH_PREFIX.length);
+  const { project } = target;
+  const actor = c.var.actor;
+  // A fork that can't be made fails here; the store has already freed the branch.
+  const routed = await backend.call("routeBranchPush", [project, actor, { branch }]).catch((err: unknown) => {
+    console.error({ event: "git.push_to_create_failed", branch, error: String(err) });
+    return null;
+  });
+  if (routed === null) return text(502, `Couldn't make a fork for ${branch}. Try again.`);
+  if (!routed.ok) return reject(c, target, push, routed.message);
+  const route = routed.value as BranchRoute;
+  const attempt: AttemptInput =
+    route.kind === "attempt"
+      ? { task: route.attempt.task, number: route.attempt.number }
+      : { task: route.task, number: route.number };
+  const name = attemptRef(attempt.task, attempt.number);
+  const fork = forkRepo(project.id, name);
+
+  let pending = route.kind === "create";
+  const abandon = async () => {
+    if (!pending) return;
+    pending = false;
+    const undone = await backend.call("abandonBranchPush", [project, actor, attempt]);
+    if (!undone.ok) console.error({ event: "git.abandon_failed", repo: fork, error: undone.message });
   };
+
+  try {
+    if (pending) await forkReady(upstream.repos, fork);
+    const [head] = await upstream.repos.listCommits(fork, { ref: "main", limit: 1 });
+    const before = head?.hash ?? "0".repeat(update.after.length);
+    const forkUpdate: RefUpdate = { ref: MAIN, before, after: update.after };
+    const commands = commandList(push, [forkUpdate]);
+    const length = contentLength(c);
+    const prefix: Prefix = {
+      bytes: concat([commands, push.consumed.subarray(push.commandLength)]),
+      length: length === null ? null : length - push.commandLength + commands.length,
+    };
+    const forkTarget: Target = { ...target, attempt, repo: fork, endpoint: "git-receive-pack" };
+    const response = await forward(c, forkTarget, "write", prefix, upstream);
+    if (!response.ok) {
+      await response.body?.cancel();
+      if (response.status === 401 || response.status === 403) upstream.tokens.forget(fork, "write");
+      console.error({ event: "git.upstream_failed", repo: fork, status: response.status });
+      await abandon();
+      return text(502, `The repository host refused the push to ${name}. Try again.`);
+    }
+
+    const sideband = push.capabilities.has("side-band-64k");
+    let report: PushReport;
+    try {
+      report = readReport(new Uint8Array(await response.arrayBuffer()), sideband);
+    } catch (err) {
+      if (!(err instanceof ProtocolError)) throw err;
+      report = { lines: ["unpack ok", `ng ${MAIN} the repository host's reply couldn't be read`], other: [] };
+    }
+    const landed = report.lines.includes("unpack ok") && report.lines.includes(`ok ${MAIN}`);
+
+    let messages: string[] = [];
+    if (!landed) {
+      await abandon();
+    } else if (route.kind === "create") {
+      const done = await backend.call("completeBranchPush", [
+        project,
+        actor,
+        { ...attempt, head: update.after, updates: [forkUpdate] },
+      ]);
+      if (done.ok) {
+        pending = false;
+        const made = done.value as { task: StoredTask; attempt: StoredAttempt };
+        messages = createdLines(c, made.task, made.attempt, branch, route.new_task);
+      } else {
+        await abandon();
+        report = refuse(report, done.message);
+      }
+    } else {
+      const recorded = await backend.call("recordPush", [project, actor, { ...attempt, updates: [forkUpdate] }]);
+      if (!recorded.ok) console.error({ event: "git.record_push_failed", error: recorded.message });
+      messages = [
+        `Updated ${name} on ${taskRef(attempt.task)} from branch ${branch}.`,
+        ...links(c, attempt.task, name),
+      ];
+    }
+
+    console.log({ event: "git.push_to_create", repo: fork, branch, user: actor.user.id, route: route.kind, landed });
+    const reply = writeReport(
+      renameRefs(report, (ref) => (ref === MAIN ? update.ref : ref)),
+      messages,
+      sideband,
+    );
+    return new Response(reply, {
+      status: 200,
+      headers: { "Content-Type": "application/x-git-receive-pack-result", "Cache-Control": "no-cache" },
+    });
+  } catch (err) {
+    await abandon();
+    console.error({ event: "git.push_to_create_failed", repo: fork, branch, error: String(err) });
+    return text(502, `The push of ${branch} to ${name} failed. Try again.`);
+  }
+}
+
+/** Waits until a new fork can be read; Artifacts may take a moment after `fork` resolves. */
+async function forkReady(repos: Repos, name: string): Promise<void> {
+  const began = Date.now();
+  for (;;) {
+    try {
+      await repos.get(name);
+      return;
+    } catch (err) {
+      if (Date.now() - began > FORK_READY_TIMEOUT_MS) throw err;
+      await new Promise((resolve) => setTimeout(resolve, FORK_READY_POLL_MS));
+    }
+  }
+}
+
+/** `report` with the fork's `main` turned from `ok` to `ng` for `reason`. */
+function refuse(report: PushReport, reason: string): PushReport {
+  const line = `ng ${MAIN} ${reason.replace(/\s+/g, " ").trim()}`;
+  return { ...report, lines: report.lines.map((l) => (l === `ok ${MAIN}` ? line : l)) };
+}
+
+/** The `remote:` lines for a push that made an attempt. */
+function createdLines(
+  c: GitContext,
+  task: StoredTask,
+  attempt: StoredAttempt,
+  branch: string,
+  newTask: boolean,
+): string[] {
+  const what = newTask
+    ? `Created ${taskRef(task.number)} "${task.title}" with attempt ${attempt.fork}, opened, from branch ${branch}.`
+    : `Added attempt ${attempt.fork}, opened, to ${taskRef(task.number)} "${task.title}" from branch ${branch}.`;
+  return [
+    what,
+    ...links(c, task.number, attempt.fork),
+    `Push ${branch} again, here or to the attempt's remote, to update it.`,
+  ];
+}
+
+/** The task's URL and the attempt's remote, from the request's own origin and path. */
+function links(c: GitContext, task: number, attempt: string): string[] {
+  const { origin, pathname } = new URL(c.req.url);
+  const [, owner = "", project = ""] = REMOTE_PATH.exec(pathname) ?? [];
+  return [
+    `  Task:    ${origin}/api/projects/${owner}/${project}/tasks/${taskRef(task)}`,
+    `  Attempt: ${origin}/git/${owner}/${project}/${attempt}.git`,
+  ];
 }
 
 /** Why a push is refused: one reason for every ref, or a reason per ref. */
@@ -233,12 +448,18 @@ interface Upstream {
   fetch: typeof fetch;
 }
 
-/** Sends the request on to the repo in Artifacts with Throng's token, replaying any body already read. */
+/** Bytes to send ahead of the rest of the request body, and the whole body's length if known. */
+interface Prefix {
+  bytes: Uint8Array;
+  length: number | null;
+}
+
+/** Sends the request on to the repo in Artifacts with Throng's token, sending `prefix` first. */
 async function forward(
   c: GitContext,
   target: Target,
   scope: TokenScope,
-  pushed: PushRequest | null,
+  prefix: Prefix | null,
   { repos, tokens, fetch }: Upstream,
 ): Promise<Response> {
   const { remote, token } = await tokens.get(repos, target.repo, scope);
@@ -251,7 +472,7 @@ async function forward(
   }
   let body: ReadableStream<Uint8Array> | null = null;
   if (c.req.method === "POST") {
-    body = pushed === null ? c.req.raw.body : replay(pushed.consumed, c.req.raw.body, contentLength(c));
+    body = prefix === null ? c.req.raw.body : replay(prefix.bytes, c.req.raw.body, prefix.length);
   }
   // `manual`, so a redirect can't carry our token to another host. `duplex` is for Node's fetch.
   const init = { method: c.req.method, headers, body, redirect: "manual", duplex: "half" } as RequestInit;

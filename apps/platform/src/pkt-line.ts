@@ -1,6 +1,7 @@
 // Just enough of git's pkt-line protocol for the git proxy: reading a receive-pack command list
-// before any pack data, answering a push ourselves with `report-status`, and reading the report
-// the upstream sent back. See `gitprotocol-common`, `gitprotocol-pack` and `gitprotocol-http`.
+// before any pack data, rewriting it for another ref, answering a push ourselves with
+// `report-status`, and reading (and rewriting) the report the upstream sent back. See
+// `gitprotocol-common`, `gitprotocol-pack` and `gitprotocol-http`.
 
 const FLUSH = "0000";
 /** The largest pkt-line git sends: 4 bytes of length and 65516 of payload. */
@@ -36,6 +37,10 @@ export interface PushRequest {
   capabilities: Set<string>;
   /** Every byte read from the body so far, the command list and possibly the start of the pack. */
   consumed: Uint8Array;
+  /** How many bytes of `consumed` are the command list, through the flush that ends it. */
+  commandLength: number;
+  /** The shallow lines before the commands, without their newlines. */
+  shallow: string[];
 }
 
 /** A body the proxy refuses to read further: malformed, or using something it doesn't check. */
@@ -65,6 +70,7 @@ export function flushPkt(): Uint8Array {
 export async function readPushRequest(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<PushRequest> {
   const buffer = new ByteBuffer(reader);
   const updates: RefUpdate[] = [];
+  const shallow: string[] = [];
   let capabilities = new Set<string>();
   for (;;) {
     const line = await buffer.pkt();
@@ -75,6 +81,7 @@ export async function readPushRequest(reader: ReadableStreamDefaultReader<Uint8A
     // pass through untouched.
     if (text.startsWith("shallow ")) {
       if (updates.length > 0 || !OBJECT_ID.test(text.slice(8))) throw new ProtocolError("malformed shallow line");
+      shallow.push(text);
       continue;
     }
     if (text.startsWith("push-cert")) throw new ProtocolError("signed pushes aren't supported");
@@ -105,7 +112,22 @@ export async function readPushRequest(reader: ReadableStreamDefaultReader<Uint8A
     updates.push({ ref, before, after });
     if (updates.length > MAX_COMMANDS) throw new ProtocolError(`a push may update at most ${MAX_COMMANDS} refs`);
   }
-  return { updates, capabilities, consumed: buffer.consumed() };
+  return { updates, capabilities, consumed: buffer.consumed(), commandLength: buffer.position(), shallow };
+}
+
+/**
+ * The bytes of `push`'s command list with `updates` in place of its own: its shallow lines, the
+ * commands (capabilities on the first) and the flush. Swapped for `push.consumed`'s first
+ * `commandLength` bytes, it sends the same pack to other refs.
+ */
+export function commandList(push: PushRequest, updates: RefUpdate[]): Uint8Array {
+  const lines = push.shallow.map((line) => pktLine(`${line}\n`));
+  updates.forEach((u, i) => {
+    const capabilities = i === 0 && push.capabilities.size > 0 ? `\0${[...push.capabilities].join(" ")}` : "";
+    lines.push(pktLine(`${u.before} ${u.after} ${u.ref}${capabilities}\n`));
+  });
+  lines.push(flushPkt());
+  return concat(lines);
 }
 
 /**
@@ -120,17 +142,20 @@ export function rejectionReport(push: PushRequest, reasons: string[]): Uint8Arra
   lines.push(flushPkt());
   const report = concat(lines);
   if (!push.capabilities.has("side-band-64k")) return report;
+  return concat([...banded(report, 1), flushPkt()]);
+}
 
+/** `data` as side-band-64k packets on band `number`. */
+function banded(data: Uint8Array, number: number): Uint8Array[] {
   const packets: Uint8Array[] = [];
-  for (let at = 0; at < report.length; at += MAX_BAND_DATA) {
-    const chunk = report.subarray(at, at + MAX_BAND_DATA);
-    const banded = new Uint8Array(chunk.length + 1);
-    banded[0] = 1;
-    banded.set(chunk, 1);
-    packets.push(pktLine(banded));
+  for (let at = 0; at < data.length; at += MAX_BAND_DATA) {
+    const chunk = data.subarray(at, at + MAX_BAND_DATA);
+    const packet = new Uint8Array(chunk.length + 1);
+    packet[0] = number;
+    packet.set(chunk, 1);
+    packets.push(pktLine(packet));
   }
-  packets.push(flushPkt());
-  return concat(packets);
+  return packets;
 }
 
 /**
@@ -151,6 +176,53 @@ export function updatedRefs(response: Uint8Array, sideband: boolean): string[] {
   } catch {
     return [];
   }
+}
+
+/** A receive-pack response, read apart so the proxy can rewrite it. */
+export interface PushReport {
+  /** The `report-status` lines, without their newlines. */
+  lines: string[];
+  /** Packets on side-bands 2 and 3 (progress and errors), with their band byte, in order. */
+  other: Uint8Array[];
+}
+
+/** Reads a receive-pack response apart, through side-band-64k when `sideband` is set. */
+export function readReport(response: Uint8Array, sideband: boolean): PushReport {
+  const other: Uint8Array[] = [];
+  let report = response;
+  if (sideband) {
+    const parts: Uint8Array[] = [];
+    for (const packet of pktLines(response)) {
+      if (packet[0] === 1) parts.push(packet.subarray(1));
+      else other.push(packet);
+    }
+    report = concat(parts);
+  }
+  const lines = [...pktLines(report)].map((line) => decoder.decode(line).replace(/\n$/, ""));
+  return { lines, other };
+}
+
+/**
+ * A receive-pack response from a report: its progress and errors, then `messages` on band 2 (git
+ * prints them as `remote:` lines), then the report-status on band 1. Without side-band there is
+ * nowhere to put messages, so the response is the bare report.
+ */
+export function writeReport(report: PushReport, messages: string[], sideband: boolean): Uint8Array {
+  const status = concat([...report.lines.map((line) => pktLine(`${line}\n`)), flushPkt()]);
+  if (!sideband) return status;
+  const packets = report.other.map((p) => pktLine(p));
+  for (const message of messages) packets.push(pktLine(concat([new Uint8Array([2]), encoder.encode(`${message}\n`)])));
+  packets.push(...banded(status, 1), flushPkt());
+  return concat(packets);
+}
+
+/** `report` with every ref it names (`ok`, `ng`, `option refname`) passed through `rename`. */
+export function renameRefs(report: PushReport, rename: (ref: string) => string): PushReport {
+  const lines = report.lines.map((line) => {
+    const match = /^(ok |ng |option refname )(\S+)(.*)$/.exec(line);
+    return match === null ? line : `${match[1]}${rename(match[2] ?? "")}${match[3]}`;
+  });
+  return { ...report, lines };
 }
 
 /** The data of one side-band, concatenated, from a sequence of side-band packets. */
@@ -213,6 +285,11 @@ class ByteBuffer {
     const length = pktLength(await this.#take(4));
     if (length === 0) return null;
     return this.#take(length - 4);
+  }
+
+  /** How many bytes the pkt-lines taken so far span. */
+  position(): number {
+    return this.#read - (this.#bytes.length - this.#at);
   }
 
   /** Every byte read off the stream, including any past the last pkt-line taken. */

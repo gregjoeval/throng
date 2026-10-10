@@ -196,17 +196,16 @@ describe("git proxy", () => {
     expect(host.requests.filter((r) => r.method === "POST" && r.path.endsWith("git-receive-pack"))).toEqual([]);
   });
 
-  it("rejects other branches pushed to the origin until push-to-create lands", async () => {
-    const { ada, clone, commit, env, host, origin } = await setup();
+  it("rejects a push of several refs to the origin, since one pack lands in one fork", async () => {
+    const { ada, clone, commit, env, host, origin, project } = await setup();
     const dir = await clone("throng.git", ada.token);
     await commit(dir, "feature");
     const pushed = await tryGit(dir, env, "push", "origin", "HEAD:refs/heads/feature", "HEAD:refs/heads/t1/x");
     expect(pushed.ok).toBe(false);
-    expect(pushed.stderr).toMatch(
-      /\[remote rejected\] HEAD -> feature \(pushing a branch to the origin isn't supported yet/,
-    );
+    expect(pushed.stderr).toMatch(/\[remote rejected\] HEAD -> feature \(push one branch at a time to the origin/);
     expect(pushed.stderr).toMatch(/\[remote rejected\] HEAD -> t1\/x/);
     expect(await host.head(origin, "refs/heads/feature")).toBeNull();
+    expect(await host.list(`${project.id}-t1a2`)).toEqual([]);
   });
 
   it("rejects a push with a plain 403 when the client asked for no report", async () => {

@@ -1,13 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
+  commandList,
   concat,
   flushPkt,
   MAX_COMMANDS,
   pktLine,
   ProtocolError,
   readPushRequest,
+  readReport,
   rejectionReport,
+  renameRefs,
   updatedRefs,
+  writeReport,
 } from "../src/pkt-line.ts";
 
 const A = "a".repeat(40);
@@ -52,6 +56,8 @@ describe("readPushRequest", () => {
     const rest: Uint8Array[] = [];
     for (let r = await reader.read(); !r.done; r = await reader.read()) rest.push(r.value);
     expect(concat([push.consumed, ...rest])).toEqual(body);
+    // The command list ends where the pack starts.
+    expect(text(concat([push.consumed.subarray(push.commandLength), ...rest]).subarray(0, 4))).toBe("PACK");
   });
 
   it("reads a probe as no updates", async () => {
@@ -59,9 +65,10 @@ describe("readPushRequest", () => {
     expect(push.updates).toEqual([]);
   });
 
-  it("skips a shallow clone's shallow lines", async () => {
+  it("keeps a shallow clone's shallow lines apart from the commands", async () => {
     const push = await readPushRequest(stream(request(`shallow ${A}`, `${A} ${B} refs/heads/main\0report-status\n`)));
     expect(push.updates).toEqual([{ ref: "refs/heads/main", before: A, after: B }]);
+    expect(push.shallow).toEqual([`shallow ${A}`]);
   });
 
   it("fails closed on what it can't check", async () => {
@@ -92,6 +99,8 @@ function twoRefPush(capabilities: string[]) {
     ],
     capabilities: new Set(capabilities),
     consumed: new Uint8Array(0),
+    commandLength: 0,
+    shallow: [],
   };
 }
 
@@ -99,6 +108,51 @@ function twoRefPush(capabilities: string[]) {
 function report(...lines: string[]): Uint8Array {
   return concat([...lines.map((l) => pktLine(l)), flushPkt()]);
 }
+
+describe("commandList", () => {
+  it("rewrites the commands and keeps the shallow lines and capabilities, so the pack can follow", async () => {
+    const body = request(`shallow ${A}`, `${ZERO} ${B} refs/heads/feature\0report-status side-band-64k\n`);
+    const reader = stream(body);
+    const push = await readPushRequest(reader);
+    const rest: Uint8Array[] = [];
+    for (let r = await reader.read(); !r.done; r = await reader.read()) rest.push(r.value);
+    const rewritten = concat([
+      commandList(push, [{ ref: "refs/heads/main", before: A, after: B }]),
+      push.consumed.subarray(push.commandLength),
+      ...rest,
+    ]);
+    expect(rewritten).toEqual(request(`shallow ${A}\n`, `${A} ${B} refs/heads/main\0report-status side-band-64k\n`));
+  });
+});
+
+describe("readReport and writeReport", () => {
+  const progress = concat([new Uint8Array([2]), new TextEncoder().encode("Resolving deltas\n")]);
+  const inner = report("unpack ok\n", "ok refs/heads/main\n");
+  const sideband = concat([pktLine(progress), pktLine(concat([new Uint8Array([1]), inner])), flushPkt()]);
+
+  it("renames refs, keeps progress and adds messages on band 2", () => {
+    const read = renameRefs(readReport(sideband, true), (ref) => (ref === "refs/heads/main" ? "refs/heads/x" : ref));
+    expect(read).toEqual({ lines: ["unpack ok", "ok refs/heads/x"], other: [progress] });
+    const written = writeReport(read, ["Created t1"], true);
+    expect(updatedRefs(written, true)).toEqual(["refs/heads/x"]);
+    expect(text(written)).toContain("Resolving deltas\n");
+    expect(text(written)).toContain("\x02Created t1\n");
+  });
+
+  it("writes a bare report without side-band, dropping messages", () => {
+    const read = readReport(inner, false);
+    expect(read.lines).toEqual(["unpack ok", "ok refs/heads/main"]);
+    expect(writeReport(read, ["dropped"], false)).toEqual(inner);
+  });
+
+  it("renames refs on ng and option lines too", () => {
+    const renamed = renameRefs(
+      { lines: ["ng refs/heads/main locked", "option refname refs/heads/main"], other: [] },
+      () => "refs/heads/y",
+    );
+    expect(renamed.lines).toEqual(["ng refs/heads/y locked", "option refname refs/heads/y"]);
+  });
+});
 
 describe("rejectionReport", () => {
   it("marks every ref ng with its reason", () => {

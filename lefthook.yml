@@ -8,4 +8,4 @@ pre-commit:
       stage_fixed: true
     lint:
       glob: "*.{ts,tsx,js}"
-      run: pnpm exec oxlint --deny-warnings {staged_files}
+      run: pnpm exec oxlint --deny-warnings --no-error-on-unmatched-pattern {staged_files}

@@ -16,6 +16,10 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Check generated Worker types are current
+        run: |
+          pnpm types
+          git diff --exit-code -- '**/worker-configuration.d.ts' || { echo "::error::Run 'pnpm types' and commit worker-configuration.d.ts"; exit 1; }
       - run: pnpm build
       - run: pnpm typecheck
       - run: pnpm lint

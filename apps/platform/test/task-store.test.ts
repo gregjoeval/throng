@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { CONFIG_PATH, parseConfig } from "../src/config.ts";
 import { ServiceError } from "../src/errors.ts";
 import {
   attemptLimitFromConfig,
-  CONFIG_PATH,
   DEFAULT_ATTEMPT_LIMIT,
   migrate,
   parseAttemptRef,
@@ -87,17 +87,22 @@ describe("references", () => {
 });
 
 describe("attemptLimitFromConfig", () => {
-  it("reads attempts.limit and ignores anything else", () => {
-    expect(attemptLimitFromConfig("attempts:\n  limit: 3\n")).toBe(3);
+  it("reads attempts.limit from a valid config, else the default", () => {
+    expect(attemptLimitFromConfig(parseConfig("attempts:\n  limit: 3\n"))).toBe(3);
+    expect(attemptLimitFromConfig(parseConfig(null))).toBe(DEFAULT_ATTEMPT_LIMIT);
+    for (const text of ["", "attempts: {}", "checks: []"]) {
+      expect(attemptLimitFromConfig(parseConfig(text)), text).toBe(DEFAULT_ATTEMPT_LIMIT);
+    }
+  });
+
+  it("falls back to the default when the config is invalid, even if it sets a limit", () => {
     for (const text of [
-      "",
-      "attempts: {}",
       "attempts:\n  limit: 0",
       "attempts:\n  limit: two",
       "attempts: [",
-      "x: 1",
+      "x: 1\nattempts:\n  limit: 3",
     ]) {
-      expect(attemptLimitFromConfig(text), text).toBeNull();
+      expect(attemptLimitFromConfig(parseConfig(text)), text).toBe(DEFAULT_ATTEMPT_LIMIT);
     }
   });
 });

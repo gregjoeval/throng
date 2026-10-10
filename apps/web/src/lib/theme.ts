@@ -23,3 +23,28 @@ export function setTheme(theme: Theme) {
     // Storage can be unavailable (private mode); the class still applies for this page.
   }
 }
+
+function hasSavedTheme(): boolean {
+  try {
+    return localStorage.getItem(storageKey) !== null;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Follows the OS setting while the user hasn't picked a theme, calling `onChange` with each new one.
+ * Returns the unsubscribe function.
+ */
+export function followSystemTheme(onChange: (theme: Theme) => void): () => void {
+  if (typeof matchMedia !== "function") return () => {};
+  const query = matchMedia("(prefers-color-scheme: dark)");
+  const listener = (event: MediaQueryListEvent) => {
+    if (hasSavedTheme()) return;
+    const theme: Theme = event.matches ? "dark" : "light";
+    document.documentElement.classList.toggle("dark", theme === "dark");
+    onChange(theme);
+  };
+  query.addEventListener("change", listener);
+  return () => query.removeEventListener("change", listener);
+}

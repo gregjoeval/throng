@@ -10,33 +10,117 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as OwnerProjectIndexRouteImport } from './routes/$owner/$project/index'
+import { Route as OwnerProjectCommitShaRouteImport } from './routes/$owner/$project/commit/$sha'
+import { Route as OwnerProjectCommitsRefRouteImport } from './routes/$owner/$project/commits/$ref'
+import { Route as OwnerProjectBlobRefSplatRouteImport } from './routes/$owner/$project/blob/$ref/$'
+import { Route as OwnerProjectRawRefSplatRouteImport } from './routes/$owner/$project/raw/$ref/$'
+import { Route as OwnerProjectTreeRefSplatRouteImport } from './routes/$owner/$project/tree/$ref/$'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const OwnerProjectIndexRoute = OwnerProjectIndexRouteImport.update({
+  id: '/$owner/$project/',
+  path: '/$owner/$project/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const OwnerProjectCommitShaRoute = OwnerProjectCommitShaRouteImport.update({
+  id: '/$owner/$project/commit/$sha',
+  path: '/$owner/$project/commit/$sha',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const OwnerProjectCommitsRefRoute = OwnerProjectCommitsRefRouteImport.update({
+  id: '/$owner/$project/commits/$ref',
+  path: '/$owner/$project/commits/$ref',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const OwnerProjectBlobRefSplatRoute =
+  OwnerProjectBlobRefSplatRouteImport.update({
+    id: '/$owner/$project/blob/$ref/$',
+    path: '/$owner/$project/blob/$ref/$',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const OwnerProjectRawRefSplatRoute = OwnerProjectRawRefSplatRouteImport.update({
+  id: '/$owner/$project/raw/$ref/$',
+  path: '/$owner/$project/raw/$ref/$',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const OwnerProjectTreeRefSplatRoute =
+  OwnerProjectTreeRefSplatRouteImport.update({
+    id: '/$owner/$project/tree/$ref/$',
+    path: '/$owner/$project/tree/$ref/$',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/$owner/$project/': typeof OwnerProjectIndexRoute
+  '/$owner/$project/commit/$sha': typeof OwnerProjectCommitShaRoute
+  '/$owner/$project/commits/$ref': typeof OwnerProjectCommitsRefRoute
+  '/$owner/$project/blob/$ref/$': typeof OwnerProjectBlobRefSplatRoute
+  '/$owner/$project/raw/$ref/$': typeof OwnerProjectRawRefSplatRoute
+  '/$owner/$project/tree/$ref/$': typeof OwnerProjectTreeRefSplatRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/$owner/$project': typeof OwnerProjectIndexRoute
+  '/$owner/$project/commit/$sha': typeof OwnerProjectCommitShaRoute
+  '/$owner/$project/commits/$ref': typeof OwnerProjectCommitsRefRoute
+  '/$owner/$project/blob/$ref/$': typeof OwnerProjectBlobRefSplatRoute
+  '/$owner/$project/raw/$ref/$': typeof OwnerProjectRawRefSplatRoute
+  '/$owner/$project/tree/$ref/$': typeof OwnerProjectTreeRefSplatRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/$owner/$project/': typeof OwnerProjectIndexRoute
+  '/$owner/$project/commit/$sha': typeof OwnerProjectCommitShaRoute
+  '/$owner/$project/commits/$ref': typeof OwnerProjectCommitsRefRoute
+  '/$owner/$project/blob/$ref/$': typeof OwnerProjectBlobRefSplatRoute
+  '/$owner/$project/raw/$ref/$': typeof OwnerProjectRawRefSplatRoute
+  '/$owner/$project/tree/$ref/$': typeof OwnerProjectTreeRefSplatRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/'
+  fullPaths:
+    | '/'
+    | '/$owner/$project/'
+    | '/$owner/$project/commit/$sha'
+    | '/$owner/$project/commits/$ref'
+    | '/$owner/$project/blob/$ref/$'
+    | '/$owner/$project/raw/$ref/$'
+    | '/$owner/$project/tree/$ref/$'
   fileRoutesByTo: FileRoutesByTo
-  to: '/'
-  id: '__root__' | '/'
+  to:
+    | '/'
+    | '/$owner/$project'
+    | '/$owner/$project/commit/$sha'
+    | '/$owner/$project/commits/$ref'
+    | '/$owner/$project/blob/$ref/$'
+    | '/$owner/$project/raw/$ref/$'
+    | '/$owner/$project/tree/$ref/$'
+  id:
+    | '__root__'
+    | '/'
+    | '/$owner/$project/'
+    | '/$owner/$project/commit/$sha'
+    | '/$owner/$project/commits/$ref'
+    | '/$owner/$project/blob/$ref/$'
+    | '/$owner/$project/raw/$ref/$'
+    | '/$owner/$project/tree/$ref/$'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  OwnerProjectIndexRoute: typeof OwnerProjectIndexRoute
+  OwnerProjectCommitShaRoute: typeof OwnerProjectCommitShaRoute
+  OwnerProjectCommitsRefRoute: typeof OwnerProjectCommitsRefRoute
+  OwnerProjectBlobRefSplatRoute: typeof OwnerProjectBlobRefSplatRoute
+  OwnerProjectRawRefSplatRoute: typeof OwnerProjectRawRefSplatRoute
+  OwnerProjectTreeRefSplatRoute: typeof OwnerProjectTreeRefSplatRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -48,11 +132,59 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/$owner/$project/': {
+      id: '/$owner/$project/'
+      path: '/$owner/$project'
+      fullPath: '/$owner/$project/'
+      preLoaderRoute: typeof OwnerProjectIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/$owner/$project/commit/$sha': {
+      id: '/$owner/$project/commit/$sha'
+      path: '/$owner/$project/commit/$sha'
+      fullPath: '/$owner/$project/commit/$sha'
+      preLoaderRoute: typeof OwnerProjectCommitShaRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/$owner/$project/commits/$ref': {
+      id: '/$owner/$project/commits/$ref'
+      path: '/$owner/$project/commits/$ref'
+      fullPath: '/$owner/$project/commits/$ref'
+      preLoaderRoute: typeof OwnerProjectCommitsRefRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/$owner/$project/blob/$ref/$': {
+      id: '/$owner/$project/blob/$ref/$'
+      path: '/$owner/$project/blob/$ref/$'
+      fullPath: '/$owner/$project/blob/$ref/$'
+      preLoaderRoute: typeof OwnerProjectBlobRefSplatRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/$owner/$project/raw/$ref/$': {
+      id: '/$owner/$project/raw/$ref/$'
+      path: '/$owner/$project/raw/$ref/$'
+      fullPath: '/$owner/$project/raw/$ref/$'
+      preLoaderRoute: typeof OwnerProjectRawRefSplatRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/$owner/$project/tree/$ref/$': {
+      id: '/$owner/$project/tree/$ref/$'
+      path: '/$owner/$project/tree/$ref/$'
+      fullPath: '/$owner/$project/tree/$ref/$'
+      preLoaderRoute: typeof OwnerProjectTreeRefSplatRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  OwnerProjectIndexRoute: OwnerProjectIndexRoute,
+  OwnerProjectCommitShaRoute: OwnerProjectCommitShaRoute,
+  OwnerProjectCommitsRefRoute: OwnerProjectCommitsRefRoute,
+  OwnerProjectBlobRefSplatRoute: OwnerProjectBlobRefSplatRoute,
+  OwnerProjectRawRefSplatRoute: OwnerProjectRawRefSplatRoute,
+  OwnerProjectTreeRefSplatRoute: OwnerProjectTreeRefSplatRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

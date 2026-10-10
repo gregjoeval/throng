@@ -26,3 +26,17 @@ export function apiQuery<const K extends QueryKey, R extends ClientResponse<unkn
 
 /** The caller: their user, and the agent and token they act with (both null in the browser). */
 export const meQuery = apiQuery(["me"], (init) => client.api.me.$get(undefined, { init }));
+
+/** The projects the signed-in user owns, by handle. */
+export const projectsQuery = apiQuery(["projects"], (init) => client.api.projects.$get(undefined, { init }));
+
+/** One project by its owner's handle and its own; a 404 means there's no such project. */
+export const projectQuery = (owner: string, project: string) =>
+  apiQuery(["projects", owner, project], (init) =>
+    client.api.projects[":owner"][":project"].$get({ param: { owner, project } }, { init }),
+  );
+
+/** Creates a project owned by the signed-in user. Rejects with hono's `DetailedError` on failure. */
+export async function createProject(handle: string) {
+  return parseResponse(client.api.projects.$post({ json: { handle } }));
+}

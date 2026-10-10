@@ -2,6 +2,8 @@ import { Hono } from "hono";
 import { describe, expect, it } from "vitest";
 import type { AccessVerifier } from "../src/access.ts";
 import { apiRoutes } from "../src/api.ts";
+import { mintToken } from "../src/tokens.ts";
+import { userForEmail } from "../src/users.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
 
@@ -13,8 +15,10 @@ const DAY = 24 * HOUR;
 type Json = Record<string, any>;
 type As = { access?: string; bearer?: string };
 
+const NOW = new Date("2026-10-10T12:00:00.000Z");
+
 function setup() {
-  let clock = new Date("2026-10-10T12:00:00.000Z");
+  let clock = NOW;
   const repos = new FakeRepos();
   const api = apiRoutes({ verifierFor: () => verify, now: () => clock, repos: () => repos });
   const env = { DB: testDatabase(), ACCESS_TEAM_DOMAIN: "throng.cloudflareaccess.com", ACCESS_AUD: "aud" };
@@ -245,6 +249,41 @@ describe("POST /api/projects", () => {
   });
 });
 
+describe("GET /api/projects", () => {
+  it("lists the projects the caller's human owns, by handle", async () => {
+    const { call, mint, env } = setup();
+    const greg = { bearer: (await mint())["token"] };
+    const claude = { bearer: (await mint({ agent: "claude" }))["token"] };
+    for (const handle of ["zeta", "alpha"]) {
+      expect((await call("POST", "/projects", greg, { handle })).status).toBe(201);
+    }
+    const ada = await userForEmail(env.DB, "ada@example.com");
+    const { plaintext } = await mintToken(env.DB, { userId: ada.id, agent: null, ttlSeconds: HOUR, now: NOW });
+    expect((await call("POST", "/projects", { bearer: plaintext }, { handle: "other" })).status).toBe(201);
+
+    for (const as of [greg, claude]) {
+      const res = await call("GET", "/projects", as);
+      expect(res.status).toBe(200);
+      expect(res.body["projects"].map((p: Json) => `${p["owner"]["handle"]}/${p["handle"]}`)).toEqual([
+        "greg/alpha",
+        "greg/zeta",
+      ]);
+    }
+    expect((await call("GET", "/projects", { bearer: plaintext })).body["projects"]).toHaveLength(1);
+  });
+
+  it("is an empty list for a caller with no projects", async () => {
+    const { call, mint } = setup();
+    const res = await call("GET", "/projects", { bearer: (await mint())["token"] });
+    expect(res).toEqual({ status: 200, body: { projects: [] } });
+  });
+
+  it("needs a bearer token; an Access session is not enough", async () => {
+    const { call, human } = setup();
+    for (const as of [{}, human]) expect((await call("GET", "/projects", as)).status).toBe(401);
+  });
+});
+
 describe("GET /api/projects/{owner}/{project}", () => {
   it("resolves handles to the project", async () => {
     const { call, mint } = setup();
@@ -303,7 +342,15 @@ describe("GET /api/openapi.json", () => {
     const operations = Object.values(body["paths"]).flatMap((path) => Object.values(path as Json)) as Json[];
     const operationIds = operations.map((op) => op["operationId"]);
     expect(operationIds).toEqual(
-      expect.arrayContaining(["getMe", "mintToken", "listTokens", "revokeToken", "createProject", "getProject"]),
+      expect.arrayContaining([
+        "getMe",
+        "mintToken",
+        "listTokens",
+        "revokeToken",
+        "listProjects",
+        "createProject",
+        "getProject",
+      ]),
     );
     expect(new Set(operationIds).size).toBe(operations.length);
     for (const op of operations) {

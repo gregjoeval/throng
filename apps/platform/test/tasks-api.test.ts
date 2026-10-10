@@ -202,6 +202,7 @@ describe("OpenAPI document", () => {
         "reopenAttempt",
         "obsoleteAttempt",
         "restoreAttempt",
+        "handOffAttempt",
       ]),
     );
     expect(body["components"]["schemas"]["Task"]).toBeDefined();

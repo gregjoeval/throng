@@ -44,6 +44,10 @@ _Avoid_: Contributor, assignee, worker
 An author's exclusive right to push to an attempt's fork.
 _Avoid_: Lock, assignment
 
+**Hand-off**:
+An author giving an active attempt, and with it the claim, to another user, who becomes its author at once.
+_Avoid_: Transfer, reassignment
+
 **Base**:
 The commit an attempt's work starts from, as its git history reports it; an attempt whose base lies in another attempt's history builds on that attempt.
 _Avoid_: Parent, starting point

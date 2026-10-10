@@ -1,6 +1,6 @@
-// End-to-end spike against a deployed throng Worker and real Artifacts.
+// End-to-end suite against a deployed throng Worker and real Artifacts.
 //
-//   THRONG_URL=https://throng.<subdomain>.workers.dev SPIKE_TOKEN=... pnpm spike [scenario...]
+//   THRONG_URL=https://throng.<subdomain>.workers.dev SPIKE_TOKEN=... pnpm e2e [scenario...]
 //
 // Scenarios: happy (one attempt lands), coalesce (two quick pushes; only the newest sha is checked),
 // conflict (two attempts edit the same line; the second is bounced with its conflicting hunks),
@@ -8,8 +8,8 @@
 // intrusion (an attempt's tests try to push to the canonical main and call the Cloudflare API; both fail),
 // deps (an attempt adds an npm dependency; the check installs it from the registry, lands, and previews).
 //
-// Every project id starts with SPIKE_PROJECT_PREFIX (default `spike`; lowercase alphanumeric).
-// `pnpm spike cleanup` deletes every repo whose name starts with an explicitly set SPIKE_PROJECT_PREFIX,
+// Every project id starts with E2E_PROJECT_PREFIX (default `e2e`; lowercase alphanumeric).
+// `pnpm e2e cleanup` deletes every repo whose name starts with an explicitly set E2E_PROJECT_PREFIX,
 // including those a failed or cancelled run left behind.
 
 import { execFile } from "node:child_process";
@@ -27,8 +27,8 @@ const CHECK_TIMEOUT_MS = 10 * 60 * 1_000;
 
 const baseUrl = requireEnv("THRONG_URL").replace(/\/$/, "");
 const spikeToken = requireEnv("SPIKE_TOKEN");
-const projectPrefix = process.env.SPIKE_PROJECT_PREFIX || "spike";
-assert(/^[a-z0-9]+$/.test(projectPrefix), `SPIKE_PROJECT_PREFIX must be lowercase alphanumeric: ${projectPrefix}`);
+const projectPrefix = process.env.E2E_PROJECT_PREFIX || "e2e";
+assert(/^[a-z0-9]+$/.test(projectPrefix), `E2E_PROJECT_PREFIX must be lowercase alphanumeric: ${projectPrefix}`);
 
 interface JournalEntry {
   id: number;
@@ -81,9 +81,9 @@ async function main(): Promise<void> {
   process.exitCode = failed ? 1 : 0;
 }
 
-/** Deletes every repo under SPIKE_PROJECT_PREFIX. It must be set explicitly, so the default never sweeps. */
+/** Deletes every repo under E2E_PROJECT_PREFIX. It must be set explicitly, so the default never sweeps. */
 async function deleteRun(): Promise<void> {
-  requireEnv("SPIKE_PROJECT_PREFIX");
+  requireEnv("E2E_PROJECT_PREFIX");
   const names = await api<string[]>("GET", `/spike/repos?prefix=${projectPrefix}`);
   console.log(`deleting ${names.length} repo(s) starting with ${projectPrefix}`);
   for (const name of names) {
@@ -251,7 +251,7 @@ async function preview(): Promise<void> {
   assert(ready.kind === "preview-ready", `preview failed: ${String(ready.detail.output)}`);
   const url = String(ready.detail.url);
   timeline.mark(`preview ready (wrangler preview ${String(ready.detail.runMs)} ms): ${url}`);
-  const body = await fetchUntil(`${url}/?name=spike`, (b) => b === "hello from a1, spike");
+  const body = await fetchUntil(`${url}/?name=e2e`, (b) => b === "hello from a1, e2e");
   timeline.mark(`preview served the change: ${JSON.stringify(body)}`);
 
   await waitFor(project, (e) => e.kind === "check-finished" && e.detail.sha === sha);
@@ -372,7 +372,7 @@ test("the dependency is installed", () => {
     (e) => (e.kind === "preview-ready" || e.kind === "preview-failed") && e.detail.sha === sha,
   );
   assert(ready.kind === "preview-ready", `preview failed: ${String(ready.detail.output)}`);
-  const body = await fetchUntil(`${String(ready.detail.url)}/?name=spike`, (b) => b === "hello with deps, spike");
+  const body = await fetchUntil(`${String(ready.detail.url)}/?name=e2e`, (b) => b === "hello with deps, e2e");
   timeline.mark(`preview served ${JSON.stringify(body)}`);
 
   const journal = await settle(project, 5_000);
@@ -483,7 +483,7 @@ async function waitFor(project: string, match: (e: JournalEntry) => boolean): Pr
 }
 
 async function cleanUp(project: string, attempts: string[], work: string): Promise<void> {
-  if (process.env.SPIKE_KEEP === "1") return;
+  if (process.env.E2E_KEEP === "1") return;
   for (const name of [originRepo(project), ...attempts.map((a) => forkRepo(project, a))]) {
     await api("DELETE", `/spike/repos/${name}`).catch((cause) => console.warn(`could not delete ${name}`, cause));
   }
@@ -513,10 +513,10 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
     env: {
       ...process.env,
       GIT_TERMINAL_PROMPT: "0",
-      GIT_AUTHOR_NAME: "spike",
-      GIT_AUTHOR_EMAIL: "spike@localhost",
-      GIT_COMMITTER_NAME: "spike",
-      GIT_COMMITTER_EMAIL: "spike@localhost",
+      GIT_AUTHOR_NAME: "e2e",
+      GIT_AUTHOR_EMAIL: "e2e@localhost",
+      GIT_COMMITTER_NAME: "e2e",
+      GIT_COMMITTER_EMAIL: "e2e@localhost",
     },
   });
   return stdout;

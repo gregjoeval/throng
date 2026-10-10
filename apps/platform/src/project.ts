@@ -36,7 +36,7 @@ interface CheckRow extends Record<string, SqlStorageValue> {
 /**
  * One per project: the inbox for its push events. Dedupes deliveries on (repo, sha), keeps at most
  * one live check per attempt (a newer push cancels the older check), and caps concurrent Sandboxes.
- * It also keeps a journal of every hop so the spike can read timings back.
+ * It also keeps a journal of every hop so the e2e suite can read timings back.
  */
 export class ProjectCoordinator extends DurableObject<Env> {
   readonly #sql: SqlStorage;

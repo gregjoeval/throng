@@ -1,19 +1,19 @@
-name: Integration
+name: E2E
 
-# Runs the spike scenarios against real Artifacts: deploys the platform's `ci` environment (the
-# `throng-ci` Worker) and runs `pnpm spike` against it. Manual only, from the Actions tab; see
+# Runs the e2e scenarios against real Artifacts: deploys the platform's `ci` environment (the
+# `throng-ci` Worker) and runs `pnpm e2e` against it. Manual only, from the Actions tab; see
 # apps/platform/README.md for the setup it needs.
 on:
   workflow_dispatch:
     inputs:
       scenarios:
-        description: Space-separated spike scenarios to run (empty runs them all)
+        description: Space-separated e2e scenarios to run (empty runs them all)
         required: false
         default: ""
 
 # One run at a time: they share the throng-ci Worker. Never cancel one halfway, or its repos leak.
 concurrency:
-  group: integration
+  group: e2e
   cancel-in-progress: false
 
 permissions:
@@ -24,7 +24,7 @@ defaults:
     shell: bash
 
 jobs:
-  spike:
+  e2e:
     if: github.repository == 'gregjoeval/throng'
     runs-on: ubuntu-latest
     environment: ci
@@ -36,7 +36,7 @@ jobs:
       CLOUDFLARE_ENV: ci
       # Every project this run creates starts with this, so cleanup can find its repos. The trailing
       # `p` keeps one run's prefix from being a prefix of another's.
-      SPIKE_PROJECT_PREFIX: ci${{ github.run_id }}r${{ github.run_attempt }}p
+      E2E_PROJECT_PREFIX: ci${{ github.run_id }}r${{ github.run_attempt }}p
     defaults:
       run:
         working-directory: apps/platform
@@ -78,20 +78,20 @@ jobs:
           # A new Worker's workers.dev route, and a new SPIKE_TOKEN, can take a moment to go live.
           for _ in $(seq 60); do
             status=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $SPIKE_TOKEN" \
-              "$THRONG_URL/spike/repos?prefix=$SPIKE_PROJECT_PREFIX" || true)
+              "$THRONG_URL/spike/repos?prefix=$E2E_PROJECT_PREFIX" || true)
             if [ "$status" = 200 ]; then exit 0; fi
             echo "throng-ci answered $status; waiting"
             sleep 5
           done
           echo "::error::$THRONG_URL never accepted this run's SPIKE_TOKEN"
           exit 1
-      - name: Run the spike
+      - name: Run the e2e suite
         env:
           SCENARIOS: ${{ inputs.scenarios }}
         run: |
           # Word-split on purpose: one argument per scenario name.
           # shellcheck disable=SC2086
-          pnpm spike $SCENARIOS
+          pnpm e2e $SCENARIOS
       - name: Delete this run's repos
         if: always() && env.THRONG_URL != ''
-        run: pnpm spike cleanup
+        run: pnpm e2e cleanup

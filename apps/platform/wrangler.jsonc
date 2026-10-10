@@ -55,7 +55,7 @@
   "observability": { "enabled": true },
   "env": {
     // The Worker the manual Integration workflow (.github/workflows/integration.yml) deploys and runs
-    // `pnpm spike` against. Select it with `CLOUDFLARE_ENV=ci`. Wrangler doesn't inherit bindings into
+    // `pnpm e2e` against. Select it with `CLOUDFLARE_ENV=ci`. Wrangler doesn't inherit bindings into
     // environments, so everything is repeated here with `throng-ci` resources.
     "ci": {
       "name": "throng-ci",

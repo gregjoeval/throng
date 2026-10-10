@@ -40,7 +40,7 @@
       "binding": "DB",
       "database_name": "throng",
       // PLACEHOLDER: run `wrangler d1 create throng` and paste the id it prints here.
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "65899f31-2d30-43f5-9588-708ae762809a",
       "migrations_dir": "migrations",
     },
   ],

@@ -77,13 +77,6 @@ export interface TreeEntry {
   type: "tree" | "blob" | "symlink" | "gitlink" | "exec";
 }
 
-/** A directory listing: the commit `ref` resolved to, the directory's tree, and its entries. */
-export interface Tree {
-  commit: string;
-  tree: string;
-  entries: TreeEntry[];
-}
-
 /** One ref copied from one repo to another: see `Repos.copyRef`. */
 export interface CopyRef {
   from: string;
@@ -114,10 +107,17 @@ export interface Repos {
   mintToken(name: string, scope: TokenScope, ttl: number): Promise<RepoToken>;
   /** A file's bytes at `ref`, or null if the ref or path doesn't resolve to a file. */
   readFile(name: string, args: { ref: string; path: string }): Promise<Blob | null>;
-  /** First-parent history from `ref`, newest first; empty if the ref doesn't resolve. */
-  listCommits(name: string, args: { ref: string; limit: number }): Promise<Commit[]>;
-  /** The directory at `path` (the root when empty) at `ref`, or null if either doesn't resolve. */
-  readTree(name: string, args: { ref: string; path: string }): Promise<Tree | null>;
+  /**
+   * First-parent history from `ref` (a branch, tag or commit sha), newest first, skipping `offset`
+   * commits; empty if the ref doesn't resolve.
+   */
+  listCommits(name: string, args: { ref: string; limit: number; offset?: number }): Promise<Commit[]>;
+  /** A commit by its 40-character lowercase sha, or null if the repo has no such commit. */
+  readCommit(name: string, hash: string): Promise<Commit | null>;
+  /** A tree's immediate children by the tree's sha, or null if the repo has no such object. */
+  readTree(name: string, hash: string): Promise<TreeEntry[] | null>;
+  /** A blob's raw bytes by its sha (the `Blob` is untyped), or null if the repo has no such blob. */
+  readBlob(name: string, hash: string): Promise<Blob | null>;
   /**
    * Points `toRef` in `to` at the commit `fromRef` points at in `from`, copying whatever objects
    * `to` lacks, and returns that commit's sha. Null, with nothing changed, when `fromRef` doesn't

@@ -1,0 +1,41 @@
+name: Deploy
+
+# Deploys main after CI passes on it, or on demand from the Actions tab.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+# One deploy at a time, in order; never cancel one halfway.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # The exact commit CI passed, not whatever main is now.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Apply D1 migrations
+        if: hashFiles('apps/platform/migrations/*.sql') != ''
+        working-directory: apps/platform
+        run: pnpm wrangler d1 migrations apply throng --remote
+      # The platform first: throng-web binds to it.
+      - run: pnpm --filter @throng/platform run deploy
+      - run: pnpm --filter @throng/web run deploy

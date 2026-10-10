@@ -6,6 +6,7 @@
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import type { AccessBindings } from "./access.ts";
 import { bearerAuth, bearerOrAccess, type AuthEnv, type AuthOptions } from "./auth.ts";
+import { CONFIG_NAME, MAX_CHECK_TIMEOUT_MS, MAX_CONFIG_BYTES, parseConfig } from "./config.ts";
 import { errorBody, errorResponse, ServiceError } from "./errors.ts";
 import { MAX_PROJECT_HANDLE, PROJECT_HANDLE, projectService } from "./projects.ts";
 import type { Repos } from "./repos.ts";
@@ -166,6 +167,61 @@ const TaskPathSchema = ProjectPathSchema.extend({
 const AttemptPathSchema = ProjectPathSchema.extend({
   a: z.string().openapi({ description: "An attempt reference.", example: "t42a3" }),
 });
+
+const ConfigNameSchema = z.string().regex(CONFIG_NAME);
+
+const ConfigSchema = z
+  .object({
+    setup: z.array(z.string()).openapi({ description: "Commands run once, in order, before the checks." }),
+    network: z.object({
+      allow: z.array(z.string()).openapi({ description: "Extra HTTPS hosts checks may reach, lowercased." }),
+    }),
+    checks: z
+      .array(
+        z.object({
+          name: ConfigNameSchema.openapi({ example: "test" }),
+          command: z.string().openapi({ example: "pnpm test" }),
+          required: z.boolean().openapi({ description: "Whether the gate needs it to pass." }),
+          timeoutMs: z
+            .number()
+            .int()
+            .max(MAX_CHECK_TIMEOUT_MS)
+            .openapi({ description: "Defaults to 10 minutes.", example: 600000 }),
+          metrics: z.array(
+            z.object({
+              name: ConfigNameSchema.openapi({ example: "coverage" }),
+              unit: z.string().nullable().openapi({ example: "%" }),
+              order: z
+                .enum(["asc", "desc"])
+                .openapi({ description: "`asc` when lower is better, `desc` when higher is." }),
+            }),
+          ),
+        }),
+      )
+      .openapi({ description: "Run in order." }),
+    preview: z
+      .object({ command: z.string().nullable().openapi({ description: "Builds before the preview deploys." }) })
+      .nullable()
+      .openapi({ description: "Null when the project doesn't deploy previews." }),
+    attempts: z.object({
+      limit: z.number().int().nullable().openapi({ description: "Null to use the default cap on active attempts." }),
+    }),
+  })
+  .openapi("Config");
+
+const ConfigResultSchema = z
+  .discriminatedUnion("kind", [
+    z.object({ kind: z.literal("none") }),
+    z.object({ kind: z.literal("valid"), config: ConfigSchema }),
+    z.object({
+      kind: z.literal("invalid"),
+      error: z.string().openapi({
+        description: "One line per problem, each prefixed with its path.",
+        example: "checks[0].metrics[0].order: order is required: ascending, asc, descending or desc",
+      }),
+    }),
+  ])
+  .openapi("ConfigResult");
 
 const security: Record<string, string[]>[] = [{ bearer: [] }, { access: [] }];
 const bearerOnly: Record<string, string[]>[] = [{ bearer: [] }];
@@ -697,6 +753,37 @@ export function apiRoutes(options: ApiOptions = {}) {
         "`invalid_state`: the attempt isn't obsolete.",
       ]),
       async (c) => c.json(await tasks(c.env).restoreAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
+    )
+    .openapi(
+      createRoute({
+        method: "post",
+        path: "/config/validate",
+        operationId: "validateConfig",
+        tags: ["Config"],
+        summary: "Validate a `.throng/config.yml` before pushing it",
+        description:
+          "Parses the body as a project config, the same way scoring will. An invalid config is still a 200, " +
+          `with \`kind: invalid\`; an empty body is a valid config with every default. Bodies over ${MAX_CONFIG_BYTES} ` +
+          "bytes are invalid. Any valid token may call.",
+        security: bearerOnly,
+        middleware: [bearer] as const,
+        request: {
+          body: {
+            required: true,
+            content: {
+              "application/yaml": {
+                schema: z.string().openapi({ example: "checks:\n  - name: test\n    command: pnpm test\n" }),
+              },
+              "text/plain": { schema: z.string() },
+            },
+          },
+        },
+        responses: {
+          200: { description: "The parse result.", ...json(ConfigResultSchema) },
+          401: unauthorizedBearer,
+        },
+      }),
+      async (c) => c.json(parseConfig(await c.req.text()), 200),
     );
 
   api.doc31("/openapi.json", { openapi: "3.1.0", info: { title: "Throng API", version: "0.0.0" } });

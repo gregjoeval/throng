@@ -6,15 +6,13 @@
 // Users are stored by id only, so renaming a handle never rewrites history; the service resolves
 // handles when it answers.
 
-import { parse as parseYaml } from "yaml";
+import { CONFIG_PATH, loadConfig, type ConfigResult } from "./config.ts";
 import { ServiceError, type ErrorCode } from "./errors.ts";
 import { forkRepo, originRepo, type Repos } from "./repos.ts";
 import type { Actor } from "./tokens.ts";
 
 /** Active attempts a task may have when neither the project config nor the task overrides it. */
 export const DEFAULT_ATTEMPT_LIMIT = 10;
-/** Where a project overrides the attempt limit, read from `origin/main`. */
-export const CONFIG_PATH = ".throng/config.yml";
 
 export const TASK_STATES = ["open", "closed", "obsolete"] as const;
 export const ATTEMPT_STATES = ["draft", "open", "merged", "closed", "obsolete"] as const;
@@ -675,9 +673,7 @@ export class TaskStore {
 
   /** The project's cap: `attempts.limit` in the origin's `.throng/config.yml` on `main`, or the default. */
   async #projectLimit(project: ProjectContext): Promise<number> {
-    const file = await this.#repos.readFile(originRepo(project.id), { ref: "main", path: CONFIG_PATH });
-    if (file === null) return DEFAULT_ATTEMPT_LIMIT;
-    return attemptLimitFromConfig(await file.text()) ?? DEFAULT_ATTEMPT_LIMIT;
+    return attemptLimitFromConfig(await loadConfig(this.#repos, project.id));
   }
 
   async #fork(project: ProjectContext, task: number, numbers: number[]): Promise<void> {
@@ -792,22 +788,18 @@ export async function runTaskMethod(store: TaskStore, method: string, args: unkn
   }
 }
 
-/** `attempts.limit` from a `.throng/config.yml`, or null when it's missing or not a positive integer. */
-export function attemptLimitFromConfig(text: string): number | null {
-  let config: unknown;
-  try {
-    config = parseYaml(text);
-  } catch (cause) {
-    console.warn({ event: "config.invalid", path: CONFIG_PATH, error: String(cause) });
-    return null;
+/**
+ * The project's cap on active attempts per task: `attempts.limit` from a valid config, or the
+ * default. An invalid config gets the default too, so a config mistake can't lock a project's tasks
+ * out of new attempts; scoring is where the mistake is surfaced.
+ */
+export function attemptLimitFromConfig(result: ConfigResult): number {
+  if (result.kind === "invalid") {
+    console.warn({ event: "config.invalid", path: CONFIG_PATH, error: result.error });
+    return DEFAULT_ATTEMPT_LIMIT;
   }
-  const limit = (config as { attempts?: { limit?: unknown } } | null)?.attempts?.limit;
-  if (limit === undefined) return null;
-  if (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1) {
-    console.warn({ event: "config.invalid", path: CONFIG_PATH, error: "attempts.limit must be a positive integer" });
-    return null;
-  }
-  return limit;
+  if (result.kind === "none") return DEFAULT_ATTEMPT_LIMIT;
+  return result.config.attempts.limit ?? DEFAULT_ATTEMPT_LIMIT;
 }
 
 function attemptCounter(task: number): string {

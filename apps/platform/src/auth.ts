@@ -5,6 +5,7 @@
 import { createMiddleware } from "hono/factory";
 import { verifierFromEnv, type AccessBindings, type AccessVerifier } from "./access.ts";
 import { errorBody } from "./errors.ts";
+import { FORWARDED_EMAIL_HEADER } from "./forwarded.ts";
 import { authenticateToken, type Actor, type Token } from "./tokens.ts";
 import { userForEmail } from "./users.ts";
 
@@ -18,6 +19,11 @@ export interface AuthOptions {
   verifierFor?: (env: AccessBindings) => AccessVerifier;
   /** The clock tokens expire against; tests pass their own. */
   now?: () => Date;
+  /**
+   * Treat `FORWARDED_EMAIL_HEADER` as an Access session throng-web has already verified. Only the
+   * service binding's entrypoint sets this; the public hostname never does.
+   */
+  trustForwardedIdentity?: boolean;
 }
 
 const BEARER_CHALLENGE = { "WWW-Authenticate": 'Bearer realm="throng"' };
@@ -58,19 +64,47 @@ export function bearerAuth({ now = () => new Date() }: AuthOptions = {}) {
 
 /**
  * Accepts a bearer token or, when no `Authorization` header is sent, an Access session. Only the
- * endpoints a human needs before holding a token (minting one, `/me`) use this.
+ * endpoints a human needs before holding a token (minting one, `/me`) use this. With
+ * `trustForwardedIdentity`, an email forwarded by throng-web counts as an Access session.
  */
-export function bearerOrAccess({ verifierFor = verifierFromEnv, now }: AuthOptions = {}) {
+export function bearerOrAccess({
+  verifierFor = verifierFromEnv,
+  now,
+  trustForwardedIdentity = false,
+}: AuthOptions = {}) {
   const bearer = bearerAuth(now === undefined ? {} : { now });
   return createMiddleware<AuthEnv>(async (c, next) => {
     if (c.req.header("Authorization") !== undefined) return bearer(c, next);
-    const jwt = c.req.header("Cf-Access-Jwt-Assertion");
-    const identity = jwt === undefined ? null : await verifierFor(c.env)(jwt);
+    const identity = trustForwardedIdentity
+      ? forwardedIdentity(c.req.header(FORWARDED_EMAIL_HEADER))
+      : await accessIdentity(c.req.header("Cf-Access-Jwt-Assertion"), verifierFor(c.env));
     if (identity === null) {
       return c.json(errorBody("unauthorized", "a bearer token or Access session is required"), 401, BEARER_CHALLENGE);
     }
     c.set("actor", { user: await userForEmail(c.env.DB, identity.email), agent: null });
     c.set("token", null);
+    await next();
+  });
+}
+
+async function accessIdentity(jwt: string | undefined, verify: AccessVerifier) {
+  return jwt === undefined ? null : await verify(jwt);
+}
+
+function forwardedIdentity(header: string | undefined): { email: string } | null {
+  const email = header?.trim().toLowerCase();
+  return email ? { email } : null;
+}
+
+/**
+ * Rejects any request carrying `FORWARDED_EMAIL_HEADER`. The public hostname runs this first: only
+ * throng-web, over the service binding, may assert an identity that way.
+ */
+export function rejectForwardedIdentity() {
+  return createMiddleware(async (c, next) => {
+    if (c.req.header(FORWARDED_EMAIL_HEADER) !== undefined) {
+      return c.json(errorBody("unauthorized", `${FORWARDED_EMAIL_HEADER} is only accepted from throng-web`), 401);
+    }
     await next();
   });
 }

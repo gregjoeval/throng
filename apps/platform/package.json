@@ -4,6 +4,10 @@
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
+  "exports": {
+    "./app": "./src/app.ts",
+    "./forwarded": "./src/forwarded.ts"
+  },
   "scripts": {
     "dev": "vite dev",
     "build": "vite build",

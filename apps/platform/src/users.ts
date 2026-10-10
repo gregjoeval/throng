@@ -1,0 +1,68 @@
+// Users: one per human, created the first time Access shows us their email.
+
+/** The slice of D1 this module uses, so tests can run the same SQL on local SQLite. */
+export interface Database {
+  prepare(sql: string): Statement;
+}
+
+export interface Statement {
+  bind(...values: unknown[]): Statement;
+  first<T = Record<string, unknown>>(): Promise<T | null>;
+}
+
+export interface User {
+  id: string;
+  handle: string;
+  email: string;
+  created_at: string;
+}
+
+const ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
+const ID_LENGTH = 8;
+/** Bytes at or above this would bias the alphabet (256 isn't a multiple of 36), so they are redrawn. */
+const ID_BYTE_LIMIT = 256 - (256 % ID_ALPHABET.length);
+const MAX_INSERT_ATTEMPTS = 20;
+
+/** An opaque user id: 8 lowercase alphanumeric characters, never `-`, so it can't be mistaken for a handle. */
+export function randomUserId(): string {
+  let id = "";
+  while (id.length < ID_LENGTH) {
+    for (const byte of crypto.getRandomValues(new Uint8Array(ID_LENGTH))) {
+      if (byte < ID_BYTE_LIMIT && id.length < ID_LENGTH) id += ID_ALPHABET[byte % ID_ALPHABET.length];
+    }
+  }
+  return id;
+}
+
+/** The user for an Access email, creating one on first sight. */
+export async function userForEmail(db: Database, email: string, newId: () => string = randomUserId): Promise<User> {
+  const base = handleBase(email);
+  let id = newId();
+  let suffix = 1;
+  for (let attempt = 0; attempt < MAX_INSERT_ATTEMPTS; attempt++) {
+    const existing = await db.prepare("SELECT * FROM users WHERE email = ?").bind(email).first<User>();
+    if (existing !== null) return existing;
+    const handle = suffix === 1 ? base : `${base}${suffix}`;
+    try {
+      const created = await db
+        .prepare("INSERT INTO users (id, handle, email) VALUES (?, ?, ?) RETURNING *")
+        .bind(id, handle, email)
+        .first<User>();
+      if (created !== null) return created;
+    } catch (err) {
+      // Collisions are expected; anything else is a real failure. An email collision means another
+      // request created this user first, which the next lookup finds.
+      const column = /UNIQUE constraint failed: users\.(\w+)/.exec(String(err))?.[1];
+      if (column === "id") id = newId();
+      else if (column === "handle") suffix++;
+      else if (column !== "email") throw err;
+    }
+  }
+  throw new Error(`could not create a user for ${email}`);
+}
+
+/** A handle from the email's local part, kept to lowercase letters, digits and single dashes. */
+function handleBase(email: string): string {
+  const local = email.slice(0, email.lastIndexOf("@")).toLowerCase();
+  return local.replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "user";
+}

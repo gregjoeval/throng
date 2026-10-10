@@ -14,7 +14,8 @@
     "spike": "tsx scripts/spike.ts"
   },
   "dependencies": {
-    "hono": "^4.13.12"
+    "hono": "^4.13.12",
+    "jose": "^6.2.12"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.63.1",

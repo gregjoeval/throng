@@ -25,7 +25,7 @@ A project's own repo, the one every fork starts from; its default branch is writ
 _Avoid_: Canonical repo, upstream, "main" (when meaning the repo rather than its branch)
 
 **Task**:
-A unit of work within a project, numbered sequentially per project and referred to as `t42`.
+One change to a project, worked on through competing attempts. It lands at most once, through a merge request. Numbered sequentially per project and referred to as `t42`. Follow-up work is a new task.
 _Avoid_: Ticket, issue, job
 
 **Changeset**:

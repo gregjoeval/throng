@@ -97,6 +97,13 @@ app.post("/spike/repos/:name/read-token", async (c) => {
   return c.json({ token });
 });
 
+/** Names of the repos starting with `prefix`, so a spike run can find everything it created. */
+app.get("/spike/repos", async (c) => {
+  const prefix = c.req.query("prefix") ?? "";
+  if (prefix === "") return c.json({ error: "prefix is required" }, 400);
+  return c.json(await reposFor(c.env).list(prefix));
+});
+
 app.delete("/spike/repos/:name", async (c) => {
   return c.json({ deleted: await reposFor(c.env).delete(c.req.param("name")) });
 });

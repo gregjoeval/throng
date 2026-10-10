@@ -7,6 +7,10 @@
 // preview (an attempt gets a live Preview URL serving its change; its files are readable via the Worker),
 // intrusion (an attempt's tests try to push to the canonical main and call the Cloudflare API; both fail),
 // deps (an attempt adds an npm dependency; the check installs it from the registry, lands, and previews).
+//
+// Every project id starts with SPIKE_PROJECT_PREFIX (default `spike`; lowercase alphanumeric).
+// `pnpm spike cleanup` deletes every repo whose name starts with an explicitly set SPIKE_PROJECT_PREFIX,
+// including those a failed or cancelled run left behind.
 
 import { execFile } from "node:child_process";
 import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -23,6 +27,8 @@ const CHECK_TIMEOUT_MS = 10 * 60 * 1_000;
 
 const baseUrl = requireEnv("THRONG_URL").replace(/\/$/, "");
 const spikeToken = requireEnv("SPIKE_TOKEN");
+const projectPrefix = process.env.SPIKE_PROJECT_PREFIX || "spike";
+assert(/^[a-z0-9]+$/.test(projectPrefix), `SPIKE_PROJECT_PREFIX must be lowercase alphanumeric: ${projectPrefix}`);
 
 interface JournalEntry {
   id: number;
@@ -57,6 +63,7 @@ const scenarios: Record<string, () => Promise<void>> = { happy, coalesce, confli
 
 async function main(): Promise<void> {
   const names = process.argv.slice(2);
+  if (names[0] === "cleanup") return deleteRun();
   const chosen = names.length > 0 ? names : Object.keys(scenarios);
   let failed = false;
   for (const name of chosen) {
@@ -72,6 +79,17 @@ async function main(): Promise<void> {
     }
   }
   process.exitCode = failed ? 1 : 0;
+}
+
+/** Deletes every repo under SPIKE_PROJECT_PREFIX. It must be set explicitly, so the default never sweeps. */
+async function deleteRun(): Promise<void> {
+  requireEnv("SPIKE_PROJECT_PREFIX");
+  const names = await api<string[]>("GET", `/spike/repos?prefix=${projectPrefix}`);
+  console.log(`deleting ${names.length} repo(s) starting with ${projectPrefix}`);
+  for (const name of names) {
+    await api("DELETE", `/spike/repos/${name}`);
+    console.log(`  deleted ${name}`);
+  }
 }
 
 /** create repo → fork → push → event → check → rebase, re-test, land → main advanced, no new check. */
@@ -365,7 +383,7 @@ test("the dependency is installed", () => {
 
 async function setUpProject(timeline: Timeline): Promise<{ project: string; work: string }> {
   // Project ids are lowercase alphanumeric; repo names take a `-main` or `-t1a1` suffix.
-  const project = `spike${Date.now().toString(36)}`;
+  const project = `${projectPrefix}${Date.now().toString(36)}`;
   console.log(`project ${project}`);
   const work = await mkdtemp(join(tmpdir(), `${project}-`));
   await cp(FIXTURE, work, { recursive: true, filter: (src) => !src.includes("node_modules") });

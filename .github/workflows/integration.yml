@@ -1,0 +1,95 @@
+name: Integration
+
+# Runs the spike scenarios against real Artifacts: deploys the platform's `ci` environment (the
+# `throng-ci` Worker) and runs `pnpm spike` against it. Manual only, from the Actions tab; see
+# apps/platform/README.md for the setup it needs.
+on:
+  workflow_dispatch:
+    inputs:
+      scenarios:
+        description: Space-separated spike scenarios to run (empty runs them all)
+        required: false
+        default: ""
+
+# One run at a time: they share the throng-ci Worker. Never cancel one halfway, or its repos leak.
+concurrency:
+  group: integration
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  spike:
+    if: github.repository == 'gregjoeval/throng'
+    runs-on: ubuntu-latest
+    environment: ci
+    timeout-minutes: 90
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      # Selects `env.ci` in apps/platform/wrangler.jsonc for vite build and wrangler alike.
+      CLOUDFLARE_ENV: ci
+      # Every project this run creates starts with this, so cleanup can find its repos. The trailing
+      # `p` keeps one run's prefix from being a prefix of another's.
+      SPIKE_PROJECT_PREFIX: ci${{ github.run_id }}r${{ github.run_attempt }}p
+    defaults:
+      run:
+        working-directory: apps/platform
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+        working-directory: .
+      - name: Generate this run's SPIKE_TOKEN
+        run: |
+          token=$(openssl rand -hex 32)
+          echo "::add-mask::$token"
+          echo "SPIKE_TOKEN=$token" >> "$GITHUB_ENV"
+      - name: Apply D1 migrations
+        if: hashFiles('apps/platform/migrations/*.sql') != ''
+        run: pnpm exec wrangler d1 migrations apply throng-ci --remote
+      - name: Deploy throng-ci
+        run: |
+          pnpm exec vite build
+          secrets="$RUNNER_TEMP/throng-ci-secrets.env"
+          trap 'rm -f "$secrets"' EXIT
+          # The Worker uses CF_PREVIEW_TOKEN to upload Worker Previews; the deploy token covers that.
+          printf 'SPIKE_TOKEN=%s\nCF_PREVIEW_TOKEN=%s\n' "$SPIKE_TOKEN" "$CLOUDFLARE_API_TOKEN" > "$secrets"
+          pnpm exec wrangler deploy --config dist/throng/wrangler.json --secrets-file "$secrets" | tee "$RUNNER_TEMP/deploy.log"
+          url=$(grep -oE 'https://throng-ci\.[a-z0-9-]+\.workers\.dev' "$RUNNER_TEMP/deploy.log" | head -n 1)
+          if [ -z "$url" ]; then
+            echo "::error::No workers.dev URL for throng-ci in the deploy output"
+            exit 1
+          fi
+          echo "THRONG_URL=$url" >> "$GITHUB_ENV"
+      - name: Wait for the new deployment
+        run: |
+          # A new Worker's workers.dev route, and a new SPIKE_TOKEN, can take a moment to go live.
+          for _ in $(seq 60); do
+            status=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $SPIKE_TOKEN" \
+              "$THRONG_URL/spike/repos?prefix=$SPIKE_PROJECT_PREFIX" || true)
+            if [ "$status" = 200 ]; then exit 0; fi
+            echo "throng-ci answered $status; waiting"
+            sleep 5
+          done
+          echo "::error::$THRONG_URL never accepted this run's SPIKE_TOKEN"
+          exit 1
+      - name: Run the spike
+        env:
+          SCENARIOS: ${{ inputs.scenarios }}
+        run: |
+          # Word-split on purpose: one argument per scenario name.
+          # shellcheck disable=SC2086
+          pnpm spike $SCENARIOS
+      - name: Delete this run's repos
+        if: always() && env.THRONG_URL != ''
+        run: pnpm spike cleanup

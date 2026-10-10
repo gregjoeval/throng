@@ -1,5 +1,8 @@
 import type { Commit, RepoInfo, Repos, RepoToken, Tree, TokenScope } from "./repos";
 
+/** The most repos Artifacts returns per `list` page. */
+const LIST_PAGE_SIZE = 200;
+
 /** The environment's repos. The only place that touches the Artifacts binding. */
 export function reposFor(env: Pick<Env, "ARTIFACTS">): Repos {
   return new ArtifactsRepos(env.ARTIFACTS);
@@ -31,6 +34,19 @@ class ArtifactsRepos implements Repos {
 
   async delete(name: string): Promise<boolean> {
     return this.#artifacts.delete(name);
+  }
+
+  async list(prefix: string): Promise<string[]> {
+    const names: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await this.#artifacts.list(
+        cursor === undefined ? { limit: LIST_PAGE_SIZE } : { limit: LIST_PAGE_SIZE, cursor },
+      );
+      names.push(...page.repos.map((r) => r.name).filter((n) => n.startsWith(prefix)));
+      cursor = page.cursor;
+    } while (cursor !== undefined);
+    return names.toSorted();
   }
 
   async mintToken(name: string, scope: TokenScope, ttl: number): Promise<RepoToken> {

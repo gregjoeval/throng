@@ -18,7 +18,7 @@ export default defineConfig({
         if (!devName) return;
         // Mutated in place: a returned partial would be merged, appending to `services`.
         config.name = `throng-web-dev-${devName}`;
-        config.services = [{ binding: "PLATFORM", service: `throng-dev-${devName}` }];
+        config.services = [{ binding: "PLATFORM", service: `throng-dev-${devName}`, entrypoint: "WebEntrypoint" }];
       },
     }),
     tailwindcss(),

@@ -3,14 +3,27 @@
   // Production. `ci` and `dev-<name>` below follow the platform's environments: each binds to the
   // matching platform Worker (`throng-ci`, `throng-dev-<name>`).
   "name": "throng-web",
-  "main": "@tanstack/react-start/server-entry",
+  // Forwards `/api/*` to the platform and hands everything else to TanStack Start.
+  "main": "src/server.ts",
   "compatibility_date": "2026-10-01",
   "compatibility_flags": ["nodejs_compat"],
-  "services": [{ "binding": "PLATFORM", "service": "throng" }],
+  // `WebEntrypoint` is the platform's binding-only entrypoint: the one place it trusts the forwarded
+  // Access identity. Deploy the platform first so the entrypoint exists.
+  "services": [{ "binding": "PLATFORM", "service": "throng", "entrypoint": "WebEntrypoint" }],
+  "vars": {
+    // The Access application in front of throng-web, the same values as the platform's.
+    "ACCESS_TEAM_DOMAIN": "gregjoeval.cloudflareaccess.com",
+    "ACCESS_AUD": "2a713dce7fdf28f6d07c5954b0a9d57e867717b5af65ba730b98473b3366712b",
+  },
   "observability": { "enabled": true },
   "env": {
     "ci": {
-      "services": [{ "binding": "PLATFORM", "service": "throng-ci" }],
+      "services": [{ "binding": "PLATFORM", "service": "throng-ci", "entrypoint": "WebEntrypoint" }],
+      // Wrangler doesn't inherit vars into environments.
+      "vars": {
+        "ACCESS_TEAM_DOMAIN": "gregjoeval.cloudflareaccess.com",
+        "ACCESS_AUD": "2a713dce7fdf28f6d07c5954b0a9d57e867717b5af65ba730b98473b3366712b",
+      },
     },
   },
 }

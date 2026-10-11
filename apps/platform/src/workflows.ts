@@ -21,6 +21,7 @@ import {
   scoreTimeoutMs,
   withPreview,
   type RawScore,
+  type PreviewPlan,
   type ScorePlan,
   type ScoringResult,
 } from "./results";
@@ -185,7 +186,7 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
   async #preview(
     instanceId: string,
     params: ScoringParams,
-    { command }: { command: string | null },
+    { command, allow }: PreviewPlan,
     step: WorkflowStep,
   ): Promise<{ deployed: PreviewScriptResult | null; logs: string[] }> {
     const workerName = this.env.PREVIEW_WORKER;
@@ -206,7 +207,7 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
                 previewName: name,
                 command,
               }),
-            { timeoutMs: PREVIEW_STEP_TIMEOUT_MS },
+            { allow, timeoutMs: PREVIEW_STEP_TIMEOUT_MS },
           );
           return { run: deploy, logs: await this.#storeLogs(instanceId, params, "preview", [PREVIEW_LOG]) };
         },

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { AccessVerifier } from "../src/access.ts";
 import { apiRoutes } from "../src/api.ts";
+import { webApp } from "../src/app.ts";
+import { FORWARDED_EMAIL_HEADER } from "../src/forwarded.ts";
 import type { LogStore } from "../src/logs.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
@@ -27,13 +29,9 @@ async function setup() {
   const repos = new FakeRepos();
   const logs = new MemoryLogs();
   const { backend } = testTaskBackends(repos, now);
-  const api = apiRoutes({
-    verifierFor: () => verify,
-    now,
-    repos: () => repos,
-    tasks: () => backend,
-    logs: () => logs,
-  });
+  const options = { verifierFor: () => verify, now, repos: () => repos, tasks: () => backend, logs: () => logs };
+  const api = apiRoutes(options);
+  const web = webApp(options);
   const env = { DB: testDatabase(), ACCESS_TEAM_DOMAIN: "throng.cloudflareaccess.com", ACCESS_AUD: "aud" };
   const request = (path: string, bearer?: string, init: RequestInit = {}) => {
     const headers: Record<string, string> = { ...(init.headers as Record<string, string>) };
@@ -59,7 +57,7 @@ async function setup() {
   const scored = await post("/projects/greg/throng/attempts/t1a1/score", ada);
   const run = scored["run"]["id"] as number;
   const prefix = `logs/${project["id"]}/t1a1/${head}/${run}`;
-  return { request, logs, greg, ada, run, prefix, base: "/projects/greg/throng" };
+  return { request, web, env, logs, greg, ada, run, prefix, base: "/projects/greg/throng" };
 }
 
 describe("GET /projects/{owner}/{project}/runs/{runId}/logs/{name}", () => {
@@ -101,5 +99,17 @@ describe("GET /projects/{owner}/{project}/runs/{runId}/logs/{name}", () => {
   it("needs a bearer token", async () => {
     const { request, run, base } = await setup();
     expect((await request(`${base}/runs/${run}/logs/test`)).status).toBe(401);
+  });
+
+  it("takes throng-web's forwarded identity over the service binding", async () => {
+    const { web, env, logs, run, prefix, base } = await setup();
+    logs.objects.set(`${prefix}/test.log`, "ok\n");
+    const res = await web.request(
+      `/api${base}/runs/${run}/logs/test`,
+      { headers: { [FORWARDED_EMAIL_HEADER]: "ada@example.com" } },
+      env,
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ok\n");
   });
 });

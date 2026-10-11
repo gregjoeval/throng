@@ -415,6 +415,17 @@ describe("results", () => {
     expect(journal().find((e) => e.kind === "scored")).toMatchObject({ gate: "passed", summary: "1 passed, 1 failed" });
   });
 
+  it("reads a result stored before runs kept logs as having none", async () => {
+    const { store, runs, drafts } = setup();
+    const [ref] = await drafts();
+    await store.openAttempt(PROJECT, ada, ref!);
+    await store.scoring.drain();
+    const { logs: _logs, ...older } = result();
+    store.scoring.finish(runs(ref!)[0]!.id, { status: "done", result: older as ScoringResult });
+
+    expect(runs(ref!)[0]!.result).toEqual(result({ logs: [] }));
+  });
+
   it("keeps an errored run's error, with no result", async () => {
     const { store, runs, drafts, journal } = setup();
     const [ref] = await drafts();

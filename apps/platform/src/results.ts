@@ -151,13 +151,19 @@ export function gateFor(checks: CheckResult[]): "passed" | "failed" {
   return checks.every((c) => !c.required || c.outcome === "passed") ? "passed" : "failed";
 }
 
+/** What the preview container runs, and the hosts its build may reach beyond the npm registry. */
+export interface PreviewPlan {
+  command: string | null;
+  allow: string[];
+}
+
 /**
- * Whether to deploy a Preview, and its build step: only when the config has a `preview` section and
- * the gate passed. Null means no Preview, and the result keeps `preview: none`.
+ * Whether to deploy a Preview, its build step and its `network.allow`: only when the config has a
+ * `preview` section and the gate passed. Null means no Preview, and the result keeps `preview: none`.
  */
-export function previewPlan(config: ConfigResult, result: ScoringResult): { command: string | null } | null {
+export function previewPlan(config: ConfigResult, result: ScoringResult): PreviewPlan | null {
   if (config.kind !== "valid" || config.config.preview === null || result.gate !== "passed") return null;
-  return { command: config.config.preview.command };
+  return { command: config.config.preview.command, allow: config.config.network.allow };
 }
 
 /**
@@ -170,12 +176,12 @@ export function withPreview(result: ScoringResult, deployed: PreviewScriptResult
 }
 
 /**
- * The run's result from the config it was scored under, the score script's raw output and the
- * names of the logs stored for it.
+ * The run's result from the config it was scored under and the score script's raw output. Its
+ * `logs` are empty: the run stores its logs, with each check's notes, once the result is built.
  */
-export function buildResult(config: ConfigResult, raw: RawScore, logs: string[] = []): ScoringResult {
+export function buildResult(config: ConfigResult, raw: RawScore): ScoringResult {
   const builtin = { ...parseShortstat(raw.shortstat), durationMs: raw.builtinMs };
-  const common = { base: raw.base, builtin, preview: { status: "none" } as const, logs };
+  const common = { base: raw.base, builtin, preview: { status: "none" } as const, logs: [] };
   if (config.kind === "none") return { ...common, config: { kind: "none" }, gate: "passed", checks: [] };
   if (config.kind === "invalid") {
     const entry: CheckResult = {

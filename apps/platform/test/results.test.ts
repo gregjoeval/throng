@@ -154,11 +154,6 @@ describe("buildResult", () => {
     });
   });
 
-  it("keeps a reference to each log the run stored, by name", () => {
-    const result = buildResult(CONFIG, raw({ checks: [{ exit: 0, durationMs: 1, metrics: "" }] }), ["setup.1", "test"]);
-    expect(result.logs).toEqual(["setup.1", "test"]);
-  });
-
   it("fails an invalid config's gate with a single config entry carrying the error", () => {
     const invalid = parseConfig("checks:\n  - name: Bad Name\n    command: x\n");
     expect(invalid.kind).toBe("invalid");
@@ -239,8 +234,13 @@ describe("previewPlan", () => {
   const passed = buildResult(WITH_PREVIEW, raw());
 
   it("deploys a Preview, with the configured build command, when preview is configured and the gate passed", () => {
-    expect(previewPlan(WITH_PREVIEW, passed)).toEqual({ command: "npm run build" });
-    expect(previewPlan(parseConfig("preview: {}\n"), passed)).toEqual({ command: null });
+    expect(previewPlan(WITH_PREVIEW, passed)).toEqual({ command: "npm run build", allow: [] });
+    expect(previewPlan(parseConfig("preview: {}\n"), passed)).toEqual({ command: null, allow: [] });
+  });
+
+  it("lets the build reach the config's network.allow hosts, as scoring does", () => {
+    const config = parseConfig("preview: {}\nnetwork:\n  allow: [fonts.example.com]\n");
+    expect(previewPlan(config, buildResult(config, raw()))).toEqual({ command: null, allow: ["fonts.example.com"] });
   });
 
   it("deploys nothing when the gate failed", () => {

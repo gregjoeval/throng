@@ -109,8 +109,15 @@ describe("OpenAPI document", () => {
     expect(op("/attempts/{a}/scoring", "get")).toBe("getAttemptScoring");
     expect(op("/attempts/{a}/runs", "get")).toBe("listAttemptRuns");
     expect(op("/runs/{runId}", "get")).toBe("getRun");
-    expect(op("/tasks/{t}/scores", "get")).toBe("getTaskScores");
-    for (const schema of ["ScoringStatus", "CurrentResult", "ScoringResult", "RunDetail", "TaskScores"]) {
+    expect(op("/tasks/{t}/arena", "get")).toBe("getTaskArena");
+    for (const schema of [
+      "ScoringStatus",
+      "CurrentResult",
+      "ScoringResult",
+      "RunDetail",
+      "TaskArena",
+      "ArenaAttempt",
+    ]) {
       expect(body["components"]["schemas"][schema], schema).toBeDefined();
     }
   });
@@ -124,18 +131,18 @@ describe("OpenAPI document", () => {
     });
     const project = client.projects[":owner"][":project"];
     const param = { owner: "greg", project: "throng" };
-    const scores = await parseResponse(project.tasks[":t"].scores.$get({ param: { ...param, t: "t1" } }));
+    const arena = await parseResponse(project.tasks[":t"].arena.$get({ param: { ...param, t: "t1" } }));
     const scoring = await parseResponse(project.attempts[":a"].scoring.$get({ param: { ...param, a: "t1a1" } }));
     const runs = await parseResponse(project.attempts[":a"].runs.$get({ param: { ...param, a: "t1a1" } }));
     const run = await project.runs[":runId"].$get({ param: { ...param, runId: "1" } });
-    expect(scores.attempts[0]?.status).toBe("none");
+    expect(arena.attempts[0]?.status).toBe("none");
     expect(scoring.sha).toBeNull();
     expect(runs.runs).toEqual([]);
     expect(run.status).toBe(404);
   });
 });
 
-describe("task scores", () => {
+describe("the arena", () => {
   it("gives every attempt's current result in one call, whatever state its scoring is in", async () => {
     const { call, ada, bob, base, drafts, commit, push, scoring, finish } = await setup();
     await drafts(4);
@@ -150,7 +157,7 @@ describe("task scores", () => {
     await finish(3, { status: "done", result: result({ gate: "failed" }) });
     const moved = push(1, 4, "four again\n");
 
-    const res = await call("GET", `${base}/tasks/t1/scores`, bob);
+    const res = await call("GET", `${base}/tasks/t1/arena`, bob);
     expect(res.status).toBe(200);
     expect(res.body["task"]).toBe("t1");
     expect(res.body["attempts"]).toEqual([
@@ -173,15 +180,23 @@ describe("task scores", () => {
     ]);
   });
 
-  it("leaves obsolete attempts out, and is 404 for an unknown task and 401 without a caller", async () => {
+  it("keeps obsolete attempts in, with their state, so a UI can filter them", async () => {
     const { call, greg, ada, base, drafts } = await setup();
     await drafts(2);
     await call("POST", `${base}/attempts/t1a2/obsolete`, greg);
-    const res = await call("GET", `${base}/tasks/1/scores`, ada);
-    expect(res.body["attempts"].map((a: Json) => a["ref"])).toEqual(["t1a1"]);
-    expect((await call("GET", `${base}/tasks/t9/scores`, ada)).status).toBe(404);
-    expect((await call("GET", `${base}/tasks/x/scores`, ada)).status).toBe(400);
-    expect((await call("GET", `${base}/tasks/t1/scores`)).status).toBe(401);
+    const res = await call("GET", `${base}/tasks/1/arena`, ada);
+    expect(res.body["attempts"].map((a: Json) => [a["ref"], a["state"]])).toEqual([
+      ["t1a1", "draft"],
+      ["t1a2", "obsolete"],
+    ]);
+  });
+
+  it("is 404 for an unknown task, 400 for a bad reference and 401 without a caller", async () => {
+    const { call, ada, base, drafts } = await setup();
+    await drafts(1);
+    expect((await call("GET", `${base}/tasks/t9/arena`, ada)).status).toBe(404);
+    expect((await call("GET", `${base}/tasks/x/arena`, ada)).status).toBe(400);
+    expect((await call("GET", `${base}/tasks/t1/arena`)).status).toBe(401);
   });
 });
 

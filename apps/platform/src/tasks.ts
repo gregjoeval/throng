@@ -11,6 +11,7 @@ import {
   parseTaskRef,
   taskRef,
   type AttemptInput,
+  type AttemptScoringDetail,
   type AttemptState,
   type ProjectContext,
   type StoredAttempt,
@@ -89,17 +90,17 @@ export interface ScoringStatus extends AttemptScoring {
   result?: CurrentResult;
 }
 
-/** One attempt in a task's scores. */
-export interface AttemptScore extends ScoringStatus {
+/** One attempt in a task's arena, obsolete or not: its state lets a UI filter. */
+export interface ArenaAttempt extends ScoringStatus {
   ref: string;
   state: AttemptState;
   author: UserRef;
 }
 
-/** The current result of every attempt in a task. */
-export interface TaskScores {
+/** A task's arena: the current result of every attempt in it. */
+export interface TaskArena {
   task: string;
-  attempts: AttemptScore[];
+  attempts: ArenaAttempt[];
 }
 
 /** What asking for scoring did: queued a run, or why not, with the run that covers the head. */
@@ -254,34 +255,27 @@ export function taskService({ db, backend }: TaskServiceDeps) {
 
     /** The attempt's scoring status and current result. Any signed-in user may read it. */
     async getScoring(actor: Actor, input: AttemptPath): Promise<ScoringStatus> {
-      const { current, ...status } = await invoke(
-        "getScoring",
-        await project(input),
-        actor,
-        attemptRefOf(input.attempt),
-      );
-      return current === null ? status : { ...status, result: currentResult(current) };
+      return scoringStatus(await invoke("getScoring", await project(input), actor, attemptRefOf(input.attempt)));
     },
 
     /**
-     * The current result of every attempt in the task but obsolete ones, by number: the arena's
-     * main query. Any signed-in user may read it.
+     * The task's arena: every attempt, obsolete ones included, by number, with its state and
+     * current result. Any signed-in user may read it.
      */
-    async taskScores(actor: Actor, input: TaskPath): Promise<TaskScores> {
+    async taskArena(actor: Actor, input: TaskPath): Promise<TaskArena> {
       const number = taskNumber(input.task);
-      const list = await invoke("taskScores", await project(input), actor, { task: number });
+      const list = await invoke("taskArena", await project(input), actor, { task: number });
       const users = await handles(
         db,
         list.map((a) => a.author),
       );
       return {
         task: taskRef(number),
-        attempts: list.map(({ current, scoring, fork, state, author }) => ({
+        attempts: list.map(({ scoring, fork, state, author }) => ({
           ref: fork,
           state,
           author: userRef(author, users),
-          ...scoring,
-          ...(current === null ? {} : { result: currentResult(current) }),
+          ...scoringStatus(scoring),
         })),
       };
     },
@@ -391,6 +385,11 @@ function publicRun(run: StoredRun, users: Map<string, string>): ScoringRun {
 
 function runDetail(run: StoredRun, users: Map<string, string>): RunDetail {
   return { ...publicRun(run, users), superseded: run.superseded, error: run.error, result: run.result };
+}
+
+/** An attempt's scoring status for polling, with its current result once its head has one. */
+function scoringStatus({ current, ...status }: AttemptScoringDetail): ScoringStatus {
+  return current === null ? status : { ...status, result: currentResult(current) };
 }
 
 function currentResult(run: StoredRun): CurrentResult {

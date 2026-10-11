@@ -9,7 +9,7 @@
 import { archiveRef } from "./archive.ts";
 import { CONFIG_PATH, loadConfig, type ConfigResult } from "./config.ts";
 import { ServiceError, type ErrorCode } from "./errors.ts";
-import { isLogName, logKey } from "./logs.ts";
+import { isLogName, logKey, missingLog } from "./logs.ts";
 import { isZeroId } from "./pkt-line.ts";
 import { forkRepo, originRepo, type Repos } from "./repos.ts";
 import {
@@ -559,20 +559,25 @@ export class TaskStore {
 
   /** The attempt's scoring status, with its current result: the latest `done` run for its head. */
   getScoring(_project: ProjectContext, _actor: Actor, input: AttemptInput): AttemptScoringDetail {
-    const current = this.#attempt(input);
-    return { ...current.scoring, current: this.scoring.currentRun(scoredAttempt(current)) };
+    return this.#scoringDetail(this.#attempt(input));
   }
 
-  /** Every attempt of the task but obsolete ones, by number, each with its scoring and current result. */
-  taskScores(
-    project: ProjectContext,
-    actor: Actor,
+  /** The task's arena: every attempt, obsolete ones included, by number, with its scoring and current result. */
+  taskArena(
+    _project: ProjectContext,
+    _actor: Actor,
     input: { task: number },
-  ): (StoredAttempt & { current: StoredRun | null })[] {
-    return this.listAttempts(project, actor, input).map((a) => ({
-      ...a,
-      current: this.scoring.currentRun(scoredAttempt(a)),
-    }));
+  ): (Omit<StoredAttempt, "scoring"> & { scoring: AttemptScoringDetail })[] {
+    this.#task(input.task);
+    return this.#sql
+      .exec<AttemptRow>("SELECT * FROM attempts WHERE task = ? ORDER BY number", input.task)
+      .map((row) => this.#toAttempt(row))
+      .map((a) => ({ ...a, scoring: this.#scoringDetail(a) }));
+  }
+
+  /** The attempt's scoring status, with the run holding its current result. */
+  #scoringDetail(attempt: StoredAttempt): AttemptScoringDetail {
+    return { ...attempt.scoring, current: this.scoring.currentRun(scoredAttempt(attempt)) };
   }
 
   /** The attempt's scoring runs, newest first, superseded and cancelled ones included. */
@@ -652,7 +657,7 @@ export class TaskStore {
    */
   runLogKey(project: ProjectContext, actor: Actor, input: { run: number; name: string }): string {
     const run = this.getScoringRun(project, actor, input);
-    if (!isLogName(input.name)) throw new ServiceError("not_found", `run ${input.run} has no log ${input.name}`);
+    if (!isLogName(input.name)) throw missingLog(input.run, input.name);
     return logKey({ project: project.id, attempt: headAttemptRef(run), sha: run.sha, run: run.id }, input.name);
   }
 
@@ -1418,7 +1423,7 @@ export const TASK_METHODS = [
   "listAttempts",
   "listProjectAttempts",
   "getScoring",
-  "taskScores",
+  "taskArena",
   "listScoringRuns",
   "getScoringRun",
   "attemptForBranch",

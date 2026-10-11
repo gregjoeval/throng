@@ -10,7 +10,7 @@ import {
   type RunGrants,
   type SandboxRole,
 } from "./grants";
-import { logKey, logNames, MISSING_LOG_EXIT, PREVIEW_LOG, readLogScript } from "./logs";
+import { LOG_CONTENT_TYPE, logKey, logNames, MISSING_LOG_EXIT, PREVIEW_LOG, readLogScript, withNotes } from "./logs";
 import { roleAccess } from "./network";
 import { previewName } from "./preview";
 import { forkRepo, originRepo } from "./repos";
@@ -21,6 +21,7 @@ import {
   scoreTimeoutMs,
   withPreview,
   type RawScore,
+  type PreviewPlan,
   type ScorePlan,
   type ScoringResult,
 } from "./results";
@@ -140,26 +141,35 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
     if (raw === null) {
       throw new Error(`score script gave no result (exit ${run.exitCode}): ${run.stderr.slice(-2000)}`);
     }
-    const logs = await this.#storeLogs(instanceId, params, "score", logNames(plan));
-    return buildResult(config, raw, logs);
+    const result = buildResult(config, raw);
+    const notes = new Map(result.checks.map((check) => [check.name, check.notes]));
+    const logs = await this.#storeLogs(instanceId, params, "score", logNames(plan), notes);
+    return { ...result, logs };
   }
 
   /**
-   * Copies the role's container's logs to R2, truncated over 5 MB, and returns the names stored. A
-   * step that never ran wrote no log; a log that fails to copy is left out rather than failing the run.
+   * Copies the role's container's logs to R2, truncated over `MAX_LOG_BYTES`, with each log's
+   * `notes` appended (see `withNotes`), and returns the names stored. A step that never ran wrote no
+   * log, unless it has notes; a log that fails to copy is left out rather than failing the run.
    */
-  async #storeLogs(instanceId: string, params: ScoringParams, role: SandboxRole, names: string[]): Promise<string[]> {
+  async #storeLogs(
+    instanceId: string,
+    params: ScoringParams,
+    role: SandboxRole,
+    names: string[],
+    notes: ReadonlyMap<string, string[]> = new Map(),
+  ): Promise<string[]> {
     const sandbox = this.env.SANDBOX.getByName(sandboxName(instanceId, role));
-    const run = { project: params.project, attempt: params.attempt, sha: params.sha, run: params.run };
     const stored: string[] = [];
     for (const name of names) {
       try {
         const read = await sandbox.run(readLogScript(name), { access: NO_ACCESS });
-        if (read.exitCode === MISSING_LOG_EXIT) continue;
-        if (read.exitCode !== 0) throw new Error(`exit ${read.exitCode}: ${read.stderr.slice(-500)}`);
-        await this.env.LOGS.put(logKey(run, name), read.stdout, {
-          httpMetadata: { contentType: "text/plain; charset=utf-8" },
-        });
+        if (read.exitCode !== 0 && read.exitCode !== MISSING_LOG_EXIT) {
+          throw new Error(`exit ${read.exitCode}: ${read.stderr.slice(-500)}`);
+        }
+        const log = withNotes(read.exitCode === MISSING_LOG_EXIT ? null : read.stdout, notes.get(name) ?? []);
+        if (log === null) continue;
+        await this.env.LOGS.put(logKey(params, name), log, { httpMetadata: { contentType: LOG_CONTENT_TYPE } });
         stored.push(name);
       } catch (cause) {
         console.error({ event: "scoring.log_not_stored", run: params.run, name, error: String(cause) });
@@ -176,7 +186,7 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
   async #preview(
     instanceId: string,
     params: ScoringParams,
-    { command }: { command: string | null },
+    { command, allow }: PreviewPlan,
     step: WorkflowStep,
   ): Promise<{ deployed: PreviewScriptResult | null; logs: string[] }> {
     const workerName = this.env.PREVIEW_WORKER;
@@ -197,7 +207,7 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
                 previewName: name,
                 command,
               }),
-            { timeoutMs: PREVIEW_STEP_TIMEOUT_MS },
+            { allow, timeoutMs: PREVIEW_STEP_TIMEOUT_MS },
           );
           return { run: deploy, logs: await this.#storeLogs(instanceId, params, "preview", [PREVIEW_LOG]) };
         },

@@ -9,13 +9,13 @@ import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import type { AccessBindings } from "./access.ts";
 import { bearerAuth, bearerOrAccess, bearerOrForwarded, type AuthEnv, type AuthOptions } from "./auth.ts";
 import { browseRoutes } from "./browse-api.ts";
-import { CHECK_OUTCOMES } from "./results.ts";
 import { CONFIG_NAME, MAX_CHECK_TIMEOUT_MS, MAX_CONFIG_BYTES, parseConfig } from "./config.ts";
 import { errorBody, errorResponse, ServiceError } from "./errors.ts";
 import { FORWARDED_EMAIL_HEADER } from "./forwarded.ts";
-import { LOG_RETENTION_DAYS, MAX_LOG_BYTES, type LogStore } from "./logs.ts";
+import { LOG_CONTENT_TYPE, LOG_RETENTION_DAYS, MAX_LOG_BYTES, missingLog, type LogStore } from "./logs.ts";
 import { MAX_PROJECT_HANDLE, PROJECT_HANDLE, projectService } from "./projects.ts";
 import type { Repos } from "./repos.ts";
+import { CHECK_OUTCOMES } from "./results.ts";
 import { ATTEMPT_SCORING_STATUSES, RUN_STATUSES, SCORING_TRIGGERS } from "./scoring.ts";
 import { ATTEMPT_STATES, TASK_STATES } from "./task-store.ts";
 import { taskService, type TaskBackend } from "./tasks.ts";
@@ -246,7 +246,7 @@ const ScoringStatusSchema = z
   })
   .openapi("ScoringStatus");
 
-const TaskScoresSchema = z
+const TaskArenaSchema = z
   .object({
     task: z.string().openapi({ example: "t42" }),
     attempts: z.array(
@@ -254,10 +254,10 @@ const TaskScoresSchema = z
         ref: z.string().openapi({ example: "t42a3" }),
         state: z.enum(ATTEMPT_STATES),
         author: UserRefSchema,
-      }).openapi("AttemptScore"),
+      }).openapi("ArenaAttempt"),
     ),
   })
-  .openapi("TaskScores");
+  .openapi("TaskArena");
 
 const AttemptLimitSchema = z
   .number()
@@ -1043,24 +1043,24 @@ export function apiRoutes(options: ApiOptions = {}) {
     .openapi(
       createRoute({
         method: "get",
-        path: "/projects/{owner}/{project}/tasks/{t}/scores",
-        operationId: "getTaskScores",
+        path: "/projects/{owner}/{project}/tasks/{t}/arena",
+        operationId: "getTaskArena",
         tags: ["Scoring"],
-        summary: "The current result of every attempt in a task, for the arena",
+        summary: "The arena: the current result of every attempt in a task",
         description:
-          "Each attempt but obsolete ones, by number, with its scoring status and, once its current head has a " +
+          "Every attempt, obsolete ones included, by number, with its state, its scoring status and, once its current head has a " +
           "`done` run, that result: `base`, the gate, the checks and every metric in one `metrics` map.",
         security: bearerOrWeb,
         middleware: [browser] as const,
         request: { params: TaskPathSchema },
         responses: {
-          200: { description: "The task's attempts with their current results.", ...json(TaskScoresSchema) },
+          200: { description: "The task's attempts with their current results.", ...json(TaskArenaSchema) },
           400: errorResponse("The task reference is invalid."),
           401: unauthorizedBearer,
           404: errorResponse("No such project or task."),
         },
       }),
-      async (c) => c.json(await tasks(c.env).taskScores(c.var.actor, taskPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c.env).taskArena(c.var.actor, taskPath(c.req.valid("param"))), 200),
     )
     .openapi(
       createRoute({
@@ -1146,8 +1146,8 @@ export function apiRoutes(options: ApiOptions = {}) {
           "Each setup command, check and preview of a run writes a log. Logs over " +
           `${MAX_LOG_BYTES / (1024 * 1024)} MB keep their head and tail, with a marker between them. Logs are ` +
           `deleted ${LOG_RETENTION_DAYS} days after the run; an expired log is \`not_found\`, like a missing one.`,
-        security: bearerOnly,
-        middleware: [bearer] as const,
+        security: bearerOrWeb,
+        middleware: [browser] as const,
         request: { params: RunLogPathSchema },
         responses: {
           200: { description: "The log.", content: { "text/plain": { schema: z.string() } } },
@@ -1160,9 +1160,9 @@ export function apiRoutes(options: ApiOptions = {}) {
         const { runId, name, ...path } = c.req.valid("param");
         const key = await tasks(c.env).runLogKey(c.var.actor, { ...path, run: runId, name });
         const log = await logsFor(c.env).get(key);
-        if (log === null) return c.json(errorBody("not_found", `run ${runId} has no log ${name}`), 404);
+        if (log === null) throw missingLog(runId, name);
         // Streamed straight from R2; the typed response only knows the documented string body.
-        return c.body(log.body, 200, { "Content-Type": "text/plain; charset=utf-8" }) as never;
+        return c.body(log.body, 200, { "Content-Type": LOG_CONTENT_TYPE }) as never;
       },
     )
     .openapi(

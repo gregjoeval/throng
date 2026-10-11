@@ -17,14 +17,6 @@ export type SandboxRole = (typeof SANDBOX_ROLES)[number];
 /** The roles a scoring run's Workflow starts containers for: scoring, its Preview, then the spike's landing. */
 export const SCORING_ROLES = ["score", "preview", "retest", "land"] as const satisfies readonly SandboxRole[];
 
-/** Only the preview container holds the Preview deploy grant. */
-export const ROLE_GETS_PREVIEW: Record<SandboxRole, boolean> = {
-  score: false,
-  preview: true,
-  retest: false,
-  land: false,
-};
-
 /** Roles whose container runs the repository's own code (npm, its scripts, wrangler builds). */
 export const RUNS_REPO_CODE: Record<SandboxRole, boolean> = {
   score: true,

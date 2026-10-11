@@ -9,9 +9,11 @@
 import { archiveRef } from "./archive.ts";
 import { CONFIG_PATH, loadConfig, type ConfigResult } from "./config.ts";
 import { ServiceError, type ErrorCode } from "./errors.ts";
+import { isLogName, logKey } from "./logs.ts";
 import { isZeroId } from "./pkt-line.ts";
 import { forkRepo, originRepo, type Repos } from "./repos.ts";
 import {
+  headAttemptRef,
   ScoringQueue,
   type AttemptScoring,
   type ScoredAttempt,
@@ -642,6 +644,16 @@ export class TaskStore {
     }
     this.#expect(current, ["open"], "rescore");
     return this.#requireHead(await this.#scoreHead(project, actor, current, "rescore"), current);
+  }
+
+  /**
+   * Where a run's log named `name` is stored in R2. Anyone signed in may read a run's logs. An
+   * unknown run, or a name no log can have, is `not_found`; whether the log itself exists is R2's.
+   */
+  runLogKey(project: ProjectContext, actor: Actor, input: { run: number; name: string }): string {
+    const run = this.getScoringRun(project, actor, input);
+    if (!isLogName(input.name)) throw new ServiceError("not_found", `run ${input.run} has no log ${input.name}`);
+    return logKey({ project: project.id, attempt: headAttemptRef(run), sha: run.sha, run: run.id }, input.name);
   }
 
   /** open → draft: takes the attempt back out of consideration. Only its author may. */
@@ -1421,6 +1433,7 @@ export const TASK_METHODS = [
   "markMerged",
   "scoreNow",
   "rescore",
+  "runLogKey",
   "authorizePush",
   "recordPush",
   "routeBranchPush",

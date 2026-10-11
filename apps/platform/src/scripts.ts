@@ -1,6 +1,7 @@
 // Bash run inside a run's Sandbox. Each script is idempotent, so a retried Workflow step can rerun it
 // on a fresh container. The last stdout line is the result: `THRONG_RESULT <json>`.
 
+import { PREVIEW_LOG, setupLogName } from "./logs.ts";
 import { MAX_METRICS_BYTES, SETUP_TIMEOUT_MS, type ScorePlan } from "./results.ts";
 
 export const RESULT_PREFIX = "THRONG_RESULT ";
@@ -46,8 +47,8 @@ fi`;
  * Scores the attempt's head `sha`: fetches it from the fork and `main` from the origin, records the
  * merge base and the diff size against it, runs each `setup` command and then every check in order,
  * each under `timeout` with `$THRONG_METRICS` pointing at an empty file. A failed setup command skips
- * every check; a failed check doesn't stop the next. Each step's output goes to `../logs/`. The
- * result is a `RawScore`; `buildResult` turns it into the run's result.
+ * every check; a failed check doesn't stop the next. Each step's output goes to `../logs/<name>.log`,
+ * named by `logNames`. The result is a `RawScore`; `buildResult` turns it into the run's result.
  */
 export function scoreScript(forkRemote: string, originRemote: string, sha: string, plan: ScorePlan): string {
   const setup = plan.setup
@@ -55,7 +56,7 @@ export function scoreScript(forkRemote: string, originRemote: string, sha: strin
       (
         command,
         i,
-      ) => `if [ -z "$setup_failed" ] && ! timeout -k 10s ${seconds(SETUP_TIMEOUT_MS)} bash -c ${quote(command)} < /dev/null > ../logs/setup-${i + 1}.log 2>&1; then
+      ) => `if [ -z "$setup_failed" ] && ! timeout -k 10s ${seconds(SETUP_TIMEOUT_MS)} bash -c ${quote(command)} < /dev/null > ../logs/${setupLogName(i + 1)}.log 2>&1; then
   setup_failed=${i + 1}
 fi`,
     )
@@ -118,7 +119,8 @@ NODE
 /**
  * Deploy the attempt's commit as a Worker Preview named `previewName`: install its dependencies, run
  * the config's `preview.command` (if any) as the build step, then `wrangler preview`. The API token
- * is a placeholder: the Worker's outbound intercept replaces it on requests it allows.
+ * is a placeholder: the Worker's outbound intercept replaces it on requests it allows. However it
+ * ends, the install's, build's and deploy's output is left in `logs/preview.deploy.log` for storing.
  */
 export function previewScript(
   forkRemote: string,
@@ -132,7 +134,10 @@ export function previewScript(
   result "{\\"ok\\":false,\\"stage\\":\\"build\\",\\"output\\":$(json < ../build.log)}"
 fi`;
   return `${PRELUDE}
-rm -rf preview && git init -q preview && cd preview
+ws=$PWD
+rm -rf preview logs install.log build.log preview.log preview.json && mkdir logs
+trap 'cat "$ws/install.log" "$ws/build.log" "$ws/preview.log" > "$ws/logs/${PREVIEW_LOG}.log" 2> /dev/null' EXIT
+git init -q preview && cd preview
 git fetch -q ${quote(forkRemote)} '+refs/heads/*:refs/remotes/fork/*' || exit 10
 git checkout -q --detach ${quote(sha)} || exit 11
 ${install('"ok":false')}

@@ -1,0 +1,74 @@
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
+import {
+  isLogName,
+  logKey,
+  logNames,
+  MAX_LOG_BYTES,
+  MISSING_LOG_EXIT,
+  PREVIEW_LOG,
+  readLogScript,
+  setupLogName,
+} from "../src/logs.ts";
+
+const SHA = "c".repeat(40);
+
+describe("logKey", () => {
+  it("lays a run's log out under the project, attempt, head and run", () => {
+    const run = { project: "p123", attempt: "t42a3", sha: SHA, run: 7 };
+    expect(logKey(run, "test")).toBe(`logs/p123/t42a3/${SHA}/7/test.log`);
+    expect(logKey(run, setupLogName(2))).toBe(`logs/p123/t42a3/${SHA}/7/setup.2.log`);
+    expect(logKey(run, PREVIEW_LOG)).toBe(`logs/p123/t42a3/${SHA}/7/preview.deploy.log`);
+  });
+});
+
+describe("log names", () => {
+  it("names each setup step and check of a plan, in run order", () => {
+    const plan = { setup: ["npm ci", "npm run gen"], checks: [{ name: "test" }, { name: "setup-1" }] };
+    expect(logNames(plan)).toEqual(["setup.1", "setup.2", "test", "setup-1"]);
+  });
+
+  it("can't collide: setup and preview logs use a dot, which check names can't", () => {
+    for (const name of [setupLogName(1), PREVIEW_LOG, "test", "bundle_kb", "a-b"]) expect(isLogName(name)).toBe(true);
+    for (const name of ["", "../x", "a/b", ".hidden", "Test", "a b"]) expect(isLogName(name)).toBe(false);
+  });
+});
+
+/** Runs `readLogScript` in a fresh directory holding `logs/<name>.log` files, as the Sandbox's workspace would. */
+function read(files: Record<string, string>, name: string, maxBytes?: number) {
+  const dir = mkdtempSync(join(tmpdir(), "throng-logs-"));
+  mkdirSync(join(dir, "logs"));
+  for (const [file, content] of Object.entries(files)) writeFileSync(join(dir, "logs", `${file}.log`), content);
+  const script = maxBytes === undefined ? readLogScript(name) : readLogScript(name, maxBytes);
+  const run = spawnSync("bash", ["-c", script], { cwd: dir, encoding: "utf8", maxBuffer: 2 * MAX_LOG_BYTES });
+  return { exit: run.status, stdout: run.stdout };
+}
+
+describe("readLogScript", () => {
+  it("prints a log that fits as it is", () => {
+    expect(read({ test: "ok\nall 3 passed\n" }, "test")).toEqual({ exit: 0, stdout: "ok\nall 3 passed\n" });
+    expect(read({ "setup.1": "" }, "setup.1")).toEqual({ exit: 0, stdout: "" });
+  });
+
+  it("exits MISSING_LOG_EXIT with nothing printed when the step wrote no log", () => {
+    expect(read({ test: "x" }, "bundle")).toEqual({ exit: MISSING_LOG_EXIT, stdout: "" });
+  });
+
+  it("keeps the head and tail of a log over the limit, with a marker between them", () => {
+    const log = "a".repeat(600) + "b".repeat(600);
+    const { exit, stdout } = read({ test: log }, "test", 1000);
+    expect(exit).toBe(0);
+    expect(stdout).toBe("a".repeat(400) + "\n[throng: truncated 400 of 1200 bytes]\n" + "b".repeat(400));
+  });
+
+  it("stores at most 5 MB of a larger log", () => {
+    const log = "h".repeat(MAX_LOG_BYTES) + "t".repeat(MAX_LOG_BYTES);
+    const { stdout } = read({ test: log }, "test");
+    expect(stdout.length).toBeLessThanOrEqual(MAX_LOG_BYTES);
+    expect(stdout.length).toBeGreaterThan(MAX_LOG_BYTES - 1024);
+    expect(stdout).toMatch(/^h+\n\[throng: truncated \d+ of 10485760 bytes\]\nt+$/);
+  });
+});

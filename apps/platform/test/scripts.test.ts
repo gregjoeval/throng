@@ -175,7 +175,7 @@ describe("scoreScript", () => {
       sandbox,
     );
     expect(raw).toMatchObject({ setupFailed: 2, checks: [{ exit: null, metrics: null }] });
-    expect(execFileSync("cat", [join(sandbox, "logs/setup-2.log")], { encoding: "utf8" })).toBe("nope\n");
+    expect(execFileSync("cat", [join(sandbox, "logs/setup.2.log")], { encoding: "utf8" })).toBe("nope\n");
     expect(() => execFileSync("test", ["-e", join(sandbox, "never")])).toThrow();
   });
 
@@ -274,6 +274,10 @@ function runPreview(script: string, bin: string, sandbox = mkdtempSync(join(root
   return { result, sandbox };
 }
 
+/** The preview's log the script left for storing. */
+const previewLog = (sandbox: string) =>
+  execFileSync("cat", [join(sandbox, "logs/preview.deploy.log")], { encoding: "utf8" });
+
 /** What the fake wrangler recorded, or a throw if it never ran. */
 const wranglerCall = (sandbox: string) => execFileSync("cat", [join(sandbox, "wrangler-call")], { encoding: "utf8" });
 
@@ -314,6 +318,22 @@ describe("previewScript", () => {
     const { result } = runPreview(previewScript(fork, head, { ...target, command: null }), fakeWrangler("fails"));
     expect(result).toMatchObject({ ok: false, stage: "deploy" });
     expect(result.ok === false && result.output).toContain("deploy refused");
+  });
+
+  it("writes the build's and the deploy's output to the preview's log, whichever stage it ends at", () => {
+    const head = attemptHead();
+    const failed = runPreview(
+      previewScript(fork, head, { ...target, command: "echo building; echo 'it is broken' >&2; exit 2" }),
+      fakeWrangler("deploys"),
+    );
+    expect(previewLog(failed.sandbox)).toBe("building\nit is broken\n");
+
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    runPreview(previewScript(fork, head, { ...target, command: "echo building" }), fakeWrangler("fails"), sandbox);
+    expect(previewLog(sandbox)).toBe("building\ndeploy refused\n");
+    // A rerun starts the log afresh.
+    runPreview(previewScript(fork, head, { ...target, command: null }), fakeWrangler("fails"), sandbox);
+    expect(previewLog(sandbox)).toBe("deploy refused\n");
   });
 
   it("is idempotent: rerunning in the same directory deploys again", () => {

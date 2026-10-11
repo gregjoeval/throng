@@ -87,6 +87,7 @@ interface Run {
     gate: "passed" | "failed";
     checks: { name: string; required: boolean; outcome: string; metrics: Record<string, number>; notes: string[] }[];
     builtin: { filesChanged: number; additions: number; deletions: number; durationMs: number };
+    logs: string[];
     preview: { status: "none" } | { status: "ready"; url: string } | { status: "failed" };
   } | null;
   error: string | null;
@@ -230,6 +231,10 @@ writeFileSync(process.env.THRONG_METRICS, JSON.stringify({ coverage: 87.5, stray
     coverage.notes.some((n) => n.includes("stray")),
     "the undeclared metric was not noted",
   );
+  assert(
+    JSON.stringify(result.logs) === JSON.stringify(["test", "coverage"]),
+    `expected both checks' logs stored: ${JSON.stringify(result.logs)}`,
+  );
   await finish(project, ["t1a1"], work, timeline);
 }
 
@@ -306,6 +311,7 @@ async function preview(): Promise<void> {
     new URL(deployed.url).hostname.startsWith(`t1a1-p${project}-`),
     `the Preview is not named after the fork and project: ${deployed.url}`,
   );
+  assert(result.logs.includes("preview.deploy"), `expected the Preview's log stored: ${JSON.stringify(result.logs)}`);
 
   // A new Preview's hostname can take a moment to answer.
   const url = `${deployed.url}?name=e2e`;

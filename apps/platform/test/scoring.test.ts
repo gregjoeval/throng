@@ -188,15 +188,31 @@ describe("scoring triggers", () => {
 });
 
 describe("the scoring queue", () => {
-  it("journals a commit pushed twice to a fork once, and scores it once", async () => {
+  it("journals every push, force-pushes back to an earlier commit included, and scores each head once", async () => {
     const { store, runs, commit, pushed, drafts, journal } = setup();
     const [ref] = await drafts();
     await store.openAttempt(PROJECT, ada, ref!);
-    const head = commit(ref!, "work\n");
-    queued(pushed(ref!, head));
-    expect(pushed(ref!, head)).toMatchObject({ queued: false, reason: "already queued" });
-    expect(journal().filter((e) => e.kind === "pushed" && e.after === head)).toHaveLength(1);
-    expect(runs(ref!).filter((r) => r.sha === head)).toHaveLength(1);
+    await store.scoring.drain();
+    const a = commit(ref!, "a\n");
+    const b = commit(ref!, "b\n");
+    queued(pushed(ref!, a));
+    expect(pushed(ref!, a)).toMatchObject({ queued: false, reason: "already queued" });
+    await store.scoring.drain();
+    store.scoring.finish(runs(ref!).at(-1)!.id, "done");
+
+    queued(pushed(ref!, b));
+    // Back to a, which already has a finished run: b's run is superseded and a isn't scored again.
+    expect(pushed(ref!, a)).toMatchObject({ queued: false, reason: "already scored" });
+    expect(
+      journal()
+        .filter((e) => e.kind === "pushed")
+        .map((e) => e.after),
+    ).toEqual([a, a, b, a]);
+    expect(runs(ref!).map((r) => [r.sha, r.status])).toEqual([
+      [expect.any(String), "cancelled"],
+      [a, "done"],
+      [b, "cancelled"],
+    ]);
   });
 
   it("keeps one pending run per attempt: the newest head wins", async () => {

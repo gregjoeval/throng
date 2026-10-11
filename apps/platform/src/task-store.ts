@@ -260,8 +260,6 @@ const SCHEMA = [
   `CREATE UNIQUE INDEX IF NOT EXISTS attempts_active_branch ON attempts (branch)
     WHERE branch IS NOT NULL AND state IN ('draft', 'open')`,
   `CREATE TABLE IF NOT EXISTS journal (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER, kind TEXT, detail TEXT)`,
-  // Every commit pushed to a repo, so a repeated delivery of a push is journalled and scored once.
-  `CREATE TABLE IF NOT EXISTS deliveries (repo TEXT, sha TEXT, at INTEGER, PRIMARY KEY (repo, sha))`,
   // Pushes creating an attempt from an origin branch, between forking and creating the attempt
   // (and task). A row holds its branch, and its attempt counts toward the task's cap.
   `CREATE TABLE IF NOT EXISTS branch_pushes (
@@ -757,10 +755,9 @@ export class TaskStore {
   /**
    * Journals a `pushed` event for each ref a push through the git proxy updated on an attempt's
    * fork, with the old and new ids so force-pushes show up afterwards, and queues scoring when the
-   * attempt is open and its head moved. A commit already delivered to the fork isn't journalled
-   * again, and the scoring queue skips a head it already covers. The proxy checked the claim
-   * before forwarding the push, and the push has landed, so this checks nothing. Returns the
-   * scoring request, or null when the push asked for none.
+   * attempt is open and its head moved; the scoring queue skips a head it already covers. The
+   * proxy checked the claim before forwarding the push, and the push has landed, so this checks
+   * nothing. Returns the scoring request, or null when the push asked for none.
    */
   recordPush(
     project: ProjectContext,
@@ -769,7 +766,7 @@ export class TaskStore {
   ): { scoring: ScoringRequest | null } {
     const current = this.#attempt(input);
     return this.#sql.transaction(() => {
-      const head = this.#recordPushed(project, actor, current, input.updates);
+      const head = this.#recordPushed(actor, current, input.updates);
       if (head === null || current.state !== "open") return { scoring: null };
       return { scoring: this.#request(project, actor, current, head, "push") };
     });
@@ -918,7 +915,7 @@ export class TaskStore {
       this.#journal(actor, "created", row.task, row.attempt);
       this.#journal(actor, "opened", row.task, row.attempt);
       const attempt = this.#attempt({ task: row.task, number: row.attempt });
-      this.#recordPushed(project, actor, attempt, input.updates);
+      this.#recordPushed(actor, attempt, input.updates);
       this.#dropBranchPush(attempt);
       const scoring = this.#request(project, actor, attempt, input.head, "open");
       return { task: this.#task(row.task), attempt, scoring };
@@ -986,21 +983,14 @@ export class TaskStore {
   }
 
   /**
-   * Journals the refs a push updated on an attempt's fork, deduped on (repo, sha) so a commit is
-   * journalled once. Returns the fork's new head when the push moved it, or null.
+   * Journals every ref a push updated on an attempt's fork. The proxy records each accepted push
+   * once, so nothing is deduped here: a force-push back to an earlier commit is journalled too.
+   * Returns the fork's new head when the push moved it, or null.
    */
-  #recordPushed(project: ProjectContext, actor: Actor, attempt: StoredAttempt, updates: PushedRef[]): string | null {
-    const repo = forkRepo(project.id, attempt.fork);
+  #recordPushed(actor: Actor, attempt: StoredAttempt, updates: PushedRef[]): string | null {
     let head: string | null = null;
     for (const { ref, before, after } of updates) {
-      const deleted = isZeroId(after);
-      // Even a commit the fork had before moves the head back to it, so scoring still hears of it.
-      if (ref === FORK_HEAD && !deleted) head = after;
-      if (!deleted) {
-        const [seen] = this.#sql.exec("SELECT 1 FROM deliveries WHERE repo = ? AND sha = ?", repo, after);
-        if (seen !== undefined) continue;
-        this.#sql.exec("INSERT INTO deliveries (repo, sha, at) VALUES (?, ?, ?)", repo, after, this.#now().getTime());
-      }
+      if (ref === FORK_HEAD && !isZeroId(after)) head = after;
       this.#journal(actor, "pushed", attempt.task, attempt.number, { git_ref: ref, before, after });
     }
     return head;

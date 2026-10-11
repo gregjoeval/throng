@@ -3,9 +3,7 @@ import { reposFor } from "./artifacts";
 import { loadConfig, type ConfigResult } from "./config";
 import {
   GRANT_SOURCES,
-  grantsForRole,
   ROLE_GRANTS,
-  RUNS_REPO_CODE,
   sandboxName,
   SCORING_ROLES,
   type RoleGrants,
@@ -13,21 +11,37 @@ import {
   type SandboxRole,
 } from "./grants";
 import { logKey, logNames, MISSING_LOG_EXIT, readLogScript } from "./logs";
+import { roleAccess } from "./network";
+import { previewName } from "./preview";
 import { forkRepo, originRepo } from "./repos";
-import { buildResult, scorePlan, scoreTimeoutMs, type RawScore, type ScorePlan, type ScoringResult } from "./results";
+import {
+  buildResult,
+  previewPlan,
+  scorePlan,
+  scoreTimeoutMs,
+  withPreview,
+  type RawScore,
+  type ScorePlan,
+  type ScoringResult,
+} from "./results";
 import type { RunResult } from "./sandbox";
 import type { ScoringOutcome, ScoringParams } from "./scoring";
 import {
   landScript,
   parseResult,
+  PREVIEW_BUILD_TIMEOUT_MS,
+  previewScript,
   retestScript,
   scoreScript,
   type FailureStage,
   type LandResult,
+  type PreviewScriptResult,
   type RetestResult,
 } from "./scripts";
 
 const TOKEN_TTL_SECONDS = 30 * 60;
+/** The preview step: fetching, installing and the build step at its timeout, then the deploy. */
+const PREVIEW_STEP_TIMEOUT_MS = PREVIEW_BUILD_TIMEOUT_MS + 10 * 60 * 1000;
 /** Each step's retries after its first try, for infrastructure errors; then the run ends `errored`. */
 const STEP_RETRIES = { limit: 2, delay: "5 seconds", backoff: "constant" } as const;
 /** What a container may reach while its logs are read: nothing. It is already running by then. */
@@ -47,9 +61,12 @@ export type LandOutcome =
  * Durable Object. The config is read from the origin's `main`, so an attempt can't change its own
  * checks. The container that runs repo code holds read grants only (see `grants.ts`).
  *
+ * When the config has a `preview` section and the gate passed, the head is then deployed as a Worker
+ * Preview from a separate container (see `#preview`); a failed Preview never changes the gate.
+ *
  * Until the merge queue takes them over, a head whose gate passed is then rebased onto main,
  * re-tested and landed, as the spike did. Landing runs before the result is reported, so a newer
- * push still cancels it. Previews (`previewScript`) are deployed by a later stage.
+ * push still cancels it.
  *
  * Each setup step's and check's log is copied to R2 (`logs.ts`) before the score step returns, so
  * the result names the logs that were stored.
@@ -66,9 +83,12 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
       );
       const plan = scorePlan(config);
       const timeoutMs = scoreTimeoutMs(plan);
-      const result = await step.do("score", { retries: STEP_RETRIES, timeout: timeoutMs }, () =>
+      const scored = await step.do("score", { retries: STEP_RETRIES, timeout: timeoutMs }, () =>
         this.#score(instanceId, params, config, plan, timeoutMs),
       );
+      const preview = previewPlan(config, scored);
+      const result =
+        preview === null ? scored : withPreview(scored, await this.#preview(instanceId, params, preview, step));
       outcome = { status: "done", result };
     } catch (cause) {
       outcome = { status: "errored", error: String(cause).slice(0, 4000) };
@@ -145,6 +165,48 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
     return stored;
   }
 
+  /**
+   * Deploys the head as a Worker Preview from the preview container, which holds the Preview deploy
+   * grant and only a read grant on the fork. Null when it gave no result or kept failing: a failed
+   * Preview is recorded on the result and never changes the gate.
+   */
+  async #preview(
+    instanceId: string,
+    params: ScoringParams,
+    { command }: { command: string | null },
+    step: WorkflowStep,
+  ): Promise<PreviewScriptResult | null> {
+    const workerName = this.env.PREVIEW_WORKER;
+    const name = previewName(params, workerName);
+    try {
+      const run = await step.do("preview", { retries: STEP_RETRIES, timeout: PREVIEW_STEP_TIMEOUT_MS }, () =>
+        this.#run(
+          instanceId,
+          params,
+          "preview",
+          (g) =>
+            previewScript(g.forkRead.remote, params.sha, {
+              accountId: this.env.CF_ACCOUNT_ID,
+              workerName,
+              previewName: name,
+              command,
+            }),
+          { timeoutMs: PREVIEW_STEP_TIMEOUT_MS },
+        ),
+      );
+      const deployed = parseResult<PreviewScriptResult>(run.stdout);
+      if (deployed === null) {
+        console.warn({ event: "scoring.preview_no_result", exit: run.exitCode, stderr: run.stderr.slice(-2000) });
+      } else if (!deployed.ok) {
+        console.log({ event: "scoring.preview_failed", stage: deployed.stage, output: deployed.output.slice(-2000) });
+      }
+      return deployed;
+    } catch (cause) {
+      console.warn({ event: "scoring.preview_errored", error: String(cause).slice(0, 2000) });
+      return null;
+    }
+  }
+
   /** The spike's landing: rebase onto main, re-test, and push, retrying while main moves underneath. */
   async #land(instanceId: string, params: ScoringParams, step: WorkflowStep): Promise<LandOutcome> {
     const landStep = { retries: STEP_RETRIES, timeout: "10 minutes" } as const;
@@ -194,8 +256,12 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
     const grants = (await this.#grants(params, ROLE_GRANTS[role])) as RoleGrants<R>;
     const sandbox = this.env.SANDBOX.getByName(sandboxName(instanceId, role));
     const result = await sandbox.run(script(grants), {
-      // Installing dependencies is repo work; the trusted land container never reaches the registry.
-      access: { grants: grantsForRole(role, grants), preview: null, npmRegistry: RUNS_REPO_CODE[role], allow },
+      // Only the preview container gets the Preview deploy grant; the trusted land container never
+      // reaches the registry.
+      access: roleAccess(role, grants, {
+        preview: { accountId: this.env.CF_ACCOUNT_ID, workerName: this.env.PREVIEW_WORKER },
+        allow,
+      }),
       ...(timeoutMs === undefined ? {} : { timeoutMs }),
     });
     // Exit codes 10+ are infrastructure failures (fetch, checkout, diff); throw so the step retries.

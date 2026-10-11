@@ -6,7 +6,9 @@ import {
   gateFor,
   parseMetrics,
   parseShortstat,
+  previewPlan,
   scorePlan,
+  withPreview,
   scoreTimeoutMs,
   SETUP_TIMEOUT_MS,
   type CheckResult,
@@ -229,5 +231,44 @@ describe("buildResult", () => {
       ["skipped", ["skipped: setup command 1 failed"]],
       ["skipped", ["skipped: setup command 1 failed"]],
     ]);
+  });
+});
+
+describe("previewPlan", () => {
+  const WITH_PREVIEW = parseConfig("preview:\n  command: npm run build\n");
+  const passed = buildResult(WITH_PREVIEW, raw());
+
+  it("deploys a Preview, with the configured build command, when preview is configured and the gate passed", () => {
+    expect(previewPlan(WITH_PREVIEW, passed)).toEqual({ command: "npm run build" });
+    expect(previewPlan(parseConfig("preview: {}\n"), passed)).toEqual({ command: null });
+  });
+
+  it("deploys nothing when the gate failed", () => {
+    const failing = parseConfig("preview:\n  command: npm run build\nchecks:\n  - { name: test, command: npm test }\n");
+    const result = buildResult(failing, raw({ checks: [{ exit: 1, durationMs: 1, metrics: "" }] }));
+    expect(result.gate).toBe("failed");
+    expect(previewPlan(failing, result)).toBeNull();
+  });
+
+  it("deploys nothing without a preview section, without a config, or with an invalid one", () => {
+    for (const config of [parseConfig(""), parseConfig(null), parseConfig("preview: nope\n")]) {
+      expect(previewPlan(config, buildResult(config, raw()))).toBeNull();
+    }
+  });
+});
+
+describe("withPreview", () => {
+  const passed = buildResult(parseConfig("preview: {}\n"), raw());
+
+  it("records a deployed Preview as ready with its URL", () => {
+    const result = withPreview(passed, { ok: true, url: "https://t1a1-pabc-w.acct.workers.dev" });
+    expect(result.preview).toEqual({ status: "ready", url: "https://t1a1-pabc-w.acct.workers.dev" });
+  });
+
+  it("records a failed Preview without changing the gate or the checks", () => {
+    for (const outcome of [{ ok: false, stage: "build", output: "boom" } as const, null]) {
+      const result = withPreview(passed, outcome);
+      expect(result).toEqual({ ...passed, preview: { status: "failed" } });
+    }
   });
 });

@@ -6,7 +6,8 @@
 // the spike's landing puts the head on main), conflict (two attempts edit the same line; the second
 // passes its gate but bounces when landing),
 // metrics (a passing project whose checks report metrics), failing (a required check fails the gate),
-// invalid (an invalid config fails the gate with a config entry), coalesce (two quick pushes; the first
+// invalid (an invalid config fails the gate with a config entry), preview (a passing gate deploys a
+// Worker Preview built with `preview.command`, and its URL serves it), coalesce (two quick pushes; the first
 // run is cancelled and only the newest sha is scored), intrusion (an attempt's checks try to push to
 // the origin and call the Cloudflare API; both fail), deps (setup installs an npm dependency from the
 // registry), refs (attempt archive refs: pushable, listed, kept across pushes to main, and copied by
@@ -87,6 +88,7 @@ interface Run {
     checks: { name: string; required: boolean; outcome: string; metrics: Record<string, number>; notes: string[] }[];
     builtin: { filesChanged: number; additions: number; deletions: number; durationMs: number };
     logs: string[];
+    preview: { status: "none" } | { status: "ready"; url: string } | { status: "failed" };
   } | null;
   error: string | null;
 }
@@ -97,6 +99,7 @@ const scenarios: Record<string, () => Promise<void>> = {
   metrics,
   failing,
   invalid,
+  preview,
   coalesce,
   intrusion,
   deps,
@@ -280,6 +283,47 @@ async function invalid(): Promise<void> {
     `expected one config entry, got ${JSON.stringify(result.checks)}`,
   );
   assert(result.builtin.filesChanged === 1, "the built-in metrics were not recorded");
+  await finish(project, ["t1a1"], work, timeline);
+}
+
+/**
+ * A project with `preview` configured: once the gate passes, the head is built with
+ * `preview.command` and deployed as a Worker Preview named `<forkName>-p<projectId>`, whose URL serves
+ * the built attempt.
+ */
+async function preview(): Promise<void> {
+  const timeline = new Timeline();
+  const { project, work } = await setUpProject(timeline, {
+    ".throng/config.yml": `${TEST_CHECK}preview:
+  command: sed -i 's/hello from a1/hello from a1, built/' src/greeting.js
+`,
+  });
+  const fork = await createAttempt(project, "t1a1", timeline);
+  const sha = await commitAndPush(work, fork, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
+  timeline.mark("attempt pushed");
+
+  const result = (await scored(project, sha)).result!;
+  timeline.mark("scored");
+  assert(result.gate === "passed", `expected the gate to pass: ${JSON.stringify(result.checks)}`);
+  const deployed = result.preview;
+  assert(deployed.status === "ready", `expected a ready Preview, got ${JSON.stringify(deployed)}`);
+  assert(
+    new URL(deployed.url).hostname.startsWith(`t1a1-p${project}-`),
+    `the Preview is not named after the fork and project: ${deployed.url}`,
+  );
+
+  // A new Preview's hostname can take a moment to answer.
+  const url = `${deployed.url}?name=e2e`;
+  const deadline = Date.now() + 2 * 60 * 1_000;
+  let last = "";
+  while (Date.now() < deadline) {
+    const response = await fetch(url).catch((cause: unknown) => cause);
+    last = response instanceof Response ? `${response.status} ${await response.text()}` : String(response);
+    if (last === "200 hello from a1, built, e2e") break;
+    await new Promise((r) => setTimeout(r, 2_000));
+  }
+  timeline.mark("preview answered");
+  assert(last === "200 hello from a1, built, e2e", `the Preview at ${url} answered ${last}`);
   await finish(project, ["t1a1"], work, timeline);
 }
 

@@ -148,7 +148,13 @@ describe("buildResult", () => {
       checks: [],
       builtin: { filesChanged: 3, additions: 10, deletions: 4, durationMs: 12 },
       preview: { status: "none" },
+      logs: [],
     });
+  });
+
+  it("keeps a reference to each log the run stored, by name", () => {
+    const result = buildResult(CONFIG, raw({ checks: [{ exit: 0, durationMs: 1, metrics: "" }] }), ["setup.1", "test"]);
+    expect(result.logs).toEqual(["setup.1", "test"]);
   });
 
   it("fails an invalid config's gate with a single config entry carrying the error", () => {

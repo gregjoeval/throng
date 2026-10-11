@@ -173,7 +173,7 @@ describe("scoreScript", () => {
       sandbox,
     );
     expect(raw).toMatchObject({ setupFailed: 2, checks: [{ exit: null, metrics: null }] });
-    expect(execFileSync("cat", [join(sandbox, "logs/setup-2.log")], { encoding: "utf8" })).toBe("nope\n");
+    expect(execFileSync("cat", [join(sandbox, "logs/setup.2.log")], { encoding: "utf8" })).toBe("nope\n");
     expect(() => execFileSync("test", ["-e", join(sandbox, "never")])).toThrow();
   });
 

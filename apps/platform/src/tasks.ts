@@ -210,6 +210,11 @@ export function taskService({ db, backend }: TaskServiceDeps) {
     /** Scores an open attempt's head again. Its author, the task's creator or the project owner may. */
     rescore: scoringRequest("rescore"),
 
+    /** The R2 key of a run's log. An unknown run or log name is `not_found`. */
+    async runLogKey(actor: Actor, input: ProjectPath & { run: number; name: string }): Promise<string> {
+      return invoke("runLogKey", await project(input), actor, { run: input.run, name: input.name });
+    },
+
     /**
      * Hands an active attempt to the user with handle `to`, who becomes its author. Only its
      * author (or their agents) may. An unknown handle is `not_found`; handing it to its own author

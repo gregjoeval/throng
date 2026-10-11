@@ -1,6 +1,7 @@
 // Bash run inside a run's Sandbox. Each script is idempotent, so a retried Workflow step can rerun it
 // on a fresh container. The last stdout line is the result: `THRONG_RESULT <json>`.
 
+import { setupLogName } from "./logs.ts";
 import { MAX_METRICS_BYTES, SETUP_TIMEOUT_MS, type ScorePlan } from "./results.ts";
 
 export const RESULT_PREFIX = "THRONG_RESULT ";
@@ -43,8 +44,8 @@ fi`;
  * Scores the attempt's head `sha`: fetches it from the fork and `main` from the origin, records the
  * merge base and the diff size against it, runs each `setup` command and then every check in order,
  * each under `timeout` with `$THRONG_METRICS` pointing at an empty file. A failed setup command skips
- * every check; a failed check doesn't stop the next. Each step's output goes to `../logs/`. The
- * result is a `RawScore`; `buildResult` turns it into the run's result.
+ * every check; a failed check doesn't stop the next. Each step's output goes to `../logs/<name>.log`,
+ * named by `logNames`. The result is a `RawScore`; `buildResult` turns it into the run's result.
  */
 export function scoreScript(forkRemote: string, originRemote: string, sha: string, plan: ScorePlan): string {
   const setup = plan.setup
@@ -52,7 +53,7 @@ export function scoreScript(forkRemote: string, originRemote: string, sha: strin
       (
         command,
         i,
-      ) => `if [ -z "$setup_failed" ] && ! timeout -k 10s ${seconds(SETUP_TIMEOUT_MS)} bash -c ${quote(command)} < /dev/null > ../logs/setup-${i + 1}.log 2>&1; then
+      ) => `if [ -z "$setup_failed" ] && ! timeout -k 10s ${seconds(SETUP_TIMEOUT_MS)} bash -c ${quote(command)} < /dev/null > ../logs/${setupLogName(i + 1)}.log 2>&1; then
   setup_failed=${i + 1}
 fi`,
     )

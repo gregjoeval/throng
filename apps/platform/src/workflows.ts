@@ -12,6 +12,7 @@ import {
   type RunGrants,
   type SandboxRole,
 } from "./grants";
+import { logKey, logNames, MISSING_LOG_EXIT, readLogScript } from "./logs";
 import { forkRepo, originRepo } from "./repos";
 import { buildResult, scorePlan, scoreTimeoutMs, type RawScore, type ScorePlan, type ScoringResult } from "./results";
 import type { RunResult } from "./sandbox";
@@ -29,6 +30,8 @@ import {
 const TOKEN_TTL_SECONDS = 30 * 60;
 /** Each step's retries after its first try, for infrastructure errors; then the run ends `errored`. */
 const STEP_RETRIES = { limit: 2, delay: "5 seconds", backoff: "constant" } as const;
+/** What a container may reach while its logs are read: nothing. It is already running by then. */
+const NO_ACCESS = { grants: [], preview: null, npmRegistry: false, allow: [] };
 /** Re-test and land rounds before giving up on a main that keeps moving. */
 const LAND_ROUNDS = 3;
 
@@ -47,6 +50,9 @@ export type LandOutcome =
  * Until the merge queue takes them over, a head whose gate passed is then rebased onto main,
  * re-tested and landed, as the spike did. Landing runs before the result is reported, so a newer
  * push still cancels it. Previews (`previewScript`) are deployed by a later stage.
+ *
+ * Each setup step's and check's log is copied to R2 (`logs.ts`) before the score step returns, so
+ * the result names the logs that were stored.
  */
 export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
   override async run(event: Readonly<WorkflowEvent<ScoringParams>>, step: WorkflowStep): Promise<ScoringOutcome> {
@@ -92,7 +98,7 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
     return outcome;
   }
 
-  /** Runs the score script in the run's own container and builds its result. */
+  /** Runs the score script in the run's own container, stores its logs and builds its result. */
   async #score(
     instanceId: string,
     params: ScoringParams,
@@ -111,7 +117,32 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
     if (raw === null) {
       throw new Error(`score script gave no result (exit ${run.exitCode}): ${run.stderr.slice(-2000)}`);
     }
-    return buildResult(config, raw);
+    const logs = await this.#storeLogs(instanceId, params, logNames(plan));
+    return buildResult(config, raw, logs);
+  }
+
+  /**
+   * Copies the score container's logs to R2, truncated over 5 MB, and returns the names stored. A
+   * step that never ran wrote no log; a log that fails to copy is left out rather than failing the run.
+   */
+  async #storeLogs(instanceId: string, params: ScoringParams, names: string[]): Promise<string[]> {
+    const sandbox = this.env.SANDBOX.getByName(sandboxName(instanceId, "score"));
+    const run = { project: params.project, attempt: params.attempt, sha: params.sha, run: params.run };
+    const stored: string[] = [];
+    for (const name of names) {
+      try {
+        const read = await sandbox.run(readLogScript(name), { access: NO_ACCESS });
+        if (read.exitCode === MISSING_LOG_EXIT) continue;
+        if (read.exitCode !== 0) throw new Error(`exit ${read.exitCode}: ${read.stderr.slice(-500)}`);
+        await this.env.LOGS.put(logKey(run, name), read.stdout, {
+          httpMetadata: { contentType: "text/plain; charset=utf-8" },
+        });
+        stored.push(name);
+      } catch (cause) {
+        console.error({ event: "scoring.log_not_stored", run: params.run, name, error: String(cause) });
+      }
+    }
+    return stored;
   }
 
   /** The spike's landing: rebase onto main, re-test, and push, retrying while main moves underneath. */

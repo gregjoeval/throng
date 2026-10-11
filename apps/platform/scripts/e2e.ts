@@ -86,6 +86,7 @@ interface Run {
     gate: "passed" | "failed";
     checks: { name: string; required: boolean; outcome: string; metrics: Record<string, number>; notes: string[] }[];
     builtin: { filesChanged: number; additions: number; deletions: number; durationMs: number };
+    logs: string[];
   } | null;
   error: string | null;
 }
@@ -226,6 +227,10 @@ writeFileSync(process.env.THRONG_METRICS, JSON.stringify({ coverage: 87.5, stray
   assert(
     coverage.notes.some((n) => n.includes("stray")),
     "the undeclared metric was not noted",
+  );
+  assert(
+    JSON.stringify(result.logs) === JSON.stringify(["test", "coverage"]),
+    `expected both checks' logs stored: ${JSON.stringify(result.logs)}`,
   );
   await finish(project, ["t1a1"], work, timeline);
 }

@@ -46,6 +46,11 @@ export interface ScoringResult {
   checks: CheckResult[];
   builtin: BuiltinMetrics;
   preview: PreviewResult;
+  /**
+   * The run's stored logs, by name (`setup.<n>`, a check's name, `preview.deploy`), in run order. A
+   * step that never ran has none; see `logs.ts` for where each is kept.
+   */
+  logs: string[];
 }
 
 /** What the score script runs, and the hosts it may reach beyond the npm registry. */
@@ -145,10 +150,13 @@ export function gateFor(checks: CheckResult[]): "passed" | "failed" {
   return checks.every((c) => !c.required || c.outcome === "passed") ? "passed" : "failed";
 }
 
-/** The run's result from the config it was scored under and the score script's raw output. */
-export function buildResult(config: ConfigResult, raw: RawScore): ScoringResult {
+/**
+ * The run's result from the config it was scored under, the score script's raw output and the
+ * names of the logs stored for it.
+ */
+export function buildResult(config: ConfigResult, raw: RawScore, logs: string[] = []): ScoringResult {
   const builtin = { ...parseShortstat(raw.shortstat), durationMs: raw.builtinMs };
-  const common = { base: raw.base, builtin, preview: { status: "none" } as const };
+  const common = { base: raw.base, builtin, preview: { status: "none" } as const, logs };
   if (config.kind === "none") return { ...common, config: { kind: "none" }, gate: "passed", checks: [] };
   if (config.kind === "invalid") {
     const entry: CheckResult = {

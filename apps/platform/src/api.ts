@@ -12,6 +12,7 @@ import { browseRoutes } from "./browse-api.ts";
 import { CONFIG_NAME, MAX_CHECK_TIMEOUT_MS, MAX_CONFIG_BYTES, parseConfig } from "./config.ts";
 import { errorBody, errorResponse, ServiceError } from "./errors.ts";
 import { FORWARDED_EMAIL_HEADER } from "./forwarded.ts";
+import { LOG_RETENTION_DAYS, MAX_LOG_BYTES, type LogStore } from "./logs.ts";
 import { MAX_PROJECT_HANDLE, PROJECT_HANDLE, projectService } from "./projects.ts";
 import type { Repos } from "./repos.ts";
 import { ATTEMPT_SCORING_STATUSES, RUN_STATUSES, SCORING_TRIGGERS } from "./scoring.ts";
@@ -212,6 +213,14 @@ const AttemptPathSchema = ProjectPathSchema.extend({
   a: z.string().openapi({ description: "An attempt reference.", example: "t42a3" }),
 });
 
+const RunLogPathSchema = ProjectPathSchema.extend({
+  runId: z.coerce.number().int().positive().openapi({ description: "A scoring run's id.", example: 7 }),
+  name: z.string().openapi({
+    description: "The log's name: a check's name, `setup.<n>` for the nth setup command, or `preview.deploy`.",
+    example: "test",
+  }),
+});
+
 const ConfigNameSchema = z.string().regex(CONFIG_NAME);
 
 const ConfigSchema = z
@@ -278,6 +287,8 @@ export interface ApiOptions extends AuthOptions {
   repos?: (env: AccessBindings) => Repos;
   /** A project's task backend: production passes its Durable Object, tests an in-process store. */
   tasks?: (env: AccessBindings) => (projectId: string) => TaskBackend;
+  /** The environment's logs bucket: production passes its R2 binding, tests one in memory. */
+  logs?: (env: AccessBindings) => LogStore;
 }
 
 function noRepos(): Repos {
@@ -286,6 +297,10 @@ function noRepos(): Repos {
 
 function noTasks(): (projectId: string) => TaskBackend {
   throw new Error("this API was built without a task backend");
+}
+
+function noLogs(): LogStore {
+  throw new Error("this API was built without a logs bucket");
 }
 
 type Bearer = ReturnType<typeof bearerAuth>;
@@ -415,6 +430,7 @@ export function apiRoutes(options: ApiOptions = {}) {
   const reposFor = options.repos ?? noRepos;
   const projects = (env: AccessBindings) => projectService({ db: env.DB, repos: reposFor(env) });
   const backendFor = options.tasks ?? noTasks;
+  const logsFor = options.logs ?? noLogs;
   const tasks = (env: AccessBindings) => taskService({ db: env.DB, backend: backendFor(env) });
   const taskPath = ({ t, ...rest }: z.infer<typeof TaskPathSchema>) => ({ ...rest, task: t });
   const attemptPath = ({ a, ...rest }: z.infer<typeof AttemptPathSchema>) => ({ ...rest, attempt: a });
@@ -934,6 +950,36 @@ export function apiRoutes(options: ApiOptions = {}) {
       async (c) => {
         const input = { ...attemptPath(c.req.valid("param")), ...c.req.valid("json") };
         return c.json(await tasks(c.env).handOffAttempt(c.var.actor, input), 200);
+      },
+    )
+    .openapi(
+      createRoute({
+        method: "get",
+        path: "/projects/{owner}/{project}/runs/{runId}/logs/{name}",
+        operationId: "getRunLog",
+        tags: ["Scoring"],
+        summary: "Stream one log of a scoring run",
+        description:
+          "Each setup command, check and preview of a run writes a log. Logs over " +
+          `${MAX_LOG_BYTES / (1024 * 1024)} MB keep their head and tail, with a marker between them. Logs are ` +
+          `deleted ${LOG_RETENTION_DAYS} days after the run; an expired log is \`not_found\`, like a missing one.`,
+        security: bearerOnly,
+        middleware: [bearer] as const,
+        request: { params: RunLogPathSchema },
+        responses: {
+          200: { description: "The log.", content: { "text/plain": { schema: z.string() } } },
+          400: errorResponse("The run id is invalid."),
+          401: unauthorizedBearer,
+          404: errorResponse("No such project, run or log, or the log has expired."),
+        },
+      }),
+      async (c) => {
+        const { runId, name, ...path } = c.req.valid("param");
+        const key = await tasks(c.env).runLogKey(c.var.actor, { ...path, run: runId, name });
+        const log = await logsFor(c.env).get(key);
+        if (log === null) return c.json(errorBody("not_found", `run ${runId} has no log ${name}`), 404);
+        // Streamed straight from R2; the typed response only knows the documented string body.
+        return c.body(log.body, 200, { "Content-Type": "text/plain; charset=utf-8" }) as never;
       },
     )
     .openapi(

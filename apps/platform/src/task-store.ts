@@ -559,8 +559,7 @@ export class TaskStore {
 
   /** The attempt's scoring status, with its current result: the latest `done` run for its head. */
   getScoring(_project: ProjectContext, _actor: Actor, input: AttemptInput): AttemptScoringDetail {
-    const current = this.#attempt(input);
-    return { ...current.scoring, current: this.scoring.currentRun(scoredAttempt(current)) };
+    return this.#scoringDetail(this.#attempt(input));
   }
 
   /** Every attempt of the task but obsolete ones, by number, each with its scoring and current result. */
@@ -568,11 +567,13 @@ export class TaskStore {
     project: ProjectContext,
     actor: Actor,
     input: { task: number },
-  ): (StoredAttempt & { current: StoredRun | null })[] {
-    return this.listAttempts(project, actor, input).map((a) => ({
-      ...a,
-      current: this.scoring.currentRun(scoredAttempt(a)),
-    }));
+  ): (Omit<StoredAttempt, "scoring"> & { scoring: AttemptScoringDetail })[] {
+    return this.listAttempts(project, actor, input).map((a) => ({ ...a, scoring: this.#scoringDetail(a) }));
+  }
+
+  /** The attempt's scoring status, with the run holding its current result. */
+  #scoringDetail(attempt: StoredAttempt): AttemptScoringDetail {
+    return { ...attempt.scoring, current: this.scoring.currentRun(scoredAttempt(attempt)) };
   }
 
   /** The attempt's scoring runs, newest first, superseded and cancelled ones included. */

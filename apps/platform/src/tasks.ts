@@ -11,6 +11,7 @@ import {
   parseTaskRef,
   taskRef,
   type AttemptInput,
+  type AttemptScoringDetail,
   type AttemptState,
   type ProjectContext,
   type StoredAttempt,
@@ -254,13 +255,7 @@ export function taskService({ db, backend }: TaskServiceDeps) {
 
     /** The attempt's scoring status and current result. Any signed-in user may read it. */
     async getScoring(actor: Actor, input: AttemptPath): Promise<ScoringStatus> {
-      const { current, ...status } = await invoke(
-        "getScoring",
-        await project(input),
-        actor,
-        attemptRefOf(input.attempt),
-      );
-      return current === null ? status : { ...status, result: currentResult(current) };
+      return scoringStatus(await invoke("getScoring", await project(input), actor, attemptRefOf(input.attempt)));
     },
 
     /**
@@ -276,12 +271,11 @@ export function taskService({ db, backend }: TaskServiceDeps) {
       );
       return {
         task: taskRef(number),
-        attempts: list.map(({ current, scoring, fork, state, author }) => ({
+        attempts: list.map(({ scoring, fork, state, author }) => ({
           ref: fork,
           state,
           author: userRef(author, users),
-          ...scoring,
-          ...(current === null ? {} : { result: currentResult(current) }),
+          ...scoringStatus(scoring),
         })),
       };
     },
@@ -391,6 +385,11 @@ function publicRun(run: StoredRun, users: Map<string, string>): ScoringRun {
 
 function runDetail(run: StoredRun, users: Map<string, string>): RunDetail {
   return { ...publicRun(run, users), superseded: run.superseded, error: run.error, result: run.result };
+}
+
+/** An attempt's scoring status for polling, with its current result once its head has one. */
+function scoringStatus({ current, ...status }: AttemptScoringDetail): ScoringStatus {
+  return current === null ? status : { ...status, result: currentResult(current) };
 }
 
 function currentResult(run: StoredRun): CurrentResult {

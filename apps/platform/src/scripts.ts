@@ -10,7 +10,10 @@ export type FailureStage = "install" | "test";
 
 export type PreviewScriptResult =
   | { ok: true; url: string }
-  | { ok: false; stage: "install" | "deploy"; output: string };
+  | { ok: false; stage: "install" | "build" | "deploy"; output: string };
+
+/** Longest `preview.command` may run; the spec gives it no timeout of its own, so a check's default. */
+export const PREVIEW_BUILD_TIMEOUT_MS = SETUP_TIMEOUT_MS;
 
 export type RetestResult =
   | { kind: "tested"; base: string; tree: string }
@@ -113,19 +116,27 @@ NODE
 }
 
 /**
- * Deploy the attempt's commit as a Worker Preview named `previewName`. The API token is a placeholder:
- * the Worker's outbound intercept replaces it on requests it allows.
+ * Deploy the attempt's commit as a Worker Preview named `previewName`: install its dependencies, run
+ * the config's `preview.command` (if any) as the build step, then `wrangler preview`. The API token
+ * is a placeholder: the Worker's outbound intercept replaces it on requests it allows.
  */
 export function previewScript(
   forkRemote: string,
   sha: string,
-  preview: { accountId: string; workerName: string; previewName: string },
+  preview: { accountId: string; workerName: string; previewName: string; command: string | null },
 ): string {
+  const build =
+    preview.command === null
+      ? ""
+      : `if ! timeout -k 10s ${seconds(PREVIEW_BUILD_TIMEOUT_MS)} bash -c ${quote(preview.command)} < /dev/null > ../build.log 2>&1; then
+  result "{\\"ok\\":false,\\"stage\\":\\"build\\",\\"output\\":$(json < ../build.log)}"
+fi`;
   return `${PRELUDE}
 rm -rf preview && git init -q preview && cd preview
 git fetch -q ${quote(forkRemote)} '+refs/heads/*:refs/remotes/fork/*' || exit 10
 git checkout -q --detach ${quote(sha)} || exit 11
 ${install('"ok":false')}
+${build}
 export CLOUDFLARE_API_TOKEN=added-by-worker CLOUDFLARE_ACCOUNT_ID=${quote(preview.accountId)}
 export WRANGLER_SEND_METRICS=false CI=1
 if wrangler preview --worker-name ${quote(preview.workerName)} --name ${quote(preview.previewName)} --json > ../preview.json 2> ../preview.log; then

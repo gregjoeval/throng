@@ -1,7 +1,15 @@
 // What a Sandbox container may reach. The Worker's outbound intercept asks `outboundDecision` about every
 // request and does only what it says, so the whole policy is here and testable.
 
-import { grantFor, type GitGrant } from "./grants.ts";
+import {
+  grantFor,
+  grantsForRole,
+  ROLE_GETS_PREVIEW,
+  RUNS_REPO_CODE,
+  type GitGrant,
+  type RoleGrants,
+  type SandboxRole,
+} from "./grants.ts";
 import { previewPathAllowed, type PreviewGrant } from "./preview.ts";
 
 export const NPM_REGISTRY_HOST = "registry.npmjs.org";
@@ -59,4 +67,21 @@ export function interceptedHosts(access: OutboundAccess): Set<string> {
 /** Installs only read from the registry; anything that would publish or log in is refused. */
 export function registryAllows(method: string, url: URL): boolean {
   return url.protocol === "https:" && url.host === NPM_REGISTRY_HOST && (method === "GET" || method === "HEAD");
+}
+
+/**
+ * What `role`'s container may reach: its git grants, the Preview deploy grant only for the `preview`
+ * role, and the npm registry and `network.allow` hosts only for roles that run repository code.
+ */
+export function roleAccess<R extends SandboxRole>(
+  role: R,
+  grants: RoleGrants<R>,
+  { preview, allow }: { preview: PreviewGrant | null; allow: string[] },
+): OutboundAccess {
+  return {
+    grants: grantsForRole(role, grants),
+    preview: ROLE_GETS_PREVIEW[role] ? preview : null,
+    npmRegistry: RUNS_REPO_CODE[role],
+    allow: RUNS_REPO_CODE[role] ? allow : [],
+  };
 }

@@ -3,6 +3,7 @@
 // gate live here so they're tested without a container.
 
 import { DEFAULT_CHECK_TIMEOUT_MS, type ConfigResult } from "./config.ts";
+import type { PreviewScriptResult } from "./scripts.ts";
 
 export const CHECK_OUTCOMES = ["passed", "failed", "timed_out", "skipped"] as const;
 export type CheckOutcome = (typeof CHECK_OUTCOMES)[number];
@@ -143,6 +144,24 @@ export function parseMetrics(
 /** Passed when every required check passed; no checks at all passes. */
 export function gateFor(checks: CheckResult[]): "passed" | "failed" {
   return checks.every((c) => !c.required || c.outcome === "passed") ? "passed" : "failed";
+}
+
+/**
+ * Whether to deploy a Preview, and its build step: only when the config has a `preview` section and
+ * the gate passed. Null means no Preview, and the result keeps `preview: none`.
+ */
+export function previewPlan(config: ConfigResult, result: ScoringResult): { command: string | null } | null {
+  if (config.kind !== "valid" || config.config.preview === null || result.gate !== "passed") return null;
+  return { command: config.config.preview.command };
+}
+
+/**
+ * The result with the Preview's outcome recorded: `ready` with its URL when it deployed, `failed`
+ * otherwise (null when the preview script gave no result). The gate and checks never change.
+ */
+export function withPreview(result: ScoringResult, deployed: PreviewScriptResult | null): ScoringResult {
+  const preview: PreviewResult = deployed?.ok === true ? { status: "ready", url: deployed.url } : { status: "failed" };
+  return { ...result, preview };
 }
 
 /** The run's result from the config it was scored under and the score script's raw output. */

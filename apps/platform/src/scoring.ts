@@ -476,9 +476,15 @@ function toRun(row: RunRow): StoredRun {
     ...run,
     trigger: row.trigger as ScoringTrigger,
     status: row.status as RunStatus,
-    result: row.result === null ? null : (JSON.parse(row.result) as ScoringResult),
+    result: row.result === null ? null : storedResult(row.result),
     superseded: row.superseded === 1,
   };
+}
+
+/** A stored result; one stored before runs kept logs has none. */
+function storedResult(json: string): ScoringResult {
+  const result = JSON.parse(json) as Omit<ScoringResult, "logs"> & { logs?: string[] };
+  return { ...result, logs: result.logs ?? [] };
 }
 
 /** A result in a few words for the journal: `no checks configured`, `2 passed, 1 failed`, `config invalid`. */

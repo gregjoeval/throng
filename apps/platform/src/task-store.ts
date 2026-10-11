@@ -272,12 +272,22 @@ const SCHEMA = [
   )`,
 ];
 
+/**
+ * Tables the spike's push inbox kept, which nothing reads since scoring moved to `scoring.ts`:
+ * event deliveries, its checks and its pending queue.
+ */
+const DROPPED_TABLES = ["deliveries", "checks", "pending"];
+
 /** Columns added to the spike's journal, so task and attempt events record who acted on what. */
 const JOURNAL_COLUMNS = ["user_id TEXT", "agent TEXT", "task INTEGER", "attempt INTEGER"];
 
-/** Creates the store's tables, and adds the journal's newer columns to a journal that predates them. */
+/**
+ * Creates the store's tables, adds the journal's newer columns to a journal that predates them, and
+ * drops the spike's tables.
+ */
 export function migrate(sql: Sql): void {
   for (const statement of SCHEMA) sql.exec(statement);
+  for (const table of DROPPED_TABLES) sql.exec(`DROP TABLE IF EXISTS ${table}`);
   const columns = new Set(sql.exec<{ name: string }>("PRAGMA table_info(journal)").map((c) => c.name));
   for (const column of JOURNAL_COLUMNS) {
     if (!columns.has(column.split(" ")[0] ?? "")) sql.exec(`ALTER TABLE journal ADD COLUMN ${column}`);

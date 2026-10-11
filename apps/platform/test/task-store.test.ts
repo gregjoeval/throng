@@ -700,6 +700,21 @@ describe("migrate", () => {
     expect(columns).toEqual(["id", "at", "kind", "detail", "user_id", "agent", "task", "attempt"]);
     expect(sql.exec("SELECT kind FROM journal")).toEqual([{ kind: "duplicate" }]);
   });
+
+  it("drops the spike's push inbox tables", () => {
+    const sql = testSql();
+    sql.exec("CREATE TABLE deliveries (repo TEXT, sha TEXT, at INTEGER, PRIMARY KEY (repo, sha))");
+    sql.exec(
+      "CREATE TABLE checks (instance_id TEXT PRIMARY KEY, attempt TEXT, sha TEXT, status TEXT, created_at INTEGER)",
+    );
+    sql.exec("CREATE TABLE pending (attempt TEXT PRIMARY KEY, sha TEXT, at INTEGER)");
+    migrate(sql);
+    const tables = sql.exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table'").map((t) => t.name);
+    expect(tables).not.toContain("deliveries");
+    expect(tables).not.toContain("checks");
+    expect(tables).not.toContain("pending");
+    expect(tables).toContain("tasks");
+  });
 });
 
 /** A store whose clock a test can move, over a FakeRepos that has the origin. */

@@ -27,7 +27,17 @@ export interface RefUpdate {
 }
 
 export function isDelete(update: RefUpdate): boolean {
-  return ZERO_ID.test(update.after);
+  return isZeroId(update.after);
+}
+
+/** Whether `id` is git's all-zero object id, which stands for "no object" in a ref update. */
+export function isZeroId(id: string): boolean {
+  return ZERO_ID.test(id);
+}
+
+/** The all-zero object id as long as `like`, an id of the same hash, for a ref that doesn't exist. */
+export function zeroId(like: string): string {
+  return "0".repeat(like.length);
 }
 
 /** A receive-pack request whose command list has been read; the pack (if any) is still unread. */

@@ -9,6 +9,7 @@
 import { archiveRef } from "./archive.ts";
 import { CONFIG_PATH, loadConfig, type ConfigResult } from "./config.ts";
 import { ServiceError, type ErrorCode } from "./errors.ts";
+import { isZeroId } from "./pkt-line.ts";
 import { forkRepo, originRepo, type Repos } from "./repos.ts";
 import { ScoringQueue, type ScoringRequest, type ScoringRunner, type ScoringTrigger } from "./scoring.ts";
 import type { Actor } from "./tokens.ts";
@@ -992,7 +993,7 @@ export class TaskStore {
     const repo = forkRepo(project.id, attempt.fork);
     let head: string | null = null;
     for (const { ref, before, after } of updates) {
-      const deleted = isZeroSha(after);
+      const deleted = isZeroId(after);
       // Even a commit the fork had before moves the head back to it, so scoring still hears of it.
       if (ref === FORK_HEAD && !deleted) head = after;
       if (!deleted) {
@@ -1458,8 +1459,4 @@ function mayAuthor(actor: Actor, current: StoredAttempt): void {
 
 function invalidState(message: string): ServiceError {
   return new ServiceError("invalid_state", message);
-}
-
-function isZeroSha(sha: string): boolean {
-  return /^0+$/.test(sha);
 }

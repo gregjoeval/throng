@@ -4,9 +4,8 @@
 
 import { ServiceError } from "./errors.ts";
 import { resolveProject } from "./projects.ts";
-import type { ScoringRequest, StoredRun } from "./scoring.ts";
+import { headAttemptRef, type ScoringRequest, type StoredRun } from "./scoring.ts";
 import {
-  attemptRef,
   parseAttemptRef,
   parseTaskRef,
   taskRef,
@@ -282,7 +281,7 @@ function publicScoring(request: ScoringRequest, users: Map<string, string>): Sco
     reason: request.queued ? null : request.reason,
     run: {
       id: run.id,
-      ref: attemptRef(run.task, run.attempt),
+      ref: headAttemptRef(run),
       sha: run.sha,
       trigger: run.trigger,
       status: run.status,

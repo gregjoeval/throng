@@ -312,6 +312,43 @@ function taskTransition(
   });
 }
 
+/** What an attempt action route documents beyond its verb. */
+interface AttemptAction<S extends z.ZodType> {
+  operationId: string;
+  tags: string[];
+  summary: string;
+  description?: string;
+  /** Who may, for the 403. */
+  forbidden: string;
+  /** The 409 causes. */
+  conflict: string;
+  /** The 200 body's description and schema. */
+  ok: { description: string; schema: S };
+}
+
+/** An attempt action route: `POST …/attempts/{a}/<verb>`, bearer-only. */
+function attemptAction<S extends z.ZodType>(bearer: Bearer, verb: string, action: AttemptAction<S>) {
+  return createRoute({
+    method: "post",
+    path: `/projects/{owner}/{project}/attempts/{a}/${verb}`,
+    operationId: action.operationId,
+    tags: action.tags,
+    summary: action.summary,
+    ...(action.description === undefined ? {} : { description: action.description }),
+    security: bearerOnly,
+    middleware: [bearer] as const,
+    request: { params: AttemptPathSchema },
+    responses: {
+      200: { description: action.ok.description, ...json(action.ok.schema) },
+      400: errorResponse("The attempt reference is invalid."),
+      401: unauthorizedBearer,
+      403: errorResponse(action.forbidden),
+      404: errorResponse("No such project or attempt."),
+      409: errorResponse(action.conflict),
+    },
+  });
+}
+
 /** An attempt transition route: `POST …/attempts/{a}/<verb>`. */
 function attemptTransition(
   bearer: Bearer,
@@ -321,23 +358,13 @@ function attemptTransition(
   forbidden: string,
   conflicts: string[],
 ) {
-  return createRoute({
-    method: "post",
-    path: `/projects/{owner}/{project}/attempts/{a}/${verb}`,
+  return attemptAction(bearer, verb, {
     operationId,
     tags: ["Attempts"],
     summary,
-    security: bearerOnly,
-    middleware: [bearer] as const,
-    request: { params: AttemptPathSchema },
-    responses: {
-      200: { description: "The attempt after the transition.", ...json(AttemptSchema) },
-      400: errorResponse("The attempt reference is invalid."),
-      401: unauthorizedBearer,
-      403: errorResponse(forbidden),
-      404: errorResponse("No such project or attempt."),
-      409: errorResponse(conflicts.join(" ")),
-    },
+    forbidden,
+    conflict: conflicts.join(" "),
+    ok: { description: "The attempt after the transition.", schema: AttemptSchema },
   });
 }
 
@@ -351,24 +378,14 @@ function scoringRoute(
   forbidden: string,
   conflict: string,
 ) {
-  return createRoute({
-    method: "post",
-    path: `/projects/{owner}/{project}/attempts/{a}/${verb}`,
+  return attemptAction(bearer, verb, {
     operationId,
     tags: ["Scoring"],
     summary,
     description,
-    security: bearerOnly,
-    middleware: [bearer] as const,
-    request: { params: AttemptPathSchema },
-    responses: {
-      200: { description: "The run now covering the attempt's head.", ...json(ScoringSchema) },
-      400: errorResponse("The attempt reference is invalid."),
-      401: unauthorizedBearer,
-      403: errorResponse(forbidden),
-      404: errorResponse("No such project or attempt."),
-      409: errorResponse(`\`invalid_state\`: ${conflict}, or its fork has no commits.`),
-    },
+    forbidden,
+    conflict: `\`invalid_state\`: ${conflict}, or its fork has no commits.`,
+    ok: { description: "The run now covering the attempt's head.", schema: ScoringSchema },
   });
 }
 

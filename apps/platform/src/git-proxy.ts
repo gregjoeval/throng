@@ -24,6 +24,7 @@ import {
   renameRefs,
   updatedRefs,
   writeReport,
+  zeroId,
   type PushReport,
   type PushRequest,
   type RefUpdate,
@@ -41,7 +42,7 @@ import {
   type StoredTask,
   type TaskMethod,
 } from "./task-store.ts";
-import type { ScoringRequest } from "./scoring.ts";
+import { headAttemptRef, type ScoringRequest } from "./scoring.ts";
 import type { TaskBackend } from "./tasks.ts";
 import type { AccessBindings } from "./access.ts";
 
@@ -278,7 +279,7 @@ async function pushToCreate(
   try {
     if (pending) await forkReady(upstream.repos, fork);
     const [head] = await upstream.repos.listCommits(fork, { ref: "main", limit: 1 });
-    const before = head?.hash ?? "0".repeat(update.after.length);
+    const before = head?.hash ?? zeroId(update.after);
     const forkUpdate: RefUpdate = { ref: MAIN, before, after: update.after };
     const commands = commandList(push, [forkUpdate]);
     const length = contentLength(c);
@@ -374,7 +375,7 @@ function refuse(report: PushReport, reason: string): PushReport {
 function scoringLines({ scoring }: { scoring: ScoringRequest | null }): string[] {
   if (scoring === null || !scoring.queued) return [];
   const { run } = scoring;
-  return [`scoring queued for ${attemptRef(run.task, run.attempt)} (${run.sha})`];
+  return [`scoring queued for ${headAttemptRef(run)} (${run.sha})`];
 }
 
 /** The `remote:` lines for a push that made an attempt. */

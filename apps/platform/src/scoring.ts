@@ -44,13 +44,23 @@ export interface ScoringRunner {
   teardown(instanceId: string): Promise<void>;
 }
 
-export interface StoredRun {
-  id: number;
+/** An attempt's head, as scoring names it. */
+export interface ScoredHead {
+  /** The project id. */
   project: string;
   task: number;
   /** The attempt's number within its task. */
   attempt: number;
   sha: string;
+}
+
+/** The attempt a head belongs to, `t42a3`. */
+export function headAttemptRef(head: Pick<ScoredHead, "task" | "attempt">): string {
+  return attemptRef(head.task, head.attempt);
+}
+
+export interface StoredRun extends ScoredHead {
+  id: number;
   trigger: ScoringTrigger;
   /** The requesting user's id, or null for a request no user made. */
   user_id: string | null;
@@ -69,11 +79,7 @@ interface RunRow extends Omit<StoredRun, "trigger" | "status"> {
   torn_down: number;
 }
 
-export interface ScoringRequestInput {
-  project: string;
-  task: number;
-  attempt: number;
-  sha: string;
+export interface ScoringRequestInput extends ScoredHead {
   trigger: ScoringTrigger;
   actor: Actor | null;
   /**
@@ -174,7 +180,7 @@ export class ScoringQueue {
       );
       if (row === undefined) throw new Error("scoring run insert returned no row");
       // The id makes the instance id unique, so a rescore of a head gets its own Workflow.
-      const instanceId = `${forkRepo(input.project, attemptRef(row.task, row.attempt))}-${input.sha.slice(0, 12)}-${row.id}`;
+      const instanceId = `${forkRepo(input.project, headAttemptRef(row))}-${input.sha.slice(0, 12)}-${row.id}`;
       this.#sql.exec("UPDATE scoring_runs SET instance_id = ? WHERE id = ?", instanceId, row.id);
       const run = toRun({ ...row, instance_id: instanceId });
       this.#journal("scoring_queued", run, { trigger: input.trigger });
@@ -284,7 +290,7 @@ export class ScoringQueue {
   async #start(runner: ScoringRunner, run: StoredRun): Promise<void> {
     const params: ScoringParams = {
       project: run.project,
-      attempt: attemptRef(run.task, run.attempt),
+      attempt: headAttemptRef(run),
       sha: run.sha,
       run: run.id,
     };
@@ -324,7 +330,7 @@ export class ScoringQueue {
   }
 
   #journal(kind: string, run: StoredRun, extra: Record<string, unknown>): void {
-    const detail = { ref: attemptRef(run.task, run.attempt), run: run.id, sha: run.sha, ...extra };
+    const detail = { ref: headAttemptRef(run), run: run.id, sha: run.sha, ...extra };
     this.#sql.exec(
       "INSERT INTO journal (at, kind, detail, user_id, agent, task, attempt) VALUES (?, ?, ?, ?, ?, ?, ?)",
       this.#ms(),

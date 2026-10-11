@@ -9,7 +9,7 @@
 // streamed straight into the target's receive-pack (v1, the only push protocol Artifacts speaks).
 // See `gitprotocol-v2`, `gitprotocol-pack` and `gitprotocol-http`.
 
-import { concat, flushPkt, pktLine } from "./pkt-line.ts";
+import { concat, flushPkt, isZeroId, pktLine, zeroId } from "./pkt-line.ts";
 import type { CopyRef, Repos } from "./repos.ts";
 
 /** A repo's HTTPS git remote and a token for it, sent as `Authorization: Bearer`. */
@@ -34,7 +34,6 @@ export class GitClientError extends Error {
   override readonly name = "GitClientError";
 }
 
-const ZERO_ID = /^0+$/;
 const OBJECT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 /** At most this many of the target's ref tips are offered to the source as haves. */
 const MAX_HAVES = 256;
@@ -55,11 +54,11 @@ export async function copyRef(fetcher: typeof fetch, args: CopyRefArgs): Promise
     throw new GitClientError(`${args.fromRef} is at ${sha}, expected ${args.expect}`);
   }
   const target = await receivePackRefs(fetcher, args.to);
-  const before = target.refs.get(args.toRef) ?? "0".repeat(sha.length);
+  const before = target.refs.get(args.toRef) ?? zeroId(sha);
   if (before === sha) return sha;
   if (!target.capabilities.has("report-status")) throw new GitClientError("the target doesn't report push status");
 
-  const haves = [...new Set(target.refs.values())].filter((id) => !ZERO_ID.test(id)).slice(0, MAX_HAVES);
+  const haves = [...new Set(target.refs.values())].filter((id) => !isZeroId(id)).slice(0, MAX_HAVES);
   const pack = await fetchPack(fetcher, args.from, sha, haves);
   await pushPack(fetcher, args.to, { ref: args.toRef, before, after: sha }, pack);
   return sha;

@@ -14,6 +14,7 @@ import { errorBody, errorResponse, ServiceError } from "./errors.ts";
 import { FORWARDED_EMAIL_HEADER } from "./forwarded.ts";
 import { MAX_PROJECT_HANDLE, PROJECT_HANDLE, projectService } from "./projects.ts";
 import type { Repos } from "./repos.ts";
+import { RUN_STATUSES, SCORING_TRIGGERS } from "./scoring.ts";
 import { ATTEMPT_STATES, TASK_STATES } from "./task-store.ts";
 import { taskService, type TaskBackend } from "./tasks.ts";
 import { DEFAULT_TOKEN_TTL_SECONDS, listTokens, MAX_TOKEN_TTL_SECONDS, mintToken, revokeToken } from "./tokens.ts";
@@ -128,6 +129,30 @@ const AttemptSchema = z
     archived_sha: z.string().nullable(),
   })
   .openapi("Attempt");
+
+const ScoringSchema = z
+  .object({
+    queued: z.boolean().openapi({ description: "Whether this request queued a new run." }),
+    reason: z.string().nullable().openapi({
+      description: "Why nothing was queued: the head is already queued, running or scored.",
+      example: "already scored",
+    }),
+    run: z
+      .object({
+        id: z.number().int(),
+        ref: z.string().openapi({ description: "The attempt it scores.", example: "t42a3" }),
+        sha: z.string().openapi({ description: "The head it scores." }),
+        trigger: z.enum(SCORING_TRIGGERS),
+        status: z.enum(RUN_STATUSES),
+        requested_by: UserRefSchema.nullable(),
+        agent: z.string().nullable(),
+        created_at: z.string(),
+        started_at: z.string().nullable(),
+        finished_at: z.string().nullable(),
+      })
+      .openapi("ScoringRun", { description: "The run that was queued, or the one already covering the head." }),
+  })
+  .openapi("ScoringRequest");
 
 const AttemptLimitSchema = z
   .number()
@@ -287,6 +312,43 @@ function taskTransition(
   });
 }
 
+/** What an attempt action route documents beyond its verb. */
+interface AttemptAction<S extends z.ZodType> {
+  operationId: string;
+  tags: string[];
+  summary: string;
+  description?: string;
+  /** Who may, for the 403. */
+  forbidden: string;
+  /** The 409 causes. */
+  conflict: string;
+  /** The 200 body's description and schema. */
+  ok: { description: string; schema: S };
+}
+
+/** An attempt action route: `POST …/attempts/{a}/<verb>`, bearer-only. */
+function attemptAction<S extends z.ZodType>(bearer: Bearer, verb: string, action: AttemptAction<S>) {
+  return createRoute({
+    method: "post",
+    path: `/projects/{owner}/{project}/attempts/{a}/${verb}`,
+    operationId: action.operationId,
+    tags: action.tags,
+    summary: action.summary,
+    ...(action.description === undefined ? {} : { description: action.description }),
+    security: bearerOnly,
+    middleware: [bearer] as const,
+    request: { params: AttemptPathSchema },
+    responses: {
+      200: { description: action.ok.description, ...json(action.ok.schema) },
+      400: errorResponse("The attempt reference is invalid."),
+      401: unauthorizedBearer,
+      403: errorResponse(action.forbidden),
+      404: errorResponse("No such project or attempt."),
+      409: errorResponse(action.conflict),
+    },
+  });
+}
+
 /** An attempt transition route: `POST …/attempts/{a}/<verb>`. */
 function attemptTransition(
   bearer: Bearer,
@@ -296,29 +358,41 @@ function attemptTransition(
   forbidden: string,
   conflicts: string[],
 ) {
-  return createRoute({
-    method: "post",
-    path: `/projects/{owner}/{project}/attempts/{a}/${verb}`,
+  return attemptAction(bearer, verb, {
     operationId,
     tags: ["Attempts"],
     summary,
-    security: bearerOnly,
-    middleware: [bearer] as const,
-    request: { params: AttemptPathSchema },
-    responses: {
-      200: { description: "The attempt after the transition.", ...json(AttemptSchema) },
-      400: errorResponse("The attempt reference is invalid."),
-      401: unauthorizedBearer,
-      403: errorResponse(forbidden),
-      404: errorResponse("No such project or attempt."),
-      409: errorResponse(conflicts.join(" ")),
-    },
+    forbidden,
+    conflict: conflicts.join(" "),
+    ok: { description: "The attempt after the transition.", schema: AttemptSchema },
+  });
+}
+
+/** A scoring request route: `POST …/attempts/{a}/<verb>`. */
+function scoringRoute(
+  bearer: Bearer,
+  verb: string,
+  operationId: string,
+  summary: string,
+  description: string,
+  forbidden: string,
+  conflict: string,
+) {
+  return attemptAction(bearer, verb, {
+    operationId,
+    tags: ["Scoring"],
+    summary,
+    description,
+    forbidden,
+    conflict: `\`invalid_state\`: ${conflict}, or its fork has no commits.`,
+    ok: { description: "The run now covering the attempt's head.", schema: ScoringSchema },
   });
 }
 
 const AUTHOR_ONLY = "Only the attempt's author, or their agents, may.";
 const OWNER_ONLY = "Only the project owner may.";
 const TASK_MANAGERS = "Only the project owner or the task's creator may.";
+const RESCORERS = "Only the attempt's author (or their agents), the task's creator or the project owner may.";
 
 function publicToken({ id, agent, expires_at, revoked_at, created_at }: z.infer<typeof TokenSchema>) {
   return { id, agent, expires_at, revoked_at, created_at };
@@ -798,6 +872,32 @@ export function apiRoutes(options: ApiOptions = {}) {
         "`invalid_state`: the attempt isn't obsolete.",
       ]),
       async (c) => c.json(await tasks(c.env).restoreAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
+    )
+    .openapi(
+      scoringRoute(
+        bearer,
+        "score",
+        "scoreAttempt",
+        "Score a draft attempt's head now",
+        "Drafts aren't scored on push; this queues a run for the head anyway. A head already queued, running " +
+          "or scored isn't queued again.",
+        AUTHOR_ONLY,
+        "the attempt isn't a draft",
+      ),
+      async (c) => c.json(await tasks(c.env).scoreNow(c.var.actor, attemptPath(c.req.valid("param"))), 200),
+    )
+    .openapi(
+      scoringRoute(
+        bearer,
+        "rescore",
+        "rescoreAttempt",
+        "Score an open attempt's head again",
+        "Queues a new run for the head even if it already has a finished one. A head already queued or running " +
+          "isn't queued again.",
+        RESCORERS,
+        "the attempt isn't open",
+      ),
+      async (c) => c.json(await tasks(c.env).rescore(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
       createRoute({

@@ -9,7 +9,9 @@
 import { archiveRef } from "./archive.ts";
 import { CONFIG_PATH, loadConfig, type ConfigResult } from "./config.ts";
 import { ServiceError, type ErrorCode } from "./errors.ts";
+import { isZeroId } from "./pkt-line.ts";
 import { forkRepo, originRepo, type Repos } from "./repos.ts";
+import { ScoringQueue, type ScoringRequest, type ScoringRunner, type ScoringTrigger } from "./scoring.ts";
 import type { Actor } from "./tokens.ts";
 
 /** Active attempts a task may have when neither the project config nor the task overrides it. */
@@ -270,12 +272,22 @@ const SCHEMA = [
   )`,
 ];
 
+/**
+ * Tables the spike's push inbox kept, which nothing reads since scoring moved to `scoring.ts`:
+ * event deliveries, its checks and its pending queue.
+ */
+const DROPPED_TABLES = ["deliveries", "checks", "pending"];
+
 /** Columns added to the spike's journal, so task and attempt events record who acted on what. */
 const JOURNAL_COLUMNS = ["user_id TEXT", "agent TEXT", "task INTEGER", "attempt INTEGER"];
 
-/** Creates the store's tables, and adds the journal's newer columns to a journal that predates them. */
+/**
+ * Creates the store's tables, adds the journal's newer columns to a journal that predates them, and
+ * drops the spike's tables.
+ */
 export function migrate(sql: Sql): void {
   for (const statement of SCHEMA) sql.exec(statement);
+  for (const table of DROPPED_TABLES) sql.exec(`DROP TABLE IF EXISTS ${table}`);
   const columns = new Set(sql.exec<{ name: string }>("PRAGMA table_info(journal)").map((c) => c.name));
   for (const column of JOURNAL_COLUMNS) {
     if (!columns.has(column.split(" ")[0] ?? "")) sql.exec(`ALTER TABLE journal ADD COLUMN ${column}`);
@@ -286,6 +298,8 @@ export interface TaskStoreDeps {
   sql: Sql;
   repos: Repos;
   now?: () => Date;
+  /** Starts and stops scoring runs; without one, scoring requests stay queued. */
+  scoring?: ScoringRunner | null | undefined;
 }
 
 /**
@@ -298,12 +312,15 @@ export class TaskStore {
   readonly #now: () => Date;
   /** Attempts being created per task, counted toward the cap while their forks are made. */
   readonly #reserved = new Map<number, number>();
+  /** The project's scoring runs. Its caller runs `scoring.drain()` after every store call. */
+  readonly scoring: ScoringQueue;
 
-  constructor({ sql, repos, now = () => new Date() }: TaskStoreDeps) {
+  constructor({ sql, repos, now = () => new Date(), scoring = null }: TaskStoreDeps) {
     this.#sql = sql;
     this.#repos = repos;
     this.#now = now;
     migrate(sql);
+    this.scoring = new ScoringQueue({ sql, runner: scoring, now });
   }
 
   // --- tasks -----------------------------------------------------------------------------------
@@ -549,13 +566,41 @@ export class TaskStore {
   }
 
   /** draft → open: submits the attempt to be scored and considered. Only its author may. */
-  openAttempt(_project: ProjectContext, actor: Actor, input: AttemptInput): StoredAttempt {
-    return this.#authorMoves(actor, input, ["draft"], "open", "opened");
+  async openAttempt(project: ProjectContext, actor: Actor, input: AttemptInput): Promise<StoredAttempt> {
+    const opened = this.#authorMoves(actor, input, ["draft"], "open", "opened");
+    await this.#scoreHead(project, actor, opened, "open");
+    return this.#attempt(opened);
+  }
+
+  /** Scores a draft attempt's head now, though drafts aren't scored otherwise. Only its author may. */
+  async scoreNow(project: ProjectContext, actor: Actor, input: AttemptInput): Promise<ScoringRequest> {
+    const current = this.#attempt(input);
+    mayAuthor(actor, current);
+    this.#expect(current, ["draft"], "score now");
+    return this.#requireHead(await this.#scoreHead(project, actor, current, "score_now"), current);
+  }
+
+  /**
+   * Scores an open attempt's head again, even if it already has a finished run. Its author, the
+   * task's creator or the project owner may.
+   */
+  async rescore(project: ProjectContext, actor: Actor, input: AttemptInput): Promise<ScoringRequest> {
+    const current = this.#attempt(input);
+    const id = actor.user.id;
+    if (id !== current.author && id !== project.owner && id !== this.#task(current.task).creator) {
+      throw new ServiceError("forbidden", `only ${current.fork}'s author, its task's creator or the project owner may`);
+    }
+    this.#expect(current, ["open"], "rescore");
+    return this.#requireHead(await this.#scoreHead(project, actor, current, "rescore"), current);
   }
 
   /** open → draft: takes the attempt back out of consideration. Only its author may. */
   draftAttempt(_project: ProjectContext, actor: Actor, input: AttemptInput): StoredAttempt {
-    return this.#authorMoves(actor, input, ["open"], "draft", "returned_to_draft");
+    return this.#sql.transaction(() => {
+      const drafted = this.#authorMoves(actor, input, ["open"], "draft", "returned_to_draft");
+      this.scoring.cancelAttempt(drafted.task, drafted.number, "returned to draft");
+      return drafted;
+    });
   }
 
   /** draft or open → closed, archiving and deleting its fork. Only its author may. */
@@ -693,6 +738,7 @@ export class TaskStore {
         current.number,
       );
       this.#journal(actor, "merged", current.task, current.number, { sha: input.sha });
+      this.scoring.cancelAttempt(current.task, current.number, "attempt merged");
       const others = this.#activeAttempts(current.task);
       for (const other of others) this.#endAttempt(actor, other, "closed");
       this.#endTask(actor, current.task, "closed");
@@ -718,15 +764,21 @@ export class TaskStore {
 
   /**
    * Journals a `pushed` event for each ref a push through the git proxy updated on an attempt's
-   * fork, with the old and new ids so force-pushes show up afterwards. The proxy checked the
-   * claim before forwarding the push, and the push has landed, so this checks nothing.
+   * fork, with the old and new ids so force-pushes show up afterwards, and queues scoring when the
+   * attempt is open and its head moved; the scoring queue skips a head it already covers. The
+   * proxy checked the claim before forwarding the push, and the push has landed, so this checks
+   * nothing. Returns the scoring request, or null when the push asked for none.
    */
-  recordPush(_project: ProjectContext, actor: Actor, input: AttemptInput & { updates: PushedRef[] }): void {
+  recordPush(
+    project: ProjectContext,
+    actor: Actor,
+    input: AttemptInput & { updates: PushedRef[] },
+  ): { scoring: ScoringRequest | null } {
     const current = this.#attempt(input);
-    this.#sql.transaction(() => {
-      for (const { ref, before, after } of input.updates) {
-        this.#journal(actor, "pushed", current.task, current.number, { git_ref: ref, before, after });
-      }
+    return this.#sql.transaction(() => {
+      const head = this.#recordPushed(actor, current, input.updates);
+      if (head === null || current.state !== "open") return { scoring: null };
+      return { scoring: this.#request(project, actor, current, head, "push") };
     });
   }
 
@@ -828,7 +880,7 @@ export class TaskStore {
     project: ProjectContext,
     actor: Actor,
     input: CompleteBranchPushInput,
-  ): Promise<{ task: StoredTask; attempt: StoredAttempt }> {
+  ): Promise<{ task: StoredTask; attempt: StoredAttempt; scoring: ScoringRequest }> {
     const pending = this.#pendingPush(input, actor);
     let created: { title: string; body: string } | null = null;
     if (pending.new_task === 1) {
@@ -872,11 +924,11 @@ export class TaskStore {
       );
       this.#journal(actor, "created", row.task, row.attempt);
       this.#journal(actor, "opened", row.task, row.attempt);
-      for (const { ref, before, after } of input.updates) {
-        this.#journal(actor, "pushed", row.task, row.attempt, { git_ref: ref, before, after });
-      }
-      this.#dropBranchPush({ task: row.task, number: row.attempt });
-      return { task: this.#task(row.task), attempt: this.#attempt({ task: row.task, number: row.attempt }) };
+      const attempt = this.#attempt({ task: row.task, number: row.attempt });
+      this.#recordPushed(actor, attempt, input.updates);
+      this.#dropBranchPush(attempt);
+      const scoring = this.#request(project, actor, attempt, input.head, "open");
+      return { task: this.#task(row.task), attempt, scoring };
     });
   }
 
@@ -940,6 +992,68 @@ export class TaskStore {
     throw invalidState(`can't ${verb} ${name}: it is ${current.state}`);
   }
 
+  /**
+   * Journals every ref a push updated on an attempt's fork. The proxy records each accepted push
+   * once, so nothing is deduped here: a force-push back to an earlier commit is journalled too.
+   * Returns the fork's new head when the push moved it, or null.
+   */
+  #recordPushed(actor: Actor, attempt: StoredAttempt, updates: PushedRef[]): string | null {
+    let head: string | null = null;
+    for (const { ref, before, after } of updates) {
+      if (ref === FORK_HEAD && !isZeroId(after)) head = after;
+      this.#journal(actor, "pushed", attempt.task, attempt.number, { git_ref: ref, before, after });
+    }
+    return head;
+  }
+
+  /**
+   * Requests scoring of the attempt's current head, read from its fork. Null when there is none to
+   * score: the fork has no commits, or it couldn't be read (logged; a rescore can ask again). A
+   * push recorded while the head is read queues its own run, which the request then yields to.
+   */
+  async #scoreHead(
+    project: ProjectContext,
+    actor: Actor,
+    attempt: StoredAttempt,
+    trigger: ScoringTrigger,
+  ): Promise<ScoringRequest | null> {
+    const readSince = this.scoring.latestRunId(attempt.task, attempt.number);
+    let head: string | null;
+    try {
+      const [commit] = await this.#repos.listCommits(forkRepo(project.id, attempt.fork), { ref: "main", limit: 1 });
+      head = commit?.hash ?? null;
+    } catch (cause) {
+      console.error({ event: "scoring.head_unreadable", attempt: attempt.fork, trigger, error: String(cause) });
+      return null;
+    }
+    return head === null ? null : this.#request(project, actor, attempt, head, trigger, readSince);
+  }
+
+  #request(
+    project: ProjectContext,
+    actor: Actor,
+    attempt: StoredAttempt,
+    sha: string,
+    trigger: ScoringTrigger,
+    readSince?: number,
+  ): ScoringRequest {
+    return this.scoring.request({
+      project: project.id,
+      task: attempt.task,
+      attempt: attempt.number,
+      sha,
+      trigger,
+      actor,
+      readSince,
+    });
+  }
+
+  /** A scoring request asked for by a user, or an error saying the attempt has no head to score. */
+  #requireHead(request: ScoringRequest | null, attempt: StoredAttempt): ScoringRequest {
+    if (request === null) throw invalidState(`${attempt.fork} has no head to score; push a commit, or try again`);
+    return request;
+  }
+
   #authorMoves(
     actor: Actor,
     input: AttemptInput,
@@ -983,6 +1097,7 @@ export class TaskStore {
       current.number,
     );
     this.#journal(actor, to === "closed" ? "closed" : "made_obsolete", current.task, current.number);
+    this.scoring.cancelAttempt(current.task, current.number, `attempt ${to}`);
   }
 
   /**
@@ -1241,6 +1356,8 @@ export const TASK_METHODS = [
   "restoreAttempt",
   "handOffAttempt",
   "markMerged",
+  "scoreNow",
+  "rescore",
   "authorizePush",
   "recordPush",
   "routeBranchPush",

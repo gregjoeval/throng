@@ -13,7 +13,7 @@ The platform Worker: the API, the git-facing repos in Artifacts, and checks.
 
 Each scoring run copies the log of every `setup` command, check and preview to the `LOGS` R2 bucket at `logs/<projectId>/<t42a3>/<sha>/<runId>/<name>.log` (`src/logs.ts`). A setup command's log is named `setup.<n>`, a check's is its name, and the preview's is `preview.deploy`; check names can't contain a dot, so they never collide. Logs over 5 MB keep their head and tail with a `[throng: truncated …]` marker between them. The run's result lists the logs it stored, and `GET /api/projects/{owner}/{project}/runs/{runId}/logs/{name}` streams one as text, or answers `not_found` once it's missing or expired.
 
-There's one bucket per environment: `throng-logs`, and `throng-ci-logs` for `ci`. Logs are deleted after 30 days by an R2 lifecycle rule. Wrangler's config can't declare lifecycle rules, so add the rule by hand once per bucket (see the setup below).
+There's one bucket per environment: `throng-logs`, and `throng-ci-logs` for `ci`. Logs are deleted after 30 days by an R2 lifecycle rule. Wrangler's config can't declare lifecycle rules, so they live in `r2-lifecycle.json`, which CI applies before each deploy (see the setup below).
 
 ## E2E job
 
@@ -50,19 +50,8 @@ gh workflow run e2e.yml --ref my-branch     # every scenario, against a branch
 ### Setup (once per account)
 
 1. **D1 database.** `throng-ci` exists and its id is in `env.ci.d1_databases` in `wrangler.jsonc`. For a new account, run `pnpm --filter @throng/platform exec wrangler d1 create throng-ci` and replace the id.
-2. **API token.** In the Cloudflare dashboard, create an account API token for the account in `CF_ACCOUNT_ID` with edit access to Workers Scripts, Artifacts, D1, Workflows, Containers and R2. The deploy uses it, and so does the Worker to upload Worker Previews of `throng-fixture-worker`. That Worker is shared with production and must already exist; if it doesn't, run `npx wrangler deploy` once in `fixtures/fixture-worker`.
-3. **Logs buckets.** Create each environment's bucket and its 30-day lifecycle rule on `logs/`:
-
-   ```bash
-   cd apps/platform
-   for bucket in throng-logs throng-ci-logs; do
-     pnpm exec wrangler r2 bucket create "$bucket"
-     pnpm exec wrangler r2 bucket lifecycle add "$bucket" expire-logs logs/ --expire-days 30 --force
-   done
-   ```
-
-   Check with `pnpm exec wrangler r2 bucket lifecycle list <bucket>`.
-
+2. **API token.** In the Cloudflare dashboard, create an account API token for the account in `CF_ACCOUNT_ID` with edit access to Workers Scripts, Artifacts, D1, Workflows, Containers and Workers R2 Storage. The deploy uses it, and so does the Worker to upload Worker Previews of `throng-fixture-worker`. That Worker is shared with production and must already exist; if it doesn't, run `npx wrangler deploy` once in `fixtures/fixture-worker`.
+3. **Logs buckets.** Nothing to do by hand. Before each deploy, the deploy and E2E workflows create the environment's bucket (`throng-logs`, `throng-ci-logs`) if it's missing and set its lifecycle rules from `r2-lifecycle.json`: logs under `logs/` expire after 30 days, and R2's default rule aborts incomplete multipart uploads after 7. `lifecycle set` replaces the bucket's whole rule set, so edit the file rather than the dashboard. Check with `pnpm exec wrangler r2 bucket lifecycle list <bucket>`.
 4. **GitHub environment.** Under **Settings → Environments**, create an environment named `ci`. Optionally, limit its **Deployment branches** to `main`. Give it two secrets:
    - `CLOUDFLARE_API_TOKEN`: the token from step 2.
    - `CLOUDFLARE_ACCOUNT_ID`: the account id (the same as `CF_ACCOUNT_ID` in `wrangler.jsonc`).

@@ -36,6 +36,12 @@ jobs:
         if: hashFiles('apps/platform/migrations/*.sql') != ''
         working-directory: apps/platform
         run: pnpm wrangler d1 migrations apply throng --remote
+      # wrangler.jsonc can't declare lifecycle rules, so r2-lifecycle.json is set on every deploy.
+      - name: Apply the logs bucket's lifecycle rules
+        working-directory: apps/platform
+        run: |
+          pnpm wrangler r2 bucket info throng-logs >/dev/null 2>&1 || pnpm wrangler r2 bucket create throng-logs
+          pnpm wrangler r2 bucket lifecycle set throng-logs --file r2-lifecycle.json --force
       # The platform first: throng-web binds to it.
       - run: pnpm --filter @throng/platform run deploy
       - run: pnpm --filter @throng/web run deploy

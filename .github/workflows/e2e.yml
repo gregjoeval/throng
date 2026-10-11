@@ -57,6 +57,11 @@ jobs:
       - name: Apply D1 migrations
         if: hashFiles('apps/platform/migrations/*.sql') != ''
         run: pnpm exec wrangler d1 migrations apply throng-ci --remote
+      # wrangler.jsonc can't declare lifecycle rules, so r2-lifecycle.json is set on every deploy.
+      - name: Apply the logs bucket's lifecycle rules
+        run: |
+          pnpm exec wrangler r2 bucket info throng-ci-logs >/dev/null 2>&1 || pnpm exec wrangler r2 bucket create throng-ci-logs
+          pnpm exec wrangler r2 bucket lifecycle set throng-ci-logs --file r2-lifecycle.json --force
       - name: Deploy throng-ci
         run: |
           pnpm exec vite build

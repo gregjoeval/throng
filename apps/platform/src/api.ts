@@ -13,7 +13,7 @@ import { CHECK_OUTCOMES } from "./results.ts";
 import { CONFIG_NAME, MAX_CHECK_TIMEOUT_MS, MAX_CONFIG_BYTES, parseConfig } from "./config.ts";
 import { errorBody, errorResponse, ServiceError } from "./errors.ts";
 import { FORWARDED_EMAIL_HEADER } from "./forwarded.ts";
-import { LOG_RETENTION_DAYS, MAX_LOG_BYTES, type LogStore } from "./logs.ts";
+import { LOG_CONTENT_TYPE, LOG_RETENTION_DAYS, MAX_LOG_BYTES, type LogStore } from "./logs.ts";
 import { MAX_PROJECT_HANDLE, PROJECT_HANDLE, projectService } from "./projects.ts";
 import type { Repos } from "./repos.ts";
 import { ATTEMPT_SCORING_STATUSES, RUN_STATUSES, SCORING_TRIGGERS } from "./scoring.ts";
@@ -1162,7 +1162,7 @@ export function apiRoutes(options: ApiOptions = {}) {
         const log = await logsFor(c.env).get(key);
         if (log === null) return c.json(errorBody("not_found", `run ${runId} has no log ${name}`), 404);
         // Streamed straight from R2; the typed response only knows the documented string body.
-        return c.body(log.body, 200, { "Content-Type": "text/plain; charset=utf-8" }) as never;
+        return c.body(log.body, 200, { "Content-Type": LOG_CONTENT_TYPE }) as never;
       },
     )
     .openapi(

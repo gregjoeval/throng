@@ -1,5 +1,5 @@
-// What each check container may reach. The rule: a container that runs repository code never holds
-// write access to the canonical repo.
+// What each Sandbox container may reach. The rule: a container that runs repository code never
+// holds write access to the origin.
 
 /** A git remote the sandbox may reach; the Worker adds the token on the sandbox's behalf. */
 export interface GitGrant {
@@ -9,44 +9,54 @@ export interface GitGrant {
 }
 
 /**
- * A check runs in several containers, one per role. Intercepts are fixed when a container starts, so
- * roles with different grants need different containers.
+ * Each role runs in its own container. Intercepts are fixed when a container starts, so roles with
+ * different grants need different containers. `preview` is kept for when Previews are deployed again.
  */
-export const CHECK_ROLES = ["test", "preview", "retest", "land"] as const;
-export type CheckRole = (typeof CHECK_ROLES)[number];
+export const SANDBOX_ROLES = ["score", "preview", "retest", "land"] as const;
+export type SandboxRole = (typeof SANDBOX_ROLES)[number];
+/** The roles a scoring run's Workflow starts containers for: scoring, then the spike's landing. */
+export const SCORING_ROLES = ["score", "retest", "land"] as const satisfies readonly SandboxRole[];
 
 /** Roles whose container runs the repository's own code (npm, its scripts, wrangler builds). */
-export const RUNS_REPO_CODE: Record<CheckRole, boolean> = {
-  test: true,
+export const RUNS_REPO_CODE: Record<SandboxRole, boolean> = {
+  score: true,
   preview: true,
   retest: true,
   land: false,
 };
 
-export interface CheckGrants {
-  canonicalRead: GitGrant;
-  canonicalWrite: GitGrant;
+/** Every grant a run's roles may get. Each is minted only for the step whose role needs it. */
+export interface RunGrants {
+  originRead: GitGrant;
+  originWrite: GitGrant;
   forkRead: GitGrant;
 }
 
-export function grantsForRole(role: CheckRole, grants: CheckGrants): GitGrant[] {
-  switch (role) {
-    case "test":
-    case "preview":
-      return [grants.forkRead];
-    case "retest":
-      return [grants.canonicalRead, grants.forkRead];
-    case "land":
-      return [grants.canonicalWrite, grants.forkRead];
-  }
+/** Which repo each grant is for, and with what access. */
+export const GRANT_SOURCES: Record<keyof RunGrants, { repo: "origin" | "fork"; access: GitGrant["access"] }> = {
+  originRead: { repo: "origin", access: "read" },
+  originWrite: { repo: "origin", access: "write" },
+  forkRead: { repo: "fork", access: "read" },
+};
+
+/** The grants each role's container gets. */
+export const ROLE_GRANTS = {
+  score: ["originRead", "forkRead"],
+  preview: ["forkRead"],
+  retest: ["originRead", "forkRead"],
+  land: ["originWrite", "forkRead"],
+} as const satisfies Record<SandboxRole, readonly (keyof RunGrants)[]>;
+
+/** The grants `role`'s container gets, by name. */
+export type RoleGrants<R extends SandboxRole> = Pick<RunGrants, (typeof ROLE_GRANTS)[R][number]>;
+
+/** The git grants `role`'s container gets, in the order its intercepts list them. */
+export function grantsForRole<R extends SandboxRole>(role: R, grants: RoleGrants<R>): GitGrant[] {
+  const byName: Partial<RunGrants> = grants;
+  return ROLE_GRANTS[role].map((name) => byName[name] as GitGrant);
 }
 
-/** Only the preview role may deploy Previews. */
-export function roleGetsPreview(role: CheckRole): boolean {
-  return role === "preview";
-}
-
-export function sandboxName(instanceId: string, role: CheckRole): string {
+export function sandboxName(instanceId: string, role: SandboxRole): string {
   return `${instanceId}/${role}`;
 }
 

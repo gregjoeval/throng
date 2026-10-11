@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { GitGrant } from "../src/grants.ts";
-import { outboundDecision, registryAllows, type OutboundAccess } from "../src/network.ts";
+import { interceptedHosts, outboundDecision, registryAllows, type OutboundAccess } from "../src/network.ts";
 
 const registry = (path: string) => new URL(`https://registry.npmjs.org${path}`);
 
@@ -32,6 +32,7 @@ const access = (overrides: Partial<OutboundAccess> = {}): OutboundAccess => ({
   grants: [fork],
   preview: null,
   npmRegistry: false,
+  allow: [],
   ...overrides,
 });
 
@@ -68,5 +69,47 @@ describe("outboundDecision", () => {
     expect(outboundDecision("GET", new URL("https://example.com/"), access({ npmRegistry: true }))).toEqual({
       action: "deny",
     });
+  });
+});
+
+describe("network.allow", () => {
+  const allow = ["api.github.com", "example.com"];
+
+  it("passes any HTTPS request to an allowed host through unchanged, adding no credentials", () => {
+    for (const method of ["GET", "POST", "PUT"]) {
+      expect(outboundDecision(method, new URL("https://api.github.com/repos/x/y"), access({ allow }))).toEqual({
+        action: "pass",
+      });
+    }
+  });
+
+  it("refuses plain HTTP, other ports, subdomains and hosts not listed", () => {
+    for (const url of [
+      "http://api.github.com/",
+      "https://api.github.com:8443/",
+      "https://evil.api.github.com/",
+      "https://github.com/",
+    ]) {
+      expect(outboundDecision("GET", new URL(url), access({ allow }))).toEqual({ action: "deny" });
+    }
+  });
+
+  it("can't widen the registry, the Cloudflare API or a granted repo's host", () => {
+    const listed = ["registry.npmjs.org", "api.cloudflare.com", "acct.artifacts.cloudflare.net"];
+    const open = access({ allow: listed, npmRegistry: true });
+    expect(outboundDecision("PUT", registry("/is-number"), open)).toEqual({ action: "deny" });
+    const api = new URL("https://api.cloudflare.com/client/v4/accounts/acct/workers/scripts/fixture");
+    expect(outboundDecision("GET", api, open)).toEqual({ action: "deny" });
+    const other = new URL("https://acct.artifacts.cloudflare.net/git/ns/other.git/info/refs?service=git-upload-pack");
+    expect(outboundDecision("GET", other, open)).toEqual({ action: "deny" });
+  });
+
+  it("intercepts the allowed hosts", () => {
+    expect([...interceptedHosts(access({ allow, npmRegistry: true }))].toSorted()).toEqual([
+      "acct.artifacts.cloudflare.net",
+      "api.github.com",
+      "example.com",
+      "registry.npmjs.org",
+    ]);
   });
 });

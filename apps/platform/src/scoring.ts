@@ -7,10 +7,14 @@
 // - a newer head for an attempt cancels its queued or running run, so newest head wins;
 // - at most `SCORING_CAP` runs are running per project; the rest wait, oldest first.
 //
+// It also tracks each attempt's head, moved by every push and scoring request, so a result for an
+// older head is superseded and the attempt's `scoring` status is about its current head.
+//
 // `request` only writes rows, so it can sit inside the store's transactions. Starting and stopping
 // Workflows is I/O, done by `drain`, which the Durable Object runs after every store call.
 
 import { forkRepo } from "./repos.ts";
+import type { ScoringResult } from "./results.ts";
 import { attemptRef, type Sql } from "./task-store.ts";
 import type { Actor } from "./tokens.ts";
 
@@ -30,6 +34,24 @@ export interface ScoringParams {
   sha: string;
   /** The run's id, which its report back names. */
   run: number;
+}
+
+/** What a run's Workflow reports when it ends: its result, or the error that ended it. */
+export type ScoringOutcome = { status: "done"; result: ScoringResult } | { status: "errored"; error: string };
+
+/** An attempt's scoring status: its current head's latest run that wasn't cancelled, or `none`. */
+export const ATTEMPT_SCORING_STATUSES = ["none", "queued", "running", "done", "errored"] as const satisfies readonly (
+  | RunStatus
+  | "none"
+)[];
+
+/**
+ * An attempt's scoring, for polling: the status of its current head's latest run (`none` when the
+ * head has no run, or its run was cancelled), and the head it applies to (null before any push).
+ */
+export interface AttemptScoring {
+  status: (typeof ATTEMPT_SCORING_STATUSES)[number];
+  sha: string | null;
 }
 
 /** The part of a Workflow binding the queue uses; tests pass a fake. */
@@ -54,8 +76,11 @@ export interface ScoredHead {
   sha: string;
 }
 
+/** The attempt a head belongs to, as scoring keys its runs. */
+export type ScoredAttempt = Pick<ScoredHead, "task" | "attempt">;
+
 /** The attempt a head belongs to, `t42a3`. */
-export function headAttemptRef(head: Pick<ScoredHead, "task" | "attempt">): string {
+export function headAttemptRef(head: ScoredAttempt): string {
   return attemptRef(head.task, head.attempt);
 }
 
@@ -71,11 +96,19 @@ export interface StoredRun extends ScoredHead {
   created_at: number;
   started_at: number | null;
   finished_at: number | null;
+  /** The run's result, once it is `done`. */
+  result: ScoringResult | null;
+  /** The error that ended it, once it is `errored`. */
+  error: string | null;
+  /** Whether its head is no longer the attempt's current head. */
+  superseded: boolean;
 }
 
-interface RunRow extends Omit<StoredRun, "trigger" | "status"> {
+interface RunRow extends Omit<StoredRun, "trigger" | "status" | "result" | "superseded"> {
   trigger: string;
   status: string;
+  result: string | null;
+  superseded: number;
   torn_down: number;
 }
 
@@ -93,7 +126,8 @@ export interface ScoringRequestInput extends ScoredHead {
 /** What a request did: queued a run, or why it didn't, with the run that already covers the head. */
 export type ScoringRequest = { queued: true; run: StoredRun } | { queued: false; reason: string; run: StoredRun };
 
-const SCHEMA = `CREATE TABLE IF NOT EXISTS scoring_runs (
+const SCHEMA = [
+  `CREATE TABLE IF NOT EXISTS scoring_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   project TEXT NOT NULL,
   task INTEGER NOT NULL,
@@ -108,7 +142,17 @@ const SCHEMA = `CREATE TABLE IF NOT EXISTS scoring_runs (
   started_at INTEGER,
   finished_at INTEGER,
   torn_down INTEGER NOT NULL DEFAULT 0
-)`;
+)`,
+  // Each attempt's current head: what its pushes and scoring requests last moved it to.
+  `CREATE TABLE IF NOT EXISTS scoring_heads (
+  task INTEGER NOT NULL,
+  attempt INTEGER NOT NULL,
+  sha TEXT NOT NULL,
+  PRIMARY KEY (task, attempt)
+)`,
+];
+/** Columns added to `scoring_runs` after its first version. */
+const RUN_COLUMNS = ["result TEXT", "error TEXT", "superseded INTEGER NOT NULL DEFAULT 0"];
 
 export interface ScoringQueueDeps {
   sql: Sql;
@@ -127,7 +171,51 @@ export class ScoringQueue {
     this.#sql = sql;
     this.#runner = runner;
     this.#now = now;
-    sql.exec(SCHEMA);
+    for (const statement of SCHEMA) sql.exec(statement);
+    const columns = new Set(sql.exec<{ name: string }>("PRAGMA table_info(scoring_runs)").map((c) => c.name));
+    for (const column of RUN_COLUMNS) {
+      if (!columns.has(column.split(" ")[0] ?? "")) sql.exec(`ALTER TABLE scoring_runs ADD COLUMN ${column}`);
+    }
+  }
+
+  /**
+   * Records that the attempt's head is now `sha`, marking runs for every other head superseded.
+   * Pushes call it whether or not they ask for scoring, so a draft's result is superseded too.
+   */
+  moveHead({ task, attempt, sha }: ScoredAttempt & Pick<ScoredHead, "sha">): void {
+    this.#sql.transaction(() => {
+      this.#sql.exec(
+        `INSERT INTO scoring_heads (task, attempt, sha) VALUES (?, ?, ?)
+         ON CONFLICT (task, attempt) DO UPDATE SET sha = excluded.sha`,
+        task,
+        attempt,
+        sha,
+      );
+      this.#sql.exec(
+        "UPDATE scoring_runs SET superseded = (sha != ?) WHERE task = ? AND attempt = ?",
+        sha,
+        task,
+        attempt,
+      );
+    });
+  }
+
+  /** The attempt's scoring status, about its current head. */
+  statusFor({ task, attempt }: ScoredAttempt): AttemptScoring {
+    const [head] = this.#sql.exec<{ sha: string }>(
+      "SELECT sha FROM scoring_heads WHERE task = ? AND attempt = ?",
+      task,
+      attempt,
+    );
+    if (head === undefined) return { status: "none", sha: null };
+    const [run] = this.#sql.exec<{ status: string }>(
+      `SELECT status FROM scoring_runs WHERE task = ? AND attempt = ? AND sha = ? AND status != 'cancelled'
+       ORDER BY id DESC LIMIT 1`,
+      task,
+      attempt,
+      head.sha,
+    );
+    return { status: (run?.status as AttemptScoring["status"] | undefined) ?? "none", sha: head.sha };
   }
 
   /**
@@ -136,6 +224,7 @@ export class ScoringQueue {
    */
   request(input: ScoringRequestInput): ScoringRequest {
     return this.#sql.transaction(() => {
+      this.moveHead(input);
       const live = this.#sql
         .exec<RunRow>(
           "SELECT * FROM scoring_runs WHERE task = ? AND attempt = ? AND status IN ('queued', 'running') ORDER BY id",
@@ -192,7 +281,7 @@ export class ScoringQueue {
    * Cancels the attempt's queued and running runs, because it ended or went back to draft and is
    * no longer considered; the next `drain` stops any that had started.
    */
-  cancelAttempt(task: number, attempt: number, reason: string): void {
+  cancelAttempt({ task, attempt }: ScoredAttempt, reason: string): void {
     this.#sql.transaction(() => {
       const live = this.#sql
         .exec<RunRow>(
@@ -206,7 +295,7 @@ export class ScoringQueue {
   }
 
   /** The newest run id for the attempt, or 0; what a request's `readSince` compares against. */
-  latestRunId(task: number, attempt: number): number {
+  latestRunId({ task, attempt }: ScoredAttempt): number {
     const [row] = this.#sql.exec<{ id: number | null }>(
       "SELECT MAX(id) AS id FROM scoring_runs WHERE task = ? AND attempt = ?",
       task,
@@ -258,10 +347,12 @@ export class ScoringQueue {
   }
 
   /**
-   * Records how a running run ended, from its Workflow's report. A report for a run that is no
-   * longer running (superseded by a newer head, or cancelled) is discarded. Returns whether it was recorded.
+   * Records how a running run ended, from its Workflow's report: a `done` run keeps its result and
+   * journals `scored` with the gate and a summary, an `errored` one its error. A report for a run
+   * that is no longer running (superseded by a newer head, or cancelled) is discarded. Returns
+   * whether it was recorded.
    */
-  finish(id: number, status: "done" | "errored", detail: Record<string, unknown> = {}): boolean {
+  finish(id: number, outcome: ScoringOutcome): boolean {
     return this.#sql.transaction(() => {
       const run = this.getRun(id);
       if (run === null) return false;
@@ -269,8 +360,24 @@ export class ScoringQueue {
         console.log({ event: "scoring.discarded_result", run: id, status: run.status });
         return false;
       }
-      this.#sql.exec("UPDATE scoring_runs SET status = ?, finished_at = ? WHERE id = ?", status, this.#ms(), id);
-      this.#journal("scored", run, { status, ...detail });
+      const at = this.#ms();
+      if (outcome.status === "done") {
+        this.#sql.exec(
+          "UPDATE scoring_runs SET status = 'done', result = ?, finished_at = ? WHERE id = ?",
+          JSON.stringify(outcome.result),
+          at,
+          id,
+        );
+        this.#journal("scored", run, { gate: outcome.result.gate, summary: summarize(outcome.result) });
+      } else {
+        this.#sql.exec(
+          "UPDATE scoring_runs SET status = 'errored', error = ?, finished_at = ? WHERE id = ?",
+          outcome.error,
+          at,
+          id,
+        );
+        this.#journal("scoring_errored", run, { error: outcome.error });
+      }
       return true;
     });
   }
@@ -281,7 +388,7 @@ export class ScoringQueue {
   }
 
   /** An attempt's runs, oldest first. */
-  listRuns(task: number, attempt: number): StoredRun[] {
+  listRuns({ task, attempt }: ScoredAttempt): StoredRun[] {
     return this.#sql
       .exec<RunRow>("SELECT * FROM scoring_runs WHERE task = ? AND attempt = ? ORDER BY id", task, attempt)
       .map(toRun);
@@ -298,7 +405,8 @@ export class ScoringQueue {
       await runner.workflow.create({ id: run.instance_id, params });
     } catch (cause) {
       this.#sql.exec(
-        "UPDATE scoring_runs SET status = 'errored', finished_at = ? WHERE id = ? AND status = 'running'",
+        "UPDATE scoring_runs SET status = 'errored', error = ?, finished_at = ? WHERE id = ? AND status = 'running'",
+        String(cause),
         this.#ms(),
         run.id,
       );
@@ -350,5 +458,20 @@ export class ScoringQueue {
 
 function toRun(row: RunRow): StoredRun {
   const { torn_down: _tornDown, ...run } = row;
-  return { ...run, trigger: row.trigger as ScoringTrigger, status: row.status as RunStatus };
+  return {
+    ...run,
+    trigger: row.trigger as ScoringTrigger,
+    status: row.status as RunStatus,
+    result: row.result === null ? null : (JSON.parse(row.result) as ScoringResult),
+    superseded: row.superseded === 1,
+  };
+}
+
+/** A result in a few words for the journal: `no checks configured`, `2 passed, 1 failed`, `config invalid`. */
+export function summarize(result: ScoringResult): string {
+  if (result.config.kind === "invalid") return "config invalid";
+  if (result.checks.length === 0) return "no checks configured";
+  const counts = new Map<string, number>();
+  for (const check of result.checks) counts.set(check.outcome, (counts.get(check.outcome) ?? 0) + 1);
+  return [...counts].map(([outcome, n]) => `${n} ${outcome.replace("_", " ")}`).join(", ");
 }

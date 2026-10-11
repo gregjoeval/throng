@@ -2,6 +2,7 @@ import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { CLOUDFLARE_API_HOST, interceptedHosts, outboundDecision, type OutboundAccess } from "./network";
 
 const INACTIVITY_TIMEOUT_MS = 10 * 60 * 1_000;
+/** How long a script may run when its caller gives no timeout. */
 const COMMAND_TIMEOUT_MS = 5 * 60 * 1_000;
 const CA_PATH = "/etc/cloudflare/certs/cloudflare-containers-ca.crt";
 
@@ -20,6 +21,13 @@ const EXEC_ENV = {
   GIT_COMMITTER_EMAIL: "throng@localhost",
 };
 
+export interface RunOptions {
+  /** What the container may reach; fixed when it starts. */
+  access: OutboundAccess;
+  /** How long the script may run before it is stopped. */
+  timeoutMs?: number;
+}
+
 export interface RunResult {
   exitCode: number;
   stdout: string;
@@ -29,7 +37,7 @@ export interface RunResult {
   runMs: number;
 }
 
-interface CheckSandboxState extends DurableObjectState {
+interface RunSandboxState extends DurableObjectState {
   readonly exports: Cloudflare.Exports & {
     readonly OutboundAuth: LoopbackForExport<typeof OutboundAuth>;
   };
@@ -66,12 +74,12 @@ function withBearer(request: Request, token: string): Request {
   return new Request(request, { headers });
 }
 
-/** One container per check, named by the check's Workflow instance id. */
-export class CheckSandbox extends DurableObject<Env> {
+/** One container per role of a run, named by the run's Workflow instance id and the role. */
+export class RunSandbox extends DurableObject<Env> {
   readonly #container: Container;
-  readonly #exports: CheckSandboxState["exports"];
+  readonly #exports: RunSandboxState["exports"];
 
-  constructor(ctx: CheckSandboxState, env: Env) {
+  constructor(ctx: RunSandboxState, env: Env) {
     super(ctx, env);
     if (ctx.container === undefined) throw new Error("The container binding is not configured");
     this.#container = ctx.container;
@@ -79,10 +87,10 @@ export class CheckSandbox extends DurableObject<Env> {
   }
 
   /** Runs a bash script in /workspace, starting the container (with its grants) if needed. */
-  async run(script: string, access: OutboundAccess): Promise<RunResult> {
-    const startMs = await this.#ensureStarted(access);
+  async run(script: string, { access, timeoutMs = COMMAND_TIMEOUT_MS }: RunOptions): Promise<RunResult> {
+    const startMs = await this.#ensureStarted(access, timeoutMs);
     const abort = new AbortController();
-    const timer = setTimeout(() => abort.abort(), COMMAND_TIMEOUT_MS);
+    const timer = setTimeout(() => abort.abort(), timeoutMs);
     const began = Date.now();
     try {
       const process = await this.#container.exec(["bash", "-c", script], {
@@ -108,7 +116,7 @@ export class CheckSandbox extends DurableObject<Env> {
     if (this.#container.running) await this.#container.destroy();
   }
 
-  async #ensureStarted(access: OutboundAccess): Promise<number> {
+  async #ensureStarted(access: OutboundAccess, timeoutMs: number): Promise<number> {
     if (this.#container.running) return 0;
     const image = this.#container.images.sandbox;
     if (image === undefined) throw new Error("The sandbox image is not configured");
@@ -123,7 +131,8 @@ export class CheckSandbox extends DurableObject<Env> {
     for (const host of interceptedHosts(access)) {
       await this.#container.interceptOutboundHttps(host, auth);
     }
-    await this.#container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS);
+    // A long script may print nothing for a while; the container must outlive it.
+    await this.#container.setInactivityTimeout(Math.max(INACTIVITY_TIMEOUT_MS, timeoutMs));
     // start() isn't awaited; the first exec is when the container is actually usable.
     const probe = await this.#container.exec(["true"]);
     await probe.exitCode;

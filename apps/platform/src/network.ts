@@ -1,4 +1,4 @@
-// What a check container may reach. The Worker's outbound intercept asks `outboundDecision` about every
+// What a Sandbox container may reach. The Worker's outbound intercept asks `outboundDecision` about every
 // request and does only what it says, so the whole policy is here and testable.
 
 import { grantFor, type GitGrant } from "./grants.ts";
@@ -14,6 +14,11 @@ export interface OutboundAccess {
   preview: PreviewGrant | null;
   /** Read-only access to the npm registry, for installs. */
   npmRegistry: boolean;
+  /**
+   * Extra hosts (`network.allow` in the project's config) the container may reach over HTTPS on the
+   * default port. Requests pass through unchanged: the Worker adds no credentials to them.
+   */
+  allow: string[];
 }
 
 export type OutboundDecision =
@@ -36,7 +41,10 @@ export function outboundDecision(method: string, url: URL, access: OutboundAcces
     return allowed ? { action: "preview-token" } : { action: "deny" };
   }
   const grant = grantFor(access.grants, url);
-  return grant === undefined ? { action: "deny" } : { action: "bearer", token: grant.token };
+  if (grant !== undefined) return { action: "bearer", token: grant.token };
+  // A granted repo's host keeps its own rules: listing it doesn't open the host's other repos.
+  if (access.grants.some((g) => new URL(g.remote).host === url.host)) return { action: "deny" };
+  return url.port === "" && access.allow.includes(url.hostname) ? { action: "pass" } : { action: "deny" };
 }
 
 /** Hosts the container's intercepts must cover for `access` to be usable. */
@@ -44,6 +52,7 @@ export function interceptedHosts(access: OutboundAccess): Set<string> {
   const hosts = new Set(access.grants.map((g) => new URL(g.remote).host));
   if (access.preview !== null) hosts.add(CLOUDFLARE_API_HOST);
   if (access.npmRegistry) hosts.add(NPM_REGISTRY_HOST);
+  for (const host of access.allow) hosts.add(host);
   return hosts;
 }
 

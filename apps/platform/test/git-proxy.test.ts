@@ -148,7 +148,7 @@ describe("git proxy", () => {
     expect(pushed.stderr).toMatch(/HEAD -> main/);
     expect(
       store(project.id)
-        .scoring.listRuns(1, 1)
+        .scoring.listRuns({ task: 1, attempt: 1 })
         .map((r) => [r.trigger, r.sha, r.status]),
     ).toEqual([
       ["open", expect.any(String), "cancelled"],

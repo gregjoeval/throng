@@ -23,15 +23,16 @@ Each run:
 
 ### Running it
 
-Go to **Actions → E2E → Run workflow** on `main`. Leave **scenarios** empty to run them all, or name some, such as `happy conflict`. From a terminal:
+Go to **Actions → E2E → Run workflow** on `main` (or a branch, to test it before merging). Leave **scenarios** empty to run them all, or name some, such as `zeroconfig conflict`. From a terminal:
 
 ```bash
-gh workflow run e2e.yml -f scenarios="happy"
+gh workflow run e2e.yml -f scenarios="zeroconfig"
+gh workflow run e2e.yml --ref my-branch     # every scenario, against a branch
 ```
 
 ### Scenarios
 
-- `happy`, `coalesce`, `conflict`, `preview`, `intrusion`, `deps`: the check pipeline; see the header of `scripts/e2e.ts`.
+- `zeroconfig`, `conflict`, `metrics`, `failing`, `invalid`, `coalesce`, `intrusion`, `deps`: scoring, and the spike's landing until the merge queue replaces it; see the header of `scripts/e2e.ts`.
 - `refs`: attempt archives. Closing an attempt pushes its fork's `main` to `refs/attempts/t42a3` in the origin (`ARCHIVE_REF_PREFIX` in `src/archive.ts`), and reopening copies it back. The scenario checks, against real Artifacts, that:
   1. a plain `git push` to a ref under that prefix succeeds and `git ls-remote` lists it;
   2. the Worker's own git client (`src/git-client.ts`, behind `POST /spike/repos/:name/copy-ref`) copies one origin's `main` into another origin's archive ref, and an archive ref back out again;
@@ -49,4 +50,4 @@ gh workflow run e2e.yml -f scenarios="happy"
    - `CLOUDFLARE_ACCOUNT_ID`: the account id (the same as `CF_ACCOUNT_ID` in `wrangler.jsonc`).
 4. **Run it once** and check the suite passes and the run's repos are gone afterwards.
 
-The first run creates the `throng-ci` Worker, its Workflow (`throng-ci-check`) and its container. `pnpm e2e cleanup` needs `THRONG_URL`, `SPIKE_TOKEN` and an explicit `E2E_PROJECT_PREFIX`, so it can also clear up after a local run.
+The first run creates the `throng-ci` Worker, its Workflow (`throng-ci-scoring`) and its container. `pnpm e2e cleanup` needs `THRONG_URL`, `SPIKE_TOKEN` and an explicit `E2E_PROJECT_PREFIX`, so it can also clear up after a local run.

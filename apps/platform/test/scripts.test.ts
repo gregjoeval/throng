@@ -8,9 +8,11 @@ import { buildResult, scorePlan, type RawScore, type ScorePlan } from "../src/re
 import {
   landScript,
   parseResult,
+  previewScript,
   retestScript,
   scoreScript,
   type LandResult,
+  type PreviewScriptResult,
   type RetestResult,
 } from "../src/scripts.ts";
 
@@ -242,6 +244,84 @@ describe("scoreScript", () => {
       ],
     });
     expect(result.checks[0]!.notes).toEqual(["ignored metric junk: not declared by this check"]);
+  });
+});
+
+/** A stand-in `wrangler` on PATH: records its args and env, then succeeds or fails. */
+function fakeWrangler(behaviour: "deploys" | "fails"): string {
+  const bin = mkdtempSync(join(root, "bin-"));
+  const body =
+    behaviour === "deploys"
+      ? `echo '{"preview":{"urls":["https://t1a1-pabc123-fixture.acct.workers.dev"]}}'`
+      : `echo 'deploy refused' >&2; exit 1`;
+  writeFileSync(
+    join(bin, "wrangler"),
+    `#!/usr/bin/env bash
+printf '%s\\n' "$*" "$CLOUDFLARE_API_TOKEN" "$CLOUDFLARE_ACCOUNT_ID" "$(cat built 2>/dev/null)" > ../wrangler-call
+${body}
+`,
+    { mode: 0o755 },
+  );
+  return bin;
+}
+
+/** Runs a preview script with `bin` (the fake wrangler) first on PATH. */
+function runPreview(script: string, bin: string, sandbox = mkdtempSync(join(root, "sandbox-"))) {
+  const env = { ...ENV, PATH: `${bin}:${process.env.PATH}` };
+  const stdout = execFileSync("bash", ["-c", script], { cwd: sandbox, env, encoding: "utf8" });
+  const result = parseResult<PreviewScriptResult>(stdout);
+  if (result === null) throw new Error(`no result in: ${stdout}`);
+  return { result, sandbox };
+}
+
+/** What the fake wrangler recorded, or a throw if it never ran. */
+const wranglerCall = (sandbox: string) => execFileSync("cat", [join(sandbox, "wrangler-call")], { encoding: "utf8" });
+
+describe("previewScript", () => {
+  const target = { accountId: "acct", workerName: "fixture", previewName: "t1a1-pabc123" };
+
+  it("builds with preview.command, then deploys the head as the named Preview and reports its URL", () => {
+    const head = attemptHead();
+    const { result, sandbox } = runPreview(
+      previewScript(fork, head, { ...target, command: "cat b.txt > built" }),
+      fakeWrangler("deploys"),
+    );
+    expect(result).toEqual({ ok: true, url: "https://t1a1-pabc123-fixture.acct.workers.dev" });
+    expect(wranglerCall(sandbox)).toBe(
+      "preview --worker-name fixture --name t1a1-pabc123 --json\nadded-by-worker\nacct\nattempt\nline two\n",
+    );
+  });
+
+  it("deploys without a build step when preview has no command", () => {
+    const head = attemptHead();
+    const { result } = runPreview(previewScript(fork, head, { ...target, command: null }), fakeWrangler("deploys"));
+    expect(result).toMatchObject({ ok: true });
+  });
+
+  it("fails at the build stage, with its output, and deploys nothing when preview.command fails", () => {
+    const head = attemptHead();
+    const { result, sandbox } = runPreview(
+      previewScript(fork, head, { ...target, command: "echo 'it is broken' >&2; exit 2" }),
+      fakeWrangler("deploys"),
+    );
+    expect(result).toMatchObject({ ok: false, stage: "build" });
+    expect(result.ok === false && result.output).toContain("it is broken");
+    expect(() => wranglerCall(sandbox)).toThrow();
+  });
+
+  it("fails at the deploy stage, with wrangler's output, when the deploy fails", () => {
+    const head = attemptHead();
+    const { result } = runPreview(previewScript(fork, head, { ...target, command: null }), fakeWrangler("fails"));
+    expect(result).toMatchObject({ ok: false, stage: "deploy" });
+    expect(result.ok === false && result.output).toContain("deploy refused");
+  });
+
+  it("is idempotent: rerunning in the same directory deploys again", () => {
+    const head = attemptHead();
+    const script = previewScript(fork, head, { ...target, command: "touch built" });
+    const bin = fakeWrangler("deploys");
+    const { result, sandbox } = runPreview(script, bin);
+    expect(runPreview(script, bin, sandbox).result).toEqual(result);
   });
 });
 

@@ -14,7 +14,7 @@ import { errorBody, errorResponse, ServiceError } from "./errors.ts";
 import { FORWARDED_EMAIL_HEADER } from "./forwarded.ts";
 import { MAX_PROJECT_HANDLE, PROJECT_HANDLE, projectService } from "./projects.ts";
 import type { Repos } from "./repos.ts";
-import { RUN_STATUSES, SCORING_TRIGGERS } from "./scoring.ts";
+import { ATTEMPT_SCORING_STATUSES, RUN_STATUSES, SCORING_TRIGGERS } from "./scoring.ts";
 import { ATTEMPT_STATES, TASK_STATES } from "./task-store.ts";
 import { taskService, type TaskBackend } from "./tasks.ts";
 import { DEFAULT_TOKEN_TTL_SECONDS, listTokens, MAX_TOKEN_TTL_SECONDS, mintToken, revokeToken } from "./tokens.ts";
@@ -127,6 +127,15 @@ const AttemptSchema = z
     closed_at: z.string().nullable(),
     merged_sha: z.string().nullable(),
     archived_sha: z.string().nullable(),
+    scoring: z
+      .object({
+        status: z.enum(ATTEMPT_SCORING_STATUSES),
+        sha: z.string().nullable().openapi({ description: "The head it applies to; null before any push." }),
+      })
+      .openapi("AttemptScoring", {
+        description:
+          "The current head's scoring status, for polling. `none` when the head has no run yet, or its run was cancelled.",
+      }),
   })
   .openapi("Attempt");
 

@@ -11,7 +11,14 @@ import { CONFIG_PATH, loadConfig, type ConfigResult } from "./config.ts";
 import { ServiceError, type ErrorCode } from "./errors.ts";
 import { isZeroId } from "./pkt-line.ts";
 import { forkRepo, originRepo, type Repos } from "./repos.ts";
-import { ScoringQueue, type ScoringRequest, type ScoringRunner, type ScoringTrigger } from "./scoring.ts";
+import {
+  ScoringQueue,
+  type AttemptScoring,
+  type ScoredAttempt,
+  type ScoringRequest,
+  type ScoringRunner,
+  type ScoringTrigger,
+} from "./scoring.ts";
 import type { Actor } from "./tokens.ts";
 
 /** Active attempts a task may have when neither the project config nor the task overrides it. */
@@ -66,6 +73,8 @@ export interface StoredAttempt {
   closed_at: string | null;
   merged_sha: string | null;
   archived_sha: string | null;
+  /** Its current head's scoring status, for polling. */
+  scoring: AttemptScoring;
 }
 
 /** The project a call acts in: its id and its owner's user id. */
@@ -123,6 +132,11 @@ export function taskRef(task: number): string {
 
 export function attemptRef(task: number, number: number): string {
   return `t${task}a${number}`;
+}
+
+/** An attempt as the scoring queue keys it. */
+function scoredAttempt({ task, number }: AttemptInput): ScoredAttempt {
+  return { task, attempt: number };
 }
 
 /**
@@ -532,14 +546,14 @@ export class TaskStore {
             input.task,
             input.state,
           );
-    return rows.map(toAttempt);
+    return rows.map((row) => this.#toAttempt(row));
   }
 
   /** Every attempt in the project, by task and then number, leaving out obsolete ones. For the ref list. */
   listProjectAttempts(_project: ProjectContext, _actor: Actor): StoredAttempt[] {
     return this.#sql
       .exec<AttemptRow>("SELECT * FROM attempts WHERE state != 'obsolete' ORDER BY task, number")
-      .map(toAttempt);
+      .map((row) => this.#toAttempt(row));
   }
 
   /** The active attempt pushed from an origin branch, if any. */
@@ -548,7 +562,7 @@ export class TaskStore {
       "SELECT * FROM attempts WHERE branch = ? AND state IN ('draft', 'open')",
       input.branch,
     );
-    return row === undefined ? null : toAttempt(row);
+    return row === undefined ? null : this.#toAttempt(row);
   }
 
   /** Edits an attempt's note. Only its author (or their agents) may. */
@@ -598,7 +612,7 @@ export class TaskStore {
   draftAttempt(_project: ProjectContext, actor: Actor, input: AttemptInput): StoredAttempt {
     return this.#sql.transaction(() => {
       const drafted = this.#authorMoves(actor, input, ["open"], "draft", "returned_to_draft");
-      this.scoring.cancelAttempt(drafted.task, drafted.number, "returned to draft");
+      this.scoring.cancelAttempt(scoredAttempt(drafted), "returned to draft");
       return drafted;
     });
   }
@@ -738,7 +752,7 @@ export class TaskStore {
         current.number,
       );
       this.#journal(actor, "merged", current.task, current.number, { sha: input.sha });
-      this.scoring.cancelAttempt(current.task, current.number, "attempt merged");
+      this.scoring.cancelAttempt(scoredAttempt(current), "attempt merged");
       const others = this.#activeAttempts(current.task);
       for (const other of others) this.#endAttempt(actor, other, "closed");
       this.#endTask(actor, current.task, "closed");
@@ -777,7 +791,12 @@ export class TaskStore {
     const current = this.#attempt(input);
     return this.#sql.transaction(() => {
       const head = this.#recordPushed(actor, current, input.updates);
-      if (head === null || current.state !== "open") return { scoring: null };
+      if (head === null) return { scoring: null };
+      // A draft isn't scored, but its old result no longer describes its head.
+      if (current.state !== "open") {
+        this.scoring.moveHead({ ...scoredAttempt(current), sha: head });
+        return { scoring: null };
+      }
       return { scoring: this.#request(project, actor, current, head, "push") };
     });
   }
@@ -928,7 +947,7 @@ export class TaskStore {
       this.#recordPushed(actor, attempt, input.updates);
       this.#dropBranchPush(attempt);
       const scoring = this.#request(project, actor, attempt, input.head, "open");
-      return { task: this.#task(row.task), attempt, scoring };
+      return { task: this.#task(row.task), attempt: this.#attempt(attempt), scoring };
     });
   }
 
@@ -968,13 +987,17 @@ export class TaskStore {
   #attempt({ task, number }: AttemptInput): StoredAttempt {
     const [row] = this.#sql.exec<AttemptRow>("SELECT * FROM attempts WHERE task = ? AND number = ?", task, number);
     if (row === undefined) throw new ServiceError("not_found", `no attempt ${attemptRef(task, number)}`);
-    return toAttempt(row);
+    return this.#toAttempt(row);
+  }
+
+  #toAttempt(row: AttemptRow): StoredAttempt {
+    return { ...toAttempt(row), scoring: this.scoring.statusFor(scoredAttempt(row)) };
   }
 
   #activeAttempts(task: number): StoredAttempt[] {
     return this.#sql
       .exec<AttemptRow>("SELECT * FROM attempts WHERE task = ? AND state IN ('draft', 'open') ORDER BY number", task)
-      .map(toAttempt);
+      .map((row) => this.#toAttempt(row));
   }
 
   #mayManageTask(project: ProjectContext, actor: Actor, current: StoredTask): void {
@@ -1017,7 +1040,7 @@ export class TaskStore {
     attempt: StoredAttempt,
     trigger: ScoringTrigger,
   ): Promise<ScoringRequest | null> {
-    const readSince = this.scoring.latestRunId(attempt.task, attempt.number);
+    const readSince = this.scoring.latestRunId(scoredAttempt(attempt));
     let head: string | null;
     try {
       const [commit] = await this.#repos.listCommits(forkRepo(project.id, attempt.fork), { ref: "main", limit: 1 });
@@ -1097,7 +1120,7 @@ export class TaskStore {
       current.number,
     );
     this.#journal(actor, to === "closed" ? "closed" : "made_obsolete", current.task, current.number);
-    this.scoring.cancelAttempt(current.task, current.number, `attempt ${to}`);
+    this.scoring.cancelAttempt(scoredAttempt(current), `attempt ${to}`);
   }
 
   /**
@@ -1432,7 +1455,7 @@ function toTask(row: TaskRow): StoredTask {
   };
 }
 
-function toAttempt(row: AttemptRow): StoredAttempt {
+function toAttempt(row: AttemptRow): Omit<StoredAttempt, "scoring"> {
   return {
     task: row.task,
     number: row.number,

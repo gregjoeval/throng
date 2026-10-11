@@ -2,21 +2,24 @@
 //
 //   THRONG_URL=https://throng.<subdomain>.workers.dev SPIKE_TOKEN=... pnpm e2e [scenario...]
 //
-// Scenarios: happy (one attempt lands), coalesce (two quick pushes; only the newest sha is checked),
-// conflict (two attempts edit the same line; the second is bounced with its conflicting hunks),
-// preview (an attempt gets a live Preview URL serving its change; its files are readable via the Worker),
-// intrusion (an attempt's tests try to push to the canonical main and call the Cloudflare API; both fail),
-// deps (an attempt adds an npm dependency; the check installs it from the registry, lands, and previews),
-// refs (attempt archive refs: pushable, listed, kept across pushes to main, and copied by the Worker).
+// Scenarios: zeroconfig (no config: the gate passes with no checks, built-in metrics recorded, and
+// the spike's landing puts the head on main), conflict (two attempts edit the same line; the second
+// passes its gate but bounces when landing),
+// metrics (a passing project whose checks report metrics), failing (a required check fails the gate),
+// invalid (an invalid config fails the gate with a config entry), coalesce (two quick pushes; the first
+// run is cancelled and only the newest sha is scored), intrusion (an attempt's checks try to push to
+// the origin and call the Cloudflare API; both fail), deps (setup installs an npm dependency from the
+// registry), refs (attempt archive refs: pushable, listed, kept across pushes to main, and copied by
+// the Worker).
 //
 // Every project id starts with E2E_PROJECT_PREFIX (default `e2e`; lowercase alphanumeric).
 // `pnpm e2e cleanup` deletes every repo whose name starts with an explicitly set E2E_PROJECT_PREFIX,
 // including those a failed or cancelled run left behind.
 
 import { execFile } from "node:child_process";
-import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { ARCHIVE_REF_PREFIX, archiveRef } from "../src/archive.ts";
 import { forkRepo, originRepo } from "../src/repos.ts";
@@ -25,6 +28,11 @@ const run = promisify(execFile);
 const FIXTURE = new URL("../fixtures/fixture-worker/", import.meta.url).pathname;
 const WRANGLER_CONFIG = new URL("../wrangler.jsonc", import.meta.url).pathname;
 const POLL_MS = 1_000;
+/** The fixture's own tests, as a check. */
+const TEST_CHECK = `checks:
+  - name: test
+    command: npm test
+`;
 const CHECK_TIMEOUT_MS = 10 * 60 * 1_000;
 
 const baseUrl = requireEnv("THRONG_URL").replace(/\/$/, "");
@@ -67,7 +75,32 @@ class Timeline {
   }
 }
 
-const scenarios: Record<string, () => Promise<void>> = { happy, coalesce, conflict, preview, intrusion, deps, refs };
+/** What a run reports, as far as the scenarios read it (see `src/results.ts`). */
+interface Run {
+  id: number;
+  sha: string;
+  status: string;
+  result: {
+    base: string | null;
+    config: { kind: string; error?: string };
+    gate: "passed" | "failed";
+    checks: { name: string; required: boolean; outcome: string; metrics: Record<string, number>; notes: string[] }[];
+    builtin: { filesChanged: number; additions: number; deletions: number; durationMs: number };
+  } | null;
+  error: string | null;
+}
+
+const scenarios: Record<string, () => Promise<void>> = {
+  zeroconfig,
+  conflict,
+  metrics,
+  failing,
+  invalid,
+  coalesce,
+  intrusion,
+  deps,
+  refs,
+};
 
 async function main(): Promise<void> {
   const names = process.argv.slice(2);
@@ -100,44 +133,158 @@ async function deleteRun(): Promise<void> {
   }
 }
 
-/** create repo → fork → push → event → check → rebase, re-test, land → main advanced, no new check. */
-async function happy(): Promise<void> {
+/** No `.throng/config.yml`: the gate passes with no checks, and the diff size is still recorded. */
+async function zeroconfig(): Promise<void> {
   const timeline = new Timeline();
   const { project, work } = await setUpProject(timeline);
-
   const fork = await createAttempt(project, "t1a1", timeline);
-  const sha = await commitAndPush(
-    work,
-    fork,
-    "src/greeting.js",
-    (s) => s.replace('"hello"', '"hello from a1"'),
-    "a1: greet",
-  );
+  const sha = await commitAndPush(work, fork, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
   timeline.mark("attempt pushed");
 
-  const finished = await waitFor(project, (e) => e.kind === "scored" && e.detail.sha === sha);
-  const outcome = finished.detail.outcome as { kind: string; mainSha?: string };
-  assert(outcome.kind === "landed", `expected landed, got ${JSON.stringify(outcome)}`);
-  const mainSha = outcome.mainSha!;
-  await waitFor(project, (e) => e.kind === "main_advanced" && e.detail.sha === mainSha);
+  const result = (await scored(project, sha)).result!;
+  assert(result.config.kind === "none", `expected no config, got ${JSON.stringify(result.config)}`);
+  assert(result.gate === "passed" && result.checks.length === 0, `expected a passing gate with no checks`);
+  assert(result.base !== null, "no merge base recorded");
+  const { filesChanged, additions, deletions } = result.builtin;
+  assert(
+    filesChanged === 1 && additions === 1 && deletions === 1,
+    `unexpected diff size ${JSON.stringify(result.builtin)}`,
+  );
 
+  const mainSha = await landed(project, sha);
   const head = await api<{ sha: string }>("GET", `/spike/repos/${originRepo(project)}/head`);
-  assert(head.sha === mainSha, `main is ${head.sha}, expected ${mainSha}`);
+  assert(head.sha === mainSha, `main is ${head.sha}, expected the landed ${mainSha}`);
   const greeting = await gitShow(work, project, mainSha, "src/greeting.js");
   assert(greeting.includes("hello from a1"), "main does not contain the attempt's change");
-
-  const journal = await settle(project);
-  const checks = journal.filter((e) => e.kind === "scoring_started");
-  assert(checks.length === 1, `expected one check, got ${checks.length}`);
-  addCheckTimings(timeline, journal);
-  report(timeline, journal);
-  await cleanUp(project, ["t1a1"], work);
+  await finish(project, ["t1a1"], work, timeline);
 }
 
-/** Two quick pushes to one attempt: the first check is cancelled (or never starts); only the newest sha lands. */
-async function coalesce(): Promise<void> {
+/** Two attempts forked from the same main edit the same line: the first lands, the second bounces. */
+async function conflict(): Promise<void> {
   const timeline = new Timeline();
   const { project, work } = await setUpProject(timeline);
+  const base = (await git(work, "rev-parse", "HEAD")).trim();
+
+  // Fork both before either lands, so both start from the same main.
+  const a1 = await createAttempt(project, "t1a1", timeline);
+  const a2 = await createAttempt(project, "t1a2", timeline);
+  const first = await commitAndPush(work, a1, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
+  timeline.mark("a1 pushed");
+  const mainSha = await landed(project, first);
+  timeline.mark("a1 landed");
+
+  await git(work, "checkout", "-q", "--detach", base);
+  const second = await commitAndPush(work, a2, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a2"'), "a2");
+  timeline.mark("a2 pushed");
+  const failed = await landing(project, second);
+  const outcome = failed.detail.landed as { kind: string; files?: string[]; diff?: string } | undefined;
+  assert(outcome?.kind === "bounced", `expected a2 to bounce, got ${JSON.stringify(failed.detail)}`);
+  assert(
+    JSON.stringify(outcome.files) === JSON.stringify(["src/greeting.js"]),
+    `unexpected conflict files ${JSON.stringify(outcome.files)}`,
+  );
+  assert(/hello from a1[\s\S]*hello from a2/.test(outcome.diff ?? ""), "the hunks do not show both sides");
+
+  const journal = await settle(project);
+  const head = await api<{ sha: string }>("GET", `/spike/repos/${originRepo(project)}/head`);
+  assert(head.sha === mainSha, `main moved to ${head.sha} after the bounce; expected ${mainSha}`);
+  assert(journal.filter((e) => e.kind === "main_advanced").length === 1, "expected only a1 to advance main");
+  report(timeline, journal);
+  await cleanUp(project, ["t1a1", "t1a2"], work);
+}
+
+/** A passing project whose checks report metrics: declared ones are kept, the rest noted. */
+async function metrics(): Promise<void> {
+  const timeline = new Timeline();
+  const { project, work } = await setUpProject(timeline, {
+    "scripts/metrics.js": `require("fs").writeFileSync(process.env.THRONG_METRICS, JSON.stringify({ coverage: 87.5, stray: 1 }));\n`,
+    ".throng/config.yml": `checks:
+  - name: test
+    command: npm test
+  - name: coverage
+    command: node scripts/metrics.js
+    required: false
+    metrics:
+      - { name: coverage, unit: "%", order: desc }
+`,
+  });
+  const fork = await createAttempt(project, "t1a1", timeline);
+  const sha = await commitAndPush(work, fork, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
+  timeline.mark("attempt pushed");
+
+  const result = (await scored(project, sha)).result!;
+  assert(result.gate === "passed", `expected the gate to pass: ${JSON.stringify(result.checks)}`);
+  const [test, coverage] = result.checks;
+  assert(
+    test?.outcome === "passed" && coverage?.outcome === "passed",
+    `unexpected outcomes ${JSON.stringify(result.checks)}`,
+  );
+  assert(coverage.metrics.coverage === 87.5, `coverage not recorded: ${JSON.stringify(coverage.metrics)}`);
+  assert(
+    coverage.notes.some((n) => n.includes("stray")),
+    "the undeclared metric was not noted",
+  );
+  await finish(project, ["t1a1"], work, timeline);
+}
+
+/** A required check that fails fails the gate; an optional one that passes doesn't save it. */
+async function failing(): Promise<void> {
+  const timeline = new Timeline();
+  const { project, work } = await setUpProject(timeline, {
+    ".throng/config.yml": `checks:
+  - name: greets
+    command: grep -q hello src/greeting.js
+  - name: test
+    command: npm test
+    required: false
+`,
+  });
+  const fork = await createAttempt(project, "t1a1", timeline);
+  const sha = await commitAndPush(work, fork, "src/greeting.js", (s) => s.replace('"hello"', '"hi"'), "a1: hi");
+  timeline.mark("attempt pushed");
+
+  const result = (await scored(project, sha)).result!;
+  assert(result.gate === "failed", "expected the gate to fail");
+  assert(
+    result.checks.map((c) => c.outcome).join() === "failed,passed",
+    `expected failed then passed, got ${JSON.stringify(result.checks)}`,
+  );
+  await finish(project, ["t1a1"], work, timeline);
+}
+
+/** An invalid config fails the gate with a single `config` entry, and runs no checks. */
+async function invalid(): Promise<void> {
+  const timeline = new Timeline();
+  const { project, work } = await setUpProject(timeline, {
+    ".throng/config.yml": `checks:
+  - name: Not A Valid Name
+    command: npm test
+`,
+  });
+  const fork = await createAttempt(project, "t1a1", timeline);
+  const sha = await commitAndPush(work, fork, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
+  timeline.mark("attempt pushed");
+
+  const result = (await scored(project, sha)).result!;
+  assert(result.config.kind === "invalid" && result.gate === "failed", `expected an invalid config to fail the gate`);
+  assert(
+    result.checks.length === 1 && result.checks[0]!.name === "config",
+    `expected one config entry, got ${JSON.stringify(result.checks)}`,
+  );
+  assert(result.builtin.filesChanged === 1, "the built-in metrics were not recorded");
+  await finish(project, ["t1a1"], work, timeline);
+}
+
+/** Two quick pushes to one attempt: the first run is cancelled; only the newest sha is scored. */
+async function coalesce(): Promise<void> {
+  const timeline = new Timeline();
+  // A check slow enough that the second push lands while the first run is still going.
+  const { project, work } = await setUpProject(timeline, {
+    ".throng/config.yml": `checks:
+  - name: slow
+    command: sleep 60
+`,
+  });
 
   const fork = await createAttempt(project, "t1a1", timeline);
   const first = await commitAndPush(work, fork, "src/greeting.js", (s) => s.replace('"hello"', '"hi"'), "a1: first");
@@ -154,142 +301,26 @@ async function coalesce(): Promise<void> {
   );
   timeline.mark("second push");
 
-  const finished = await waitFor(project, (e) => e.kind === "scored" && e.detail.sha === second);
-  const outcome = finished.detail.outcome as { kind: string; mainSha?: string };
-  assert(outcome.kind === "landed", `expected landed, got ${JSON.stringify(outcome)}`);
-  await waitFor(project, (e) => e.kind === "main_advanced" && e.detail.sha === outcome.mainSha);
-
+  await scored(project, second);
   const journal = await settle(project);
-  const landedFirst = journal.some(
-    (e) => e.kind === "scored" && e.detail.sha === first && (e.detail.outcome as { kind: string }).kind === "landed",
-  );
-  assert(!landedFirst, "the superseded sha landed");
+  assert(!journal.some((e) => e.kind === "scored" && e.detail.sha === first), "the superseded sha was scored");
+  assert(!journal.some((e) => e.kind === "main_advanced" && e.detail.head === first), "the superseded sha landed");
   assert(
     journal.some((e) => e.kind === "scoring_cancelled" && e.detail.sha === first),
-    "the first check was not cancelled",
+    "the first run was not cancelled",
   );
-  const greeting = await gitShow(work, project, outcome.mainSha!, "src/greeting.js");
-  assert(greeting.includes('"hi again"'), "main does not contain the newest change");
-  addCheckTimings(timeline, journal);
   report(timeline, journal);
   await cleanUp(project, ["t1a1"], work);
-}
-
-/** Two attempts forked from the same main edit the same line: the first lands, the second bounces. */
-async function conflict(): Promise<void> {
-  const timeline = new Timeline();
-  const { project, work } = await setUpProject(timeline);
-  const base = (await git(work, "rev-parse", "HEAD")).trim();
-
-  // Fork both before either lands, so both start from the same main.
-  const a1 = await createAttempt(project, "t1a1", timeline);
-  const a2 = await createAttempt(project, "t1a2", timeline);
-
-  const first = await commitAndPush(work, a1, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
-  timeline.mark("a1 pushed");
-  const landed = await waitFor(project, (e) => e.kind === "scored" && e.detail.sha === first);
-  const landedOutcome = landed.detail.outcome as { kind: string; mainSha?: string };
-  assert(landedOutcome.kind === "landed", `expected a1 to land, got ${JSON.stringify(landedOutcome)}`);
-  const mainSha = landedOutcome.mainSha!;
-  timeline.mark("a1 landed");
-
-  await git(work, "checkout", "-q", "--detach", base);
-  const second = await commitAndPush(work, a2, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a2"'), "a2");
-  timeline.mark("a2 pushed");
-  const finished = await waitFor(project, (e) => e.kind === "scored" && e.detail.sha === second);
-  const outcome = finished.detail.outcome as { kind: string; files?: string[]; diff?: string };
-  assert(outcome.kind === "bounced", `expected a2 to bounce, got ${JSON.stringify(outcome)}`);
-  assert(
-    JSON.stringify(outcome.files) === JSON.stringify(["src/greeting.js"]),
-    `unexpected conflict files ${JSON.stringify(outcome.files)}`,
-  );
-  assert(/hello from a1[\s\S]*hello from a2/.test(outcome.diff ?? ""), "the hunks do not show both sides");
-
-  const journal = await settle(project);
-  const head = await api<{ sha: string }>("GET", `/spike/repos/${originRepo(project)}/head`);
-  assert(head.sha === mainSha, `main moved to ${head.sha} after the bounce; expected ${mainSha}`);
-  assert(journal.filter((e) => e.kind === "main_advanced").length === 1, "expected only a1 to advance main");
-  console.log(`bounced: ${outcome.files!.join(", ")}`);
-  console.log(outcome.diff);
-  addCheckTimings(timeline, journal);
-  report(timeline, journal);
-  await cleanUp(project, ["t1a1", "t1a2"], work);
-}
-
-/** An attempt's passing check deploys a Preview serving its change; its files are readable without a clone. */
-async function preview(): Promise<void> {
-  const timeline = new Timeline();
-  const { project, work } = await setUpProject(timeline);
-  const fork = await createAttempt(project, "t1a1", timeline);
-  const sha = await commitAndPush(work, fork, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
-  timeline.mark("attempt pushed");
-  const forkName = forkRepo(project, "t1a1");
-
-  // File reads through the binding, against the fork.
-  const began = Date.now();
-  const file = await apiText("GET", `/spike/repos/${forkName}/file?ref=main&path=src/greeting.js`);
-  assert(file.includes("hello from a1"), "file read does not show the attempt's change");
-  const root = await api<{ commit: string; entries: { name: string; type: string }[] }>(
-    "GET",
-    `/spike/repos/${forkName}/tree?ref=main`,
-  );
-  assert(root.commit === sha, `tree is at ${root.commit}, expected ${sha}`);
-  const names = root.entries.map((e) => e.name).toSorted();
-  assert(
-    ["package.json", "src", "test"].every((n) => names.includes(n)),
-    `unexpected root ${names.join(", ")}`,
-  );
-  const src = await api<{ entries: { name: string }[] }>("GET", `/spike/repos/${forkName}/tree?ref=main&path=src`);
-  assert(
-    src.entries.some((e) => e.name === "greeting.js"),
-    "src/ listing has no greeting.js",
-  );
-  const log = await api<{ hash: string; message: string }[]>("GET", `/spike/repos/${forkName}/log?ref=main&limit=5`);
-  assert(log[0]?.hash === sha && log.length === 2, `unexpected log ${JSON.stringify(log.map((c) => c.message))}`);
-  timeline.mark(`file, 2 trees and log read in ${Date.now() - began} ms`);
-
-  const ready = await waitFor(
-    project,
-    (e) => (e.kind === "preview-ready" || e.kind === "preview-failed") && e.detail.sha === sha,
-  );
-  assert(ready.kind === "preview-ready", `preview failed: ${String(ready.detail.output)}`);
-  const url = String(ready.detail.url);
-  timeline.mark(`preview ready (wrangler preview ${String(ready.detail.runMs)} ms): ${url}`);
-  const body = await fetchUntil(`${url}/?name=e2e`, (b) => b === "hello from a1, e2e");
-  timeline.mark(`preview served the change: ${JSON.stringify(body)}`);
-
-  await waitFor(project, (e) => e.kind === "scored" && e.detail.sha === sha);
-  const journal = await settle(project, 5_000);
-  addCheckTimings(timeline, journal);
-  report(timeline, journal);
-  await cleanUp(project, ["t1a1"], work);
-}
-
-/** Polls a public URL until its body matches; new Preview hostnames can take a moment to resolve. */
-async function fetchUntil(url: string, match: (body: string) => boolean, timeoutMs = 60_000): Promise<string> {
-  const deadline = Date.now() + timeoutMs;
-  let last = "";
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(url);
-      last = `${response.status} ${await response.text()}`;
-      if (response.ok && match(last.slice(4))) return last.slice(4);
-    } catch (cause) {
-      last = String(cause);
-    }
-    await new Promise((r) => setTimeout(r, POLL_MS));
-  }
-  throw new Error(`${url} never matched; last: ${last}`);
 }
 
 /**
- * The attempt's own test tries to push a forged commit to the canonical main and to reach the Cloudflare
- * API with the Preview grant. The test passes only if both are blocked, so a leak fails the check.
+ * The attempt's own test tries to push a forged commit to the origin's main and to reach the
+ * Cloudflare API. The test passes only if both are blocked, so a leak fails the gate.
  */
 async function intrusion(): Promise<void> {
   const timeline = new Timeline();
-  const { project, work } = await setUpProject(timeline);
-  const canonical = (await git(work, "remote", "get-url", "canonical")).trim();
+  const { project, work } = await setUpProject(timeline, { ".throng/config.yml": TEST_CHECK });
+  const origin = (await git(work, "remote", "get-url", "origin")).trim();
   const accountId = /"CF_ACCOUNT_ID":\s*"(\w+)"/.exec(await readFile(WRANGLER_CONFIG, "utf8"))?.[1];
   assert(accountId !== undefined, "CF_ACCOUNT_ID not found in wrangler.jsonc");
   const fork = await createAttempt(project, "t1a1", timeline);
@@ -298,11 +329,11 @@ async function intrusion(): Promise<void> {
 import { execFileSync } from "node:child_process";
 import { test } from "node:test";
 
-test("cannot push to the canonical repo", () => {
+test("cannot push to the origin", () => {
   const tree = execFileSync("git", ["rev-parse", "HEAD^{tree}"]).toString().trim();
   const forged = execFileSync("git", ["commit-tree", tree, "-p", "HEAD", "-m", "intrusion"]).toString().trim();
   assert.throws(() =>
-    execFileSync("git", ["push", ${JSON.stringify(canonical)}, \`\${forged}:refs/heads/main\`], { stdio: "pipe", timeout: 30_000 }),
+    execFileSync("git", ["push", ${JSON.stringify(origin)}, \`\${forged}:refs/heads/main\`], { stdio: "pipe", timeout: 30_000 }),
   );
 });
 
@@ -317,25 +348,21 @@ test("cannot reach the Cloudflare API", async () => {
   const sha = await commitAndPush(work, fork, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
   timeline.mark("attempt pushed");
 
-  const finished = await waitFor(project, (e) => e.kind === "scored" && e.detail.sha === sha);
-  const outcome = finished.detail.outcome as { kind: string; mainSha?: string; output?: string };
-  assert(outcome.kind === "landed", `expected the check to pass and land, got ${JSON.stringify(outcome)}`);
+  const result = (await scored(project, sha)).result!;
+  assert(result.gate === "passed", `expected the probes to be blocked and pass, got ${JSON.stringify(result.checks)}`);
   const log = await api<{ message: string }[]>("GET", `/spike/repos/${originRepo(project)}/log?ref=main&limit=20`);
   assert(!log.some((c) => c.message === "intrusion"), "the forged commit reached main");
-  const head = await api<{ sha: string }>("GET", `/spike/repos/${originRepo(project)}/head`);
-  assert(head.sha === outcome.mainSha, `main is ${head.sha}, expected the landed ${outcome.mainSha}`);
-  console.log(`main history: ${log.map((c) => c.message).join(" <- ")}`);
-
-  const journal = await settle(project, 5_000);
-  addCheckTimings(timeline, journal);
-  report(timeline, journal);
-  await cleanUp(project, ["t1a1"], work);
+  await finish(project, ["t1a1"], work, timeline);
 }
 
-/** An attempt adds an npm dependency: the check installs it, passes, lands, and its Preview is built with it. */
+/** An attempt adds an npm dependency: setup installs it from the registry and the checks use it. */
 async function deps(): Promise<void> {
   const timeline = new Timeline();
-  const { project, work } = await setUpProject(timeline);
+  const { project, work } = await setUpProject(timeline, {
+    ".throng/config.yml": `setup:
+  - npm ci --ignore-scripts --no-audit --no-fund
+${TEST_CHECK}`,
+  });
   const fork = await createAttempt(project, "t1a1", timeline);
 
   const pkg = JSON.parse(await readFile(join(work, "package.json"), "utf8")) as Record<string, unknown>;
@@ -365,24 +392,12 @@ test("the dependency is installed", () => {
   );
   timeline.mark("attempt pushed");
 
-  const finished = await waitFor(project, (e) => e.kind === "scored" && e.detail.sha === sha);
-  const outcome = finished.detail.outcome as { kind: string; mainSha?: string };
-  assert(outcome.kind === "landed", `expected landed, got ${JSON.stringify(outcome)}`);
-  const lock = await apiText("GET", `/spike/repos/${originRepo(project)}/file?ref=main&path=package-lock.json`);
-  assert(lock.includes('"is-number"'), "main has no lockfile with the dependency");
-
-  const ready = await waitFor(
-    project,
-    (e) => (e.kind === "preview-ready" || e.kind === "preview-failed") && e.detail.sha === sha,
+  const result = (await scored(project, sha)).result!;
+  assert(
+    result.gate === "passed",
+    `expected the dependency to install and the tests to pass: ${JSON.stringify(result.checks)}`,
   );
-  assert(ready.kind === "preview-ready", `preview failed: ${String(ready.detail.output)}`);
-  const body = await fetchUntil(`${String(ready.detail.url)}/?name=e2e`, (b) => b === "hello with deps, e2e");
-  timeline.mark(`preview served ${JSON.stringify(body)}`);
-
-  const journal = await settle(project, 5_000);
-  addCheckTimings(timeline, journal);
-  report(timeline, journal);
-  await cleanUp(project, ["t1a1"], work);
+  await finish(project, ["t1a1"], work, timeline);
 }
 
 /**
@@ -452,12 +467,20 @@ async function lsRemote(work: string, remote: Grant, ref: string): Promise<strin
   return line?.split("\t")[0] ?? null;
 }
 
-async function setUpProject(timeline: Timeline): Promise<{ project: string; work: string; origin: Grant }> {
+/** A new project whose origin's `main` is the fixture plus `files` (a config, helper scripts). */
+async function setUpProject(
+  timeline: Timeline,
+  files: Record<string, string> = {},
+): Promise<{ project: string; work: string; origin: Grant }> {
   // Project ids are lowercase alphanumeric; repo names take a `-main` or `-t1a1` suffix.
   const project = `${projectPrefix}${Date.now().toString(36)}`;
   console.log(`project ${project}`);
   const work = await mkdtemp(join(tmpdir(), `${project}-`));
   await cp(FIXTURE, work, { recursive: true, filter: (src) => !src.includes("node_modules") });
+  for (const [path, content] of Object.entries(files)) {
+    await mkdir(dirname(join(work, path)), { recursive: true });
+    await writeFile(join(work, path), content);
+  }
   await git(work, "init", "-q", "-b", "main");
   await git(work, "add", "-A");
   await git(work, "commit", "-q", "-m", "fixture");
@@ -467,7 +490,7 @@ async function setUpProject(timeline: Timeline): Promise<{ project: string; work
   timeline.mark("repo created");
   await git(work, ...auth(repo.token), "push", "-q", repo.remote, "main:refs/heads/main");
   timeline.mark("fixture pushed to main");
-  await git(work, "remote", "add", "canonical", repo.remote);
+  await git(work, "remote", "add", "origin", repo.remote);
   return { project, work, origin: repo };
 }
 
@@ -498,33 +521,49 @@ async function commitAndPush(
   return sha;
 }
 
-async function gitShow(work: string, project: string, sha: string, path: string): Promise<string> {
-  const { token } = await api<{ token: string }>("POST", `/spike/repos/${originRepo(project)}/read-token`);
-  await git(work, ...auth(token), "fetch", "-q", "canonical", "main");
-  return git(work, "show", `${sha}:${path}`);
-}
-
-function addCheckTimings(timeline: Timeline, journal: JournalEntry[]): void {
-  for (const e of journal) {
-    const sha = typeof e.detail.sha === "string" ? e.detail.sha.slice(0, 7) : "";
-    if (e.kind === "scored") {
-      const t = e.detail.timings as Record<string, number>;
-      timeline.mark(`check ${sha}: test sandbox start ${t.testStartMs} ms, run ${t.testRunMs} ms`, t.createdAt! + 1);
-      timeline.mark(
-        `check ${sha}: land sandbox start ${t.landStartMs ?? "-"} ms, run ${t.landRunMs ?? "-"} ms`,
-        t.finishedAt! - 1,
-      );
-    }
-    timeline.mark(`journal: ${e.kind} ${sha}`, e.at);
-  }
-}
-
 function report(timeline: Timeline, journal: JournalEntry[]): void {
   console.log("timeline:");
   timeline.print();
   const cancelled = journal.filter((e) => e.kind === "scoring_cancelled");
   console.log(`cancelled runs: ${cancelled.length}`);
   for (const d of cancelled) console.log(`  ${JSON.stringify(d.detail)}`);
+}
+
+/** Waits for `sha`'s run to finish and reads it back; an errored run fails the scenario. */
+async function scored(project: string, sha: string): Promise<Run> {
+  const event = await waitFor(
+    project,
+    (e) => (e.kind === "scored" || e.kind === "scoring_errored") && e.detail.sha === sha,
+  );
+  const found = await api<Run>("GET", `/spike/projects/${project}/runs/${String(event.detail.run)}`);
+  const { result } = found;
+  assert(found.status === "done" && result !== null, `run ${found.id} ended ${found.status}: ${found.error ?? ""}`);
+  console.log(`  gate ${result.gate}: ${JSON.stringify(result.checks.map((c) => [c.name, c.outcome]))}`);
+  return found;
+}
+
+/** Waits for the spike's landing of `sha` to end, either advancing main or failing. */
+async function landing(project: string, sha: string): Promise<JournalEntry> {
+  return waitFor(project, (e) => (e.kind === "main_advanced" || e.kind === "land_failed") && e.detail.head === sha);
+}
+
+/** Waits for `sha` to land and returns main's new commit; a failed landing fails the scenario. */
+async function landed(project: string, sha: string): Promise<string> {
+  const event = await landing(project, sha);
+  assert(event.kind === "main_advanced", `expected ${sha} to land, got ${JSON.stringify(event.detail)}`);
+  return String(event.detail.sha);
+}
+
+async function gitShow(work: string, project: string, sha: string, path: string): Promise<string> {
+  const { token } = await api<{ token: string }>("POST", `/spike/repos/${originRepo(project)}/read-token`);
+  await git(work, ...auth(token), "fetch", "-q", "origin", "main");
+  return git(work, "show", `${sha}:${path}`);
+}
+
+/** Reports a scenario's journal and deletes what it made. */
+async function finish(project: string, attempts: string[], work: string, timeline: Timeline): Promise<void> {
+  report(timeline, await settle(project, 5_000));
+  await cleanUp(project, attempts, work);
 }
 
 /** Waits a little after the last expected event so stray runs show up. */
@@ -554,13 +593,6 @@ async function cleanUp(project: string, attempts: string[], work: string): Promi
     await api("DELETE", `/spike/repos/${name}`).catch((cause) => console.warn(`could not delete ${name}`, cause));
   }
   await rm(work, { recursive: true, force: true });
-}
-
-async function apiText(method: string, path: string): Promise<string> {
-  const response = await fetch(`${baseUrl}${path}`, { method, headers: { Authorization: `Bearer ${spikeToken}` } });
-  const body = await response.text();
-  if (!response.ok) throw new Error(`${method} ${path}: ${response.status} ${body}`);
-  return body;
 }
 
 async function api<T>(method: string, path: string): Promise<T> {

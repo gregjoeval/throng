@@ -3,14 +3,15 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
+import { parseConfig } from "../src/config.ts";
+import { buildResult, scorePlan, type RawScore, type ScorePlan } from "../src/results.ts";
 import {
   landScript,
   parseResult,
   retestScript,
-  testScript,
+  scoreScript,
   type LandResult,
   type RetestResult,
-  type TestResult,
 } from "../src/scripts.ts";
 
 // Runs the Sandbox scripts against local bare repos standing in for Artifacts remotes.
@@ -24,7 +25,7 @@ const ENV = {
 };
 
 let root: string;
-let canonical: string;
+let origin: string;
 let fork: string;
 let work: string;
 
@@ -37,8 +38,7 @@ function commit(file: string, content: string, message: string): string {
   return git(work, "rev-parse", "HEAD");
 }
 
-function runScript<T>(script: string): T {
-  const sandbox = mkdtempSync(join(root, "sandbox-"));
+function runScript<T>(script: string, sandbox = mkdtempSync(join(root, "sandbox-"))): T {
   const stdout = execFileSync("bash", ["-c", script], { cwd: sandbox, env: ENV, encoding: "utf8" });
   const result = parseResult<T>(stdout);
   if (result === null) throw new Error(`no result in: ${stdout}`);
@@ -47,10 +47,10 @@ function runScript<T>(script: string): T {
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "throng-scripts-"));
-  canonical = join(root, "canonical.git");
+  origin = join(root, "origin.git");
   fork = join(root, "fork.git");
   work = join(root, "work");
-  git(root, "init", "-q", "--bare", "-b", "main", canonical);
+  git(root, "init", "-q", "--bare", "-b", "main", origin);
   git(root, "init", "-q", "-b", "main", work);
   writeFileSync(join(work, "package.json"), JSON.stringify({ scripts: { test: "node check.js" } }));
   writeFileSync(
@@ -58,8 +58,8 @@ beforeEach(() => {
     `if (require("fs").readFileSync("a.txt", "utf8").includes("bad")) process.exit(1);`,
   );
   commit("a.txt", "one\ntwo\nthree\n", "base");
-  git(work, "push", "-q", canonical, "main");
-  git(root, "clone", "-q", "--bare", canonical, fork);
+  git(work, "push", "-q", origin, "main");
+  git(root, "clone", "-q", "--bare", origin, fork);
 });
 
 /**
@@ -94,52 +94,154 @@ if (fs.existsSync("ran-install-script")) { console.error("install script ran"); 
 }
 
 describe("dependency install", () => {
-  it("installs from the lockfile without running install scripts", () => {
-    addDependency();
-    const sha = commit("a.txt", "one\ntwo\nthree\n", "with dependency");
-    git(work, "push", "-q", fork, "main");
-    expect(runScript<TestResult>(testScript(fork, sha))).toEqual({ ok: true });
-  });
-
-  it("skips the install when the repo has no lockfile", () => {
-    writeFileSync(
-      join(work, "package.json"),
-      JSON.stringify({ scripts: { test: "node check.js" }, dependencies: { missing: "file:./missing" } }),
-    );
-    const sha = commit("a.txt", "one\ntwo\nthree\n", "no lockfile");
-    git(work, "push", "-q", fork, "main");
-    expect(runScript<TestResult>(testScript(fork, sha))).toEqual({ ok: true });
-  });
-
-  it("installs before the retest after rebasing", () => {
+  it("installs before the retest after rebasing, without running install scripts", () => {
     addDependency();
     const attempt = commit("a.txt", "one\ntwo\nthree\n", "with dependency");
     git(work, "push", "-q", fork, "main");
     git(work, "reset", "-q", "--hard", "HEAD~1");
     commit("c.txt", "someone else\n", "main moved");
-    git(work, "push", "-q", canonical, "main");
-    expect(runScript<RetestResult>(retestScript(canonical, fork, attempt))).toMatchObject({ kind: "tested" });
-  });
-
-  it("reports a broken install as an install failure, not a test failure", () => {
-    addDependency();
-    writeFileSync(
-      join(work, "package.json"),
-      JSON.stringify({ scripts: { test: "node check.js" }, dependencies: { dep: "file:./dep", other: "1.0.0" } }),
-    );
-    const sha = commit("a.txt", "one\ntwo\nthree\n", "lockfile out of sync");
-    git(work, "push", "-q", fork, "main");
-    expect(runScript<TestResult>(testScript(fork, sha))).toMatchObject({ ok: false, stage: "install" });
+    git(work, "push", "-q", origin, "main");
+    expect(runScript<RetestResult>(retestScript(origin, fork, attempt))).toMatchObject({ kind: "tested" });
   });
 });
 
-describe("testScript", () => {
-  it("passes a good commit and reports a failing one", () => {
-    const good = commit("a.txt", "one\ntwo!\nthree\n", "good");
-    const bad = commit("a.txt", "one\nbad\nthree\n", "bad");
-    git(work, "push", "-q", fork, "main");
-    expect(runScript<TestResult>(testScript(fork, good))).toEqual({ ok: true });
-    expect(runScript<TestResult>(testScript(fork, bad))).toMatchObject({ ok: false, stage: "test" });
+const plan = (overrides: Partial<ScorePlan> = {}): ScorePlan => ({ setup: [], checks: [], allow: [], ...overrides });
+const check = (name: string, command: string, timeoutMs = 60_000) => ({ name, command, timeoutMs });
+
+/** Pushes an attempt to the fork on top of the origin's main (adds 2 lines, deletes 2) and returns its head. */
+function attemptHead(): string {
+  commit("b.txt", "attempt\nline two\n", "attempt");
+  const head = commit("a.txt", "one\n", "attempt trims a.txt");
+  git(work, "push", "-q", fork, "main");
+  return head;
+}
+
+describe("scoreScript", () => {
+  it("records the merge base and the diff size from it, and runs nothing without a plan", () => {
+    const head = attemptHead();
+    const raw = runScript<RawScore>(scoreScript(fork, origin, head, plan()));
+    expect(raw).toMatchObject({ base: git(origin, "rev-parse", "main"), setupFailed: null, checks: [] });
+    expect(raw.shortstat.trim()).toBe("2 files changed, 2 insertions(+), 2 deletions(-)");
+    expect(raw.builtinMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it("measures the base from the origin's main, not the fork's", () => {
+    const head = attemptHead();
+    commit("c.txt", "later\n", "main moves on");
+    git(work, "push", "-q", origin, "HEAD:main");
+    const raw = runScript<RawScore>(scoreScript(fork, origin, head, plan()));
+    expect(raw.base).toBe(git(origin, "rev-parse", "main~1"));
+  });
+
+  it("diffs against the empty tree when the head shares no history with main", () => {
+    git(work, "checkout", "-q", "--orphan", "lone");
+    git(work, "rm", "-rqf", ".");
+    const head = commit("only.txt", "x\ny\n", "unrelated");
+    git(work, "push", "-q", fork, "lone:main", "--force");
+    const raw = runScript<RawScore>(scoreScript(fork, origin, head, plan()));
+    expect(raw.base).toBeNull();
+    expect(raw.shortstat.trim()).toBe("1 file changed, 2 insertions(+)");
+  });
+
+  it("runs every check in order, after a failure too, with an empty $THRONG_METRICS file each", () => {
+    const head = attemptHead();
+    const checks = [
+      check(
+        "first",
+        `test ! -s "$THRONG_METRICS" && echo '{"coverage": 81.5}' > "$THRONG_METRICS" && echo first >> ../order`,
+      ),
+      check("broken", "echo broken >> ../order; exit 3"),
+      check("last", `test ! -s "$THRONG_METRICS" && echo last >> ../order && test -f b.txt`),
+    ];
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    const raw = runScript<RawScore>(scoreScript(fork, origin, head, plan({ checks })), sandbox);
+    expect(raw.checks.map((c) => [c.exit, c.metrics?.trim()])).toEqual([
+      [0, '{"coverage": 81.5}'],
+      [3, ""],
+      [0, ""],
+    ]);
+    expect(execFileSync("cat", [join(sandbox, "order")], { encoding: "utf8" })).toBe("first\nbroken\nlast\n");
+    expect(execFileSync("cat", [join(sandbox, "logs/broken.log")], { encoding: "utf8" })).toBe("");
+  });
+
+  it("skips every check after a failed setup command, and names the command", () => {
+    const head = attemptHead();
+    const setup = ["true", "echo nope >&2; false", "touch ../never"];
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    const raw = runScript<RawScore>(
+      scoreScript(fork, origin, head, plan({ setup, checks: [check("test", "true")] })),
+      sandbox,
+    );
+    expect(raw).toMatchObject({ setupFailed: 2, checks: [{ exit: null, metrics: null }] });
+    expect(execFileSync("cat", [join(sandbox, "logs/setup-2.log")], { encoding: "utf8" })).toBe("nope\n");
+    expect(() => execFileSync("test", ["-e", join(sandbox, "never")])).toThrow();
+  });
+
+  it("stops a check at its timeout", () => {
+    const head = attemptHead();
+    const raw = runScript<RawScore>(
+      scoreScript(fork, origin, head, plan({ checks: [check("slow", "sleep 20", 1000)] })),
+    );
+    expect(raw.checks[0]).toMatchObject({ exit: 124 });
+    expect(raw.checks[0]!.durationMs).toBeGreaterThanOrEqual(1000);
+    expect(raw.checks[0]!.durationMs).toBeLessThan(10_000);
+  });
+
+  it("quotes commands so a check can't break out of the script", () => {
+    const head = attemptHead();
+    const raw = runScript<RawScore>(
+      scoreScript(
+        fork,
+        origin,
+        head,
+        plan({ checks: [check("quotes", `echo "it's" '$HOME' "$(echo ok)" > ../quoted`)] }),
+      ),
+    );
+    expect(raw.checks[0]!.exit).toBe(0);
+  });
+
+  it("is idempotent: rerunning in the same directory gives the same result", () => {
+    const head = attemptHead();
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    const script = scoreScript(
+      fork,
+      origin,
+      head,
+      plan({ checks: [check("test", "echo '{\"n\": 1}' > $THRONG_METRICS")] }),
+    );
+    const first = runScript<RawScore>(script, sandbox);
+    const second = runScript<RawScore>(script, sandbox);
+    expect({ ...second, builtinMs: 0, checks: second.checks.map((c) => ({ ...c, durationMs: 0 })) }).toEqual({
+      ...first,
+      builtinMs: 0,
+      checks: first.checks.map((c) => ({ ...c, durationMs: 0 })),
+    });
+  });
+
+  it("turns a project's config into a scored result end to end", () => {
+    const head = attemptHead();
+    const config = parseConfig(`checks:
+  - name: test
+    command: >-
+      echo '{"coverage": 90, "junk": 1}' > "$THRONG_METRICS"
+    metrics:
+      - { name: coverage, unit: "%", order: desc }
+  - name: lint
+    command: exit 1
+    required: false
+`);
+    const raw = runScript<RawScore>(scoreScript(fork, origin, head, scorePlan(config)));
+    const result = buildResult(config, raw);
+    expect(result).toMatchObject({
+      config: { kind: "valid" },
+      gate: "passed",
+      builtin: { filesChanged: 2, additions: 2, deletions: 2 },
+      checks: [
+        { name: "test", required: true, outcome: "passed", metrics: { coverage: 90 } },
+        { name: "lint", required: false, outcome: "failed", metrics: {} },
+      ],
+    });
+    expect(result.checks[0]!.notes).toEqual(["ignored metric junk: not declared by this check"]);
   });
 });
 
@@ -149,15 +251,15 @@ function divergedAttempt(): string {
   git(work, "push", "-q", fork, "main");
   git(work, "reset", "-q", "--hard", "HEAD~1");
   commit("c.txt", "someone else\n", "main moved");
-  git(work, "push", "-q", canonical, "main");
+  git(work, "push", "-q", origin, "main");
   return attempt;
 }
 
 describe("retestScript", () => {
   it("rebases onto the current main and reports the base and the tested tree", () => {
     const attempt = divergedAttempt();
-    const result = runScript<RetestResult>(retestScript(canonical, fork, attempt));
-    expect(result).toMatchObject({ kind: "tested", base: git(canonical, "rev-parse", "main") });
+    const result = runScript<RetestResult>(retestScript(origin, fork, attempt));
+    expect(result).toMatchObject({ kind: "tested", base: git(origin, "rev-parse", "main") });
     expect(result.kind === "tested" && result.tree).toMatch(/^[0-9a-f]{40}$/);
   });
 
@@ -166,9 +268,9 @@ describe("retestScript", () => {
     git(work, "push", "-q", fork, "main");
     git(work, "reset", "-q", "--hard", "HEAD~1");
     commit("a.txt", "one\ntheirs\nthree\n", "main moved");
-    git(work, "push", "-q", canonical, "main");
+    git(work, "push", "-q", origin, "main");
 
-    const result = runScript<RetestResult>(retestScript(canonical, fork, attempt));
+    const result = runScript<RetestResult>(retestScript(origin, fork, attempt));
     expect(result).toMatchObject({ kind: "bounced", files: ["a.txt"] });
     expect(result.kind === "bounced" && result.diff).toMatch(/<<<<<<<[\s\S]*theirs[\s\S]*=======[\s\S]*mine/);
   });
@@ -178,14 +280,14 @@ describe("retestScript", () => {
     git(work, "push", "-q", fork, "main");
     git(work, "reset", "-q", "--hard", "HEAD~1");
     commit("a.txt", "one\nbad\nthree\n", "main broke");
-    git(work, "push", "-q", canonical, "main");
+    git(work, "push", "-q", origin, "main");
 
-    expect(runScript<RetestResult>(retestScript(canonical, fork, attempt))).toMatchObject({ kind: "failed" });
+    expect(runScript<RetestResult>(retestScript(origin, fork, attempt))).toMatchObject({ kind: "failed" });
   });
 });
 
 function retested(attempt: string): { base: string; tree: string } {
-  const result = runScript<RetestResult>(retestScript(canonical, fork, attempt));
+  const result = runScript<RetestResult>(retestScript(origin, fork, attempt));
   if (result.kind !== "tested") throw new Error(`retest did not pass: ${JSON.stringify(result)}`);
   return result;
 }
@@ -195,31 +297,31 @@ describe("landScript", () => {
     const attempt = divergedAttempt();
     const tested = retested(attempt);
 
-    const result = runScript<LandResult>(landScript(canonical, fork, attempt, tested));
-    expect(result).toEqual({ kind: "landed", mainSha: git(canonical, "rev-parse", "main") });
-    expect(git(canonical, "rev-parse", "main^{tree}")).toBe(tested.tree);
-    expect(git(canonical, "log", "--format=%s", "main")).toBe("attempt\nmain moved\nbase");
+    const result = runScript<LandResult>(landScript(origin, fork, attempt, tested));
+    expect(result).toEqual({ kind: "landed", mainSha: git(origin, "rev-parse", "main") });
+    expect(git(origin, "rev-parse", "main^{tree}")).toBe(tested.tree);
+    expect(git(origin, "log", "--format=%s", "main")).toBe("attempt\nmain moved\nbase");
   });
 
   it("reports main moved, without pushing, when main changed after the retest", () => {
     const attempt = divergedAttempt();
     const tested = retested(attempt);
     commit("d.txt", "later\n", "main moved again");
-    git(work, "push", "-q", canonical, "main");
-    const before = git(canonical, "rev-parse", "main");
+    git(work, "push", "-q", origin, "main");
+    const before = git(origin, "rev-parse", "main");
 
-    expect(runScript<LandResult>(landScript(canonical, fork, attempt, tested))).toEqual({ kind: "moved" });
-    expect(git(canonical, "rev-parse", "main")).toBe(before);
+    expect(runScript<LandResult>(landScript(origin, fork, attempt, tested))).toEqual({ kind: "moved" });
+    expect(git(origin, "rev-parse", "main")).toBe(before);
   });
 
   it("refuses to push a tree other than the one tested", () => {
     const attempt = divergedAttempt();
     const tested = retested(attempt);
-    const before = git(canonical, "rev-parse", "main");
+    const before = git(origin, "rev-parse", "main");
 
     const forged = { ...tested, tree: git(work, "rev-parse", "HEAD^{tree}") };
-    expect(runScript<LandResult>(landScript(canonical, fork, attempt, forged))).toMatchObject({ kind: "mismatch" });
-    expect(git(canonical, "rev-parse", "main")).toBe(before);
+    expect(runScript<LandResult>(landScript(origin, fork, attempt, forged))).toMatchObject({ kind: "mismatch" });
+    expect(git(origin, "rev-parse", "main")).toBe(before);
   });
 
   it("runs no repository code: no npm, node or hooks", () => {

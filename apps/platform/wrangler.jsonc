@@ -8,21 +8,22 @@
   "durable_objects": {
     "bindings": [
       { "name": "PROJECT", "class_name": "ProjectCoordinator" },
-      { "name": "SANDBOX", "class_name": "CheckSandbox" },
+      { "name": "SANDBOX", "class_name": "RunSandbox" },
     ],
   },
   "exports": {
     "ProjectCoordinator": { "type": "durable-object", "storage": "sqlite" },
-    "CheckSandbox": { "type": "durable-object", "storage": "sqlite" },
+    "RunSandbox": { "type": "durable-object", "storage": "sqlite" },
+    "CheckSandbox": { "type": "durable-object", "state": "renamed", "renamed_to": "RunSandbox" },
   },
   "containers": [
     {
-      "class_name": "CheckSandbox",
+      "class_name": "RunSandbox",
       "scheduling_policy": "durable_object",
       "images": { "sandbox": { "dockerfile": "./container/Dockerfile" } },
     },
   ],
-  "workflows": [{ "name": "throng-check", "binding": "CHECK", "class_name": "CheckWorkflow" }],
+  "workflows": [{ "name": "throng-scoring", "binding": "SCORING", "class_name": "ScoringWorkflow" }],
   "d1_databases": [
     {
       "binding": "DB",
@@ -51,22 +52,23 @@
       "durable_objects": {
         "bindings": [
           { "name": "PROJECT", "class_name": "ProjectCoordinator" },
-          { "name": "SANDBOX", "class_name": "CheckSandbox" },
+          { "name": "SANDBOX", "class_name": "RunSandbox" },
         ],
       },
       "exports": {
         "ProjectCoordinator": { "type": "durable-object", "storage": "sqlite" },
-        "CheckSandbox": { "type": "durable-object", "storage": "sqlite" },
+        "RunSandbox": { "type": "durable-object", "storage": "sqlite" },
+        "CheckSandbox": { "type": "durable-object", "state": "renamed", "renamed_to": "RunSandbox" },
       },
       "containers": [
         {
-          "class_name": "CheckSandbox",
+          "class_name": "RunSandbox",
           "scheduling_policy": "durable_object",
           "images": { "sandbox": { "dockerfile": "./container/Dockerfile" } },
         },
       ],
       // Workflow names are account-wide, so they can't reuse production's.
-      "workflows": [{ "name": "throng-ci-check", "binding": "CHECK", "class_name": "CheckWorkflow" }],
+      "workflows": [{ "name": "throng-ci-scoring", "binding": "SCORING", "class_name": "ScoringWorkflow" }],
       "d1_databases": [
         {
           "binding": "DB",

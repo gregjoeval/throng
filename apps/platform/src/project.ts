@@ -1,15 +1,8 @@
-import type { FailureStage } from "./scripts";
 import { DurableObject } from "cloudflare:workers";
-import { CHECK_ROLES, sandboxName } from "./grants";
+import { sandboxName, SCORING_ROLES } from "./grants";
 import { reposFor } from "./artifacts";
-import type { ScoringParams, ScoringRequest } from "./scoring";
+import type { ScoringOutcome, ScoringRequest, StoredRun } from "./scoring";
 import { parseAttemptRef, runTaskMethod, TaskStore, type Sql, type TaskOutcome } from "./task-store";
-
-export type CheckOutcome =
-  | { kind: "landed"; mainSha: string }
-  | { kind: "failed"; stage: FailureStage | "rebase-test"; output: string }
-  | { kind: "bounced"; files: string[]; diff: string }
-  | { kind: "error"; message: string };
 
 export interface JournalEntry {
   id: number;
@@ -40,9 +33,11 @@ export class ProjectCoordinator extends DurableObject<Env> {
       sql,
       repos: reposFor(env),
       scoring: {
-        workflow: env.CHECK,
+        workflow: env.SCORING,
         teardown: async (instanceId) => {
-          await Promise.all(CHECK_ROLES.map((role) => env.SANDBOX.getByName(sandboxName(instanceId, role)).destroy()));
+          await Promise.all(
+            SCORING_ROLES.map((role) => env.SANDBOX.getByName(sandboxName(instanceId, role)).destroy()),
+          );
         },
       },
     });
@@ -74,19 +69,14 @@ export class ProjectCoordinator extends DurableObject<Env> {
     return request;
   }
 
-  /**
-   * Called by the run's Workflow (the spike's `CheckWorkflow` until the Scoring Workflow replaces
-   * it) when it finishes. Reports from a superseded or cancelled run are discarded.
-   */
-  async checkFinished(
-    params: ScoringParams & { instanceId: string },
-    outcome: CheckOutcome,
-    timings: Record<string, number>,
-  ): Promise<void> {
-    const status = outcome.kind === "error" ? "errored" : "done";
-    this.#tasks.scoring.finish(params.run, status, { instance_id: params.instanceId, outcome, timings });
-    // Landing pushes to the origin's `main`; that internal push notifies the project here.
-    if (outcome.kind === "landed") this.#log("main_advanced", { sha: outcome.mainSha, attempt: params.attempt });
+  /** Spike-only: one scoring run, with its result, for the e2e suite. */
+  spikeRun(id: number): StoredRun | null {
+    return this.#tasks.scoring.getRun(id);
+  }
+
+  /** Called by a run's Scoring Workflow when it ends. Reports from a superseded or cancelled run are discarded. */
+  async scoringFinished(run: number, outcome: ScoringOutcome): Promise<void> {
+    this.#tasks.scoring.finish(run, outcome);
     await this.#drain();
   }
 

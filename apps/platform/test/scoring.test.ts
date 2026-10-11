@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { ServiceError } from "../src/errors.ts";
-import { SCORING_CAP, type ScoringParams, type ScoringRequest, type ScoringWorkflow } from "../src/scoring.ts";
+import type { CheckResult, ScoringResult } from "../src/results.ts";
+import {
+  SCORING_CAP,
+  type ScoringOutcome,
+  type ScoringParams,
+  type ScoringRequest,
+  type ScoringWorkflow,
+} from "../src/scoring.ts";
 import { TaskStore, type AttemptInput, type ProjectContext } from "../src/task-store.ts";
 import type { Actor } from "../src/tokens.ts";
 import { FakeRepos } from "./fake-repos.ts";
@@ -56,7 +63,7 @@ function setup() {
     (sql.db.prepare("SELECT kind, detail FROM journal ORDER BY id").all() as { kind: string; detail: string }[]).map(
       (e): Record<string, unknown> => ({ kind: e.kind, ...(JSON.parse(e.detail) as Record<string, unknown>) }),
     );
-  const runs = (ref: AttemptInput) => store.scoring.listRuns(ref.task, ref.number);
+  const runs = (ref: AttemptInput) => store.scoring.listRuns({ task: ref.task, attempt: ref.number });
 
   /** Commits on an attempt's fork `main`, as a push would, and returns the new head. */
   const commit = (ref: AttemptInput, content: string) =>
@@ -84,6 +91,24 @@ async function code(promise: Promise<unknown>): Promise<string> {
   expect(err).toBeInstanceOf(ServiceError);
   return (err as ServiceError).code;
 }
+
+function result(overrides: Partial<ScoringResult> = {}): ScoringResult {
+  return {
+    base: "b".repeat(40),
+    config: { kind: "none" },
+    gate: "passed",
+    checks: [],
+    builtin: { filesChanged: 1, additions: 2, deletions: 0, durationMs: 5 },
+    preview: { status: "none" },
+    ...overrides,
+  };
+}
+
+const done = (overrides: Partial<ScoringResult> = {}): ScoringOutcome => ({
+  status: "done",
+  result: result(overrides),
+});
+const errored = (): ScoringOutcome => ({ status: "errored", error: "sandbox lost" });
 
 function queued(request: ScoringRequest | null): ScoringRequest & { queued: true } {
   expect(request?.queued).toBe(true);
@@ -167,7 +192,7 @@ describe("scoring triggers", () => {
     expect(await code(store.rescore(PROJECT, bob, ref))).toBe("forbidden");
     for (const who of [ada, cat, owner]) {
       await store.scoring.drain();
-      store.scoring.finish(runs(ref).at(-1)!.id, "done");
+      store.scoring.finish(runs(ref).at(-1)!.id, done());
       const request = queued(await store.rescore(PROJECT, who, ref));
       expect(request.run).toMatchObject({ trigger: "rescore", user_id: who.user.id });
     }
@@ -183,7 +208,7 @@ describe("scoring triggers", () => {
     const ref = { task: made!.task, number: made!.number };
     expect(await code(store.scoreNow(PROJECT, ada, ref))).toBe("invalid_state");
     expect((await store.openAttempt(PROJECT, ada, ref)).state).toBe("open");
-    expect(store.scoring.listRuns(ref.task, ref.number)).toEqual([]);
+    expect(store.scoring.listRuns({ task: ref.task, attempt: ref.number })).toEqual([]);
   });
 });
 
@@ -198,7 +223,7 @@ describe("the scoring queue", () => {
     queued(pushed(ref!, a));
     expect(pushed(ref!, a)).toMatchObject({ queued: false, reason: "already queued" });
     await store.scoring.drain();
-    store.scoring.finish(runs(ref!).at(-1)!.id, "done");
+    store.scoring.finish(runs(ref!).at(-1)!.id, done());
 
     queued(pushed(ref!, b));
     // Back to a, which already has a finished run: b's run is superseded and a isn't scored again.
@@ -250,7 +275,7 @@ describe("the scoring queue", () => {
     expect(journal().find((e) => e.kind === "scoring_cancelled")).toMatchObject({ run: 1, superseded_by: head });
 
     // A late report from the cancelled run is discarded, and a second drain stops nothing more.
-    expect(store.scoring.finish(running!.id, "done")).toBe(false);
+    expect(store.scoring.finish(running!.id, done())).toBe(false);
     expect(store.scoring.getRun(running!.id)?.status).toBe("cancelled");
     await store.scoring.drain();
     expect(workflow.terminated).toHaveLength(1);
@@ -264,12 +289,16 @@ describe("the scoring queue", () => {
     expect(workflow.created.map((c) => c.params.attempt)).toEqual(["t1a1", "t1a2", "t1a3"]);
     expect(refs.map((r) => runs(r)[0]!.status)).toEqual(["running", "running", "running", "queued", "queued"]);
 
-    expect(store.scoring.finish(runs(refs[1]!)[0]!.id, "done", { gate: "passed" })).toBe(true);
+    expect(store.scoring.finish(runs(refs[1]!)[0]!.id, done())).toBe(true);
     await store.scoring.drain();
     expect(workflow.created.map((c) => c.params.attempt)).toEqual(["t1a1", "t1a2", "t1a3", "t1a4"]);
-    expect(journal().find((e) => e.kind === "scored")).toMatchObject({ ref: "t1a2", status: "done", gate: "passed" });
+    expect(journal().find((e) => e.kind === "scored")).toMatchObject({
+      ref: "t1a2",
+      gate: "passed",
+      summary: "no checks configured",
+    });
 
-    store.scoring.finish(runs(refs[0]!)[0]!.id, "errored");
+    store.scoring.finish(runs(refs[0]!)[0]!.id, errored());
     await store.scoring.drain();
     expect(refs.map((r) => runs(r)[0]!.status)).toEqual(["errored", "done", "running", "running", "running"]);
   });
@@ -279,7 +308,7 @@ describe("the scoring queue", () => {
     const [ref] = await drafts();
     await store.openAttempt(PROJECT, ada, ref!);
     await store.scoring.drain();
-    store.scoring.finish(runs(ref!)[0]!.id, "done");
+    store.scoring.finish(runs(ref!)[0]!.id, done());
 
     store.draftAttempt(PROJECT, ada, ref!);
     await store.openAttempt(PROJECT, ada, ref!);
@@ -297,7 +326,7 @@ describe("the scoring queue", () => {
     const [ref] = await drafts();
     await store.scoreNow(PROJECT, ada, ref!);
     await store.scoring.drain();
-    store.scoring.finish(runs(ref!)[0]!.id, "errored");
+    store.scoring.finish(runs(ref!)[0]!.id, errored());
     expect(await store.scoreNow(PROJECT, ada, ref!)).toMatchObject({ queued: true });
   });
 
@@ -362,6 +391,109 @@ describe("the scoring queue", () => {
     const [a] = await store.createAttempts(PROJECT, ada, { task: task.number });
     await store.openAttempt(PROJECT, ada, { task: a!.task, number: a!.number });
     await store.scoring.drain();
-    expect(store.scoring.listRuns(a!.task, a!.number)).toMatchObject([{ status: "queued" }]);
+    expect(store.scoring.listRuns({ task: a!.task, attempt: a!.number })).toMatchObject([{ status: "queued" }]);
+  });
+});
+
+describe("results", () => {
+  it("stores a done run's result and journals scored with its gate and a summary", async () => {
+    const { store, runs, drafts, journal } = setup();
+    const [ref] = await drafts();
+    await store.openAttempt(PROJECT, ada, ref!);
+    await store.scoring.drain();
+    const checks: CheckResult[] = [
+      { name: "test", required: true, outcome: "passed", durationMs: 9, metrics: { coverage: 80 }, notes: [] },
+      { name: "lint", required: false, outcome: "failed", durationMs: 1, metrics: {}, notes: [] },
+    ];
+    expect(store.scoring.finish(runs(ref!)[0]!.id, done({ config: { kind: "valid" }, checks }))).toBe(true);
+
+    const [run] = runs(ref!);
+    expect(run).toMatchObject({ status: "done", superseded: false, error: null });
+    expect(run!.result).toEqual(result({ config: { kind: "valid" }, checks }));
+    expect(store.getAttempt(PROJECT, ada, ref!).scoring).toEqual({ status: "done", sha: run!.sha });
+    expect(journal().find((e) => e.kind === "scored")).toMatchObject({ gate: "passed", summary: "1 passed, 1 failed" });
+  });
+
+  it("keeps an errored run's error, with no result", async () => {
+    const { store, runs, drafts, journal } = setup();
+    const [ref] = await drafts();
+    await store.scoreNow(PROJECT, ada, ref!);
+    await store.scoring.drain();
+    store.scoring.finish(runs(ref!)[0]!.id, errored());
+    expect(runs(ref!)[0]).toMatchObject({ status: "errored", error: "sandbox lost", result: null });
+    expect(store.getAttempt(PROJECT, ada, ref!).scoring.status).toBe("errored");
+    expect(journal().find((e) => e.kind === "scoring_errored")).toMatchObject({ error: "sandbox lost" });
+  });
+
+  it("marks results for older heads superseded, and keeps them for history", async () => {
+    const { store, runs, commit, pushed, drafts } = setup();
+    const [ref] = await drafts();
+    await store.openAttempt(PROJECT, ada, ref!);
+    await store.scoring.drain();
+    store.scoring.finish(runs(ref!)[0]!.id, done());
+    const newer = commit(ref!, "newer\n");
+    pushed(ref!, newer);
+
+    expect(runs(ref!).map((r) => [r.status, r.superseded])).toEqual([
+      ["done", true],
+      ["queued", false],
+    ]);
+    expect(runs(ref!)[0]!.result).not.toBeNull();
+    expect(store.getAttempt(PROJECT, ada, ref!).scoring).toEqual({ status: "queued", sha: newer });
+  });
+
+  it("supersedes a draft's result when it's pushed, though the push isn't scored", async () => {
+    const { store, runs, commit, pushed, drafts } = setup();
+    const [ref] = await drafts();
+    await store.scoreNow(PROJECT, ada, ref!);
+    await store.scoring.drain();
+    store.scoring.finish(runs(ref!)[0]!.id, done());
+    const newer = commit(ref!, "draft work\n");
+    expect(pushed(ref!, newer)).toBeNull();
+    expect(runs(ref!)).toMatchObject([{ status: "done", superseded: true }]);
+    expect(store.getAttempt(PROJECT, ada, ref!).scoring).toEqual({ status: "none", sha: newer });
+  });
+
+  it("makes an older head current again when a force-push returns to it", async () => {
+    const { store, runs, commit, pushed, drafts, base } = setup();
+    const [ref] = await drafts();
+    await store.openAttempt(PROJECT, ada, ref!);
+    await store.scoring.drain();
+    store.scoring.finish(runs(ref!)[0]!.id, done());
+    pushed(ref!, commit(ref!, "b\n"));
+    pushed(ref!, base.hash);
+    expect(runs(ref!).map((r) => [r.sha, r.status, r.superseded])).toEqual([
+      [base.hash, "done", false],
+      [expect.any(String), "cancelled", true],
+    ]);
+    expect(store.getAttempt(PROJECT, ada, ref!).scoring).toEqual({ status: "done", sha: base.hash });
+  });
+
+  it("exposes scoring on the attempt: none, queued, running, then done for its head", async () => {
+    const { store, runs, drafts, base } = setup();
+    const [ref] = await drafts();
+    const status = () => store.getAttempt(PROJECT, ada, ref!).scoring;
+    expect(status()).toEqual({ status: "none", sha: null });
+    await store.openAttempt(PROJECT, ada, ref!);
+    expect(status()).toEqual({ status: "queued", sha: base.hash });
+    await store.scoring.drain();
+    expect(status()).toEqual({ status: "running", sha: base.hash });
+    store.scoring.finish(runs(ref!)[0]!.id, done());
+    expect(status()).toEqual({ status: "done", sha: base.hash });
+    store.draftAttempt(PROJECT, ada, ref!);
+    expect(status()).toEqual({ status: "done", sha: base.hash });
+  });
+
+  it("adds the result columns to a scoring_runs table from before results", () => {
+    const sql = testSql();
+    sql.exec(`CREATE TABLE scoring_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, task INTEGER NOT NULL, attempt INTEGER NOT NULL,
+      sha TEXT NOT NULL, trigger TEXT NOT NULL, user_id TEXT, agent TEXT, status TEXT NOT NULL,
+      instance_id TEXT NOT NULL, created_at INTEGER NOT NULL, started_at INTEGER, finished_at INTEGER,
+      torn_down INTEGER NOT NULL DEFAULT 0
+    )`);
+    expect(new TaskStore({ sql, repos: new FakeRepos() }).scoring).toBeDefined();
+    const columns = sql.exec<{ name: string }>("PRAGMA table_info(scoring_runs)").map((c) => c.name);
+    expect(columns.slice(-3)).toEqual(["result", "error", "superseded"]);
   });
 });

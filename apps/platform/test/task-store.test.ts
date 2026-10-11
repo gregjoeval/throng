@@ -252,6 +252,7 @@ describe("attempts", () => {
         closed_at: null,
         merged_sha: null,
         archived_sha: null,
+        scoring: { status: "none", sha: null },
       })),
     );
     expect(await repos.get("abc123-t1a1")).toMatchObject({ parent: "abc123-main" });

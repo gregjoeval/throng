@@ -1,14 +1,16 @@
-// Bash run inside a check's Sandbox. Each script is idempotent, so a retried Workflow step can rerun it
+// Bash run inside a run's Sandbox. Each script is idempotent, so a retried Workflow step can rerun it
 // on a fresh container. The last stdout line is the result: `THRONG_RESULT <json>`.
+
+import { MAX_METRICS_BYTES, SETUP_TIMEOUT_MS, type ScorePlan } from "./results.ts";
 
 export const RESULT_PREFIX = "THRONG_RESULT ";
 
 /** Where a script that runs repo code failed: installing dependencies, or running/building the repo. */
 export type FailureStage = "install" | "test";
 
-export type TestResult = { ok: true } | { ok: false; stage: FailureStage; output: string };
-
-export type PreviewResult = { ok: true; url: string } | { ok: false; stage: "install" | "deploy"; output: string };
+export type PreviewScriptResult =
+  | { ok: true; url: string }
+  | { ok: false; stage: "install" | "deploy"; output: string };
 
 export type RetestResult =
   | { kind: "tested"; base: string; tree: string }
@@ -37,15 +39,76 @@ function install(fields: string): string {
 fi`;
 }
 
-/** Check out the attempt's commit, install its dependencies, and run its tests. */
-export function testScript(forkRemote: string, sha: string): string {
+/**
+ * Scores the attempt's head `sha`: fetches it from the fork and `main` from the origin, records the
+ * merge base and the diff size against it, runs each `setup` command and then every check in order,
+ * each under `timeout` with `$THRONG_METRICS` pointing at an empty file. A failed setup command skips
+ * every check; a failed check doesn't stop the next. Each step's output goes to `../logs/`. The
+ * result is a `RawScore`; `buildResult` turns it into the run's result.
+ */
+export function scoreScript(forkRemote: string, originRemote: string, sha: string, plan: ScorePlan): string {
+  const setup = plan.setup
+    .map(
+      (
+        command,
+        i,
+      ) => `if [ -z "$setup_failed" ] && ! timeout -k 10s ${seconds(SETUP_TIMEOUT_MS)} bash -c ${quote(command)} < /dev/null > ../logs/setup-${i + 1}.log 2>&1; then
+  setup_failed=${i + 1}
+fi`,
+    )
+    .join("\n");
+  const checks = plan.checks
+    .map(
+      (check, i) => `if [ -z "$setup_failed" ]; then
+  : > "$out/${i}.metrics"
+  t0=$(now)
+  THRONG_METRICS="$out/${i}.metrics" timeout -k 10s ${seconds(check.timeoutMs)} bash -c ${quote(check.command)} < /dev/null > ../logs/${check.name}.log 2>&1
+  code=$?
+  printf '%s %s\\n' "$code" "$(( $(now) - t0 ))" > "$out/${i}.status"
+fi`,
+    )
+    .join("\n");
   return `${PRELUDE}
-rm -rf attempt && git init -q attempt && cd attempt
+rm -rf score logs out && mkdir logs out && out="$PWD/out" && git init -q score && cd score
 git fetch -q ${quote(forkRemote)} '+refs/heads/*:refs/remotes/fork/*' || exit 10
+git fetch -q ${quote(originRemote)} '+refs/heads/main:refs/remotes/origin/main' || exit 12
 git checkout -q --detach ${quote(sha)} || exit 11
-${install('"ok":false')}
-if npm test > ../test.log 2>&1; then result '{"ok":true}'; fi
-result "{\\"ok\\":false,\\"stage\\":\\"test\\",\\"output\\":$(json < ../test.log)}"
+now() { date +%s%3N; }
+t0=$(now)
+base=$(git merge-base HEAD refs/remotes/origin/main 2>/dev/null) || base=""
+shortstat=$(git diff --shortstat "\${base:-$(git hash-object -t tree /dev/null)}" HEAD) || exit 15
+builtin_ms=$(( $(now) - t0 ))
+setup_failed=""
+${setup}
+${checks}
+node - "$out" ${plan.checks.length} ${MAX_METRICS_BYTES} "$base" "$shortstat" "$builtin_ms" "$setup_failed" <<'NODE' || exit 16
+const fs = require("fs");
+const [out, count, max, base, shortstat, builtinMs, setupFailed] = process.argv.slice(2);
+const read = (path) => {
+  const fd = fs.openSync(path, "r");
+  const buffer = Buffer.alloc(Number(max));
+  const length = fs.readSync(fd, buffer, 0, buffer.length, 0);
+  fs.closeSync(fd);
+  return buffer.subarray(0, length).toString("utf8");
+};
+const checks = [];
+for (let i = 0; i < Number(count); i++) {
+  if (!fs.existsSync(out + "/" + i + ".status")) {
+    checks.push({ exit: null, durationMs: 0, metrics: null });
+    continue;
+  }
+  const [exit, durationMs] = fs.readFileSync(out + "/" + i + ".status", "utf8").trim().split(" ").map(Number);
+  checks.push({ exit, durationMs, metrics: fs.existsSync(out + "/" + i + ".metrics") ? read(out + "/" + i + ".metrics") : null });
+}
+const result = {
+  base: base || null,
+  shortstat,
+  builtinMs: Number(builtinMs),
+  setupFailed: setupFailed === "" ? null : Number(setupFailed),
+  checks,
+};
+process.stdout.write("${RESULT_PREFIX}" + JSON.stringify(result) + "\\n");
+NODE
 `;
 }
 
@@ -75,16 +138,16 @@ result "{\\"ok\\":false,\\"stage\\":\\"deploy\\",\\"output\\":$(json < ../previe
 }
 
 /**
- * Untrusted: rebase the attempt onto the canonical repo's current main and re-run the tests. Reports
+ * Untrusted: rebase the attempt onto the origin's current main and re-run the tests. Reports
  * the main it rebased onto and the tree it tested, for the trusted land step to check against.
  */
-export function retestScript(canonicalRemote: string, forkRemote: string, sha: string): string {
+export function retestScript(originRemote: string, forkRemote: string, sha: string): string {
   return `${PRELUDE}
 rm -rf retest && git init -q retest && cd retest
 git fetch -q ${quote(forkRemote)} '+refs/heads/*:refs/remotes/fork/*' || exit 10
-git fetch -q ${quote(canonicalRemote)} '+refs/heads/main:refs/remotes/canonical/main' || exit 12
+git fetch -q ${quote(originRemote)} '+refs/heads/main:refs/remotes/origin/main' || exit 12
 git checkout -q -B attempt ${quote(sha)} || exit 11
-base=$(git rev-parse canonical/main)
+base=$(git rev-parse origin/main)
 if ! git rebase -q "$base" > ../rebase.log 2>&1; then
   files=$(git diff --name-only --diff-filter=U | node -e 'process.stdout.write(JSON.stringify(require("fs").readFileSync(0, "utf8").split("\\n").filter(Boolean)))')
   diff=$(git diff | json)
@@ -100,12 +163,12 @@ result "{\\"kind\\":\\"tested\\",\\"base\\":\\"$base\\",\\"tree\\":\\"$(git rev-
 }
 
 /**
- * Trusted: holds canonical write, so it runs no repository code (no npm or node, no hooks, no config
+ * Trusted: holds origin write, so it runs no repository code (no npm or node, no hooks, no config
  * from the repo). It redoes the same rebase onto the pinned main and pushes only if the result is the
  * exact tree the retest step tested, so an untrusted step can't hand over other content.
  */
 export function landScript(
-  canonicalRemote: string,
+  originRemote: string,
   forkRemote: string,
   sha: string,
   tested: { base: string; tree: string },
@@ -117,17 +180,22 @@ export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
 rm -rf land && git init -q land && cd land
 git config core.hooksPath /dev/null
 git fetch -q ${quote(forkRemote)} '+refs/heads/*:refs/remotes/fork/*' || exit 10
-git fetch -q ${quote(canonicalRemote)} '+refs/heads/main:refs/remotes/canonical/main' || exit 12
-[ "$(git rev-parse canonical/main)" = ${quote(tested.base)} ] || result '{"kind":"moved"}'
+git fetch -q ${quote(originRemote)} '+refs/heads/main:refs/remotes/origin/main' || exit 12
+[ "$(git rev-parse origin/main)" = ${quote(tested.base)} ] || result '{"kind":"moved"}'
 git checkout -q -B attempt ${quote(sha)} || exit 11
 git rebase -q ${quote(tested.base)} > /dev/null 2>&1 || exit 14
 tree=$(git rev-parse 'HEAD^{tree}')
 [ "$tree" = ${quote(tested.tree)} ] || result "{\\"kind\\":\\"mismatch\\",\\"tree\\":\\"$tree\\"}"
-if git push -q ${quote(canonicalRemote)} HEAD:refs/heads/main; then
+if git push -q ${quote(originRemote)} HEAD:refs/heads/main; then
   result "{\\"kind\\":\\"landed\\",\\"mainSha\\":\\"$(git rev-parse HEAD)\\"}"
 fi
 result '{"kind":"moved"}'
 `;
+}
+
+/** A duration for `timeout(1)`, in whole seconds. */
+function seconds(ms: number): string {
+  return `${Math.ceil(ms / 1000)}s`;
 }
 
 /** Pulls the result line out of a script's stdout. */

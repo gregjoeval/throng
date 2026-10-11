@@ -6,8 +6,8 @@ import { gitRoutes, type GitProxyOptions } from "./git-proxy";
 import { forkRepo, originRepo } from "./repos";
 
 export { ProjectCoordinator } from "./project";
-export { CheckSandbox, OutboundAuth } from "./sandbox";
-export { CheckWorkflow } from "./workflows";
+export { RunSandbox, OutboundAuth } from "./sandbox";
+export { ScoringWorkflow } from "./workflows";
 
 const FORK_READY_TIMEOUT_MS = 60_000;
 const PUSH_TOKEN_TTL_SECONDS = 60 * 60;
@@ -87,6 +87,12 @@ app.post("/spike/projects/:project/attempts/:attempt/score", async (c) => {
   if (sha === undefined) return c.json({ error: "sha is required" }, 400);
   const project = c.req.param("project");
   return c.json(await c.env.PROJECT.getByName(project).spikeScore(project, c.req.param("attempt"), sha));
+});
+
+/** One scoring run of the project, with its result once it is done. */
+app.get("/spike/projects/:project/runs/:run", async (c) => {
+  const run = await c.env.PROJECT.getByName(c.req.param("project")).spikeRun(Number(c.req.param("run")));
+  return run === null ? c.json({ error: "no such run" }, 404) : c.json(run);
 });
 
 app.get("/spike/projects/:project/journal", async (c) => {

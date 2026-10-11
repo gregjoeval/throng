@@ -14,6 +14,7 @@ import { errorBody, errorResponse, ServiceError } from "./errors.ts";
 import { FORWARDED_EMAIL_HEADER } from "./forwarded.ts";
 import { MAX_PROJECT_HANDLE, PROJECT_HANDLE, projectService } from "./projects.ts";
 import type { Repos } from "./repos.ts";
+import { RUN_STATUSES, SCORING_TRIGGERS } from "./scoring.ts";
 import { ATTEMPT_STATES, TASK_STATES } from "./task-store.ts";
 import { taskService, type TaskBackend } from "./tasks.ts";
 import { DEFAULT_TOKEN_TTL_SECONDS, listTokens, MAX_TOKEN_TTL_SECONDS, mintToken, revokeToken } from "./tokens.ts";
@@ -128,6 +129,30 @@ const AttemptSchema = z
     archived_sha: z.string().nullable(),
   })
   .openapi("Attempt");
+
+const ScoringSchema = z
+  .object({
+    queued: z.boolean().openapi({ description: "Whether this request queued a new run." }),
+    reason: z.string().nullable().openapi({
+      description: "Why nothing was queued: the head is already queued, running or scored.",
+      example: "already scored",
+    }),
+    run: z
+      .object({
+        id: z.number().int(),
+        ref: z.string().openapi({ description: "The attempt it scores.", example: "t42a3" }),
+        sha: z.string().openapi({ description: "The head it scores." }),
+        trigger: z.enum(SCORING_TRIGGERS),
+        status: z.enum(RUN_STATUSES),
+        requested_by: UserRefSchema.nullable(),
+        agent: z.string().nullable(),
+        created_at: z.string(),
+        started_at: z.string().nullable(),
+        finished_at: z.string().nullable(),
+      })
+      .openapi("ScoringRun", { description: "The run that was queued, or the one already covering the head." }),
+  })
+  .openapi("ScoringRequest");
 
 const AttemptLimitSchema = z
   .number()
@@ -312,6 +337,37 @@ function attemptTransition(
       403: errorResponse(forbidden),
       404: errorResponse("No such project or attempt."),
       409: errorResponse(conflicts.join(" ")),
+    },
+  });
+}
+
+/** A scoring request route: `POST …/attempts/{a}/<verb>`. */
+function scoringRoute(
+  bearer: Bearer,
+  verb: string,
+  operationId: string,
+  summary: string,
+  description: string,
+  forbidden: string,
+  conflict: string,
+) {
+  return createRoute({
+    method: "post",
+    path: `/projects/{owner}/{project}/attempts/{a}/${verb}`,
+    operationId,
+    tags: ["Scoring"],
+    summary,
+    description,
+    security: bearerOnly,
+    middleware: [bearer] as const,
+    request: { params: AttemptPathSchema },
+    responses: {
+      200: { description: "The run now covering the attempt's head.", ...json(ScoringSchema) },
+      400: errorResponse("The attempt reference is invalid."),
+      401: unauthorizedBearer,
+      403: errorResponse(forbidden),
+      404: errorResponse("No such project or attempt."),
+      409: errorResponse(`\`invalid_state\`: ${conflict}, or its fork has no commits.`),
     },
   });
 }
@@ -798,6 +854,32 @@ export function apiRoutes(options: ApiOptions = {}) {
         "`invalid_state`: the attempt isn't obsolete.",
       ]),
       async (c) => c.json(await tasks(c.env).restoreAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
+    )
+    .openapi(
+      scoringRoute(
+        bearer,
+        "score",
+        "scoreAttempt",
+        "Score a draft attempt's head now",
+        "Drafts aren't scored on push; this queues a run for the head anyway. A head already queued, running " +
+          "or scored isn't queued again.",
+        AUTHOR_ONLY,
+        "the attempt isn't a draft",
+      ),
+      async (c) => c.json(await tasks(c.env).scoreNow(c.var.actor, attemptPath(c.req.valid("param"))), 200),
+    )
+    .openapi(
+      scoringRoute(
+        bearer,
+        "rescore",
+        "rescoreAttempt",
+        "Score an open attempt's head again",
+        "Queues a new run for the head even if it already has a finished one. A head already queued or running " +
+          "isn't queued again.",
+        "Only the attempt's author (or their agents), the task's creator or the project owner may.",
+        "the attempt isn't open",
+      ),
+      async (c) => c.json(await tasks(c.env).rescore(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
       createRoute({

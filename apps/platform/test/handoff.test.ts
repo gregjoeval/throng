@@ -46,7 +46,7 @@ async function attemptIn(store: TaskStore, state: AttemptState) {
   const [a] = await store.createAttempts(PROJECT, adaUser, { task: task.number });
   if (a === undefined) throw new Error("no attempt");
   const ref = { task: a.task, number: a.number };
-  if (state === "open" || state === "merged") store.openAttempt(PROJECT, adaUser, ref);
+  if (state === "open" || state === "merged") await store.openAttempt(PROJECT, adaUser, ref);
   if (state === "merged") store.markMerged(PROJECT, owner, { ...ref, sha: "abc" });
   if (state === "closed") store.closeAttempt(PROJECT, adaUser, ref);
   if (state === "obsolete") store.obsoleteAttempt(PROJECT, owner, ref);

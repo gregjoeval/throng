@@ -175,6 +175,45 @@ describe("attempt routes", () => {
     expect((await call("GET", `${base}/tasks/t1/attempts?state=obsolete`, ada)).body["attempts"]).toHaveLength(1);
     expect((await call("POST", `${a}/restore`, greg)).body["state"]).toBe("closed");
   });
+
+  it("scores a draft now for its author, and rescores an open attempt for the author, creator or owner", async () => {
+    const { call, ada, adaClaude, bob, greg, base, repos, project } = await setup();
+    const head = repos.commit(`${project["id"]}-main`, { files: { "README.md": "hi\n" } }).hash;
+    await call("POST", `${base}/tasks`, bob, { title: "a" });
+    await call("POST", `${base}/tasks/t1/attempts`, ada);
+    const a = `${base}/attempts/t1a1`;
+
+    expect((await call("POST", `${a}/score`, bob)).status).toBe(403);
+    expect((await call("POST", `${a}/rescore`, ada)).body["error"]["code"]).toBe("invalid_state");
+    const scored = await call("POST", `${a}/score`, adaClaude);
+    expect(scored.status).toBe(200);
+    expect(scored.body).toEqual({
+      queued: true,
+      reason: null,
+      run: {
+        id: 1,
+        ref: "t1a1",
+        sha: head,
+        trigger: "score_now",
+        status: "queued",
+        requested_by: { id: expect.any(String), handle: "ada" },
+        agent: "claude",
+        created_at: "2026-10-10T12:00:00.000Z",
+        started_at: null,
+        finished_at: null,
+      },
+    });
+    expect((await call("POST", `${a}/score`, ada)).body).toMatchObject({ queued: false, reason: "already queued" });
+
+    await call("POST", `${a}/open`, ada);
+    expect((await call("POST", `${a}/score`, ada)).body["error"]["code"]).toBe("invalid_state");
+    expect((await call("POST", `${a}/rescore`, greg)).body).toMatchObject({ queued: false, run: { id: 1 } });
+    const other = await call("POST", `${base}/tasks`, greg, { title: "b" });
+    expect(other.status).toBe(201);
+    await call("POST", `${base}/tasks/t2/attempts`, ada);
+    await call("POST", `${base}/attempts/t2a1/open`, ada);
+    expect((await call("POST", `${base}/attempts/t2a1/rescore`, bob)).status).toBe(403);
+  });
 });
 
 describe("OpenAPI document", () => {
@@ -203,9 +242,12 @@ describe("OpenAPI document", () => {
         "obsoleteAttempt",
         "restoreAttempt",
         "handOffAttempt",
+        "scoreAttempt",
+        "rescoreAttempt",
       ]),
     );
     expect(body["components"]["schemas"]["Task"]).toBeDefined();
     expect(body["components"]["schemas"]["Attempt"]).toBeDefined();
+    expect(body["components"]["schemas"]["ScoringRequest"]).toBeDefined();
   });
 });

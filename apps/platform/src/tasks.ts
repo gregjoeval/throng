@@ -4,6 +4,7 @@
 
 import { ServiceError } from "./errors.ts";
 import { resolveProject } from "./projects.ts";
+import type { ScoringRequest, StoredRun } from "./scoring.ts";
 import {
   parseAttemptRef,
   parseTaskRef,
@@ -46,6 +47,29 @@ export interface Task extends Omit<StoredTask, "creator" | "closed_by"> {
 export interface Attempt extends Omit<StoredAttempt, "author"> {
   ref: string;
   author: UserRef;
+}
+
+/** A scoring run as the API shows it. */
+export interface ScoringRun {
+  id: number;
+  /** The attempt it scores, `t42a3`. */
+  ref: string;
+  sha: string;
+  trigger: StoredRun["trigger"];
+  status: StoredRun["status"];
+  /** Who asked for it, or null when no user did. */
+  requested_by: UserRef | null;
+  agent: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+/** What asking for scoring did: queued a run, or why not, with the run that covers the head. */
+export interface ScoringAnswer {
+  queued: boolean;
+  reason: string | null;
+  run: ScoringRun;
 }
 
 interface ProjectPath {
@@ -102,6 +126,14 @@ export function taskService({ db, backend }: TaskServiceDeps) {
     ) =>
     async (actor: Actor, input: AttemptPath): Promise<Attempt> =>
       one(await invoke(method, await project(input), actor, attemptRefOf(input.attempt)), attempts);
+
+  /** A scoring request: resolves the project and attempt reference, then runs `method`. */
+  const scoringRequest =
+    (method: "scoreNow" | "rescore") =>
+    async (actor: Actor, input: AttemptPath): Promise<ScoringAnswer> => {
+      const request = await invoke(method, await project(input), actor, attemptRefOf(input.attempt));
+      return publicScoring(request, await handles(db, [request.run.user_id]));
+    };
 
   return {
     /** Creates an open task; the caller's human is its creator. Any signed-in user may. */
@@ -173,6 +205,11 @@ export function taskService({ db, backend }: TaskServiceDeps) {
     obsoleteAttempt: attemptMove("obsoleteAttempt"),
     restoreAttempt: attemptMove("restoreAttempt"),
 
+    /** Scores a draft attempt's head now. Only its author (or their agents) may. */
+    scoreNow: scoringRequest("scoreNow"),
+    /** Scores an open attempt's head again. Its author, the task's creator or the project owner may. */
+    rescore: scoringRequest("rescore"),
+
     /**
      * Hands an active attempt to the user with handle `to`, who becomes its author. Only its
      * author (or their agents) may. An unknown handle is `not_found`; handing it to its own author
@@ -235,4 +272,28 @@ function publicTask(t: StoredTask, users: Map<string, string>): Task {
 
 function publicAttempt(a: StoredAttempt, users: Map<string, string>): Attempt {
   return { ...a, ref: a.fork, author: userRef(a.author, users) };
+}
+
+function publicScoring(request: ScoringRequest, users: Map<string, string>): ScoringAnswer {
+  const { run } = request;
+  return {
+    queued: request.queued,
+    reason: request.queued ? null : request.reason,
+    run: {
+      id: run.id,
+      ref: `t${run.task}a${run.attempt}`,
+      sha: run.sha,
+      trigger: run.trigger,
+      status: run.status,
+      requested_by: run.user_id === null ? null : userRef(run.user_id, users),
+      agent: run.agent,
+      created_at: new Date(run.created_at).toISOString(),
+      started_at: iso(run.started_at),
+      finished_at: iso(run.finished_at),
+    },
+  };
+}
+
+function iso(ms: number | null): string | null {
+  return ms === null ? null : new Date(ms).toISOString();
 }

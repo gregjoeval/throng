@@ -151,7 +151,9 @@ describe("push-to-create", () => {
       ["created", 1],
       ["opened", 1],
       ["pushed", 1],
+      ["scoring_queued", 1],
     ]);
+    expect(pushed.stderr).toMatch(new RegExp(`remote: scoring queued for t2a1 \\(${sha}\\)`));
     expect(JSON.parse(events[3]!.detail)).toEqual({
       ref: "t2a1",
       git_ref: "refs/heads/main",
@@ -321,7 +323,7 @@ describe("joining a task with a t<n>/ branch", () => {
       journal()
         .filter((e) => e.task === 1 && e.attempt === 2)
         .map((e) => e.kind),
-    ).toEqual(["created", "opened", "pushed", "pushed"]);
+    ).toEqual(["created", "opened", "pushed", "scoring_queued", "pushed", "scoring_cancelled", "scoring_queued"]);
   });
 
   it("rejects a join for a missing, closed or obsolete task, one at its limit, or one with an open merge request", async () => {

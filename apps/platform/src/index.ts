@@ -7,7 +7,7 @@ import { forkRepo, originRepo } from "./repos";
 
 export { ProjectCoordinator } from "./project";
 export { CheckSandbox, OutboundAuth } from "./sandbox";
-export { CheckWorkflow, IngestWorkflow } from "./workflows";
+export { CheckWorkflow } from "./workflows";
 
 const FORK_READY_TIMEOUT_MS = 60_000;
 const PUSH_TOKEN_TTL_SECONDS = 60 * 60;
@@ -76,6 +76,17 @@ app.post("/spike/projects/:project/attempts/:attempt", async (c) => {
       await new Promise((r) => setTimeout(r, 250));
     }
   }
+});
+
+/**
+ * Queues scoring of `sha`, which the caller pushed straight to an attempt's fork (`t1a1`). Pushes
+ * through the git proxy queue scoring themselves; the spike's pushes bypass it.
+ */
+app.post("/spike/projects/:project/attempts/:attempt/score", async (c) => {
+  const sha = c.req.query("sha");
+  if (sha === undefined) return c.json({ error: "sha is required" }, 400);
+  const project = c.req.param("project");
+  return c.json(await c.env.PROJECT.getByName(project).spikeScore(project, c.req.param("attempt"), sha));
 });
 
 app.get("/spike/projects/:project/journal", async (c) => {

@@ -41,15 +41,17 @@ import {
   type StoredTask,
   type TaskMethod,
 } from "./task-store.ts";
+import type { ScoringRequest } from "./scoring.ts";
 import type { TaskBackend } from "./tasks.ts";
 import type { AccessBindings } from "./access.ts";
+
+/** What `recordPush` answers. */
+type PushRecord = { scoring: ScoringRequest | null };
 
 /** How long a minted Artifacts token lives. */
 export const UPSTREAM_TOKEN_TTL_SECONDS = 60 * 60;
 /** A cached token is replaced once it has less than this left, so no request carries a dying one. */
 export const UPSTREAM_TOKEN_MARGIN_MS = 5 * 60 * 1000;
-/** Most bytes of a receive-pack response kept to read its report; the rest still reaches the client. */
-const MAX_REPORT_BYTES = 1024 * 1024;
 
 const REMOTE_PATH = /^\/git\/([^/]+)\/([^/]+?)(?:\/([^/]+?))?\.git\/(info\/refs|git-upload-pack|git-receive-pack)$/;
 const SERVICES = ["git-upload-pack", "git-receive-pack"] as const;
@@ -143,20 +145,17 @@ export function gitRoutes(options: GitProxyOptions) {
       const value = upstream.headers.get(name);
       if (value !== null) headers.set(name, value);
     }
-    let body = upstream.body;
-    if (upstream.ok && body !== null && pushed !== null && target.attempt !== null && pushed.updates.length > 0) {
-      const [client, report] = body.tee();
-      body = client;
-      const attempt = target.attempt;
-      const update = pushed;
-      background(
-        c,
-        recordPush(report, update, (updates) =>
-          backend.call("recordPush", [target.project, c.var.actor, { ...attempt, updates }]),
-        ),
-      );
+    if (
+      upstream.ok &&
+      upstream.body !== null &&
+      pushed !== null &&
+      target.attempt !== null &&
+      pushed.updates.length > 0
+    ) {
+      const reply = await recordForkPush(c, target, target.attempt, pushed, backend, upstream);
+      return new Response(reply, { status: upstream.status, headers });
     }
-    return new Response(body, { status: upstream.status, headers });
+    return new Response(upstream.body, { status: upstream.status, headers });
   });
 
   return app;
@@ -318,8 +317,8 @@ async function pushToCreate(
       ]);
       if (done.ok) {
         pending = false;
-        const made = done.value as { task: StoredTask; attempt: StoredAttempt };
-        messages = createdLines(c, made.task, made.attempt, branch, route.new_task);
+        const made = done.value as { task: StoredTask; attempt: StoredAttempt; scoring: ScoringRequest };
+        messages = [...createdLines(c, made.task, made.attempt, branch, route.new_task), ...scoringLines(made)];
       } else {
         await abandon();
         report = refuse(report, done.message);
@@ -330,6 +329,7 @@ async function pushToCreate(
       messages = [
         `Updated ${name} on ${taskRef(attempt.task)} from branch ${branch}.`,
         ...links(c, attempt.task, name),
+        ...(recorded.ok ? scoringLines(recorded.value as PushRecord) : []),
       ];
     }
 
@@ -368,6 +368,13 @@ async function forkReady(repos: Repos, name: string): Promise<void> {
 function refuse(report: PushReport, reason: string): PushReport {
   const line = `ng ${MAIN} ${reason.replace(/\s+/g, " ").trim()}`;
   return { ...report, lines: report.lines.map((l) => (l === `ok ${MAIN}` ? line : l)) };
+}
+
+/** The `remote:` line for a push that queued scoring of an attempt's head, if it did. */
+function scoringLines({ scoring }: { scoring: ScoringRequest | null }): string[] {
+  if (scoring === null || !scoring.queued) return [];
+  const { run } = scoring;
+  return [`scoring queued for ${attemptRef(run.task, run.attempt)} (${run.sha})`];
 }
 
 /** The `remote:` lines for a push that made an attempt. */
@@ -522,34 +529,45 @@ function contentLength(c: GitContext): number | null {
   return Number.isSafeInteger(length) && length >= 0 ? length : null;
 }
 
-/** Journals the refs Artifacts reports it updated, once the response has been read. */
-async function recordPush(
-  report: ReadableStream<Uint8Array>,
+/**
+ * Records a push Artifacts accepted on an attempt's fork: journals the refs its report says were
+ * updated (`recordPush`, which also queues scoring of an open attempt's new head) and adds a
+ * `remote:` line when scoring was queued. The response is buffered for that, which is cheap: a
+ * receive-pack response is a report and some progress, never a pack. One that can't be read is
+ * passed on as it came, and nothing is recorded.
+ */
+async function recordForkPush(
+  c: GitContext,
+  target: Target,
+  attempt: AttemptInput,
   push: PushRequest,
-  record: (updates: RefUpdate[]) => Promise<unknown>,
-): Promise<void> {
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  for await (const chunk of report) {
-    // Keep reading past the cap: a tee'd branch left unread would buffer the rest of the response.
-    if (size < MAX_REPORT_BYTES) chunks.push(chunk);
-    size += chunk.length;
-  }
-  const ok = new Set(updatedRefs(concat(chunks), push.capabilities.has("side-band-64k")));
-  const updates = push.updates.filter((u) => ok.has(u.ref));
-  if (updates.length > 0) await record(updates);
-}
-
-/** Runs `work` after the response, in a Worker for as long as it needs; logs its failure. */
-function background(c: GitContext, work: Promise<void>): void {
-  const logged = work.catch((cause: unknown) => {
-    console.error({ event: "git.record_push_failed", error: String(cause) });
-  });
+  backend: TaskBackend,
+  upstream: Response,
+): Promise<Uint8Array> {
+  const bytes = new Uint8Array(await upstream.arrayBuffer());
+  const sideband = push.capabilities.has("side-band-64k");
+  let report: PushReport;
   try {
-    c.executionCtx.waitUntil(logged);
-  } catch {
-    // Not in a Worker (Node tests): the promise runs on its own.
+    report = readReport(bytes, sideband);
+  } catch (err) {
+    if (!(err instanceof ProtocolError)) throw err;
+    console.error({ event: "git.report_unreadable", repo: target.repo, error: err.message });
+    return bytes;
   }
+  const ok = new Set(updatedRefs(bytes, sideband));
+  const updates = push.updates.filter((u) => ok.has(u.ref));
+  if (updates.length === 0) return bytes;
+
+  const recorded = await backend
+    .call("recordPush", [target.project, c.var.actor, { ...attempt, updates }])
+    .catch((cause: unknown) => ({ ok: false, message: String(cause) }) as const);
+  if (!recorded.ok) {
+    // The push landed either way; only its journal entry and scoring are missing.
+    console.error({ event: "git.record_push_failed", repo: target.repo, error: recorded.message });
+    return bytes;
+  }
+  const messages = scoringLines(recorded.value as PushRecord);
+  return messages.length === 0 ? bytes : writeReport(report, messages, sideband);
 }
 
 /** Calls a task method; null when it succeeds, its `ServiceError` when it refuses. */

@@ -1,6 +1,5 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import { reposFor } from "./artifacts";
-import { routePush, type PushRoute } from "./events";
 import type { CheckOutcome, CheckParams } from "./project";
 import {
   CHECK_ROLES,
@@ -29,22 +28,6 @@ import {
 const TOKEN_TTL_SECONDS = 30 * 60;
 /** Re-test and land rounds before giving up on a main that keeps moving. */
 const LAND_ROUNDS = 3;
-
-/** Started by the `cf.artifacts.repo.pushed` event trigger for every repo in the namespace. */
-export class IngestWorkflow extends WorkflowEntrypoint<Env, unknown> {
-  override async run(event: Readonly<WorkflowEvent<unknown>>, step: WorkflowStep): Promise<PushRoute> {
-    const startedAt = event.timestamp.getTime();
-    const route = routePush(event.payload);
-    if (route.kind === "ignored") {
-      console.log({ event: "ingest.ignored", reason: route.reason, payload: event.payload });
-      return route;
-    }
-    await step.do("deliver", async () => {
-      await this.env.PROJECT.getByName(route.project).receive(route, { startedAt, instanceId: event.instanceId });
-    });
-    return route;
-  }
-}
 
 /**
  * Tests an attempt's commit, then rebases it onto main, re-tests, and lands it. Repo code runs only in

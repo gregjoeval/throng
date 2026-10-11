@@ -44,6 +44,12 @@ interface Grant {
   token: string;
 }
 
+/** An attempt's fork: its grant, and the project and attempt that scoring requests name. */
+interface Fork extends Grant {
+  project: string;
+  attempt: string;
+}
+
 class Timeline {
   readonly #start = Date.now();
   readonly #rows: [string, number][] = [];
@@ -109,11 +115,11 @@ async function happy(): Promise<void> {
   );
   timeline.mark("attempt pushed");
 
-  const finished = await waitFor(project, (e) => e.kind === "check-finished" && e.detail.sha === sha);
+  const finished = await waitFor(project, (e) => e.kind === "scored" && e.detail.sha === sha);
   const outcome = finished.detail.outcome as { kind: string; mainSha?: string };
   assert(outcome.kind === "landed", `expected landed, got ${JSON.stringify(outcome)}`);
   const mainSha = outcome.mainSha!;
-  await waitFor(project, (e) => e.kind === "main-advanced" && e.detail.sha === mainSha);
+  await waitFor(project, (e) => e.kind === "main_advanced" && e.detail.sha === mainSha);
 
   const head = await api<{ sha: string }>("GET", `/spike/repos/${originRepo(project)}/head`);
   assert(head.sha === mainSha, `main is ${head.sha}, expected ${mainSha}`);
@@ -121,7 +127,7 @@ async function happy(): Promise<void> {
   assert(greeting.includes("hello from a1"), "main does not contain the attempt's change");
 
   const journal = await settle(project);
-  const checks = journal.filter((e) => e.kind === "check-started");
+  const checks = journal.filter((e) => e.kind === "scoring_started");
   assert(checks.length === 1, `expected one check, got ${checks.length}`);
   addCheckTimings(timeline, journal);
   report(timeline, journal);
@@ -137,7 +143,7 @@ async function coalesce(): Promise<void> {
   const first = await commitAndPush(work, fork, "src/greeting.js", (s) => s.replace('"hello"', '"hi"'), "a1: first");
   timeline.mark("first push");
   // Wait until the first check is running, so the second push has something to cancel.
-  await waitFor(project, (e) => e.kind === "check-started" && e.detail.sha === first);
+  await waitFor(project, (e) => e.kind === "scoring_started" && e.detail.sha === first);
   timeline.mark("first check started");
   const second = await commitAndPush(
     work,
@@ -148,19 +154,18 @@ async function coalesce(): Promise<void> {
   );
   timeline.mark("second push");
 
-  const finished = await waitFor(project, (e) => e.kind === "check-finished" && e.detail.sha === second);
+  const finished = await waitFor(project, (e) => e.kind === "scored" && e.detail.sha === second);
   const outcome = finished.detail.outcome as { kind: string; mainSha?: string };
   assert(outcome.kind === "landed", `expected landed, got ${JSON.stringify(outcome)}`);
-  await waitFor(project, (e) => e.kind === "main-advanced" && e.detail.sha === outcome.mainSha);
+  await waitFor(project, (e) => e.kind === "main_advanced" && e.detail.sha === outcome.mainSha);
 
   const journal = await settle(project);
   const landedFirst = journal.some(
-    (e) =>
-      e.kind === "check-finished" && e.detail.sha === first && (e.detail.outcome as { kind: string }).kind === "landed",
+    (e) => e.kind === "scored" && e.detail.sha === first && (e.detail.outcome as { kind: string }).kind === "landed",
   );
   assert(!landedFirst, "the superseded sha landed");
   assert(
-    journal.some((e) => e.kind === "check-cancelled" && e.detail.sha === first),
+    journal.some((e) => e.kind === "scoring_cancelled" && e.detail.sha === first),
     "the first check was not cancelled",
   );
   const greeting = await gitShow(work, project, outcome.mainSha!, "src/greeting.js");
@@ -182,7 +187,7 @@ async function conflict(): Promise<void> {
 
   const first = await commitAndPush(work, a1, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
   timeline.mark("a1 pushed");
-  const landed = await waitFor(project, (e) => e.kind === "check-finished" && e.detail.sha === first);
+  const landed = await waitFor(project, (e) => e.kind === "scored" && e.detail.sha === first);
   const landedOutcome = landed.detail.outcome as { kind: string; mainSha?: string };
   assert(landedOutcome.kind === "landed", `expected a1 to land, got ${JSON.stringify(landedOutcome)}`);
   const mainSha = landedOutcome.mainSha!;
@@ -191,7 +196,7 @@ async function conflict(): Promise<void> {
   await git(work, "checkout", "-q", "--detach", base);
   const second = await commitAndPush(work, a2, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a2"'), "a2");
   timeline.mark("a2 pushed");
-  const finished = await waitFor(project, (e) => e.kind === "check-finished" && e.detail.sha === second);
+  const finished = await waitFor(project, (e) => e.kind === "scored" && e.detail.sha === second);
   const outcome = finished.detail.outcome as { kind: string; files?: string[]; diff?: string };
   assert(outcome.kind === "bounced", `expected a2 to bounce, got ${JSON.stringify(outcome)}`);
   assert(
@@ -203,10 +208,7 @@ async function conflict(): Promise<void> {
   const journal = await settle(project);
   const head = await api<{ sha: string }>("GET", `/spike/repos/${originRepo(project)}/head`);
   assert(head.sha === mainSha, `main moved to ${head.sha} after the bounce; expected ${mainSha}`);
-  assert(
-    journal.filter((e) => e.kind === "main-advanced").length === 2,
-    "expected only the fixture and a1 to advance main",
-  );
+  assert(journal.filter((e) => e.kind === "main_advanced").length === 1, "expected only a1 to advance main");
   console.log(`bounced: ${outcome.files!.join(", ")}`);
   console.log(outcome.diff);
   addCheckTimings(timeline, journal);
@@ -256,7 +258,7 @@ async function preview(): Promise<void> {
   const body = await fetchUntil(`${url}/?name=e2e`, (b) => b === "hello from a1, e2e");
   timeline.mark(`preview served the change: ${JSON.stringify(body)}`);
 
-  await waitFor(project, (e) => e.kind === "check-finished" && e.detail.sha === sha);
+  await waitFor(project, (e) => e.kind === "scored" && e.detail.sha === sha);
   const journal = await settle(project, 5_000);
   addCheckTimings(timeline, journal);
   report(timeline, journal);
@@ -315,7 +317,7 @@ test("cannot reach the Cloudflare API", async () => {
   const sha = await commitAndPush(work, fork, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
   timeline.mark("attempt pushed");
 
-  const finished = await waitFor(project, (e) => e.kind === "check-finished" && e.detail.sha === sha);
+  const finished = await waitFor(project, (e) => e.kind === "scored" && e.detail.sha === sha);
   const outcome = finished.detail.outcome as { kind: string; mainSha?: string; output?: string };
   assert(outcome.kind === "landed", `expected the check to pass and land, got ${JSON.stringify(outcome)}`);
   const log = await api<{ message: string }[]>("GET", `/spike/repos/${originRepo(project)}/log?ref=main&limit=20`);
@@ -363,7 +365,7 @@ test("the dependency is installed", () => {
   );
   timeline.mark("attempt pushed");
 
-  const finished = await waitFor(project, (e) => e.kind === "check-finished" && e.detail.sha === sha);
+  const finished = await waitFor(project, (e) => e.kind === "scored" && e.detail.sha === sha);
   const outcome = finished.detail.outcome as { kind: string; mainSha?: string };
   assert(outcome.kind === "landed", `expected landed, got ${JSON.stringify(outcome)}`);
   const lock = await apiText("GET", `/spike/repos/${originRepo(project)}/file?ref=main&path=package-lock.json`);
@@ -385,7 +387,7 @@ test("the dependency is installed", () => {
 
 /**
  * Attempt archives: a custom ref under ARCHIVE_REF_PREFIX can be pushed to an origin, is listed by
- * ls-remote, survives a later push to main, and starts no check. Then the Worker's own git client
+ * ls-remote, survives a later push to main, and queues no scoring. Then the Worker's own git client
  * (what closing and reopening an attempt use) copies a ref into an origin's archive namespace and
  * back out of it, across two unrelated repos so a real pack has to move.
  */
@@ -420,8 +422,6 @@ async function refs(): Promise<void> {
   await git(a.work, "add", "-A");
   await git(a.work, "commit", "-q", "-m", "later");
   await git(a.work, ...auth(a.origin.token), "push", "-q", a.origin.remote, "HEAD:refs/heads/main");
-  const later = (await git(a.work, "rev-parse", "HEAD")).trim();
-  await waitFor(a.project, (e) => e.kind === "main-advanced" && e.detail.sha === later);
   timeline.mark("a's main advanced");
   assert((await lsRemote(a.work, a.origin, raw)) === archived, `${raw} moved or vanished after a push to main`);
   assert((await lsRemote(a.work, a.origin, archiveRef("t1a1"))) === bMain, "the archive ref moved or vanished");
@@ -435,10 +435,10 @@ async function refs(): Promise<void> {
   assert(restored.sha === archived, `copy-ref returned ${restored.sha}, expected ${archived}`);
   assert((await lsRemote(b.work, b.origin, archiveRef("t9a9"))) === archived, "the restored ref is not listed");
 
-  // Archive pushes are ignored by push routing: nothing but main moving reached either journal.
+  // Archive pushes are internal: neither project queued any scoring.
   for (const project of [a.project, b.project]) {
     const kinds = new Set((await settle(project, 5_000)).map((e) => e.kind));
-    assert(!kinds.has("check-started") && !kinds.has("attempt-pushed"), `${project} started work on an archive push`);
+    assert(!kinds.has("scoring_queued"), `${project} queued scoring on an archive push`);
   }
   timeline.print();
   await cleanUp(a.project, [], a.work);
@@ -468,25 +468,22 @@ async function setUpProject(timeline: Timeline): Promise<{ project: string; work
   await git(work, ...auth(repo.token), "push", "-q", repo.remote, "main:refs/heads/main");
   timeline.mark("fixture pushed to main");
   await git(work, "remote", "add", "canonical", repo.remote);
-  // The fixture push itself is a "main advanced" event; let it land in the journal before forking.
-  await waitFor(project, (e) => e.kind === "main-advanced");
-  timeline.mark("fixture main-advanced journaled");
   return { project, work, origin: repo };
 }
 
-async function createAttempt(project: string, attempt: string, timeline: Timeline): Promise<Grant> {
+async function createAttempt(project: string, attempt: string, timeline: Timeline): Promise<Fork> {
   timeline.mark(`fork ${attempt} requested`);
   const fork = await api<Grant & { forkMs: number; readyMs: number; polls: number }>(
     "POST",
     `/spike/projects/${project}/attempts/${attempt}`,
   );
   timeline.mark(`fork ${attempt} ready (fork() ${fork.forkMs} ms, ready ${fork.readyMs} ms, ${fork.polls} polls)`);
-  return fork;
+  return { ...fork, project, attempt };
 }
 
 async function commitAndPush(
   work: string,
-  fork: Grant,
+  fork: Fork,
   path: string,
   edit: (source: string) => string,
   message: string,
@@ -495,7 +492,10 @@ async function commitAndPush(
   await writeFile(file, edit(await readFile(file, "utf8")));
   await git(work, "commit", "-q", "-am", message);
   await git(work, ...auth(fork.token), "push", "-q", "--force", fork.remote, "HEAD:refs/heads/main");
-  return (await git(work, "rev-parse", "HEAD")).trim();
+  const sha = (await git(work, "rev-parse", "HEAD")).trim();
+  // The push went straight to Artifacts, around the git proxy that would queue scoring, so ask for it.
+  await api("POST", `/spike/projects/${fork.project}/attempts/${fork.attempt}/score?sha=${sha}`);
+  return sha;
 }
 
 async function gitShow(work: string, project: string, sha: string, path: string): Promise<string> {
@@ -507,12 +507,7 @@ async function gitShow(work: string, project: string, sha: string, path: string)
 function addCheckTimings(timeline: Timeline, journal: JournalEntry[]): void {
   for (const e of journal) {
     const sha = typeof e.detail.sha === "string" ? e.detail.sha.slice(0, 7) : "";
-    if (e.kind === "attempt-pushed" || e.kind === "main-advanced") {
-      const { emittedAt, ingestStartedAt } = e.detail as { emittedAt: number | null; ingestStartedAt: number };
-      if (emittedAt !== null) timeline.mark(`${e.kind} ${sha}: event emitted`, emittedAt);
-      timeline.mark(`${e.kind} ${sha}: ingest workflow started`, ingestStartedAt);
-    }
-    if (e.kind === "check-finished") {
+    if (e.kind === "scored") {
       const t = e.detail.timings as Record<string, number>;
       timeline.mark(`check ${sha}: test sandbox start ${t.testStartMs} ms, run ${t.testRunMs} ms`, t.createdAt! + 1);
       timeline.mark(
@@ -527,12 +522,12 @@ function addCheckTimings(timeline: Timeline, journal: JournalEntry[]): void {
 function report(timeline: Timeline, journal: JournalEntry[]): void {
   console.log("timeline:");
   timeline.print();
-  const duplicates = journal.filter((e) => e.kind === "duplicate");
-  console.log(`duplicate deliveries: ${duplicates.length}`);
-  for (const d of duplicates) console.log(`  ${JSON.stringify(d.detail)}`);
+  const cancelled = journal.filter((e) => e.kind === "scoring_cancelled");
+  console.log(`cancelled runs: ${cancelled.length}`);
+  for (const d of cancelled) console.log(`  ${JSON.stringify(d.detail)}`);
 }
 
-/** Waits a little after the last expected event so late duplicates and stray checks show up. */
+/** Waits a little after the last expected event so stray runs show up. */
 async function settle(project: string, quietMs = 15_000): Promise<JournalEntry[]> {
   await new Promise((r) => setTimeout(r, quietMs));
   return api<JournalEntry[]>("GET", `/spike/projects/${project}/journal`);

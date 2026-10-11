@@ -129,9 +129,36 @@ describe("git proxy", () => {
     expect(pushed.ok).toBe(true);
     expect(await host.head(forkRepo(project.id, "t1a1"))).toBe(sha);
 
-    await expect.poll(journal).toHaveLength(1);
+    expect(journal()).toHaveLength(1);
     expect(journal()[0]).toMatchObject({ kind: "pushed", user_id: ada.user.id, task: 1, attempt: 1 });
     expect(JSON.parse(journal()[0]!.detail)).toEqual({ ref: "t1a1", git_ref: "refs/heads/main", before, after: sha });
+    // A draft isn't scored on push.
+    expect(pushed.stderr).not.toMatch(/scoring/);
+  });
+
+  it("queues scoring of an open attempt's new head on push, and says so", async () => {
+    const { ada, clone, commit, env, project, store, attempt } = await setup();
+    const ref = { task: attempt.task, number: attempt.number };
+    await store(project.id).openAttempt(project, ada.actor, ref);
+    const dir = await clone("throng/t1a1.git", ada.token);
+    const sha = await commit(dir, "fix");
+    const pushed = await tryGit(dir, env, "push", "origin", "HEAD:main");
+    expect(pushed.ok).toBe(true);
+    expect(pushed.stderr).toMatch(new RegExp(`remote: scoring queued for t1a1 \\(${sha}\\)`));
+    expect(pushed.stderr).toMatch(/HEAD -> main/);
+    expect(
+      store(project.id)
+        .scoring.listRuns(1, 1)
+        .map((r) => [r.trigger, r.sha, r.status]),
+    ).toEqual([
+      ["open", expect.any(String), "cancelled"],
+      ["push", sha, "queued"],
+    ]);
+
+    // Pushing the same head to another ref of the fork queues nothing more.
+    const again = await tryGit(dir, env, "push", "origin", "HEAD:refs/heads/copy");
+    expect(again.ok).toBe(true);
+    expect(again.stderr).not.toMatch(/scoring/);
   });
 
   it("rejects a push by anyone but the author when git asks to push", async () => {

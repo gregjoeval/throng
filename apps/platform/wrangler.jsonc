@@ -22,19 +22,7 @@
       "images": { "sandbox": { "dockerfile": "./container/Dockerfile" } },
     },
   ],
-  "workflows": [
-    { "name": "throng-ingest", "binding": "INGEST", "class_name": "IngestWorkflow" },
-    { "name": "throng-check", "binding": "CHECK", "class_name": "CheckWorkflow" },
-  ],
-  "triggers": {
-    "events": [
-      {
-        "type": "cf.artifacts.repo.pushed",
-        "filter": { "namespace": "throng-spike" },
-        "targets": [{ "type": "workflow", "workflow_name": "throng-ingest" }],
-      },
-    ],
-  },
+  "workflows": [{ "name": "throng-check", "binding": "CHECK", "class_name": "CheckWorkflow" }],
   "d1_databases": [
     {
       "binding": "DB",
@@ -78,19 +66,7 @@
         },
       ],
       // Workflow names are account-wide, so they can't reuse production's.
-      "workflows": [
-        { "name": "throng-ci-ingest", "binding": "INGEST", "class_name": "IngestWorkflow" },
-        { "name": "throng-ci-check", "binding": "CHECK", "class_name": "CheckWorkflow" },
-      ],
-      "triggers": {
-        "events": [
-          {
-            "type": "cf.artifacts.repo.pushed",
-            "filter": { "namespace": "throng-ci" },
-            "targets": [{ "type": "workflow", "workflow_name": "throng-ci-ingest" }],
-          },
-        ],
-      },
+      "workflows": [{ "name": "throng-ci-check", "binding": "CHECK", "class_name": "CheckWorkflow" }],
       "d1_databases": [
         {
           "binding": "DB",

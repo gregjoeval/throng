@@ -65,7 +65,7 @@ async function attemptIn(store: TaskStore, state: AttemptState): Promise<StoredA
   const [a] = await store.createAttempts(PROJECT, ada, { task: task.number });
   if (a === undefined) throw new Error("no attempt");
   const ref = { task: a.task, number: a.number };
-  if (state === "open" || state === "merged") store.openAttempt(PROJECT, ada, ref);
+  if (state === "open" || state === "merged") await store.openAttempt(PROJECT, ada, ref);
   if (state === "merged") await store.markMerged(PROJECT, owner, { ...ref, sha: "abc" });
   if (state === "closed") await store.closeAttempt(PROJECT, ada, ref);
   if (state === "obsolete") await store.obsoleteAttempt(PROJECT, owner, ref);
@@ -214,7 +214,7 @@ describe("tasks", () => {
     const { store } = setup();
     store.createTask(PROJECT, ada, { title: "a" });
     await store.createAttempts(PROJECT, ada, { task: 1, count: 3 });
-    store.openAttempt(PROJECT, ada, { task: 1, number: 2 });
+    await store.openAttempt(PROJECT, ada, { task: 1, number: 2 });
     await store.closeAttempt(PROJECT, ada, { task: 1, number: 3 });
     await store.closeTask(PROJECT, owner, { task: 1 });
     expect(store.listAttempts(PROJECT, ada, { task: 1 }).map((a) => a.state)).toEqual(["closed", "closed", "closed"]);
@@ -339,13 +339,13 @@ describe("attempts", () => {
     store.createTask(PROJECT, ada, { title: "a" });
     await store.createAttempts(PROJECT, adaAgent, { task: 1 });
     const ref = { task: 1, number: 1 };
-    store.openAttempt(PROJECT, adaAgent, ref);
+    await store.openAttempt(PROJECT, adaAgent, ref);
     store.draftAttempt(PROJECT, ada, ref);
     await store.closeAttempt(PROJECT, ada, ref);
     await store.obsoleteAttempt(PROJECT, owner, ref);
     store.restoreAttempt(PROJECT, owner, ref);
     await store.reopenAttempt(PROJECT, ada, ref);
-    store.openAttempt(PROJECT, ada, ref);
+    await store.openAttempt(PROJECT, ada, ref);
     await store.markMerged(PROJECT, owner, { ...ref, sha: "f00" });
     expect(journal().map((e) => [e.kind, e.user_id, e.agent, e.attempt])).toEqual([
       ["created", ada.user.id, null, null],
@@ -374,7 +374,7 @@ describe("attempts", () => {
       expect(await code(() => store.editAttempt(PROJECT, who, { ...ref, note: "x" }))).toBe("forbidden");
     }
     expect(store.editAttempt(PROJECT, adaAgent, { ...ref, note: "mine" }).note).toBe("mine");
-    expect(store.openAttempt(PROJECT, adaAgent, ref).state).toBe("open");
+    expect((await store.openAttempt(PROJECT, adaAgent, ref)).state).toBe("open");
     expect(await code(() => store.draftAttempt(PROJECT, bob, ref))).toBe("forbidden");
     await store.closeAttempt(PROJECT, ada, ref);
     expect(await code(store.reopenAttempt(PROJECT, bob, ref))).toBe("forbidden");
@@ -402,8 +402,8 @@ describe("attempts", () => {
     store.createTask(PROJECT, ada, { title: "a" });
     await store.createAttempts(PROJECT, ada, { task: 1, count: 2 });
     await store.createAttempts(PROJECT, bob, { task: 1 });
-    store.openAttempt(PROJECT, ada, { task: 1, number: 1 });
-    store.openAttempt(PROJECT, bob, { task: 1, number: 3 });
+    await store.openAttempt(PROJECT, ada, { task: 1, number: 1 });
+    await store.openAttempt(PROJECT, bob, { task: 1, number: 3 });
     const merged = await store.markMerged(PROJECT, bob, { task: 1, number: 3, sha: "f00d" });
     expect(merged).toMatchObject({ state: "merged", merged_sha: "f00d", closed_at: "2026-10-10T12:00:00.000Z" });
     expect(store.listAttempts(PROJECT, ada, { task: 1 }).map((a) => a.state)).toEqual(["closed", "closed", "merged"]);
@@ -595,7 +595,7 @@ describe("archive", () => {
 
     store.createTask(PROJECT, ada, { title: "c" });
     await store.createAttempts(PROJECT, ada, { task: 3, count: 2 });
-    store.openAttempt(PROJECT, ada, { task: 3, number: 1 });
+    await store.openAttempt(PROJECT, ada, { task: 3, number: 1 });
     await store.markMerged(PROJECT, owner, { task: 3, number: 1, sha: "landed" });
     expect(store.listAttempts(PROJECT, ada, { task: 3 }).map((a) => [a.state, a.archived_sha])).toEqual([
       ["merged", "base"],

@@ -197,7 +197,10 @@ async function conflict(): Promise<void> {
 async function metrics(): Promise<void> {
   const timeline = new Timeline();
   const { project, work } = await setUpProject(timeline, {
-    "scripts/metrics.js": `require("fs").writeFileSync(process.env.THRONG_METRICS, JSON.stringify({ coverage: 87.5, stray: 1 }));\n`,
+    // The fixture is an ES module package, so no `require`.
+    "scripts/metrics.js": `import { writeFileSync } from "node:fs";
+writeFileSync(process.env.THRONG_METRICS, JSON.stringify({ coverage: 87.5, stray: 1 }));
+`,
     ".throng/config.yml": `checks:
   - name: test
     command: npm test

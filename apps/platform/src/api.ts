@@ -197,10 +197,18 @@ const ScoringResultSchema = z
     builtin: z
       .object({ filesChanged: z.number(), additions: z.number(), deletions: z.number(), durationMs: z.number() })
       .openapi({ description: "Diff size against the base." }),
-    preview: z.object({
-      status: z.enum(["none", "ready", "failed"]),
-      url: z.string().optional(),
-    }),
+    preview: z
+      .discriminatedUnion("status", [
+        z.object({ status: z.literal("none") }),
+        z.object({
+          status: z.literal("ready"),
+          url: z.string().openapi({ description: "Where the Preview is served." }),
+        }),
+        z.object({ status: z.literal("failed") }),
+      ])
+      .openapi("PreviewResult", {
+        description: "The attempt's Worker Preview: `none` without a `preview` config or a passing gate.",
+      }),
   })
   .openapi("ScoringResult");
 

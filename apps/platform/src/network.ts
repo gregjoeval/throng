@@ -1,15 +1,7 @@
 // What a Sandbox container may reach. The Worker's outbound intercept asks `outboundDecision` about every
 // request and does only what it says, so the whole policy is here and testable.
 
-import {
-  grantFor,
-  grantsForRole,
-  ROLE_GETS_PREVIEW,
-  RUNS_REPO_CODE,
-  type GitGrant,
-  type RoleGrants,
-  type SandboxRole,
-} from "./grants.ts";
+import { grantFor, grantsForRole, RUNS_REPO_CODE, type GitGrant, type RoleGrants, type SandboxRole } from "./grants.ts";
 import { previewPathAllowed, type PreviewGrant } from "./preview.ts";
 
 export const NPM_REGISTRY_HOST = "registry.npmjs.org";
@@ -80,7 +72,8 @@ export function roleAccess<R extends SandboxRole>(
 ): OutboundAccess {
   return {
     grants: grantsForRole(role, grants),
-    preview: ROLE_GETS_PREVIEW[role] ? preview : null,
+    // Only the preview container holds the Preview deploy grant.
+    preview: role === "preview" ? preview : null,
     npmRegistry: RUNS_REPO_CODE[role],
     allow: RUNS_REPO_CODE[role] ? allow : [],
   };

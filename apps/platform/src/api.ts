@@ -246,7 +246,7 @@ const ScoringStatusSchema = z
   })
   .openapi("ScoringStatus");
 
-const TaskScoresSchema = z
+const TaskArenaSchema = z
   .object({
     task: z.string().openapi({ example: "t42" }),
     attempts: z.array(
@@ -254,10 +254,10 @@ const TaskScoresSchema = z
         ref: z.string().openapi({ example: "t42a3" }),
         state: z.enum(ATTEMPT_STATES),
         author: UserRefSchema,
-      }).openapi("AttemptScore"),
+      }).openapi("ArenaAttempt"),
     ),
   })
-  .openapi("TaskScores");
+  .openapi("TaskArena");
 
 const AttemptLimitSchema = z
   .number()
@@ -1043,24 +1043,24 @@ export function apiRoutes(options: ApiOptions = {}) {
     .openapi(
       createRoute({
         method: "get",
-        path: "/projects/{owner}/{project}/tasks/{t}/scores",
-        operationId: "getTaskScores",
+        path: "/projects/{owner}/{project}/tasks/{t}/arena",
+        operationId: "getTaskArena",
         tags: ["Scoring"],
-        summary: "The current result of every attempt in a task, for the arena",
+        summary: "The arena: the current result of every attempt in a task",
         description:
-          "Each attempt but obsolete ones, by number, with its scoring status and, once its current head has a " +
+          "Every attempt, obsolete ones included, by number, with its state, its scoring status and, once its current head has a " +
           "`done` run, that result: `base`, the gate, the checks and every metric in one `metrics` map.",
         security: bearerOrWeb,
         middleware: [browser] as const,
         request: { params: TaskPathSchema },
         responses: {
-          200: { description: "The task's attempts with their current results.", ...json(TaskScoresSchema) },
+          200: { description: "The task's attempts with their current results.", ...json(TaskArenaSchema) },
           400: errorResponse("The task reference is invalid."),
           401: unauthorizedBearer,
           404: errorResponse("No such project or task."),
         },
       }),
-      async (c) => c.json(await tasks(c.env).taskScores(c.var.actor, taskPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c.env).taskArena(c.var.actor, taskPath(c.req.valid("param"))), 200),
     )
     .openapi(
       createRoute({

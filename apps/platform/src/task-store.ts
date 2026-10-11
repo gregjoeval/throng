@@ -562,13 +562,17 @@ export class TaskStore {
     return this.#scoringDetail(this.#attempt(input));
   }
 
-  /** Every attempt of the task but obsolete ones, by number, each with its scoring and current result. */
-  taskScores(
-    project: ProjectContext,
-    actor: Actor,
+  /** The task's arena: every attempt, obsolete ones included, by number, with its scoring and current result. */
+  taskArena(
+    _project: ProjectContext,
+    _actor: Actor,
     input: { task: number },
   ): (Omit<StoredAttempt, "scoring"> & { scoring: AttemptScoringDetail })[] {
-    return this.listAttempts(project, actor, input).map((a) => ({ ...a, scoring: this.#scoringDetail(a) }));
+    this.#task(input.task);
+    return this.#sql
+      .exec<AttemptRow>("SELECT * FROM attempts WHERE task = ? ORDER BY number", input.task)
+      .map((row) => this.#toAttempt(row))
+      .map((a) => ({ ...a, scoring: this.#scoringDetail(a) }));
   }
 
   /** The attempt's scoring status, with the run holding its current result. */
@@ -1419,7 +1423,7 @@ export const TASK_METHODS = [
   "listAttempts",
   "listProjectAttempts",
   "getScoring",
-  "taskScores",
+  "taskArena",
   "listScoringRuns",
   "getScoringRun",
   "attemptForBranch",

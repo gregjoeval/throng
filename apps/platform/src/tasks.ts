@@ -90,17 +90,17 @@ export interface ScoringStatus extends AttemptScoring {
   result?: CurrentResult;
 }
 
-/** One attempt in a task's scores. */
-export interface AttemptScore extends ScoringStatus {
+/** One attempt in a task's arena, obsolete or not: its state lets a UI filter. */
+export interface ArenaAttempt extends ScoringStatus {
   ref: string;
   state: AttemptState;
   author: UserRef;
 }
 
-/** The current result of every attempt in a task. */
-export interface TaskScores {
+/** A task's arena: the current result of every attempt in it. */
+export interface TaskArena {
   task: string;
-  attempts: AttemptScore[];
+  attempts: ArenaAttempt[];
 }
 
 /** What asking for scoring did: queued a run, or why not, with the run that covers the head. */
@@ -259,12 +259,12 @@ export function taskService({ db, backend }: TaskServiceDeps) {
     },
 
     /**
-     * The current result of every attempt in the task but obsolete ones, by number: the arena's
-     * main query. Any signed-in user may read it.
+     * The task's arena: every attempt, obsolete ones included, by number, with its state and
+     * current result. Any signed-in user may read it.
      */
-    async taskScores(actor: Actor, input: TaskPath): Promise<TaskScores> {
+    async taskArena(actor: Actor, input: TaskPath): Promise<TaskArena> {
       const number = taskNumber(input.task);
-      const list = await invoke("taskScores", await project(input), actor, { task: number });
+      const list = await invoke("taskArena", await project(input), actor, { task: number });
       const users = await handles(
         db,
         list.map((a) => a.author),

@@ -18,6 +18,9 @@
   },
   "containers": [
     {
+      // The application keeps the name it was created with under CheckSandbox: renaming the class
+      // kept its Durable Object namespace, and an application's name can't change.
+      "name": "throng-checksandbox",
       "class_name": "RunSandbox",
       "scheduling_policy": "durable_object",
       "images": { "sandbox": { "dockerfile": "./container/Dockerfile" } },
@@ -62,6 +65,7 @@
       },
       "containers": [
         {
+          "name": "throng-ci-checksandbox-ci",
           "class_name": "RunSandbox",
           "scheduling_policy": "durable_object",
           "images": { "sandbox": { "dockerfile": "./container/Dockerfile" } },

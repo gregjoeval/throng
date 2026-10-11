@@ -1146,8 +1146,8 @@ export function apiRoutes(options: ApiOptions = {}) {
           "Each setup command, check and preview of a run writes a log. Logs over " +
           `${MAX_LOG_BYTES / (1024 * 1024)} MB keep their head and tail, with a marker between them. Logs are ` +
           `deleted ${LOG_RETENTION_DAYS} days after the run; an expired log is \`not_found\`, like a missing one.`,
-        security: bearerOnly,
-        middleware: [bearer] as const,
+        security: bearerOrWeb,
+        middleware: [browser] as const,
         request: { params: RunLogPathSchema },
         responses: {
           200: { description: "The log.", content: { "text/plain": { schema: z.string() } } },

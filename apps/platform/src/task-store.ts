@@ -9,7 +9,7 @@
 import { archiveRef } from "./archive.ts";
 import { CONFIG_PATH, loadConfig, type ConfigResult } from "./config.ts";
 import { ServiceError, type ErrorCode } from "./errors.ts";
-import { isLogName, logKey } from "./logs.ts";
+import { isLogName, logKey, missingLog } from "./logs.ts";
 import { isZeroId } from "./pkt-line.ts";
 import { forkRepo, originRepo, type Repos } from "./repos.ts";
 import {
@@ -653,7 +653,7 @@ export class TaskStore {
    */
   runLogKey(project: ProjectContext, actor: Actor, input: { run: number; name: string }): string {
     const run = this.getScoringRun(project, actor, input);
-    if (!isLogName(input.name)) throw new ServiceError("not_found", `run ${input.run} has no log ${input.name}`);
+    if (!isLogName(input.name)) throw missingLog(input.run, input.name);
     return logKey({ project: project.id, attempt: headAttemptRef(run), sha: run.sha, run: run.id }, input.name);
   }
 

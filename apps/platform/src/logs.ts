@@ -2,6 +2,7 @@
 // layout, the log names and the script that reads a log out of the Sandbox (truncated to fit) live
 // here; the R2 lifecycle deletes logs after `LOG_RETENTION_DAYS` (see the README's setup).
 
+import { ServiceError } from "./errors.ts";
 import type { ScoringParams } from "./scoring.ts";
 
 /** Logs over this many bytes are stored truncated, keeping their head and tail. */
@@ -38,6 +39,11 @@ export function isLogName(name: string): boolean {
 /** Where a run's log is stored: `logs/<projectId>/<t42a3>/<sha>/<runId>/<name>.log`. */
 export function logKey({ project, attempt, sha, run }: ScoringParams, name: string): string {
   return `${LOG_PREFIX}${project}/${attempt}/${sha}/${run}/${name}.log`;
+}
+
+/** The `not_found` for a log a run doesn't have: never stored, expired, or a name no log can have. */
+export function missingLog(run: number, name: string): ServiceError {
+  return new ServiceError("not_found", `run ${run} has no log ${name}`);
 }
 
 /** `readLogScript`'s exit code when the step wrote no log (it was skipped). */

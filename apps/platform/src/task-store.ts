@@ -18,6 +18,7 @@ import {
   type ScoringRequest,
   type ScoringRunner,
   type ScoringTrigger,
+  type StoredRun,
 } from "./scoring.ts";
 import type { Actor } from "./tokens.ts";
 
@@ -75,6 +76,11 @@ export interface StoredAttempt {
   archived_sha: string | null;
   /** Its current head's scoring status, for polling. */
   scoring: AttemptScoring;
+}
+
+/** An attempt's scoring status, and the run holding its current result, if its head has one. */
+export interface AttemptScoringDetail extends AttemptScoring {
+  current: StoredRun | null;
 }
 
 /** The project a call acts in: its id and its owner's user id. */
@@ -547,6 +553,36 @@ export class TaskStore {
             input.state,
           );
     return rows.map((row) => this.#toAttempt(row));
+  }
+
+  /** The attempt's scoring status, with its current result: the latest `done` run for its head. */
+  getScoring(_project: ProjectContext, _actor: Actor, input: AttemptInput): AttemptScoringDetail {
+    const current = this.#attempt(input);
+    return { ...current.scoring, current: this.scoring.currentRun(scoredAttempt(current)) };
+  }
+
+  /** Every attempt of the task but obsolete ones, by number, each with its scoring and current result. */
+  taskScores(
+    project: ProjectContext,
+    actor: Actor,
+    input: { task: number },
+  ): (StoredAttempt & { current: StoredRun | null })[] {
+    return this.listAttempts(project, actor, input).map((a) => ({
+      ...a,
+      current: this.scoring.currentRun(scoredAttempt(a)),
+    }));
+  }
+
+  /** The attempt's scoring runs, newest first, superseded and cancelled ones included. */
+  listScoringRuns(_project: ProjectContext, _actor: Actor, input: AttemptInput): StoredRun[] {
+    return this.scoring.listRuns(scoredAttempt(this.#attempt(input))).toReversed();
+  }
+
+  /** One scoring run of the project, by id. */
+  getScoringRun(_project: ProjectContext, _actor: Actor, input: { run: number }): StoredRun {
+    const run = this.scoring.getRun(input.run);
+    if (run === null) throw new ServiceError("not_found", `no run ${input.run}`);
+    return run;
   }
 
   /** Every attempt in the project, by task and then number, leaving out obsolete ones. For the ref list. */
@@ -1369,6 +1405,10 @@ export const TASK_METHODS = [
   "getAttempt",
   "listAttempts",
   "listProjectAttempts",
+  "getScoring",
+  "taskScores",
+  "listScoringRuns",
+  "getScoringRun",
   "attemptForBranch",
   "editAttempt",
   "openAttempt",

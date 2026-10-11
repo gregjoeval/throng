@@ -12,6 +12,7 @@ import {
   PREVIEW_LOG,
   readLogScript,
   setupLogName,
+  withNotes,
 } from "../src/logs.ts";
 
 const SHA = "c".repeat(40);
@@ -70,5 +71,31 @@ describe("readLogScript", () => {
     expect(stdout.length).toBeLessThanOrEqual(MAX_LOG_BYTES);
     expect(stdout.length).toBeGreaterThan(MAX_LOG_BYTES - 1024);
     expect(stdout).toMatch(/^h+\n\[throng: truncated \d+ of 10485760 bytes\]\nt+$/);
+  });
+});
+
+describe("withNotes", () => {
+  it("appends a check's notes to its log under a throng trailer", () => {
+    expect(withNotes("ok\n", ["ignored metric coverage: not a number", "metric bundle_kb was not reported"])).toBe(
+      "ok\n== throng ==\nignored metric coverage: not a number\nmetric bundle_kb was not reported\n",
+    );
+  });
+
+  it("starts the trailer on its own line when the log doesn't end in a newline", () => {
+    expect(withNotes("ok", ["ignored $THRONG_METRICS: not JSON"])).toBe(
+      "ok\n== throng ==\nignored $THRONG_METRICS: not JSON\n",
+    );
+  });
+
+  it("gives a check that wrote no log one holding just its notes", () => {
+    expect(withNotes(null, ["skipped: setup command 1 failed"])).toBe(
+      "== throng ==\nskipped: setup command 1 failed\n",
+    );
+  });
+
+  it("leaves a log without notes as it is, and stores nothing for a missing one", () => {
+    expect(withNotes("ok\n", [])).toBe("ok\n");
+    expect(withNotes("", [])).toBe("");
+    expect(withNotes(null, [])).toBeNull();
   });
 });

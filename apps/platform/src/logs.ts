@@ -2,6 +2,8 @@
 // layout, the log names and the script that reads a log out of the Sandbox (truncated to fit) live
 // here; the R2 lifecycle deletes logs after `LOG_RETENTION_DAYS` (see the README's setup).
 
+import type { ScoringParams } from "./scoring.ts";
+
 /** Logs over this many bytes are stored truncated, keeping their head and tail. */
 export const MAX_LOG_BYTES = 5 * 1024 * 1024;
 /** How long the R2 lifecycle rule keeps a log. */
@@ -20,15 +22,8 @@ export interface LogStore {
   put(key: string, value: string): Promise<unknown>;
 }
 
-/** The run a log belongs to. */
-export interface LogRun {
-  /** The project id. */
-  project: string;
-  /** The attempt, `t42a3`. */
-  attempt: string;
-  sha: string;
-  run: number;
-}
+/** What R2 and the log endpoint serve a log as. */
+export const LOG_CONTENT_TYPE = "text/plain; charset=utf-8";
 
 /** The 1-based `setup` command's log name, `setup.2`. */
 export function setupLogName(step: number): string {
@@ -41,7 +36,7 @@ export function isLogName(name: string): boolean {
 }
 
 /** Where a run's log is stored: `logs/<projectId>/<t42a3>/<sha>/<runId>/<name>.log`. */
-export function logKey({ project, attempt, sha, run }: LogRun, name: string): string {
+export function logKey({ project, attempt, sha, run }: ScoringParams, name: string): string {
   return `${LOG_PREFIX}${project}/${attempt}/${sha}/${run}/${name}.log`;
 }
 
@@ -72,4 +67,15 @@ tail -c ${keep} "$f"
 /** The logs a score plan may write, in run order: each setup step, then each check. */
 export function logNames(plan: { setup: string[]; checks: { name: string }[] }): string[] {
   return [...plan.setup.map((_, i) => setupLogName(i + 1)), ...plan.checks.map((check) => check.name)];
+}
+
+/**
+ * A check's log with what the run noted about it (ignored metrics, why it was skipped) appended
+ * under a `== throng ==` trailer. A step that wrote no log (`null`) gets one holding just its notes;
+ * with no notes either, there's nothing to store.
+ */
+export function withNotes(log: string | null, notes: string[]): string | null {
+  if (notes.length === 0) return log;
+  const head = log === null || log === "" || log.endsWith("\n") ? (log ?? "") : `${log}\n`;
+  return `${head}== throng ==\n${notes.join("\n")}\n`;
 }

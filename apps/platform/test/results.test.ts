@@ -154,11 +154,6 @@ describe("buildResult", () => {
     });
   });
 
-  it("keeps a reference to each log the run stored, by name", () => {
-    const result = buildResult(CONFIG, raw({ checks: [{ exit: 0, durationMs: 1, metrics: "" }] }), ["setup.1", "test"]);
-    expect(result.logs).toEqual(["setup.1", "test"]);
-  });
-
   it("fails an invalid config's gate with a single config entry carrying the error", () => {
     const invalid = parseConfig("checks:\n  - name: Bad Name\n    command: x\n");
     expect(invalid.kind).toBe("invalid");

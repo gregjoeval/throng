@@ -170,12 +170,12 @@ export function withPreview(result: ScoringResult, deployed: PreviewScriptResult
 }
 
 /**
- * The run's result from the config it was scored under, the score script's raw output and the
- * names of the logs stored for it.
+ * The run's result from the config it was scored under and the score script's raw output. Its
+ * `logs` are empty: the run stores its logs, with each check's notes, once the result is built.
  */
-export function buildResult(config: ConfigResult, raw: RawScore, logs: string[] = []): ScoringResult {
+export function buildResult(config: ConfigResult, raw: RawScore): ScoringResult {
   const builtin = { ...parseShortstat(raw.shortstat), durationMs: raw.builtinMs };
-  const common = { base: raw.base, builtin, preview: { status: "none" } as const, logs };
+  const common = { base: raw.base, builtin, preview: { status: "none" } as const, logs: [] };
   if (config.kind === "none") return { ...common, config: { kind: "none" }, gate: "passed", checks: [] };
   if (config.kind === "invalid") {
     const entry: CheckResult = {

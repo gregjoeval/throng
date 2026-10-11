@@ -10,7 +10,7 @@ import {
   type RunGrants,
   type SandboxRole,
 } from "./grants";
-import { logKey, logNames, MISSING_LOG_EXIT, readLogScript } from "./logs";
+import { logKey, logNames, MISSING_LOG_EXIT, PREVIEW_LOG, readLogScript } from "./logs";
 import { roleAccess } from "./network";
 import { previewName } from "./preview";
 import { forkRepo, originRepo } from "./repos";
@@ -68,8 +68,8 @@ export type LandOutcome =
  * re-tested and landed, as the spike did. Landing runs before the result is reported, so a newer
  * push still cancels it.
  *
- * Each setup step's and check's log is copied to R2 (`logs.ts`) before the score step returns, so
- * the result names the logs that were stored.
+ * Each setup step's, check's and Preview's log is copied to R2 (`logs.ts`) within the step that
+ * wrote it, while its container still runs, so the result names the logs that were stored.
  */
 export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
   override async run(event: Readonly<WorkflowEvent<ScoringParams>>, step: WorkflowStep): Promise<ScoringOutcome> {
@@ -87,8 +87,11 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
         this.#score(instanceId, params, config, plan, timeoutMs),
       );
       const preview = previewPlan(config, scored);
-      const result =
-        preview === null ? scored : withPreview(scored, await this.#preview(instanceId, params, preview, step));
+      let result = scored;
+      if (preview !== null) {
+        const { deployed, logs } = await this.#preview(instanceId, params, preview, step);
+        result = { ...withPreview(scored, deployed), logs: [...scored.logs, ...logs] };
+      }
       outcome = { status: "done", result };
     } catch (cause) {
       outcome = { status: "errored", error: String(cause).slice(0, 4000) };
@@ -137,16 +140,16 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
     if (raw === null) {
       throw new Error(`score script gave no result (exit ${run.exitCode}): ${run.stderr.slice(-2000)}`);
     }
-    const logs = await this.#storeLogs(instanceId, params, logNames(plan));
+    const logs = await this.#storeLogs(instanceId, params, "score", logNames(plan));
     return buildResult(config, raw, logs);
   }
 
   /**
-   * Copies the score container's logs to R2, truncated over 5 MB, and returns the names stored. A
+   * Copies the role's container's logs to R2, truncated over 5 MB, and returns the names stored. A
    * step that never ran wrote no log; a log that fails to copy is left out rather than failing the run.
    */
-  async #storeLogs(instanceId: string, params: ScoringParams, names: string[]): Promise<string[]> {
-    const sandbox = this.env.SANDBOX.getByName(sandboxName(instanceId, "score"));
+  async #storeLogs(instanceId: string, params: ScoringParams, role: SandboxRole, names: string[]): Promise<string[]> {
+    const sandbox = this.env.SANDBOX.getByName(sandboxName(instanceId, role));
     const run = { project: params.project, attempt: params.attempt, sha: params.sha, run: params.run };
     const stored: string[] = [];
     for (const name of names) {
@@ -167,32 +170,37 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
 
   /**
    * Deploys the head as a Worker Preview from the preview container, which holds the Preview deploy
-   * grant and only a read grant on the fork. Null when it gave no result or kept failing: a failed
-   * Preview is recorded on the result and never changes the gate.
+   * grant and only a read grant on the fork, and stores its log. `deployed` is null when it gave no
+   * result or kept failing: a failed Preview is recorded on the result and never changes the gate.
    */
   async #preview(
     instanceId: string,
     params: ScoringParams,
     { command }: { command: string | null },
     step: WorkflowStep,
-  ): Promise<PreviewScriptResult | null> {
+  ): Promise<{ deployed: PreviewScriptResult | null; logs: string[] }> {
     const workerName = this.env.PREVIEW_WORKER;
     const name = previewName(params, workerName);
     try {
-      const run = await step.do("preview", { retries: STEP_RETRIES, timeout: PREVIEW_STEP_TIMEOUT_MS }, () =>
-        this.#run(
-          instanceId,
-          params,
-          "preview",
-          (g) =>
-            previewScript(g.forkRead.remote, params.sha, {
-              accountId: this.env.CF_ACCOUNT_ID,
-              workerName,
-              previewName: name,
-              command,
-            }),
-          { timeoutMs: PREVIEW_STEP_TIMEOUT_MS },
-        ),
+      const { run, logs } = await step.do(
+        "preview",
+        { retries: STEP_RETRIES, timeout: PREVIEW_STEP_TIMEOUT_MS },
+        async () => {
+          const deploy = await this.#run(
+            instanceId,
+            params,
+            "preview",
+            (g) =>
+              previewScript(g.forkRead.remote, params.sha, {
+                accountId: this.env.CF_ACCOUNT_ID,
+                workerName,
+                previewName: name,
+                command,
+              }),
+            { timeoutMs: PREVIEW_STEP_TIMEOUT_MS },
+          );
+          return { run: deploy, logs: await this.#storeLogs(instanceId, params, "preview", [PREVIEW_LOG]) };
+        },
       );
       const deployed = parseResult<PreviewScriptResult>(run.stdout);
       if (deployed === null) {
@@ -200,10 +208,10 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
       } else if (!deployed.ok) {
         console.log({ event: "scoring.preview_failed", stage: deployed.stage, output: deployed.output.slice(-2000) });
       }
-      return deployed;
+      return { deployed, logs };
     } catch (cause) {
       console.warn({ event: "scoring.preview_errored", error: String(cause).slice(0, 2000) });
-      return null;
+      return { deployed: null, logs: [] };
     }
   }
 

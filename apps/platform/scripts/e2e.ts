@@ -311,6 +311,7 @@ async function preview(): Promise<void> {
     new URL(deployed.url).hostname.startsWith(`t1a1-p${project}-`),
     `the Preview is not named after the fork and project: ${deployed.url}`,
   );
+  assert(result.logs.includes("preview.deploy"), `expected the Preview's log stored: ${JSON.stringify(result.logs)}`);
 
   // A new Preview's hostname can take a moment to answer.
   const url = `${deployed.url}?name=e2e`;

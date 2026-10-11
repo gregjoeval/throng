@@ -1,7 +1,7 @@
 // Bash run inside a run's Sandbox. Each script is idempotent, so a retried Workflow step can rerun it
 // on a fresh container. The last stdout line is the result: `THRONG_RESULT <json>`.
 
-import { setupLogName } from "./logs.ts";
+import { PREVIEW_LOG, setupLogName } from "./logs.ts";
 import { MAX_METRICS_BYTES, SETUP_TIMEOUT_MS, type ScorePlan } from "./results.ts";
 
 export const RESULT_PREFIX = "THRONG_RESULT ";
@@ -119,7 +119,8 @@ NODE
 /**
  * Deploy the attempt's commit as a Worker Preview named `previewName`: install its dependencies, run
  * the config's `preview.command` (if any) as the build step, then `wrangler preview`. The API token
- * is a placeholder: the Worker's outbound intercept replaces it on requests it allows.
+ * is a placeholder: the Worker's outbound intercept replaces it on requests it allows. However it
+ * ends, the install's, build's and deploy's output is left in `logs/preview.deploy.log` for storing.
  */
 export function previewScript(
   forkRemote: string,
@@ -133,7 +134,10 @@ export function previewScript(
   result "{\\"ok\\":false,\\"stage\\":\\"build\\",\\"output\\":$(json < ../build.log)}"
 fi`;
   return `${PRELUDE}
-rm -rf preview && git init -q preview && cd preview
+ws=$PWD
+rm -rf preview logs install.log build.log preview.log preview.json && mkdir logs
+trap 'cat "$ws/install.log" "$ws/build.log" "$ws/preview.log" > "$ws/logs/${PREVIEW_LOG}.log" 2> /dev/null' EXIT
+git init -q preview && cd preview
 git fetch -q ${quote(forkRemote)} '+refs/heads/*:refs/remotes/fork/*' || exit 10
 git checkout -q --detach ${quote(sha)} || exit 11
 ${install('"ok":false')}

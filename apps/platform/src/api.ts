@@ -375,6 +375,7 @@ function scoringRoute(
 const AUTHOR_ONLY = "Only the attempt's author, or their agents, may.";
 const OWNER_ONLY = "Only the project owner may.";
 const TASK_MANAGERS = "Only the project owner or the task's creator may.";
+const RESCORERS = "Only the attempt's author (or their agents), the task's creator or the project owner may.";
 
 function publicToken({ id, agent, expires_at, revoked_at, created_at }: z.infer<typeof TokenSchema>) {
   return { id, agent, expires_at, revoked_at, created_at };
@@ -876,7 +877,7 @@ export function apiRoutes(options: ApiOptions = {}) {
         "Score an open attempt's head again",
         "Queues a new run for the head even if it already has a finished one. A head already queued or running " +
           "isn't queued again.",
-        "Only the attempt's author (or their agents), the task's creator or the project owner may.",
+        RESCORERS,
         "the attempt isn't open",
       ),
       async (c) => c.json(await tasks(c.env).rescore(c.var.actor, attemptPath(c.req.valid("param"))), 200),

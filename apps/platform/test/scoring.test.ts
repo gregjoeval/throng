@@ -297,6 +297,46 @@ describe("the scoring queue", () => {
     });
   });
 
+  it("doesn't let a head read before a push replace the head that push queued", async () => {
+    const { store, repos, runs, base, commit, drafts } = setup();
+    const [ref] = await drafts();
+    const newer = commit(ref!, "pushed while opening\n");
+    // Opening reads the fork's head; a push lands while that read is in flight.
+    const listCommits = repos.listCommits.bind(repos);
+    repos.listCommits = async (name, opts) => {
+      const [head, ...rest] = await listCommits(name, opts);
+      store.recordPush(PROJECT, ada, {
+        ...ref!,
+        updates: [{ ref: "refs/heads/main", before: base.hash, after: newer }],
+      });
+      return [{ ...head!, hash: base.hash }, ...rest];
+    };
+    // The attempt is open by the time the push is recorded, so it queues the newer head.
+    await store.openAttempt(PROJECT, ada, ref!);
+    expect(runs(ref!).map((r) => [r.sha, r.trigger, r.status])).toEqual([[newer, "push", "queued"]]);
+  });
+
+  it("cancels an attempt's runs when it returns to draft, closes, merges or is made obsolete", async () => {
+    const { store, workflow, runs, drafts, journal } = setup();
+    const refs = await drafts(4);
+    for (const ref of refs) await store.openAttempt(PROJECT, ada, ref);
+    await store.scoring.drain();
+    expect(refs.map((r) => runs(r)[0]!.status)).toEqual(["running", "running", "running", "queued"]);
+
+    store.draftAttempt(PROJECT, ada, refs[0]!);
+    await store.closeAttempt(PROJECT, ada, refs[1]!);
+    await store.obsoleteAttempt(PROJECT, owner, refs[3]!);
+    await store.markMerged(PROJECT, owner, { ...refs[2]!, sha: "f00" });
+    await store.scoring.drain();
+    expect(refs.map((r) => runs(r)[0]!.status)).toEqual(["cancelled", "cancelled", "cancelled", "cancelled"]);
+    expect(workflow.terminated).toHaveLength(3);
+    expect(
+      journal()
+        .filter((e) => e.kind === "scoring_cancelled")
+        .map((e) => e.reason),
+    ).toEqual(["returned to draft", "attempt closed", "attempt obsolete", "attempt merged"]);
+  });
+
   it("keeps runs queued when no runner is configured", async () => {
     const repos = new FakeRepos();
     void repos.create(ORIGIN);

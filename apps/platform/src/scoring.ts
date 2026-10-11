@@ -11,7 +11,7 @@
 // Workflows is I/O, done by `drain`, which the Durable Object runs after every store call.
 
 import { forkRepo } from "./repos.ts";
-import type { Sql } from "./task-store.ts";
+import { attemptRef, type Sql } from "./task-store.ts";
 import type { Actor } from "./tokens.ts";
 
 /** Most scoring runs one project may have running (each holds a Sandbox) at once. */
@@ -76,6 +76,12 @@ export interface ScoringRequestInput {
   sha: string;
   trigger: ScoringTrigger;
   actor: Actor | null;
+  /**
+   * The newest run id for the attempt when the caller began reading `sha` from its fork. A run
+   * queued since then came from a push recorded meanwhile, whose head is at least as new as
+   * `sha`, so the request yields to it rather than replace it.
+   */
+  readSince?: number | undefined;
 }
 
 /** What a request did: queued a run, or why it didn't, with the run that already covers the head. */
@@ -133,15 +139,17 @@ export class ScoringQueue {
         .map(toRun);
       const same = live.find((r) => r.sha === input.sha);
       if (same !== undefined) return { queued: false, reason: `already ${same.status}`, run: same };
-      // Whatever happens to this head, runs for older heads are stale now.
-      for (const older of live) {
-        this.#sql.exec(
-          "UPDATE scoring_runs SET status = 'cancelled', finished_at = ? WHERE id = ?",
-          this.#ms(),
-          older.id,
+      if (input.readSince !== undefined) {
+        const [newer] = this.#sql.exec<RunRow>(
+          "SELECT * FROM scoring_runs WHERE task = ? AND attempt = ? AND id > ? ORDER BY id DESC",
+          input.task,
+          input.attempt,
+          input.readSince,
         );
-        this.#journal("scoring_cancelled", older, { superseded_by: input.sha });
+        if (newer !== undefined) return { queued: false, reason: "a newer push is queued", run: toRun(newer) };
       }
+      // Whatever happens to this head, runs for older heads are superseded now.
+      for (const older of live) this.#cancel(older, { superseded_by: input.sha });
       if (input.trigger !== "rescore") {
         const [done] = this.#sql.exec<RunRow>(
           "SELECT * FROM scoring_runs WHERE task = ? AND attempt = ? AND sha = ? AND status = 'done' ORDER BY id DESC",
@@ -166,12 +174,39 @@ export class ScoringQueue {
       );
       if (row === undefined) throw new Error("scoring run insert returned no row");
       // The id makes the instance id unique, so a rescore of a head gets its own Workflow.
-      const instanceId = `${forkRepo(input.project, attemptName(row))}-${input.sha.slice(0, 12)}-${row.id}`;
+      const instanceId = `${forkRepo(input.project, attemptRef(row.task, row.attempt))}-${input.sha.slice(0, 12)}-${row.id}`;
       this.#sql.exec("UPDATE scoring_runs SET instance_id = ? WHERE id = ?", instanceId, row.id);
       const run = toRun({ ...row, instance_id: instanceId });
       this.#journal("scoring_queued", run, { trigger: input.trigger });
       return { queued: true, run };
     });
+  }
+
+  /**
+   * Cancels the attempt's queued and running runs, because it ended or went back to draft and is
+   * no longer considered; the next `drain` stops any that had started.
+   */
+  cancelAttempt(task: number, attempt: number, reason: string): void {
+    this.#sql.transaction(() => {
+      const live = this.#sql
+        .exec<RunRow>(
+          "SELECT * FROM scoring_runs WHERE task = ? AND attempt = ? AND status IN ('queued', 'running')",
+          task,
+          attempt,
+        )
+        .map(toRun);
+      for (const run of live) this.#cancel(run, { reason });
+    });
+  }
+
+  /** The newest run id for the attempt, or 0; what a request's `readSince` compares against. */
+  latestRunId(task: number, attempt: number): number {
+    const [row] = this.#sql.exec<{ id: number | null }>(
+      "SELECT MAX(id) AS id FROM scoring_runs WHERE task = ? AND attempt = ?",
+      task,
+      attempt,
+    );
+    return row?.id ?? 0;
   }
 
   /**
@@ -204,7 +239,7 @@ export class ScoringQueue {
         .map(toRun);
       for (const run of rows) {
         this.#sql.exec("UPDATE scoring_runs SET status = 'running', started_at = ? WHERE id = ?", this.#ms(), run.id);
-        this.#journal("scoring_started", run, { instanceId: run.instance_id });
+        this.#journal("scoring_started", run, { instance_id: run.instance_id });
       }
       return rows;
     });
@@ -218,14 +253,14 @@ export class ScoringQueue {
 
   /**
    * Records how a running run ended, from its Workflow's report. A report for a run that is no
-   * longer running (cancelled by a newer head) is discarded. Returns whether it was recorded.
+   * longer running (superseded by a newer head, or cancelled) is discarded. Returns whether it was recorded.
    */
   finish(id: number, status: "done" | "errored", detail: Record<string, unknown> = {}): boolean {
     return this.#sql.transaction(() => {
       const run = this.getRun(id);
       if (run === null) return false;
       if (run.status !== "running") {
-        console.log({ event: "scoring.stale_result", run: id, status: run.status });
+        console.log({ event: "scoring.discarded_result", run: id, status: run.status });
         return false;
       }
       this.#sql.exec("UPDATE scoring_runs SET status = ?, finished_at = ? WHERE id = ?", status, this.#ms(), id);
@@ -249,7 +284,7 @@ export class ScoringQueue {
   async #start(runner: ScoringRunner, run: StoredRun): Promise<void> {
     const params: ScoringParams = {
       project: run.project,
-      attempt: attemptName(run),
+      attempt: attemptRef(run.task, run.attempt),
       sha: run.sha,
       run: run.id,
     };
@@ -279,12 +314,17 @@ export class ScoringQueue {
       await runner.teardown(run.instance_id);
     } catch (cause) {
       // The run may already have finished; its report is discarded either way.
-      console.warn({ event: "scoring.stop_failed", instanceId: run.instance_id, error: String(cause) });
+      console.warn({ event: "scoring.stop_failed", instance_id: run.instance_id, error: String(cause) });
     }
   }
 
+  #cancel(run: StoredRun, detail: Record<string, unknown>): void {
+    this.#sql.exec("UPDATE scoring_runs SET status = 'cancelled', finished_at = ? WHERE id = ?", this.#ms(), run.id);
+    this.#journal("scoring_cancelled", run, detail);
+  }
+
   #journal(kind: string, run: StoredRun, extra: Record<string, unknown>): void {
-    const detail = { ref: attemptName(run), run: run.id, sha: run.sha, ...extra };
+    const detail = { ref: attemptRef(run.task, run.attempt), run: run.id, sha: run.sha, ...extra };
     this.#sql.exec(
       "INSERT INTO journal (at, kind, detail, user_id, agent, task, attempt) VALUES (?, ?, ?, ?, ?, ?, ?)",
       this.#ms(),
@@ -300,10 +340,6 @@ export class ScoringQueue {
   #ms(): number {
     return this.#now().getTime();
   }
-}
-
-function attemptName(run: { task: number; attempt: number }): string {
-  return `t${run.task}a${run.attempt}`;
 }
 
 function toRun(row: RunRow): StoredRun {

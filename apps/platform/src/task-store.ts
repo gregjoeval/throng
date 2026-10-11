@@ -587,7 +587,11 @@ export class TaskStore {
 
   /** open → draft: takes the attempt back out of consideration. Only its author may. */
   draftAttempt(_project: ProjectContext, actor: Actor, input: AttemptInput): StoredAttempt {
-    return this.#authorMoves(actor, input, ["open"], "draft", "returned_to_draft");
+    return this.#sql.transaction(() => {
+      const drafted = this.#authorMoves(actor, input, ["open"], "draft", "returned_to_draft");
+      this.scoring.cancelAttempt(drafted.task, drafted.number, "returned to draft");
+      return drafted;
+    });
   }
 
   /** draft or open → closed, archiving and deleting its fork. Only its author may. */
@@ -725,6 +729,7 @@ export class TaskStore {
         current.number,
       );
       this.#journal(actor, "merged", current.task, current.number, { sha: input.sha });
+      this.scoring.cancelAttempt(current.task, current.number, "attempt merged");
       const others = this.#activeAttempts(current.task);
       for (const other of others) this.#endAttempt(actor, other, "closed");
       this.#endTask(actor, current.task, "closed");
@@ -752,8 +757,9 @@ export class TaskStore {
    * Journals a `pushed` event for each ref a push through the git proxy updated on an attempt's
    * fork, with the old and new ids so force-pushes show up afterwards, and queues scoring when the
    * attempt is open and its head moved. A commit already delivered to the fork isn't journalled
-   * again, and the scoring queue skips a head it already covers. The proxy checked the claim before forwarding the push, and the push has landed, so this checks
-   * nothing. Returns the scoring request, or null when the push asked for none.
+   * again, and the scoring queue skips a head it already covers. The proxy checked the claim
+   * before forwarding the push, and the push has landed, so this checks nothing. Returns the
+   * scoring request, or null when the push asked for none.
    */
   recordPush(
     project: ProjectContext,
@@ -1001,7 +1007,8 @@ export class TaskStore {
 
   /**
    * Requests scoring of the attempt's current head, read from its fork. Null when there is none to
-   * score: the fork has no commits, or it couldn't be read (logged; a rescore can ask again).
+   * score: the fork has no commits, or it couldn't be read (logged; a rescore can ask again). A
+   * push recorded while the head is read queues its own run, which the request then yields to.
    */
   async #scoreHead(
     project: ProjectContext,
@@ -1009,6 +1016,7 @@ export class TaskStore {
     attempt: StoredAttempt,
     trigger: ScoringTrigger,
   ): Promise<ScoringRequest | null> {
+    const readSince = this.scoring.latestRunId(attempt.task, attempt.number);
     let head: string | null;
     try {
       const [commit] = await this.#repos.listCommits(forkRepo(project.id, attempt.fork), { ref: "main", limit: 1 });
@@ -1017,7 +1025,7 @@ export class TaskStore {
       console.error({ event: "scoring.head_unreadable", attempt: attempt.fork, trigger, error: String(cause) });
       return null;
     }
-    return head === null ? null : this.#request(project, actor, attempt, head, trigger);
+    return head === null ? null : this.#request(project, actor, attempt, head, trigger, readSince);
   }
 
   #request(
@@ -1026,6 +1034,7 @@ export class TaskStore {
     attempt: StoredAttempt,
     sha: string,
     trigger: ScoringTrigger,
+    readSince?: number,
   ): ScoringRequest {
     return this.scoring.request({
       project: project.id,
@@ -1034,6 +1043,7 @@ export class TaskStore {
       sha,
       trigger,
       actor,
+      readSince,
     });
   }
 
@@ -1086,6 +1096,7 @@ export class TaskStore {
       current.number,
     );
     this.#journal(actor, to === "closed" ? "closed" : "made_obsolete", current.task, current.number);
+    this.scoring.cancelAttempt(current.task, current.number, `attempt ${to}`);
   }
 
   /**

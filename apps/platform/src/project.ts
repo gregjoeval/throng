@@ -5,9 +5,6 @@ import { reposFor } from "./artifacts";
 import type { ScoringParams, ScoringRequest } from "./scoring";
 import { parseAttemptRef, runTaskMethod, TaskStore, type Sql, type TaskOutcome } from "./task-store";
 
-/** What the check Workflow is started with: a scoring run's params. */
-export type CheckParams = ScoringParams;
-
 export type CheckOutcome =
   | { kind: "landed"; mainSha: string }
   | { kind: "failed"; stage: FailureStage | "rebase-test"; output: string }
@@ -77,14 +74,17 @@ export class ProjectCoordinator extends DurableObject<Env> {
     return request;
   }
 
-  /** Called by the check Workflow when it finishes. Reports from a cancelled run are discarded. */
+  /**
+   * Called by the run's Workflow (the spike's `CheckWorkflow` until the Scoring Workflow replaces
+   * it) when it finishes. Reports from a superseded or cancelled run are discarded.
+   */
   async checkFinished(
-    params: CheckParams & { instanceId: string },
+    params: ScoringParams & { instanceId: string },
     outcome: CheckOutcome,
     timings: Record<string, number>,
   ): Promise<void> {
     const status = outcome.kind === "error" ? "errored" : "done";
-    this.#tasks.scoring.finish(params.run, status, { instanceId: params.instanceId, outcome, timings });
+    this.#tasks.scoring.finish(params.run, status, { instance_id: params.instanceId, outcome, timings });
     // Landing pushes to the origin's `main`; that internal push notifies the project here.
     if (outcome.kind === "landed") this.#log("main_advanced", { sha: outcome.mainSha, attempt: params.attempt });
     await this.#drain();

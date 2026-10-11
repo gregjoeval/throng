@@ -1,6 +1,7 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import { reposFor } from "./artifacts";
-import type { CheckOutcome, CheckParams } from "./project";
+import type { CheckOutcome } from "./project";
+import type { ScoringParams } from "./scoring";
 import {
   CHECK_ROLES,
   grantsForRole,
@@ -33,8 +34,8 @@ const LAND_ROUNDS = 3;
  * Tests an attempt's commit, then rebases it onto main, re-tests, and lands it. Repo code runs only in
  * containers without canonical write access; landing happens in its own container (see `grants.ts`).
  */
-export class CheckWorkflow extends WorkflowEntrypoint<Env, CheckParams> {
-  override async run(event: Readonly<WorkflowEvent<CheckParams>>, step: WorkflowStep): Promise<CheckOutcome> {
+export class CheckWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
+  override async run(event: Readonly<WorkflowEvent<ScoringParams>>, step: WorkflowStep): Promise<CheckOutcome> {
     const params = event.payload;
     const instanceId = event.instanceId;
     const timings: Record<string, number> = { createdAt: event.timestamp.getTime() };
@@ -118,7 +119,7 @@ export class CheckWorkflow extends WorkflowEntrypoint<Env, CheckParams> {
   }
 
   /** Every token a check might need. Minted per step, so a retry never holds a stale one. */
-  async #grants({ project, attempt }: CheckParams): Promise<CheckGrants> {
+  async #grants({ project, attempt }: ScoringParams): Promise<CheckGrants> {
     const repos = reposFor(this.env);
     const origin = originRepo(project);
     const fork = forkRepo(project, attempt);

@@ -5,7 +5,7 @@
 
 import { parseDocument } from "yaml";
 import { z } from "zod";
-import { METRIC_FORMATS, METRIC_TYPES } from "./metric-values.ts";
+import { METRIC_FORMATS, METRIC_TYPES, parseFrom } from "./metric-values.ts";
 import type { MetricFormat } from "./metric-values.ts";
 import { originRepo } from "./repos.ts";
 import type { Repos } from "./repos.ts";
@@ -22,9 +22,12 @@ const FROM = /^[^.]+\.[^./\\]+(\.[^.]+)+$/u;
 /** A metric's stored `order`: `asc` when lower values are better, `desc` when higher are. */
 export const METRIC_ORDERS = ["asc", "desc"] as const;
 export type MetricOrder = (typeof METRIC_ORDERS)[number];
-/** Who defined a check or metric: the project's config, or a task over it. */
-export const CONFIG_LAYERS = ["project", "task"] as const;
-export type ConfigLayer = (typeof CONFIG_LAYERS)[number];
+/** Who defined a check or metric: Throng itself, the project's config, or a task over it. */
+export const SOURCES = ["platform", "project", "task"] as const;
+export type Source = (typeof SOURCES)[number];
+/** The layers a config merges: every source but Throng, whose own checks no config defines. */
+export type ConfigLayer = Exclude<Source, "platform">;
+export const CONFIG_LAYERS = SOURCES.filter((source): source is ConfigLayer => source !== "platform");
 
 /** A metric, with the fields its type has. */
 export type MetricConfig = {
@@ -108,6 +111,10 @@ const oneOf = (values: readonly string[]) =>
 const FROM_FORMAT = "from must be <check>.<file>.<path>, like test.coverage-summary.total.lines.pct";
 const command = z.string({ error: "must be a string" }).trim().min(1, "must not be empty");
 
+/**
+ * A metric as a config writes it. It stays one flat object rather than a union on `type`, so each
+ * field's error names that field; `checkMetricFields` enforces which fields each type has.
+ */
 export const MetricSchema = z.strictObject({
   name: name("metric name"),
   from: z
@@ -148,6 +155,54 @@ export function checkMetricFields(metric: z.infer<typeof MetricSchema>, at: numb
     if (seen.has(value)) problem(["values", i], `duplicate value ${value}`);
     seen.add(value);
   });
+}
+
+/** A layer's checks and metrics, as far as the name rules read them. */
+export interface NamedLayer {
+  checks: readonly { name: string }[];
+  metrics: readonly { name: string; from: string }[];
+}
+
+/** A broken name rule, at its path in the layer: `["metrics", 0, "from"]`. */
+export interface NameProblem {
+  path: (string | number)[];
+  message: string;
+}
+
+/**
+ * Each name rule a layer's checks and metrics break, in order. A check's outcome is a metric named
+ * after it, so checks and metrics share one namespace: a name may be used once, and a metric may read
+ * only a check that exists. `project` is the config a task's layer goes over: its names are taken,
+ * and its checks may be read. It is null for the project's config itself.
+ */
+export function nameProblems(layer: NamedLayer, project: NamedLayer | null): NameProblem[] {
+  const projectChecks = new Set(project?.checks.map((check) => check.name));
+  const projectMetrics = new Set(project?.metrics.map((metric) => metric.name));
+  const taken = (used: string): string | null => {
+    if (projectChecks.has(used)) return `${used} is also a check's name in ${CONFIG_PATH}`;
+    if (projectMetrics.has(used)) return `${used} is also a metric's name in ${CONFIG_PATH}`;
+    return null;
+  };
+  const problems: NameProblem[] = [];
+  const checks = new Set<string>();
+  layer.checks.forEach((check, i) => {
+    const message = taken(check.name) ?? (checks.has(check.name) ? `duplicate check name ${check.name}` : null);
+    if (message !== null) problems.push({ path: ["checks", i, "name"], message });
+    checks.add(check.name);
+  });
+  const metrics = new Set<string>();
+  layer.metrics.forEach((metric, i) => {
+    let message = taken(metric.name);
+    if (message === null && checks.has(metric.name)) message = `metric name ${metric.name} is also a check's name`;
+    else if (message === null && metrics.has(metric.name)) message = `duplicate metric name ${metric.name}`;
+    if (message !== null) problems.push({ path: ["metrics", i, "name"], message });
+    metrics.add(metric.name);
+    const { check } = parseFrom(metric.from);
+    if (!checks.has(check) && !projectChecks.has(check)) {
+      problems.push({ path: ["metrics", i, "from"], message: `no check is named ${check}` });
+    }
+  });
+  return problems;
 }
 
 /**
@@ -241,29 +296,9 @@ const ConfigSchema = z
     { error: "the config must be a mapping" },
   )
   .superRefine((config, ctx) => {
-    // Each check's outcome is a metric named after it, so checks and metrics share one namespace.
-    const checks = new Set<string>();
-    config.checks?.forEach((check, i) => {
-      if (checks.has(check.name)) {
-        ctx.addIssue({ code: "custom", path: ["checks", i, "name"], message: `duplicate check name ${check.name}` });
-      }
-      checks.add(check.name);
-    });
-    const metrics = new Set<string>();
-    config.metrics?.forEach((metric, i) => {
-      const path = ["metrics", i, "name"];
-      if (checks.has(metric.name)) {
-        ctx.addIssue({ code: "custom", path, message: `metric name ${metric.name} is also a check's name` });
-      } else if (metrics.has(metric.name)) {
-        ctx.addIssue({ code: "custom", path, message: `duplicate metric name ${metric.name}` });
-      }
-      metrics.add(metric.name);
-      checkMetricFields(metric, i, ctx);
-      const check = metric.from.split(".")[0] ?? "";
-      if (!checks.has(check)) {
-        ctx.addIssue({ code: "custom", path: ["metrics", i, "from"], message: `no check is named ${check}` });
-      }
-    });
+    const layer = { checks: config.checks ?? [], metrics: config.metrics ?? [] };
+    for (const problem of nameProblems(layer, null)) ctx.addIssue({ code: "custom", ...problem });
+    layer.metrics.forEach((metric, i) => checkMetricFields(metric, i, ctx));
   });
 
 /**
@@ -310,13 +345,18 @@ export async function loadConfig(repos: Repos, projectId: string): Promise<Confi
 }
 
 export function describeIssue(issue: z.core.$ZodIssue): string {
-  const path = issue.path
-    .map((part, i) => (typeof part === "number" ? `[${part}]` : `${i === 0 ? "" : "."}${String(part)}`))
-    .join("");
+  const path = describePath(issue.path);
   // An unknown key's path is its parent's, so name the key itself.
   if (issue.code === "unrecognized_keys") {
     const keys = issue.keys.map((key) => (path === "" ? key : `${path}.${key}`));
     return `${keys.join(", ")}: unknown key${keys.length === 1 ? "" : "s"}`;
   }
   return path === "" ? issue.message : `${path}: ${issue.message}`;
+}
+
+/** A path into a config as its YAML reads: `checks[0].name`. */
+export function describePath(path: readonly PropertyKey[]): string {
+  return path
+    .map((part, i) => (typeof part === "number" ? `[${part}]` : `${i === 0 ? "" : "."}${String(part)}`))
+    .join("");
 }

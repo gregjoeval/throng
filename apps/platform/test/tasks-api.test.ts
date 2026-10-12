@@ -312,7 +312,7 @@ describe("task checks", () => {
     [
       "a task metric named like it",
       { checks: [SMOKE], metrics: [{ ...SMOKED, name: "smoke" }] },
-      /^metrics\[0\]\.name: smoke is also the name of one of the task's checks$/u,
+      /^metrics\[0\]\.name: metric name smoke is also a check's name$/u,
     ],
   ])("are rejected with what is wrong: %s", async (_label, fields, message) => {
     const { call, ada, base } = await withConfig();
@@ -350,6 +350,7 @@ describe("attempt routes", () => {
         alias: "claude",
         state: "draft",
         fork: `t1a${n}`,
+        remote: `http://localhost/git/greg/throng/t1a${n}.git`,
         branch: null,
         note: "go",
         createdAt: "2026-10-10T12:00:00.000Z",
@@ -368,9 +369,20 @@ describe("attempt routes", () => {
     expect(one.body["attempts"].map((a: Json) => a["ref"])).toEqual(["t1a3"]);
     const list = await call("GET", `${base}/tasks/t1/attempts`, bob);
     expect(list.body["attempts"].map((a: Json) => a["ref"])).toEqual(["t1a1", "t1a2", "t1a3"]);
-    expect((await call("GET", `${base}/attempts/t1a2`, bob)).body).toEqual(created.body["attempts"][1]);
+    expect(created.body["attempts"][1]).toMatchObject((await call("GET", `${base}/attempts/t1a2`, bob)).body);
     expect((await call("GET", `${base}/attempts/t1a9`, bob)).status).toBe(404);
     expect((await call("GET", `${base}/attempts/t1`, bob)).status).toBe(400);
+  });
+
+  it("gives each new attempt its git remote, and never the token", async () => {
+    const { call, adaClaude, bob, base } = await setup();
+    await call("POST", `${base}/tasks`, bob, { title: "a" });
+    const created = await call("POST", `${base}/tasks/t1/attempts`, adaClaude, { count: 2 });
+    expect(created.body["attempts"].map((a: Json) => a["remote"])).toEqual(
+      [1, 2].map((n) => `http://localhost/git/greg/throng/t1a${n}.git`),
+    );
+    expect(created.body["attempts"][0]).not.toHaveProperty("clone");
+    expect(JSON.stringify(created.body)).not.toContain(adaClaude);
   });
 
   it("forks an attempt of the same task, recording forkedFrom, and refuses one from another task", async () => {

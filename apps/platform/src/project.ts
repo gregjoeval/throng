@@ -82,8 +82,8 @@ export class ProjectCoordinator extends DurableObject<Env> {
   }
 
   /** Called by a run's Scoring Workflow when it starts: what the task defines over the project's config. */
-  taskDefinitions(task: number): TaskDefinitions {
-    return this.#tasks.taskDefinitions(task);
+  definitionsOf(task: number): TaskDefinitions {
+    return this.#tasks.definitionsOf(task);
   }
 
   /** Called by a run's Scoring Workflow when it ends. Reports from a superseded or cancelled run are discarded. */

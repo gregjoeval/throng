@@ -3,18 +3,14 @@
 // gate live here so they're tested without a container.
 
 import { DEFAULT_CHECK_TIMEOUT_MS } from "./config.ts";
-import type { CheckConfig, ConfigResult, MetricConfig, MetricOrder } from "./config.ts";
-import { typedValue } from "./metric-values.ts";
+import type { CheckConfig, ConfigResult, MetricConfig, MetricOrder, Source } from "./config.ts";
+import { parseFrom, typedValue } from "./metric-values.ts";
 import type { MetricFormat, MetricRule, MetricValue } from "./metric-values.ts";
 import type { PreviewScriptResult } from "./scripts.ts";
 
 /** A check's outcome, best first; they are also the values of the check's outcome metric. */
 export const CHECK_OUTCOMES = ["passed", "failed", "timedOut", "errored", "skipped"] as const;
 export type CheckOutcome = (typeof CHECK_OUTCOMES)[number];
-
-/** Who defined a check or metric: Throng itself, the project's config, or the task. */
-export const METRIC_SOURCES = ["platform", "project", "task"] as const;
-export type MetricSource = (typeof METRIC_SOURCES)[number];
 
 /** Longest a `setup` command may run; the spec gives setup no timeout of its own. */
 export const SETUP_TIMEOUT_MS = DEFAULT_CHECK_TIMEOUT_MS;
@@ -30,7 +26,7 @@ const PREVIEW_CHECK = "_preview";
 /** A check: a process the run ran, or skipped. Its outcome is also a metric named after it. */
 export interface CheckResult {
   name: string;
-  source: MetricSource;
+  source: Source;
   /** Whether the gate needs it to pass. */
   required: boolean;
   outcome: CheckOutcome;
@@ -40,8 +36,8 @@ export interface CheckResult {
 }
 
 interface MetricFields {
-  source: MetricSource;
-  /** Why the value is null. */
+  source: Source;
+  /** Why the value is null; on a value, what to know about it, such as that it came from an older result. */
   note?: string;
 }
 
@@ -114,7 +110,7 @@ export interface RawScore {
 
 /** The metrics read from `check`'s output, in config order. */
 function metricsFrom(check: string, metrics: MetricConfig[]): MetricConfig[] {
-  return metrics.filter((metric) => metric.from.split(".")[0] === check);
+  return metrics.filter((metric) => parseFrom(metric.from).check === check);
 }
 
 /** The rule a metric's value must fit: its type, and an enum's values. */
@@ -189,13 +185,13 @@ export function previewPlan(config: ConfigResult, result: ScoringResult): Previe
 }
 
 /** A check with its metrics, before its outcome metric is added. */
-interface Scored {
+interface ScoredCheck {
   check: CheckResult;
   metrics: Record<string, MetricResult>;
 }
 
 /** The check's outcome metric, then its own metrics. */
-function metricsOf({ check, metrics }: Scored): Record<string, MetricResult> {
+function metricsOf({ check, metrics }: ScoredCheck): Record<string, MetricResult> {
   const outcome: MetricResult = {
     source: check.source,
     type: "enum",
@@ -215,7 +211,7 @@ function diffMetric(value: number): MetricResult {
 }
 
 /** `_diff`: finding the base and diffing, with the diff's size. */
-function diffScored(size: ReturnType<typeof parseShortstat>, durationMs: number): Scored {
+function diffScored(size: ReturnType<typeof parseShortstat>, durationMs: number): ScoredCheck {
   return {
     check: platformCheck(DIFF_CHECK, "passed", durationMs, []),
     metrics: {
@@ -227,10 +223,10 @@ function diffScored(size: ReturnType<typeof parseShortstat>, durationMs: number)
 }
 
 /** `_preview` with its outcome, and `_preview.url`: null with a note unless it passed. */
-function previewScored(outcome: CheckOutcome, durationMs: number, notes: string[], url: string | null): Scored {
+function previewScored(outcome: CheckOutcome, durationMs: number, notes: string[], url: string | null): ScoredCheck {
   const what = `${PREVIEW_CHECK} ${outcome === "skipped" ? "was skipped" : outcome}`;
   const note = notes.length === 0 ? what : `${what}: ${notes.join("; ")}`;
-  const base = { source: "platform", type: "string", format: "url" } as const;
+  const urlFields = { source: "platform", type: "string", format: "url" } as const;
   return {
     check: platformCheck(
       PREVIEW_CHECK,
@@ -238,7 +234,9 @@ function previewScored(outcome: CheckOutcome, durationMs: number, notes: string[
       durationMs,
       notes.map((n) => `${outcome}: ${n}`),
     ),
-    metrics: { [`${PREVIEW_CHECK}.url`]: url === null ? { ...base, value: null, note } : { ...base, value: url } },
+    metrics: {
+      [`${PREVIEW_CHECK}.url`]: url === null ? { ...urlFields, value: null, note } : { ...urlFields, value: url },
+    },
   };
 }
 
@@ -259,7 +257,7 @@ export function withPreview(
   deployed: PreviewScriptResult | null | { error: string },
   durationMs: number,
 ): ScoringResult {
-  let scored: Scored;
+  let scored: ScoredCheck;
   if (deployed !== null && "error" in deployed) scored = previewScored("errored", durationMs, [deployed.error], null);
   else if (deployed === null) scored = previewScored("failed", durationMs, ["the preview script gave no result"], null);
   else if (deployed.ok) scored = previewScored("passed", durationMs, [], deployed.url);
@@ -276,8 +274,13 @@ export function withPreview(
  * beside the attempt's code, so the Worker trusts nothing it hands back.
  */
 function checkedValue(metric: MetricConfig, reported: MetricValue | undefined): MetricValue {
-  if (typeof reported !== "object" || reported === null) return { value: null, note: `${metric.from}: not reported` };
-  if (reported.value === null) return { value: null, note: String(reported.note) };
+  const notReported = { value: null, note: `${metric.from}: not reported` };
+  if (typeof reported !== "object" || reported === null) return notReported;
+  if (reported.value === null) {
+    return typeof reported.note === "string" && reported.note !== ""
+      ? { value: null, note: reported.note }
+      : notReported;
+  }
   const typed = typedValue(reported.value, ruleOf(metric));
   return "problem" in typed ? { value: null, note: `${metric.from}: ${typed.problem}` } : typed;
 }
@@ -286,7 +289,8 @@ function checkedValue(metric: MetricConfig, reported: MetricValue | undefined): 
  * A metric's entry in the result: its type's fields, and its value, already checked against its
  * type, or null with the note.
  */
-function metricResult(metric: MetricConfig, source: MetricSource, checked: MetricValue): MetricResult {
+function metricResult(metric: MetricConfig, checked: MetricValue): MetricResult {
+  const { source } = metric;
   const note = checked.value === null ? { note: checked.note } : {};
   const { value } = checked;
   switch (metric.type) {
@@ -326,12 +330,13 @@ function configScored(
   metrics: MetricConfig[],
   ran: RawScore["checks"][number] | undefined,
   setupFailed: number | null,
-): Scored {
+): ScoredCheck {
   const outcome = checkOutcome(ran?.exit ?? null, ran?.durationMs ?? 0, check.timeoutMs);
-  const skipped = setupFailed === null ? "skipped" : `skipped: setup command ${setupFailed} failed`;
-  const value = (metric: MetricConfig): MetricValue =>
+  // The score script records an exit for every check it runs, and runs them all unless setup fails.
+  const skipNote = `skipped: ${setupFailed === null ? "the score script didn't report it" : `setup command ${setupFailed} failed`}`;
+  const metricValue = (metric: MetricConfig): MetricValue =>
     outcome === "skipped"
-      ? { value: null, note: `${check.name}: ${check.name} was ${skipped}` }
+      ? { value: null, note: `${check.name}: ${check.name} was ${skipNote}` }
       : checkedValue(metric, ran?.metrics[metric.name]);
   return {
     check: {
@@ -340,12 +345,12 @@ function configScored(
       required: check.required,
       outcome,
       durationMs: ran?.durationMs ?? 0,
-      notes: outcome === "skipped" && setupFailed !== null ? [skipped] : [],
+      notes: outcome === "skipped" ? [skipNote] : [],
     },
     metrics: Object.fromEntries(
       metricsFrom(check.name, metrics).map((metric): [string, MetricResult] => [
         metric.name,
-        metricResult(metric, metric.source, value(metric)),
+        metricResult(metric, metricValue(metric)),
       ]),
     ),
   };
@@ -369,17 +374,21 @@ export function buildResult(config: ConfigResult, raw: RawScore): ScoringResult 
     ...checks,
     previewScored("skipped", 0, [previewSkipped(config, gate)], null),
   ];
-  const kind = config.kind === "invalid" ? { kind: "invalid" as const, error: config.error } : { kind: config.kind };
-  return { base: raw.base, config: kind, gate, ...flatten(scored), logs: [] };
+  const configSummary =
+    config.kind === "invalid" ? { kind: "invalid" as const, error: config.error } : { kind: config.kind };
+  return { base: raw.base, config: configSummary, gate, ...flatten(scored), logs: [] };
 }
 
 /** The checks, and every metric by name: each check's outcome metric, then its own metrics. */
-function flatten(scored: Scored[]): Pick<ScoringResult, "checks" | "metrics"> {
+function flatten(scored: ScoredCheck[]): Pick<ScoringResult, "checks" | "metrics"> {
   return {
     checks: scored.map((s) => s.check),
     metrics: Object.assign({}, ...scored.map(metricsOf)) as Record<string, MetricResult>,
   };
 }
+
+/** The note on each metric `upgradeResult` converts: its order is a guess. */
+const LEGACY_METRIC_NOTE = "converted from an older result, which didn't record its order or unit";
 
 /**
  * A result as runs stored it before Throng's own work became checks: `builtin` held the diff's size,
@@ -398,24 +407,35 @@ export interface LegacyResult extends Pick<ScoringResult, "base" | "config" | "g
 
 /**
  * A stored result in the current shape. A legacy one becomes `_diff`, its checks with their metrics
- * as project numbers (the order a config gives a number by default, since no order was stored), and
- * `_preview`; its synthetic `config` check is dropped, as `config` already holds the error.
+ * as project numbers, and `_preview`; its synthetic `config` check is dropped, as `config` already
+ * holds the error. No order or unit was stored, so each number takes a config's default order
+ * (higher is better) with a note saying so. A metric named like a check is dropped, as the check's
+ * outcome metric holds that name now, with a note on that check.
  */
 export function upgradeResult(stored: ScoringResult | LegacyResult): ScoringResult {
   if (!("builtin" in stored)) return stored;
   const { builtin, preview } = stored;
-  const checks = stored.checks
-    .filter((check) => check.error === undefined)
-    .map(({ metrics, error: _error, ...check }): Scored => ({
-      check: { ...check, source: "project" },
-      metrics: Object.fromEntries(
-        Object.entries(metrics).map(([name, value]): [string, MetricResult] => [
+  const legacyChecks = stored.checks.filter((check) => check.error === undefined);
+  const names = new Set(legacyChecks.map((check) => check.name));
+  const dropped = new Map<string, string[]>();
+  for (const { name: check, metrics } of legacyChecks) {
+    for (const name of Object.keys(metrics).filter((metric) => names.has(metric))) {
+      const note = `dropped metric ${name}, read from ${check} in an older result: its name is this check's`;
+      dropped.set(name, [...(dropped.get(name) ?? []), note]);
+    }
+  }
+  const checks = legacyChecks.map(({ metrics, error: _error, ...check }): ScoredCheck => ({
+    check: { ...check, source: "project", notes: [...check.notes, ...(dropped.get(check.name) ?? [])] },
+    metrics: Object.fromEntries(
+      Object.entries(metrics)
+        .filter(([name]) => !names.has(name))
+        .map(([name, value]): [string, MetricResult] => [
           name,
-          { source: "project", type: "number", value, order: "desc" },
+          { source: "project", type: "number", value, order: "desc", note: LEGACY_METRIC_NOTE },
         ]),
-      ),
-    }));
-  let deployed: Scored;
+    ),
+  }));
+  let deployed: ScoredCheck;
   if (preview.status === "ready") deployed = previewScored("passed", 0, [], preview.url);
   else if (preview.status === "errored") deployed = previewScored("errored", 0, [preview.error], null);
   else deployed = previewScored(preview.status === "none" ? "skipped" : "failed", 0, [], null);

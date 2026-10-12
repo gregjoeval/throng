@@ -8,7 +8,22 @@
 
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import type { AccessBindings } from "./access.ts";
-import { json, ProjectPathSchema } from "./api-shared.ts";
+import {
+  AttemptLimitSchema,
+  CreateAttemptsSchema,
+  CreateTaskSchema,
+  EditAttemptSchema,
+  HandOffSchema,
+  json,
+  PostVerdictSchema,
+  ProjectPathSchema,
+  requestTaskService,
+  SelectionSchema,
+  TaskChecksInputSchema,
+  TaskMetricsInputSchema,
+  WaitQuerySchema,
+  workersCache,
+} from "./api-shared.ts";
 import { bearerAuth, bearerOrAccess, bearerOrForwarded } from "./auth.ts";
 import type { AuthEnv, AuthOptions } from "./auth.ts";
 import { BASE_LINES } from "./base.ts";
@@ -20,6 +35,7 @@ import {
   MAX_CONFIG_BYTES,
   METRIC_ORDERS,
   parseConfig,
+  SOURCES,
 } from "./config.ts";
 import { dequeueRoutes } from "./dequeue-api.ts";
 import type { DiffCache } from "./diff.ts";
@@ -31,15 +47,15 @@ import { DEQUEUE_REASONS, MERGE_REQUEST_STATES } from "./merge-requests.ts";
 import { METRIC_FORMATS, METRIC_TYPES } from "./metric-values.ts";
 import { MAX_PROJECT_HANDLE, PROJECT_HANDLE, projectService } from "./projects.ts";
 import type { Repos } from "./repos.ts";
-import { CHECK_OUTCOMES, GATES, METRIC_SOURCES } from "./results.ts";
+import { CHECK_OUTCOMES, GATES } from "./results.ts";
 import { ATTEMPT_SCORING_STATUSES, RUN_STATUSES, SCORING_TRIGGERS } from "./scoring.ts";
 import { ATTEMPT_STATES, TASK_STATES } from "./task-store.ts";
-import { taskService } from "./tasks.ts";
 import type { TaskBackend } from "./tasks.ts";
 import { DEFAULT_TOKEN_TTL_SECONDS, MAX_TOKEN_TTL_SECONDS, tokenService } from "./tokens.ts";
 import type { Token } from "./tokens.ts";
 import type { User } from "./users.ts";
-import { MAX_VERDICT_BODY, VERDICT_RECOMMENDATIONS } from "./verdicts.ts";
+import { VERDICT_RECOMMENDATIONS } from "./verdicts.ts";
+import { MAX_WAITERS_PER_USER } from "./waiters.ts";
 
 const UserSchema = z
   .object({ id: z.string(), handle: z.string(), email: z.string(), createdAt: z.string() })
@@ -118,6 +134,20 @@ const UserRefSchema = z.object({ id: z.string(), handle: z.string().openapi({ ex
 
 const ConfigNameSchema = z.string().regex(CONFIG_NAME);
 
+/** Who defined a declared check or metric. */
+const ConfigLayerSchema = z
+  .enum(CONFIG_LAYERS)
+  .openapi({ description: "Who defined it: the project's config, or the task." });
+
+/** The fields only some metric types have, described once for a declared metric and a metric result. */
+const METRIC_TYPE_FIELDS = {
+  numberOrder: z.enum(METRIC_ORDERS).openapi({ description: "`asc` when lower is better, `desc` when higher is." }),
+  booleanOrder: z.enum(METRIC_ORDERS).openapi({ description: "`desc` when true is better, `asc` when false is." }),
+  unit: z.string().openapi({ example: "%" }),
+  format: z.enum(METRIC_FORMATS).openapi({ description: "`url`: shown as a link." }),
+  values: z.array(z.string()).openapi({ description: "Every value it may take, best first." }),
+};
+
 const configMetricFields = {
   name: ConfigNameSchema.openapi({ example: "coverage" }),
   from: z.string().openapi({
@@ -126,7 +156,7 @@ const configMetricFields = {
       "object keys and array indexes.",
     example: "test.coverage-summary.total.lines.pct",
   }),
-  source: z.enum(CONFIG_LAYERS).openapi({ description: "Who defined it: the project's config, or the task." }),
+  source: ConfigLayerSchema,
 };
 
 const MetricSchema = z
@@ -134,23 +164,23 @@ const MetricSchema = z
     z.object({
       ...configMetricFields,
       type: z.literal("number"),
-      unit: z.string().nullable().openapi({ example: "%" }),
-      order: z.enum(METRIC_ORDERS).openapi({ description: "`asc` when lower is better, `desc` when higher is." }),
+      unit: METRIC_TYPE_FIELDS.unit.nullable(),
+      order: METRIC_TYPE_FIELDS.numberOrder,
     }),
     z.object({
       ...configMetricFields,
       type: z.literal("boolean"),
-      order: z.enum(METRIC_ORDERS).openapi({ description: "`desc` when true is better, `asc` when false is." }),
+      order: METRIC_TYPE_FIELDS.booleanOrder,
     }),
     z.object({
       ...configMetricFields,
       type: z.literal("string"),
-      format: z.enum(METRIC_FORMATS).nullable().openapi({ description: "`url`: shown as a link." }),
+      format: METRIC_TYPE_FIELDS.format.nullable(),
     }),
     z.object({
       ...configMetricFields,
       type: z.literal("enum"),
-      values: z.array(z.string()).openapi({ description: "Every value it may take, best first." }),
+      values: METRIC_TYPE_FIELDS.values,
     }),
   ])
   .openapi("Metric", {
@@ -169,30 +199,9 @@ const ConfigCheckSchema = z
       .int()
       .max(MAX_CHECK_TIMEOUT_MS)
       .openapi({ description: "Defaults to 10 minutes.", example: 600_000 }),
-    source: z.enum(CONFIG_LAYERS).openapi({ description: "Who defined it: the project's config, or the task." }),
+    source: ConfigLayerSchema,
   })
   .openapi("Check", { description: "A check the config declares: a command whose exit code is its outcome." });
-
-/** A task's checks as a request gives them: checked like `.throng/config.yml`'s, so they're described there. */
-const TaskChecksInputSchema = z.array(z.unknown()).openapi({
-  description:
-    "The task's own checks, run after the project's in the same container, under its `setup` and " +
-    "`network.allow`, in the shape of `.throng/config.yml`'s `checks`: `name`, `command`, and optionally " +
-    "`required` (true by default; a required task check gates the task's attempts) and `timeout`. Names must " +
-    "not start with `_` or clash with a check or metric in the project's config on `main`. Replaces the " +
-    "task's checks; its metrics may read them.",
-  example: [{ name: "smoke", command: "./smoke.sh", timeout: "2m" }],
-});
-
-/** A task's metrics as a request gives them: checked like `.throng/config.yml`'s, so they're described there. */
-const TaskMetricsInputSchema = z.array(z.unknown()).openapi({
-  description:
-    "The task's own metrics, read after the project's, in the shape of `.throng/config.yml`'s `metrics`: " +
-    "`name`, `from`, `type`, and optionally `unit` and `order`. Names must not start with `_` or clash with a " +
-    "check or metric in the project's config on `main`, or one of the task's checks, and each `from` must name " +
-    "one of the project's or the task's checks. Replaces the task's metrics.",
-  example: [{ name: "lines", from: "test.coverage-summary.total.lines.total", type: "number", order: "asc" }],
-});
 
 const TaskSchema = z
   .object({
@@ -255,13 +264,6 @@ const VerdictSchema = z
   })
   .openapi("Verdict");
 
-const PostVerdictSchema = z
-  .object({
-    recommendation: z.enum(VERDICT_RECOMMENDATIONS),
-    body: z.string().max(MAX_VERDICT_BODY).openapi({ description: "Markdown, up to 64 KB." }),
-  })
-  .openapi("PostVerdict");
-
 const ListedTaskSchema = TaskSchema.extend({
   attemptCount: z.number().int().openapi({ description: "Its attempts, obsolete ones left out.", example: 3 }),
   bestGate: z.enum(GATES).nullable().openapi({
@@ -305,6 +307,11 @@ const AttemptSchema = z
     alias: AliasSchema,
     state: z.enum(ATTEMPT_STATES),
     fork: z.string().openapi({ description: "The logical fork name, kept for the attempt's life.", example: "t42a3" }),
+    remote: z.string().openapi({
+      description:
+        "The attempt's git remote, its fork. Clone and push with a Throng token as the bearer or Basic password.",
+      example: "https://throng.example/git/greg/throng/t42a3.git",
+    }),
     branch: z.string().nullable().openapi({ description: "The origin branch a push created it from." }),
     note: z.string().openapi({ description: "Markdown." }),
     createdAt: z.string(),
@@ -364,8 +371,11 @@ const ScoringSchema = z
   .openapi("ScoringRequest");
 
 const metricFields = {
-  source: z.enum(METRIC_SOURCES).openapi({ description: "Who defined it: Throng, the project's config or the task." }),
-  note: z.string().optional().openapi({ description: "Why its value is null." }),
+  source: z.enum(SOURCES).openapi({ description: "Who defined it: Throng, the project's config or the task." }),
+  note: z.string().optional().openapi({
+    description:
+      "Why its value is null; on a value, what to know about it, such as that an older result was converted.",
+  }),
 };
 
 const MetricResultSchema = z
@@ -374,26 +384,26 @@ const MetricResultSchema = z
       ...metricFields,
       type: z.literal("number"),
       value: z.number().nullable(),
-      order: z.enum(METRIC_ORDERS).openapi({ description: "`asc` when lower is better, `desc` when higher is." }),
-      unit: z.string().optional().openapi({ example: "%" }),
+      order: METRIC_TYPE_FIELDS.numberOrder,
+      unit: METRIC_TYPE_FIELDS.unit.optional(),
     }),
     z.object({
       ...metricFields,
       type: z.literal("boolean"),
       value: z.boolean().nullable(),
-      order: z.enum(METRIC_ORDERS).openapi({ description: "`desc` when true is better, `asc` when false is." }),
+      order: METRIC_TYPE_FIELDS.booleanOrder,
     }),
     z.object({
       ...metricFields,
       type: z.literal("string"),
       value: z.string().nullable(),
-      format: z.enum(METRIC_FORMATS).optional().openapi({ description: "`url`: shown as a link." }),
+      format: METRIC_TYPE_FIELDS.format.optional(),
     }),
     z.object({
       ...metricFields,
       type: z.literal("enum"),
       value: z.string().nullable(),
-      values: z.array(z.string()).openapi({ description: "Every value it may take, best first." }),
+      values: METRIC_TYPE_FIELDS.values,
     }),
   ])
   .openapi("MetricResult", { description: "One typed value in a run's score; null when it couldn't be measured." });
@@ -423,11 +433,14 @@ const ScoringResultSchema = z
         z
           .object({
             name: z.string().openapi({ example: "test" }),
-            source: z.enum(METRIC_SOURCES),
+            source: z.enum(SOURCES),
             required: z.boolean(),
             outcome: z.enum(CHECK_OUTCOMES),
             durationMs: z.number(),
-            notes: z.array(z.string()).openapi({ description: "Ignored metrics, or why it was skipped." }),
+            notes: z.array(z.string()).openapi({
+              description:
+                "What the run noticed about it, such as why it was skipped or why the Preview didn't deploy.",
+            }),
           })
           .openapi("CheckResult"),
       )
@@ -494,7 +507,8 @@ const TaskArenaSchema = z
     task: z.string().openapi({ example: "t42" }),
     metrics: z.array(MetricSchema).openapi({
       description:
-        "Every metric the `.throng/config.yml` on `origin/main` declares, in order; empty without a valid config.",
+        "Every metric the task's attempts are scored on: those the `.throng/config.yml` on `origin/main` declares, " +
+        "then the task's own, in order, each with its `source`; empty when they don't merge into a valid config.",
     }),
     attempts: z.array(
       ScoringStatusSchema.extend({
@@ -544,10 +558,6 @@ const MergeRequestSchema = z
   })
   .openapi("MergeRequest");
 
-const SelectionSchema = z
-  .object({ attempt: z.string().openapi({ description: "An open attempt of the task.", example: "t42a3" }) })
-  .openapi("Selection");
-
 const MergeQueueSchema = z
   .object({
     queue: z.array(
@@ -563,24 +573,6 @@ const MergeQueueSchema = z
   })
   .openapi("MergeQueue");
 
-const AttemptLimitSchema = z
-  .number()
-  .int()
-  .min(1)
-  .max(1000)
-  .nullable()
-  .openapi({ description: "Overrides the project's cap on active attempts; null to use the project's." });
-
-const CreateTaskSchema = z
-  .object({
-    title: z.string().trim().min(1).max(200),
-    body: z.string().max(65_536).optional().openapi({ description: "Markdown." }),
-    attemptLimit: AttemptLimitSchema.optional(),
-    checks: TaskChecksInputSchema.optional(),
-    metrics: TaskMetricsInputSchema.optional(),
-  })
-  .openapi("CreateTask");
-
 const EditTaskSchema = z
   .object({
     title: z.string().trim().min(1).max(200).optional(),
@@ -591,32 +583,6 @@ const EditTaskSchema = z
   })
   .openapi("EditTask");
 
-const CreateAttemptsSchema = z
-  .object({
-    count: z.number().int().min(1).max(100).optional().openapi({ description: "Attempts to create. Defaults to 1." }),
-    note: z.string().max(65_536).optional().openapi({ description: "Markdown, set on every new attempt." }),
-    from: z
-      .string()
-      .optional()
-      .openapi({
-        description:
-          "An attempt of the same task, current or archived, whose head every new attempt starts at. Each records it " +
-          "as `forkedFrom`; its base is still the task branch or `main`, and it never follows the source.",
-        example: "t42a1",
-      }),
-  })
-  .openapi("CreateAttempts");
-
-const EditAttemptSchema = z
-  .object({ note: z.string().max(65_536).openapi({ description: "Markdown." }) })
-  .openapi("EditAttempt");
-
-const HandOffSchema = z
-  .object({
-    to: z.string().min(1).openapi({ description: "The handle of the user who becomes the author.", example: "bob" }),
-  })
-  .openapi("HandOff");
-
 const TaskPathSchema = ProjectPathSchema.extend({
   t: z.string().openapi({ description: "A task reference: `t42` or `42`.", example: "t42" }),
 });
@@ -624,6 +590,17 @@ const TaskPathSchema = ProjectPathSchema.extend({
 const AttemptPathSchema = ProjectPathSchema.extend({
   a: z.string().openapi({ description: "An attempt reference.", example: "t42a3" }),
 });
+
+const WaitedAttemptSchema = AttemptSchema.extend({
+  changed: z
+    .boolean()
+    .optional()
+    .openapi({
+      description:
+        "With `wait` only: whether what `until` watches changed before the wait ran out. False at once when the " +
+        `caller's user already has ${MAX_WAITERS_PER_USER} requests waiting in the project.`,
+    }),
+}).openapi("WaitedAttempt");
 
 const RunLogPathSchema = RunPathSchema.extend({
   name: z.string().openapi({
@@ -679,11 +656,6 @@ export interface ApiOptions extends AuthOptions {
   logs?: (env: AccessBindings) => LogStore;
   /** Where commit diffs are cached: the Workers Cache API by default, none outside a Worker. */
   diffCache?: (env: AccessBindings) => DiffCache | undefined;
-}
-
-/** The Workers Cache API's default cache, when running in a Worker. */
-function workersCache(): DiffCache | undefined {
-  return (globalThis as { caches?: { default?: DiffCache } }).caches?.default;
 }
 
 function noRepos(): Repos {
@@ -873,7 +845,7 @@ export function apiRoutes(options: ApiOptions = {}) {
   const projects = (env: AccessBindings) => projectService({ db: env.DB, repos: reposFor(env) });
   const backendFor = options.tasks ?? noTasks;
   const logsFor = options.logs ?? noLogs;
-  const tasks = (env: AccessBindings) => taskService({ db: env.DB, repos: reposFor(env), backend: backendFor(env) });
+  const tasks = requestTaskService(reposFor, backendFor);
   const tokens = (env: AccessBindings) => tokenService({ db: env.DB, now });
   const taskPath = ({ t, ...rest }: z.infer<typeof TaskPathSchema>) => ({ ...rest, task: t });
   const attemptPath = ({ a, ...rest }: z.infer<typeof AttemptPathSchema>) => ({ ...rest, attempt: a });
@@ -1086,7 +1058,7 @@ export function apiRoutes(options: ApiOptions = {}) {
         },
       }),
       async (c) => {
-        const task = await tasks(c.env).createTask(c.var.actor, { ...c.req.valid("param"), ...c.req.valid("json") });
+        const task = await tasks(c).createTask(c.var.actor, { ...c.req.valid("param"), ...c.req.valid("json") });
         return c.json(task, 201);
       },
     )
@@ -1109,7 +1081,7 @@ export function apiRoutes(options: ApiOptions = {}) {
         },
       }),
       async (c) => {
-        const list = await tasks(c.env).listTasks(c.var.actor, { ...c.req.valid("param"), ...c.req.valid("query") });
+        const list = await tasks(c).listTasks(c.var.actor, { ...c.req.valid("param"), ...c.req.valid("query") });
         return c.json({ tasks: list }, 200);
       },
     )
@@ -1130,7 +1102,7 @@ export function apiRoutes(options: ApiOptions = {}) {
           404: errorResponse("No such project or task."),
         },
       }),
-      async (c) => c.json(await tasks(c.env).getTask(c.var.actor, taskPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c).getTask(c.var.actor, taskPath(c.req.valid("param"))), 200),
     )
     .openapi(
       createRoute({
@@ -1154,32 +1126,32 @@ export function apiRoutes(options: ApiOptions = {}) {
       }),
       async (c) => {
         const input = { ...taskPath(c.req.valid("param")), ...c.req.valid("json") };
-        return c.json(await tasks(c.env).editTask(c.var.actor, input), 200);
+        return c.json(await tasks(c).editTask(c.var.actor, input), 200);
       },
     )
     .openapi(
       taskTransition(browser, "close", "closeTask", "Close an open task, and its active attempts", TASK_MANAGERS, [
         "the task isn't open.",
       ]),
-      async (c) => c.json(await tasks(c.env).closeTask(c.var.actor, taskPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c).closeTask(c.var.actor, taskPath(c.req.valid("param"))), 200),
     )
     .openapi(
       taskTransition(browser, "reopen", "reopenTask", "Reopen a closed task", TASK_MANAGERS, [
         "the task isn't closed, or one of its attempts merged.",
       ]),
-      async (c) => c.json(await tasks(c.env).reopenTask(c.var.actor, taskPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c).reopenTask(c.var.actor, taskPath(c.req.valid("param"))), 200),
     )
     .openapi(
       taskTransition(browser, "obsolete", "obsoleteTask", "Make a task obsolete, and its active attempts", OWNER_ONLY, [
         "the task is already obsolete.",
       ]),
-      async (c) => c.json(await tasks(c.env).obsoleteTask(c.var.actor, taskPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c).obsoleteTask(c.var.actor, taskPath(c.req.valid("param"))), 200),
     )
     .openapi(
       taskTransition(browser, "restore", "restoreTask", "Restore an obsolete task to closed", OWNER_ONLY, [
         "the task isn't obsolete.",
       ]),
-      async (c) => c.json(await tasks(c.env).restoreTask(c.var.actor, taskPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c).restoreTask(c.var.actor, taskPath(c.req.valid("param"))), 200),
     )
     .openapi(
       createRoute({
@@ -1195,7 +1167,10 @@ export function apiRoutes(options: ApiOptions = {}) {
         middleware: [bearer] as const,
         request: { params: TaskPathSchema, body: { required: false, ...json(CreateAttemptsSchema) } },
         responses: {
-          201: { description: "The new attempts.", ...json(z.object({ attempts: z.array(AttemptSchema) })) },
+          201: {
+            description: "The new attempts, each with its git remote.",
+            ...json(z.object({ attempts: z.array(AttemptSchema) })),
+          },
           400: errorResponse("The request is invalid."),
           401: unauthorizedBearer,
           404: errorResponse("No such project or task."),
@@ -1204,7 +1179,7 @@ export function apiRoutes(options: ApiOptions = {}) {
       }),
       async (c) => {
         const input = { ...taskPath(c.req.valid("param")), ...c.req.valid("json") };
-        return c.json({ attempts: await tasks(c.env).createAttempts(c.var.actor, input) }, 201);
+        return c.json({ attempts: await tasks(c).createAttempts(c.var.actor, input) }, 201);
       },
     )
     .openapi(
@@ -1227,7 +1202,7 @@ export function apiRoutes(options: ApiOptions = {}) {
       }),
       async (c) => {
         const input = { ...taskPath(c.req.valid("param")), ...c.req.valid("query") };
-        return c.json({ attempts: await tasks(c.env).listAttempts(c.var.actor, input) }, 200);
+        return c.json({ attempts: await tasks(c).listAttempts(c.var.actor, input) }, 200);
       },
     )
     .openapi(
@@ -1236,18 +1211,30 @@ export function apiRoutes(options: ApiOptions = {}) {
         path: "/projects/{owner}/{project}/attempts/{a}",
         operationId: "getAttempt",
         tags: ["Attempts"],
-        summary: "Get an attempt by its reference",
+        summary: "Get an attempt by its reference, or wait for it to change",
+        description:
+          "With `wait`, the request is held until what `until` watches changes from when it arrived, or `wait` " +
+          "seconds pass, and the attempt comes back with `changed`. Use it instead of polling.",
         security: bearerOnly,
         middleware: [bearer] as const,
-        request: { params: AttemptPathSchema },
+        request: { params: AttemptPathSchema, query: WaitQuerySchema },
         responses: {
-          200: { description: "The attempt.", ...json(AttemptSchema) },
-          400: errorResponse("The attempt reference is invalid."),
+          200: { description: "The attempt.", ...json(WaitedAttemptSchema) },
+          400: errorResponse("The request is invalid."),
           401: unauthorizedBearer,
           404: errorResponse("No such project or attempt."),
         },
       }),
-      async (c) => c.json(await tasks(c.env).getAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
+      async (c) => {
+        const { wait, until } = c.req.valid("query");
+        const path = attemptPath(c.req.valid("param"));
+        const service = tasks(c);
+        const answer =
+          wait === undefined
+            ? await service.getAttempt(c.var.actor, path)
+            : await service.waitForAttempt(c.var.actor, { ...path, wait, until });
+        return c.json(answer, 200);
+      },
     )
     .openapi(
       createRoute({
@@ -1271,7 +1258,7 @@ export function apiRoutes(options: ApiOptions = {}) {
       }),
       async (c) => {
         const input = { ...attemptPath(c.req.valid("param")), ...c.req.valid("json") };
-        return c.json(await tasks(c.env).editAttempt(c.var.actor, input), 200);
+        return c.json(await tasks(c).editAttempt(c.var.actor, input), 200);
       },
     )
     .openapi(
@@ -1283,38 +1270,38 @@ export function apiRoutes(options: ApiOptions = {}) {
         AUTHOR_ONLY,
         ["`invalidState`: the attempt isn't a draft."],
       ),
-      async (c) => c.json(await tasks(c.env).openAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c).openAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
       attemptTransition(bearerRoute, "draft", "draftAttempt", "Return an open attempt to draft", AUTHOR_ONLY, [
         "`invalidState`: the attempt isn't open.",
       ]),
-      async (c) => c.json(await tasks(c.env).draftAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c).draftAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
       attemptTransition(bearerRoute, "close", "closeAttempt", "Close a draft or open attempt", AUTHOR_ONLY, [
         "`invalidState`: the attempt isn't active.",
       ]),
-      async (c) => c.json(await tasks(c.env).closeAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c).closeAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
       attemptTransition(webRoute, "reopen", "reopenAttempt", "Reopen a closed attempt as a draft", AUTHOR_ONLY, [
         "`invalidState`: the attempt isn't closed or its task isn't open;",
         "`attemptLimit`: the task is at its cap; `conflict`: another active attempt has its branch.",
       ]),
-      async (c) => c.json(await tasks(c.env).reopenAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c).reopenAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
       attemptTransition(bearerRoute, "obsolete", "obsoleteAttempt", "Make an attempt obsolete", OWNER_ONLY, [
         "`invalidState`: the attempt is merged or already obsolete.",
       ]),
-      async (c) => c.json(await tasks(c.env).obsoleteAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c).obsoleteAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
       attemptTransition(bearerRoute, "restore", "restoreAttempt", "Restore an obsolete attempt to closed", OWNER_ONLY, [
         "`invalidState`: the attempt isn't obsolete.",
       ]),
-      async (c) => c.json(await tasks(c.env).restoreAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c).restoreAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
       scoringRoute(
@@ -1327,7 +1314,7 @@ export function apiRoutes(options: ApiOptions = {}) {
         AUTHOR_ONLY,
         "the attempt isn't a draft",
       ),
-      async (c) => c.json(await tasks(c.env).scoreNow(c.var.actor, attemptPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c).scoreNow(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
       scoringRoute(
@@ -1340,7 +1327,7 @@ export function apiRoutes(options: ApiOptions = {}) {
         RESCORERS,
         "the attempt isn't open",
       ),
-      async (c) => c.json(await tasks(c.env).rescore(c.var.actor, attemptPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c).rescore(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
       createRoute({
@@ -1362,7 +1349,7 @@ export function apiRoutes(options: ApiOptions = {}) {
           404: errorResponse("No such project or attempt."),
         },
       }),
-      async (c) => c.json(await tasks(c.env).getScoring(c.var.actor, attemptPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c).getScoring(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
       createRoute({
@@ -1384,7 +1371,7 @@ export function apiRoutes(options: ApiOptions = {}) {
           404: errorResponse("No such project or task."),
         },
       }),
-      async (c) => c.json(await tasks(c.env).taskArena(c.var.actor, taskPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c).taskArena(c.var.actor, taskPath(c.req.valid("param"))), 200),
     )
     .openapi(
       createRoute({
@@ -1405,7 +1392,7 @@ export function apiRoutes(options: ApiOptions = {}) {
         },
       }),
       async (c) => {
-        const runs = await tasks(c.env).listScoringRuns(c.var.actor, attemptPath(c.req.valid("param")));
+        const runs = await tasks(c).listScoringRuns(c.var.actor, attemptPath(c.req.valid("param")));
         return c.json({ runs }, 200);
       },
     )
@@ -1428,7 +1415,7 @@ export function apiRoutes(options: ApiOptions = {}) {
       }),
       async (c) => {
         const { runId, ...path } = c.req.valid("param");
-        return c.json(await tasks(c.env).getScoringRun(c.var.actor, { ...path, run: runId }), 200);
+        return c.json(await tasks(c).getScoringRun(c.var.actor, { ...path, run: runId }), 200);
       },
     )
     .openapi(
@@ -1456,7 +1443,7 @@ export function apiRoutes(options: ApiOptions = {}) {
       }),
       async (c) => {
         const input = { ...attemptPath(c.req.valid("param")), ...c.req.valid("json") };
-        return c.json(await tasks(c.env).handOffAttempt(c.var.actor, input), 200);
+        return c.json(await tasks(c).handOffAttempt(c.var.actor, input), 200);
       },
     )
     .openapi(
@@ -1485,7 +1472,7 @@ export function apiRoutes(options: ApiOptions = {}) {
       }),
       async (c) => {
         const input = { ...attemptPath(c.req.valid("param")), ...c.req.valid("json") };
-        return c.json(await tasks(c.env).postVerdict(c.var.actor, input), 201);
+        return c.json(await tasks(c).postVerdict(c.var.actor, input), 201);
       },
     )
     .openapi(
@@ -1509,7 +1496,7 @@ export function apiRoutes(options: ApiOptions = {}) {
         },
       }),
       async (c) => {
-        const verdicts = await tasks(c.env).listVerdicts(c.var.actor, attemptPath(c.req.valid("param")));
+        const verdicts = await tasks(c).listVerdicts(c.var.actor, attemptPath(c.req.valid("param")));
         return c.json({ verdicts }, 200);
       },
     )
@@ -1536,7 +1523,7 @@ export function apiRoutes(options: ApiOptions = {}) {
       }),
       async (c) => {
         const { runId, name, ...path } = c.req.valid("param");
-        const key = await tasks(c.env).runLogKey(c.var.actor, { ...path, run: runId, name });
+        const key = await tasks(c).runLogKey(c.var.actor, { ...path, run: runId, name });
         const log = await logsFor(c.env).get(key);
         if (log === null) throw missingLog(runId, name);
         // Streamed straight from R2; the typed response only knows the documented string body.
@@ -1604,7 +1591,7 @@ export function apiRoutes(options: ApiOptions = {}) {
       }),
       async (c) => {
         const input = { ...taskPath(c.req.valid("param")), ...c.req.valid("json") };
-        return c.json(await tasks(c.env).selectAttempt(c.var.actor, input), 200);
+        return c.json(await tasks(c).selectAttempt(c.var.actor, input), 200);
       },
     )
     .openapi(
@@ -1617,7 +1604,7 @@ export function apiRoutes(options: ApiOptions = {}) {
           "`pending` it re-approves the same head, which requeues one held after a dequeue (an `errored` one, say). Then, " +
           "as on selection, it enters the queue once the head's gate has passed. Journals `approved`.",
       ),
-      async (c) => c.json(await tasks(c.env).approveMergeRequest(c.var.actor, taskPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c).approveMergeRequest(c.var.actor, taskPath(c.req.valid("param"))), 200),
     )
     .openapi(
       mergeRequestAction(
@@ -1628,7 +1615,7 @@ export function apiRoutes(options: ApiOptions = {}) {
         "From any open state. A queued or landing one is dequeued with reason `cancelled`. The task stays open and can be " +
           "selected again. Journals `cancelled`.",
       ),
-      async (c) => c.json(await tasks(c.env).cancelMergeRequest(c.var.actor, taskPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c).cancelMergeRequest(c.var.actor, taskPath(c.req.valid("param"))), 200),
     )
     .openapi(
       createRoute({
@@ -1648,7 +1635,7 @@ export function apiRoutes(options: ApiOptions = {}) {
           404: errorResponse("No such project or task, or the task has no merge request."),
         },
       }),
-      async (c) => c.json(await tasks(c.env).getMergeRequest(c.var.actor, taskPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c).getMergeRequest(c.var.actor, taskPath(c.req.valid("param"))), 200),
     )
     .openapi(
       createRoute({
@@ -1667,7 +1654,7 @@ export function apiRoutes(options: ApiOptions = {}) {
           404: errorResponse("No such project."),
         },
       }),
-      async (c) => c.json({ queue: await tasks(c.env).mergeQueue(c.var.actor, c.req.valid("param")) }, 200),
+      async (c) => c.json({ queue: await tasks(c).mergeQueue(c.var.actor, c.req.valid("param")) }, 200),
     )
     .route(
       "/",

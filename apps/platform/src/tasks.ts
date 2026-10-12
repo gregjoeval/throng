@@ -8,6 +8,8 @@ import { loadConfig } from "./config.ts";
 import type { CheckConfig, MetricConfig } from "./config.ts";
 import type { ConflictDetails, ConflictFile } from "./conflicts.ts";
 import { ServiceError } from "./errors.ts";
+import { attemptRemote } from "./git-remotes.ts";
+import type { ProjectPath } from "./git-remotes.ts";
 import type { ErroredDetails, FailedChecksDetails } from "./landing.ts";
 import type { Dequeue, DequeueReason, StoredMergeRequest } from "./merge-requests.ts";
 import { resolveProject } from "./projects.ts";
@@ -16,8 +18,8 @@ import type { Repos } from "./repos.ts";
 import type { Gate, ScoringResult } from "./results.ts";
 import { headAttemptRef } from "./scoring.ts";
 import type { AttemptScoring, ScoringRequest, StoredRun } from "./scoring.ts";
-import { NO_TASK_DEFINITIONS, taskDefinitionsFrom } from "./task-definitions.ts";
-import type { TaskDefinitions } from "./task-definitions.ts";
+import { NO_TASK_DEFINITIONS, taskDefinitionsFrom, withTask } from "./task-definitions.ts";
+import type { TaskDefinitions, TaskDefinitionsInput } from "./task-definitions.ts";
 import { attemptRef, parseAttemptRef, parseTaskRef, taskRef } from "./task-refs.ts";
 import type {
   AttemptInput,
@@ -37,6 +39,7 @@ import { isActive } from "./task-store.ts";
 import type { Actor } from "./tokens.ts";
 import type { Database } from "./users.ts";
 import type { VerdictRecommendation, VerdictSummary } from "./verdicts.ts";
+import type { WaitCondition } from "./waiters.ts";
 
 /** A project's Durable Object, as the services call it: one store method per call. */
 export interface TaskBackend {
@@ -49,6 +52,8 @@ export interface TaskServiceDeps {
   repos: Repos;
   /** The backend for a project id: its Durable Object in production, an in-process store in tests. */
   backend: (projectId: string) => TaskBackend;
+  /** The platform's origin (`https://<host>`), which attempts' git remotes are under. */
+  origin: string;
 }
 
 export interface UserRef {
@@ -111,6 +116,8 @@ export interface Attempt extends AttemptStanding {
   author: UserRef;
   state: AttemptState;
   fork: string;
+  /** The attempt's git remote, its fork: `https://<host>/git/<owner>/<project>/t42a3.git`. */
+  remote: string;
   branch: string | null;
   note: string;
   createdAt: string;
@@ -119,6 +126,11 @@ export interface Attempt extends AttemptStanding {
   archivedSha: string | null;
   scoring: AttemptScoring;
   mergeRequest: { state: AttemptMergeRequest["state"]; lastDequeue: { reason: DequeueReason } | null } | null;
+}
+
+/** An attempt a wait answered with, and whether what it watched changed. */
+export interface WaitedAttempt extends Attempt {
+  changed: boolean;
 }
 
 /** A reviewer's verdict on one head of an attempt, as the API shows it. */
@@ -229,7 +241,10 @@ export interface ArenaAttempt extends ScoringStatus, AttemptStanding {
 /** A task's arena: the current result of every attempt in it. */
 export interface TaskArena {
   task: string;
-  /** Every metric the config on `origin/main` declares, in its order; none without a valid config. */
+  /**
+   * Every metric a run of the task's attempts would read: the config on `origin/main`'s, then the
+   * task's, each with its `source`; none when they don't merge into a valid config.
+   */
   metrics: MetricConfig[];
   attempts: ArenaAttempt[];
 }
@@ -241,11 +256,6 @@ export interface ScoringAnswer {
   run: ScoringRun;
 }
 
-interface ProjectPath {
-  owner: string;
-  project: string;
-}
-
 type TaskPath = ProjectPath & { task: string };
 type AttemptPath = ProjectPath & { attempt: string };
 
@@ -253,7 +263,7 @@ type StoreArgs<K extends TaskMethod> = Parameters<TaskStore[K]>;
 type StoreResult<K extends TaskMethod> = Awaited<ReturnType<TaskStore[K]>>;
 
 /** The task and attempt services. Any signed-in actor may read any project's tasks in P0. */
-export function taskService({ db, repos, backend }: TaskServiceDeps) {
+export function taskService({ db, repos, backend, origin }: TaskServiceDeps) {
   async function project(path: ProjectPath): Promise<ProjectContext> {
     const found = await resolveProject(db, path.owner, path.project);
     if (found === null) throw new ServiceError("notFound", `no project ${path.owner}/${path.project}`);
@@ -272,10 +282,7 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
    * `main`; none when it gave neither. Anyone may create a task; an edit's are checked by the store,
    * after who may edit.
    */
-  async function taskDefinitions(
-    ctx: ProjectContext,
-    input: { checks?: unknown; metrics?: unknown },
-  ): Promise<TaskDefinitions> {
+  async function newTaskDefinitions(ctx: ProjectContext, input: TaskDefinitionsInput): Promise<TaskDefinitions> {
     if (input.checks === undefined && input.metrics === undefined) return NO_TASK_DEFINITIONS;
     const checked = taskDefinitionsFrom(input, NO_TASK_DEFINITIONS, await loadConfig(repos, ctx.id));
     if ("error" in checked) throw new ServiceError("invalidRequest", checked.error);
@@ -293,12 +300,13 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
     ]);
     return list.map((t, i) => publicTask(t, users, branches[i] ?? null));
   };
-  const attempts = async (list: StoredAttempt[]) => {
+  /** Renders attempts of the project at `path`, each with its git remote. */
+  const attempts = (path: ProjectPath) => async (list: StoredAttempt[]) => {
     const users = await handles(
       db,
       list.map((a) => a.author),
     );
-    return list.map((a) => publicAttempt(a, users));
+    return list.map((a) => publicAttempt(a, users, attemptRemote(origin, path, a.fork)));
   };
 
   /** A task transition: resolves the project and task reference, then runs `method`. */
@@ -315,7 +323,7 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
       method: "openAttempt" | "draftAttempt" | "closeAttempt" | "reopenAttempt" | "obsoleteAttempt" | "restoreAttempt",
     ) =>
     async (actor: Actor, input: AttemptPath): Promise<Attempt> =>
-      one(await invoke(method, await project(input), actor, attemptRefOf(input.attempt)), attempts);
+      one(await invoke(method, await project(input), actor, attemptRefOf(input.attempt)), attempts(input));
 
   /** A scoring request: resolves the project and attempt reference, then runs `method`. */
   const scoringRequest =
@@ -338,17 +346,16 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
     /** Creates an open task; the caller's user is its creator. Any signed-in user may. */
     async createTask(
       actor: Actor,
-      input: ProjectPath & {
-        title: string;
-        body?: string | undefined;
-        attemptLimit?: number | null | undefined;
-        checks?: unknown;
-        metrics?: unknown;
-      },
+      input: ProjectPath &
+        TaskDefinitionsInput & {
+          title: string;
+          body?: string | undefined;
+          attemptLimit?: number | null | undefined;
+        },
     ): Promise<Task> {
       const { title, body, attemptLimit } = input;
       const ctx = await project(input);
-      const definitions = await taskDefinitions(ctx, input);
+      const definitions = await newTaskDefinitions(ctx, input);
       return one(await invoke("createTask", ctx, actor, { title, body, attemptLimit, ...definitions }), tasks(ctx));
     },
 
@@ -373,13 +380,12 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
     /** Edits a task. The project owner or the task's creator may. */
     async editTask(
       actor: Actor,
-      input: TaskPath & {
-        title?: string | undefined;
-        body?: string | undefined;
-        attemptLimit?: number | null | undefined;
-        checks?: unknown;
-        metrics?: unknown;
-      },
+      input: TaskPath &
+        TaskDefinitionsInput & {
+          title?: string | undefined;
+          body?: string | undefined;
+          attemptLimit?: number | null | undefined;
+        },
     ): Promise<Task> {
       const { title, body, attemptLimit } = input;
       const ctx = await project(input);
@@ -405,23 +411,48 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
         note: input.note,
         from: input.from === undefined ? undefined : attemptRefOf(input.from),
       };
-      return attempts(await invoke("createAttempts", await project(input), actor, create));
+      return attempts(input)(await invoke("createAttempts", await project(input), actor, create));
     },
 
     async getAttempt(actor: Actor, input: AttemptPath): Promise<Attempt> {
-      return one(await invoke("getAttempt", await project(input), actor, attemptRefOf(input.attempt)), attempts);
+      return one(await invoke("getAttempt", await project(input), actor, attemptRefOf(input.attempt)), attempts(input));
+    },
+
+    /**
+     * Holds until what `until` watches on the attempt changes, or `wait` seconds pass (see
+     * `TaskStore.waitForAttempt`), then answers with the attempt and whether it changed. Waits live
+     * in the project's Durable Object's memory, so a deploy or an eviction drops them: one dropped
+     * answers with the attempt as it is now, unchanged, and the caller waits again.
+     */
+    async waitForAttempt(
+      actor: Actor,
+      input: AttemptPath & { wait: number; until: WaitCondition },
+    ): Promise<WaitedAttempt> {
+      const ctx = await project(input);
+      const ref = attemptRefOf(input.attempt);
+      try {
+        const { changed, ...attempt } = await invoke("waitForAttempt", ctx, actor, {
+          ...ref,
+          wait: input.wait,
+          until: input.until,
+        });
+        return { ...(await one(attempt, attempts(input))), changed };
+      } catch (error) {
+        if (!droppedByReset(error)) throw error;
+        return { ...(await one(await invoke("getAttempt", ctx, actor, ref), attempts(input))), changed: false };
+      }
     },
 
     /** A task's attempts; obsolete ones only when `state` is `obsolete`. */
     async listAttempts(actor: Actor, input: TaskPath & { state?: AttemptState | undefined }): Promise<Attempt[]> {
       const list = { task: taskNumber(input.task), state: input.state };
-      return attempts(await invoke("listAttempts", await project(input), actor, list));
+      return attempts(input)(await invoke("listAttempts", await project(input), actor, list));
     },
 
     /** Edits an attempt's note. Only its author (or their aliases) may. */
     async editAttempt(actor: Actor, input: AttemptPath & { note: string }): Promise<Attempt> {
       const edit = { ...attemptRefOf(input.attempt), note: input.note };
-      return one(await invoke("editAttempt", await project(input), actor, edit), attempts);
+      return one(await invoke("editAttempt", await project(input), actor, edit), attempts(input));
     },
 
     openAttempt: attemptMove("openAttempt"),
@@ -453,7 +484,7 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
     async taskArena(actor: Actor, input: TaskPath): Promise<TaskArena> {
       const number = taskNumber(input.task);
       const ctx = await project(input);
-      const list = await invoke("taskArena", ctx, actor, { task: number });
+      const { definitions, attempts: list } = await invoke("taskArena", ctx, actor, { task: number });
       const [users, bases, config] = await Promise.all([
         handles(
           db,
@@ -462,9 +493,10 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
         Promise.all(list.map(({ fork, state }) => (isActive(state) ? currentBase(repos, ctx.id, fork) : null))),
         loadConfig(repos, ctx.id),
       ]);
+      const merged = withTask(config, definitions);
       return {
         task: taskRef(number),
-        metrics: config.kind === "valid" ? config.config.metrics : [],
+        metrics: merged.kind === "valid" ? merged.config.metrics : [],
         attempts: list.map(({ scoring, fork, state, author, alias, verdicts, forked_from, needs_update }, i) => ({
           ref: fork,
           state,
@@ -505,7 +537,7 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
       const ctx = await project(input);
       const to = await db.prepare("SELECT id FROM users WHERE handle = ?").bind(input.to).first<{ id: string }>();
       if (to === null) throw new ServiceError("notFound", `no user ${input.to}`);
-      return one(await invoke("handOffAttempt", ctx, actor, { ...ref, to: to.id }), attempts);
+      return one(await invoke("handOffAttempt", ctx, actor, { ...ref, to: to.id }), attempts(input));
     },
 
     /**
@@ -644,11 +676,21 @@ function publicTask(t: StoredTask, users: Map<string, string>, taskBranch: TaskB
 }
 
 /** `forkedFrom` for an attempt copied from another, and nothing for one that wasn't. */
+/**
+ * Whether a call to a Durable Object failed because the object was reset (a deploy, or an eviction)
+ * while it ran: the runtime marks such errors `durableObjectReset`, or `retryable`.
+ */
+function droppedByReset(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const marked = error as Error & { durableObjectReset?: unknown; retryable?: unknown };
+  return marked.durableObjectReset === true || marked.retryable === true;
+}
+
 function forkedFrom(source: string | null): { forkedFrom?: string } {
   return source === null ? {} : { forkedFrom: source };
 }
 
-function publicAttempt(a: StoredAttempt, users: Map<string, string>): Attempt {
+function publicAttempt(a: StoredAttempt, users: Map<string, string>, remote: string): Attempt {
   const mr = a.merge_request;
   return {
     ref: a.fork,
@@ -658,6 +700,7 @@ function publicAttempt(a: StoredAttempt, users: Map<string, string>): Attempt {
     alias: a.alias,
     state: a.state,
     fork: a.fork,
+    remote,
     branch: a.branch,
     note: a.note,
     createdAt: a.created_at,

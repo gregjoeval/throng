@@ -3,6 +3,8 @@
 
 import type { ConfigResult } from "./config.ts";
 import type { ConflictDetails } from "./conflicts.ts";
+import { parseFrom } from "./metric-values.ts";
+import { CHECK_OUTCOMES } from "./results.ts";
 import type { CheckOutcome, ScoringResult } from "./results.ts";
 import { attemptRef, taskRef } from "./task-refs.ts";
 
@@ -85,11 +87,23 @@ export function actedAlias(acted: { alias?: string | null; agent?: string | null
   return acted.alias ?? acted.agent ?? null;
 }
 
+/**
+ * How a required check can fail to pass: every outcome but `passed` and `errored`, as only `_preview`
+ * errors, and it is never required.
+ */
+export type FailedCheckOutcome = Exclude<CheckOutcome, "passed" | "errored">;
+
+function isFailedCheckOutcome(outcome: CheckOutcome): outcome is FailedCheckOutcome {
+  return outcome !== "passed" && outcome !== "errored";
+}
+
+/** The outcomes a failed check can have, in `CHECK_OUTCOMES`'s order. */
+export const FAILED_CHECK_OUTCOMES = CHECK_OUTCOMES.filter(isFailedCheckOutcome);
+
 /** A required check that didn't pass on the merged tree, and the name of its stored log, if any. */
 export interface FailedCheck {
   name: string;
-  /** Only `_preview` errors, and it is never required. */
-  outcome: Exclude<CheckOutcome, "passed" | "errored">;
+  outcome: FailedCheckOutcome;
   log: string | null;
 }
 
@@ -123,7 +137,7 @@ export function retestConfig(config: ConfigResult): ConfigResult | null {
   if (config.kind === "invalid") return config;
   const checks = config.config.checks.filter((check) => check.required);
   const kept = new Set(checks.map((check) => check.name));
-  const metrics = config.config.metrics.filter((metric) => kept.has(metric.from.split(".")[0] ?? ""));
+  const metrics = config.config.metrics.filter((metric) => kept.has(parseFrom(metric.from).check));
   return checks.length === 0 ? null : { kind: "valid", config: { ...config.config, checks, metrics } };
 }
 
@@ -132,13 +146,11 @@ export function retestConfig(config: ConfigResult): ConfigResult | null {
  * own checks are left out: the retest doesn't diff or deploy, and neither is ever required.
  */
 export function failedChecks(result: ScoringResult, stored: string[]): FailedChecksDetails {
-  const checks = result.checks
-    .filter((check) => check.source !== "platform" && check.outcome !== "passed")
-    .map((check) => ({
-      name: check.name,
-      outcome: check.outcome as FailedCheck["outcome"],
-      log: stored.includes(check.name) ? check.name : null,
-    }));
+  const checks = result.checks.flatMap(({ name, source, outcome }): FailedCheck[] =>
+    source !== "platform" && isFailedCheckOutcome(outcome)
+      ? [{ name, outcome, log: stored.includes(name) ? name : null }]
+      : [],
+  );
   return result.config.kind === "invalid" ? { checks, error: result.config.error } : { checks };
 }
 

@@ -45,11 +45,13 @@ import type {
   StoredRun,
 } from "./scoring.ts";
 import { NO_TASK_DEFINITIONS, taskDefinitionsFrom } from "./task-definitions.ts";
-import type { TaskDefinitions } from "./task-definitions.ts";
+import type { TaskDefinitions, TaskDefinitionsInput } from "./task-definitions.ts";
 import { attemptRef, reservedTask, taskBranchRef, taskRef } from "./task-refs.ts";
 import type { Actor } from "./tokens.ts";
 import { Verdicts } from "./verdicts.ts";
 import type { StoredVerdict, VerdictRecommendation, VerdictSummary } from "./verdicts.ts";
+import { alreadyMet, Waiters, watchChanged } from "./waiters.ts";
+import type { AttemptWatch, WaitCondition } from "./waiters.ts";
 
 /** Active attempts a task may have when neither the project config nor the task overrides it. */
 export const DEFAULT_ATTEMPT_LIMIT = 10;
@@ -219,15 +221,12 @@ export interface CreateTaskInput {
   metrics?: MetricConfig[] | undefined;
 }
 
-export interface EditTaskInput {
+/** The checks and metrics it gives replace the task's, once checked against the project's config. */
+export interface EditTaskInput extends TaskDefinitionsInput {
   task: number;
   title?: string | undefined;
   body?: string | undefined;
   attemptLimit?: number | null | undefined;
-  /** Replaces the task's checks, as a request gave them; checked against the project's config. */
-  checks?: unknown;
-  /** Replaces the task's metrics, as a request gave them; checked against the project's config. */
-  metrics?: unknown;
 }
 
 export interface CreateAttemptsInput {
@@ -452,6 +451,8 @@ export class TaskStore {
   /** Active attempts' follows of their task branch. */
   readonly follows: Follows;
   readonly #follow: FollowRunner | null;
+  /** Requests waiting on an attempt to change. */
+  readonly #waiters = new Waiters();
 
   constructor({ sql, repos, now = () => new Date(), scoring = null, landing = null, follow = null }: TaskStoreDeps) {
     this.#sql = sql;
@@ -508,7 +509,7 @@ export class TaskStore {
    * What a task defines over the project's config, for a scoring run to merge. None for a task with
    * no row, like the spike's attempts.
    */
-  taskDefinitions(task: number): TaskDefinitions {
+  definitionsOf(task: number): TaskDefinitions {
     const [row] = this.#sql.exec<TaskRow>("SELECT * FROM tasks WHERE number = ?", task);
     return row === undefined ? NO_TASK_DEFINITIONS : toTask(row).definitions;
   }
@@ -552,7 +553,7 @@ export class TaskStore {
     const current = this.#task(input.task);
     this.#mayEditTask(project, actor, current);
     const definitions = storedDefinitions(
-      config === null ? current.definitions : taskDefinitions(input, current.definitions, config),
+      config === null ? current.definitions : editedDefinitions(input, current.definitions, config),
     );
     this.#sql.exec(
       "UPDATE tasks SET title = ?, body = ?, attempt_limit = ?, definitions = ? WHERE number = ?",
@@ -723,6 +724,29 @@ export class TaskStore {
     return this.#attempt(input);
   }
 
+  /**
+   * Holds until what `until` watches on the attempt changes from now, or `wait` seconds pass, then
+   * answers with the attempt and whether it changed. `scored` answers at once, changed, when the
+   * current head is already scored. Past the actor's user's cap on waiting requests, answers at
+   * once, unchanged.
+   */
+  async waitForAttempt(
+    _project: ProjectContext,
+    actor: Actor,
+    input: AttemptInput & { wait: number; until: WaitCondition },
+  ): Promise<StoredAttempt & { changed: boolean }> {
+    const before = this.#watch(input);
+    if (alreadyMet(input.until, before)) return { ...this.#attempt(input), changed: true };
+    const ready = () => watchChanged(input.until, before, this.#watch(input));
+    const changed = await this.#waiters.wait(actor.user.id, ready, input.wait * 1000);
+    return { ...this.#attempt(input), changed };
+  }
+
+  /** Answers the waits whose attempts changed; run after every call that may change one. */
+  wakeWaiters(): void {
+    this.#waiters.wake();
+  }
+
   /** A task's attempts by number. Obsolete attempts are left out unless `state` asks for them. */
   listAttempts(
     _project: ProjectContext,
@@ -749,17 +773,24 @@ export class TaskStore {
     return this.#scoringDetail(this.#attempt(input));
   }
 
-  /** The task's arena: every attempt, obsolete ones included, by number, with its scoring and current result. */
+  /**
+   * The task's arena: what the task defines over the project's config, and every attempt, obsolete
+   * ones included, by number, with its scoring and current result.
+   */
   taskArena(
     _project: ProjectContext,
     _actor: Actor,
     input: { task: number },
-  ): (Omit<StoredAttempt, "scoring"> & { scoring: AttemptScoringDetail })[] {
-    this.#task(input.task);
-    return this.#sql
+  ): {
+    definitions: TaskDefinitions;
+    attempts: (Omit<StoredAttempt, "scoring"> & { scoring: AttemptScoringDetail })[];
+  } {
+    const { definitions } = this.#task(input.task);
+    const attempts = this.#sql
       .exec<AttemptRow>("SELECT * FROM attempts WHERE task = ? ORDER BY number", input.task)
       .map((row) => this.#toAttempt(row))
       .map((a) => ({ ...a, scoring: this.#scoringDetail(a) }));
+    return { definitions, attempts };
   }
 
   /** The attempt's scoring status, with the run holding its current result. */
@@ -1160,6 +1191,14 @@ export class TaskStore {
    * report from a follow that already reported, or whose attempt ended, is discarded.
    */
   async followFinished(follow: number, outcome: FollowOutcome): Promise<boolean> {
+    try {
+      return this.#followFinished(follow, outcome);
+    } finally {
+      this.wakeWaiters();
+    }
+  }
+
+  #followFinished(follow: number, outcome: FollowOutcome): boolean {
     return this.#sql.transaction(() => {
       const current = this.follows.get(follow);
       if (current?.status !== "running") return false;
@@ -1607,14 +1646,18 @@ export class TaskStore {
    * request its attempt is the source of can enter the queue. Returns whether the run was recorded.
    */
   scoringFinished(run: number, outcome: ScoringOutcome): boolean {
-    return this.#sql.transaction(() => {
-      if (!this.scoring.finish(run, outcome)) return false;
-      const finished = this.scoring.getRun(run);
-      if (finished === null) return true;
-      const mr = this.mergeRequests.open(finished.task);
-      if (mr !== null && mr.attempt === finished.attempt) this.#evaluate(null, mr);
-      return true;
-    });
+    try {
+      return this.#sql.transaction(() => {
+        if (!this.scoring.finish(run, outcome)) return false;
+        const finished = this.scoring.getRun(run);
+        if (finished === null) return true;
+        const mr = this.mergeRequests.open(finished.task);
+        if (mr !== null && mr.attempt === finished.attempt) this.#evaluate(null, mr);
+        return true;
+      });
+    } finally {
+      this.wakeWaiters();
+    }
   }
 
   /**
@@ -1684,9 +1727,13 @@ export class TaskStore {
 
   /** Stops stale landings, starts the next one, starts queued follows, then drains the scoring queue. */
   async drain(project: string): Promise<void> {
-    await this.#drainLandings(project);
-    await this.#drainFollows(project);
-    await this.scoring.drain();
+    try {
+      await this.#drainLandings(project);
+      await this.#drainFollows(project);
+      await this.scoring.drain();
+    } finally {
+      this.wakeWaiters();
+    }
   }
 
   /**
@@ -1720,6 +1767,14 @@ export class TaskStore {
    * interrupted archive finds the landing already recorded.
    */
   async landingFinished(landing: number, reported: LandingOutcome): Promise<boolean> {
+    try {
+      return await this.#landingFinished(landing, reported);
+    } finally {
+      this.wakeWaiters();
+    }
+  }
+
+  async #landingFinished(landing: number, reported: LandingOutcome): Promise<boolean> {
     // A Workflow started before values were camelCase may still report `failedChecks`.
     const outcome = normaliseLandingOutcome(reported);
     let current = this.#reportable(landing);
@@ -2004,6 +2059,17 @@ export class TaskStore {
         mr === null
           ? null
           : { state: mr.state, last_dequeue: mr.last_dequeue === null ? null : { reason: mr.last_dequeue.reason } },
+    };
+  }
+
+  /** What a wait on the attempt compares against its snapshot. */
+  #watch(input: AttemptInput): AttemptWatch {
+    const { state } = this.#attempt(input);
+    const mr = this.mergeRequests.forAttempt(input.task, input.number);
+    return {
+      state,
+      scoredRun: this.scoring.scoredRun({ task: input.task, attempt: input.number }),
+      mergeRequest: mr === null ? null : { id: mr.id, state: mr.state, dequeuedAt: mr.last_dequeue?.at ?? null },
     };
   }
 
@@ -2442,6 +2508,7 @@ export const TASK_METHODS = [
   "restoreTask",
   "createAttempts",
   "getAttempt",
+  "waitForAttempt",
   "listAttempts",
   "listProjectAttempts",
   "getScoring",
@@ -2498,6 +2565,8 @@ export async function runTaskMethod(store: TaskStore, method: string, args: unkn
   } catch (error) {
     if (error instanceof ServiceError) return { ok: false, code: error.code, message: error.message };
     throw error;
+  } finally {
+    store.wakeWaiters();
   }
 }
 
@@ -2560,8 +2629,8 @@ function storedDefinitions(definitions: TaskDefinitions): string | null {
  * A task's definitions after an edit: the checks and metrics it gave, with `current`'s for those it
  * left out, checked against the project's config on `main`.
  */
-function taskDefinitions(
-  input: { checks?: unknown; metrics?: unknown },
+function editedDefinitions(
+  input: TaskDefinitionsInput,
   current: TaskDefinitions,
   config: ConfigResult,
 ): TaskDefinitions {

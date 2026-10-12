@@ -11,7 +11,6 @@
  * (true is the higher), an enum by its `values` best first, and a string not at all.
  */
 export const METRIC_TYPES = ["boolean", "number", "string", "enum"] as const;
-export type MetricType = (typeof METRIC_TYPES)[number];
 
 /** How a string metric's value is shown; it never changes how values compare. */
 export const METRIC_FORMATS = ["url"] as const;
@@ -34,6 +33,19 @@ export type OutputFile =
   | { kind: "tooLarge"; limit: number }
   | { kind: "invalid" }
   | { kind: "parsed"; json: unknown };
+
+/** A metric's `from` split at its dots: the check, the output file's name without `.json`, and the keys into it. */
+export interface MetricFrom {
+  check: string;
+  file: string;
+  path: string[];
+}
+
+/** `<check>.<file>.<path>` as its parts; the config has already checked its shape. */
+export function parseFrom(from: string): MetricFrom {
+  const [check = "", file = "", ...path] = from.split(".");
+  return { check, file, path };
+}
 
 /** What a JSON value is, for a note: `a number`, `an array`, `null`. */
 export function jsonKind(value: unknown): string {
@@ -74,21 +86,23 @@ export function typedValue(value: unknown, rule: MetricRule): { value: TypedValu
  * `from` up to the segment that failed, and lists the keys (or files) that were there instead.
  */
 export function metricValue(from: string, rule: MetricRule, file: OutputFile): MetricValue {
-  const segments = from.split(".");
-  const name = segments[1] ?? "";
-  const fileAt = segments.slice(0, 2).join(".");
+  const parts = parseFrom(from);
+  const fileAt = `${parts.check}.${parts.file}`;
   if (file.kind === "missing") {
-    return { value: null, note: `${fileAt}: no ${name}.json in $THRONG_OUTPUT; files there: ${keyList(file.files)}` };
+    return {
+      value: null,
+      note: `${fileAt}: no ${parts.file}.json in $THRONG_OUTPUT; files there: ${keyList(file.files)}`,
+    };
   }
   if (file.kind === "tooLarge") {
     const mb = Math.round(file.limit / (1024 * 1024));
-    return { value: null, note: `${fileAt}: ${name}.json is over the parse guard of ${mb} MB` };
+    return { value: null, note: `${fileAt}: ${parts.file}.json is over the parse guard of ${mb} MB` };
   }
-  if (file.kind === "invalid") return { value: null, note: `${fileAt}: ${name}.json is not valid JSON` };
+  if (file.kind === "invalid") return { value: null, note: `${fileAt}: ${parts.file}.json is not valid JSON` };
   let at: unknown = file.json;
-  for (let i = 2; i < segments.length; i++) {
-    const key = segments[i] ?? "";
-    const path = segments.slice(0, i + 1).join(".");
+  for (let i = 0; i < parts.path.length; i++) {
+    const key = parts.path[i] ?? "";
+    const path = [fileAt, ...parts.path.slice(0, i + 1)].join(".");
     if (Array.isArray(at)) {
       const index = /^(0|[1-9]\d*)$/u.test(key) ? Number(key) : -1;
       if (index < 0 || index >= at.length) {
@@ -102,7 +116,7 @@ export function metricValue(from: string, rule: MetricRule, file: OutputFile): M
       }
       at = Reflect.get(at, key);
     } else {
-      const parent = segments[i - 1] ?? "";
+      const parent = i === 0 ? parts.file : (parts.path[i - 1] ?? "");
       return { value: null, note: `${path}: no key ${key}; ${parent} is ${jsonKind(at)}, not an object or array` };
     }
   }
@@ -114,4 +128,4 @@ export function metricValue(from: string, rule: MetricRule, file: OutputFile): M
  * These functions as plain JavaScript, for the score script's `node` step to run. Call them by
  * `metricValue.name`, since a bundler may rename them.
  */
-export const METRIC_VALUES_SOURCE = [jsonKind, keyList, typedValue, metricValue].map(String).join("\n");
+export const METRIC_VALUES_SOURCE = [parseFrom, jsonKind, keyList, typedValue, metricValue].map(String).join("\n");

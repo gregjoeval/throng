@@ -11,11 +11,17 @@
 // queued or landing merge request's source dequeues it with `newPush` to `needsReview`, and it
 // doesn't requeue on its own once the new head passes).
 //
+// The agent loop over MCP, mcp, through `/mcp` and git only (see `e2e-mcp.ts`), with tokens under
+// aliases so it runs as `user (alias)`: the e2e user's agent
+// creates a task, starts two attempts, clones one with llms.txt's recipe, pushes and opens it, and
+// waits until it is scored; a second e2e user, the reviewer, posts a verdict on it; the first selects
+// it and waits until it merges.
+//
 // The arena scenario, arena, drives throng-web in Playwright's Chromium (THRONG_WEB_URL; see
 // `e2e-browser.ts`): two scored attempts load as lanes against their base, by file lines up their
 // files, and selecting one there lands its merge request and closes the task.
 //
-// Scoring scenarios, through the e2e routes (`/e2e/*`): metrics (a check writes two JSON files into $THRONG_OUTPUT and fails; metrics are read from both), taskmetrics (a task adds a metric over a project check, scored with source task; a clash main later adds makes the next run invalid; through `/api`), taskchecks (a task adds a metric over a project check and a required check of its own; the gate follows the task check; through `/api`), failing (a required check fails the gate),
+// Scoring scenarios, through the e2e routes (`/e2e/*`): metrics (a check writes two JSON files into $THRONG_OUTPUT and fails; metrics are read from both), taskmetrics (a task adds a metric over a project check, scored with source task; a clash main later adds makes the next run invalid; through `/api`), taskchecks (a task adds a metric over a project check and a required check of its own; the gate follows the task check; making the check optional rescores the open attempts; through `/api`), failing (a required check fails the gate),
 // invalid (an invalid config fails the gate with a config entry), preview (a passing gate deploys a
 // Worker Preview built with `preview.command`, and its URL serves it), coalesce (two quick pushes; the first
 // run is cancelled and only the newest sha is scored), intrusion (an attempt's checks try to push to
@@ -25,7 +31,7 @@
 //
 // Every project id starts with E2E_PROJECT_PREFIX (default `e2e`; lowercase alphanumeric, starting
 // with `e2e`, which the Worker's e2e routes insist on). Each scenario deletes what its projects made
-// (D1 rows, Durable Object storage, logs and repos), and the run revokes its token when it ends.
+// (D1 rows, Durable Object storage, logs and repos), and the run revokes its tokens when it ends.
 // `pnpm e2e cleanup` deletes every project under an explicitly set E2E_PROJECT_PREFIX, including those
 // a failed or cancelled run left behind.
 
@@ -34,12 +40,16 @@ import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { ARCHIVE_REF_PREFIX, archiveRef } from "../src/archive.ts";
+import { CLONE_RECIPE } from "../src/mcp.ts";
 import { originRepo } from "../src/repos.ts";
 import { openBrowser } from "./e2e-browser.ts";
 import type { BrowserSession } from "./e2e-browser.ts";
 import { basicAuthHeader, parseCommit } from "./e2e-git.ts";
 import type { Commit } from "./e2e-git.ts";
+import { agentLoop, toolCaller } from "./e2e-mcp.ts";
+import type { LoopAttempt } from "./e2e-mcp.ts";
 
 const run = promisify(execFile);
 const FIXTURE = new URL("../fixtures/fixture-worker/", import.meta.url).pathname;
@@ -200,6 +210,7 @@ const scenarios: Record<string, () => Promise<void>> = {
   zeroconfig,
   conflict,
   needsreview,
+  mcp,
   arena,
   metrics,
   taskmetrics,
@@ -232,7 +243,7 @@ async function main(): Promise<void> {
       }
     }
   } finally {
-    await revokeE2eToken();
+    await revokeE2eTokens();
   }
   process.exitCode = failed ? 1 : 0;
 }
@@ -761,8 +772,12 @@ writeFileSync(process.env.THRONG_OUTPUT + "/coverage-summary.json", JSON.stringi
 /**
  * A task adds a metric over the project's `report` check and a required `smoke` check of its own,
  * which needs the greeting to say who it's from. Both attempts show the task's check and metrics with
- * `source: task`, after the project's; the gate follows `smoke`: passed for a1, failed for a2.
+ * `source: task`, after the project's; the gate follows `smoke`: passed for a1, failed for a2. Then
+ * the task makes `smoke` optional, which rescores the open a2 at the same head: `smoke` still fails,
+ * but the gate passes.
  */
+const SMOKE = { name: "smoke", command: "node scripts/smoke.js", timeout: "2m" };
+
 async function taskchecks(): Promise<void> {
   const timeline = new Timeline();
   const p = await setUpRealProject(timeline, {
@@ -783,7 +798,7 @@ process.exit(ok ? 0 : 1);
     "/tasks",
     {
       title: "Greet",
-      checks: [{ name: "smoke", command: "node scripts/smoke.js", timeout: "2m" }],
+      checks: [SMOKE],
       metrics: [
         { name: "lines", from: "report.coverage-summary.total.lines.total", type: "number", order: "asc" },
         { name: "smoked", from: "smoke.smoke.ok", type: "boolean" },
@@ -823,6 +838,20 @@ process.exit(ok ? 0 : 1);
     );
   }
   timeline.mark("task check gated");
+
+  await throng(p, "PATCH", `/tasks/${t1}`, { checks: [{ ...SMOKE, required: false }] });
+  const rescored = await poll(`${a2}'s rescore under the edited checks`, async () => {
+    const s = await throng<ScoringStatus>(p, "GET", `/attempts/${a2}/scoring`);
+    assert(s.status !== "errored", `${a2}'s rescore errored`);
+    const smoke = s.result?.checks.find((c) => c.name === "smoke");
+    return s.sha === unsigned && s.status === "done" && smoke?.required === false ? (s.result ?? null) : null;
+  });
+  const smoke = rescored.checks.find((c) => c.name === "smoke");
+  assert(
+    rescored.gate === "passed" && smoke?.outcome === "failed",
+    `expected the rescore to fail smoke and pass the gate: ${JSON.stringify(rescored)}`,
+  );
+  timeline.mark("edit rescored");
   await finish(p.project, p.work, timeline);
 }
 
@@ -1058,6 +1087,79 @@ test("the dependency is installed", () => {
 }
 
 /**
+ * The agent loop through `/mcp` and git only (`agentLoop` in `e2e-mcp.ts`), with no config, so the
+ * gate passes with no checks. The e2e user's agent is the task's creator; the second e2e user's
+ * agent reviews.
+ */
+async function mcp(): Promise<void> {
+  const timeline = new Timeline();
+  const p = await setUpRealProject(timeline);
+  // Agents' tokens, each under an alias, so the loop runs as `user (alias)` throughout.
+  const [creator, reviewer] = await Promise.all([e2eAgentToken("claude"), e2eAgentToken("codex", "reviewer")]);
+  const clones = await mkdtemp(join(tmpdir(), `${p.project}-clones-`));
+  const [creatorClient, reviewerClient] = await Promise.all([connectMcp(creator.token), connectMcp(reviewer.token)]);
+  timeline.mark("connected to /mcp");
+  try {
+    await agentLoop({
+      creator: toolCaller(creatorClient),
+      reviewer: toolCaller(reviewerClient),
+      project: `${p.owner}/${p.project}`,
+      push: (attempt) => cloneAndPush(creator.token, attempt, join(clones, attempt.ref)),
+      wait: 30,
+      timeoutMs: CHECK_TIMEOUT_MS,
+      log: (line) => {
+        console.log(`  ${line}`);
+        timeline.mark(line);
+      },
+    });
+  } finally {
+    await Promise.all([creatorClient.close(), reviewerClient.close()]);
+    await rm(clones, { recursive: true, force: true });
+  }
+  await finish(p.project, p.work, timeline);
+}
+
+/** An MCP client on the Worker's `/mcp`, with `token` as its bearer. */
+async function connectMcp(token: string): Promise<Client> {
+  const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
+    requestInit: { headers: { Authorization: `Bearer ${token}` } },
+  });
+  const client = new Client({ name: "throng-e2e", version: "0.0.0" });
+  await client.connect(transport);
+  return client;
+}
+
+/**
+ * Clones the attempt's remote into `dir` with the recipe `llms.txt` gives, run through `sh` with the
+ * token in `THRONG_TOKEN`; edits the greeting, commits, and pushes to its `main` with no auth of its
+ * own, so the push proves the clone kept the header. A new fork can take a moment to serve, so the
+ * clone retries.
+ */
+async function cloneAndPush(token: string, attempt: LoopAttempt, dir: string): Promise<string> {
+  const recipe = `${CLONE_RECIPE.replace("<remote>", '"$1"')} "$2"`;
+  const env = { ...process.env, THRONG_TOKEN: token, GIT_TERMINAL_PROMPT: "0" };
+  await retrying(() => run("sh", ["-c", recipe, "sh", attempt.remote, dir], { env }));
+  const file = join(dir, "src/greeting.js");
+  await writeFile(file, (await readFile(file, "utf8")).replace('"hello"', `"hello from ${attempt.ref}"`));
+  await git(dir, "commit", "-q", "-am", `${attempt.ref}: greet over MCP`);
+  await git(dir, "push", "-q", "origin", "HEAD:refs/heads/main");
+  return (await git(dir, "rev-parse", "HEAD")).trim();
+}
+
+/** Runs `step` until it succeeds, for up to a minute. */
+async function retrying<T>(step: () => Promise<T>): Promise<T> {
+  const deadline = Date.now() + 60_000;
+  for (;;) {
+    try {
+      return await step();
+    } catch (error) {
+      if (Date.now() > deadline) throw error;
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
+}
+
+/**
  * Attempt archives: a custom ref under ARCHIVE_REF_PREFIX can be pushed to an origin, is listed by
  * ls-remote, survives a later push to main, and queues no scoring. Then the Worker's own git client
  * (what closing and reopening an attempt use) copies a ref into an origin's archive namespace and
@@ -1211,19 +1313,40 @@ async function setUpRealProject(timeline: Timeline, files: Record<string, string
   return { project, owner: user.handle, work, origin, token, user };
 }
 
-let e2eUserToken: Promise<{ token: string; id: string; user: { id: string; handle: string } }> | null = null;
+/** A token an e2e route minted. */
+interface MintedToken {
+  token: string;
+  id: string;
+  user: { id: string; handle: string };
+}
+
+let e2eUserToken: Promise<MintedToken> | null = null;
 
 /** The e2e user's Throng token, minted once per run. */
-function e2eUser(): Promise<{ token: string; id: string; user: { id: string; handle: string } }> {
+function e2eUser(): Promise<MintedToken> {
   e2eUserToken ??= api("POST", "/e2e/token");
   return e2eUserToken;
 }
 
-/** Revokes the run's token, if it minted one. */
-async function revokeE2eToken(): Promise<void> {
-  if (e2eUserToken === null || process.env.E2E_KEEP === "1") return;
-  const { id } = await e2eUserToken;
-  await api("DELETE", `/e2e/tokens/${id}`).catch((error) => console.warn("could not revoke the run's token", error));
+/** Agents' tokens the run minted: each under an alias, for the e2e user or the second one, the reviewer. */
+const e2eAgentTokens: Promise<MintedToken>[] = [];
+
+/** Mints a Throng token under `alias` for the e2e user, or for the reviewer: a user who isn't the attempts' author. */
+function e2eAgentToken(alias: string, as?: "reviewer"): Promise<MintedToken> {
+  const query = new URLSearchParams({ alias, ...(as === undefined ? {} : { as }) });
+  const minted = api<MintedToken>("POST", `/e2e/token?${query}`);
+  e2eAgentTokens.push(minted);
+  return minted;
+}
+
+/** Revokes the run's tokens, if it minted any. */
+async function revokeE2eTokens(): Promise<void> {
+  if (process.env.E2E_KEEP === "1") return;
+  for (const minted of [e2eUserToken, ...e2eAgentTokens]) {
+    if (minted === null) continue;
+    const { id } = await minted;
+    await api("DELETE", `/e2e/tokens/${id}`).catch((error) => console.warn("could not revoke a run's token", error));
+  }
 }
 
 /** Creates the task the scenario expects to be `expected` (numbers are per project, from 1). */

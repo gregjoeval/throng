@@ -318,6 +318,46 @@ describe("buildResult", () => {
     });
   });
 
+  it("skips a check the score script reported no exit for, saying so on it and its metrics", () => {
+    const result = buildResult(
+      CONFIG,
+      raw({
+        checks: [
+          { exit: null, durationMs: 0, metrics: {} },
+          { exit: 0, durationMs: 1, metrics: {} },
+        ],
+      }),
+    );
+    expect(result.checks[1]).toMatchObject({
+      outcome: "skipped",
+      notes: ["skipped: the score script didn't report it"],
+    });
+    expect(result.metrics.coverage).toMatchObject({
+      value: null,
+      note: "test: test was skipped: the score script didn't report it",
+    });
+  });
+
+  it("gives a null the score script sent without a note one naming its from", () => {
+    const result = buildResult(
+      CONFIG,
+      raw({
+        checks: [
+          {
+            exit: 0,
+            durationMs: 1,
+            metrics: { coverage: { value: null } as unknown as { value: null; note: string } },
+          },
+          { exit: 0, durationMs: 1, metrics: {} },
+        ],
+      }),
+    );
+    expect(result.metrics.coverage).toMatchObject({
+      value: null,
+      note: "test.coverage-summary.total.lines.pct: not reported",
+    });
+  });
+
   const TYPED = parseConfig(`checks:
   - { name: t, command: x }
 metrics:
@@ -513,13 +553,31 @@ describe("upgradeResult", () => {
         "_diff.additions": { source: "platform", type: "number", value: 10, order: "asc" },
         "_diff.deletions": { source: "platform", type: "number", value: 4, order: "asc" },
         test: { source: "project", type: "enum", value: "passed", values: OUTCOMES },
-        coverage: { source: "project", type: "number", value: 92, order: "desc" },
+        coverage: {
+          source: "project",
+          type: "number",
+          value: 92,
+          order: "desc",
+          note: "converted from an older result, which didn't record its order or unit",
+        },
         bundle: { source: "project", type: "enum", value: "timedOut", values: OUTCOMES },
         _preview: { source: "platform", type: "enum", value: "passed", values: OUTCOMES },
         "_preview.url": { source: "platform", type: "string", format: "url", value: "https://x.workers.dev" },
       },
       logs: ["test", "preview.deploy"],
     });
+  });
+
+  it("keeps a check's outcome metric over an older metric of the same name, saying it dropped it", () => {
+    const checks = legacy().checks.map((check) =>
+      check.name === "test" ? { ...check, metrics: { coverage: 92, bundle: 5 } } : check,
+    );
+    const result = upgradeResult(legacy({ checks }));
+    expect(result.metrics.bundle).toEqual({ source: "project", type: "enum", value: "timedOut", values: OUTCOMES });
+    expect(result.checks.find((check) => check.name === "bundle")?.notes).toEqual([
+      "metric bundle_kb was not reported",
+      "dropped metric bundle, read from test in an older result: its name is this check's",
+    ]);
   });
 
   it("reads each stored Preview status as a _preview outcome", () => {

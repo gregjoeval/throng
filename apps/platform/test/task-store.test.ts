@@ -168,12 +168,12 @@ describe("tasks", () => {
       source: "task",
     } as const;
     store.createTask(PROJECT, ada, { title: "a", metrics: [lines] });
-    expect(store.taskDefinitions(1)).toEqual({ checks: [], metrics: [lines] });
+    expect(store.definitionsOf(1)).toEqual({ checks: [], metrics: [lines] });
     await store.editTask(PROJECT, ada, { task: 1, title: "A" });
-    expect(store.taskDefinitions(1)).toEqual({ checks: [], metrics: [lines] });
+    expect(store.definitionsOf(1)).toEqual({ checks: [], metrics: [lines] });
     await store.editTask(PROJECT, ada, { task: 1, metrics: [] });
-    expect(store.taskDefinitions(1)).toEqual({ checks: [], metrics: [] });
-    expect(store.taskDefinitions(7)).toEqual({ checks: [], metrics: [] });
+    expect(store.definitionsOf(1)).toEqual({ checks: [], metrics: [] });
+    expect(store.definitionsOf(7)).toEqual({ checks: [], metrics: [] });
   });
 
   it("lets the owner or the creator edit, close and reopen, and nobody else", async () => {

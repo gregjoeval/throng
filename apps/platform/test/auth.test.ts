@@ -63,9 +63,16 @@ describe("gitAuth", () => {
     }
   });
 
-  it("challenges for Basic credentials when the token is missing, wrong, or sent as Bearer", async () => {
+  it("takes the token as a bearer header", async () => {
     const { get, plaintext } = await setup();
-    for (const header of [undefined, `Bearer ${plaintext}`, basic(plaintext, "thr_wrong"), "Basic !!!"]) {
+    const res = await get("/git/x", `Bearer ${plaintext}`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ handle: "greg", alias: "claude" });
+  });
+
+  it("challenges for Basic credentials when the token is missing or wrong", async () => {
+    const { get, plaintext } = await setup();
+    for (const header of [undefined, "Bearer thr_wrong", basic(plaintext, "thr_wrong"), "Basic !!!"]) {
       const res = await get("/git/x", header);
       expect(res.status).toBe(401);
       expect(res.headers.get("WWW-Authenticate")).toBe('Basic realm="throng"');

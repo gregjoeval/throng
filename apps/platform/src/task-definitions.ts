@@ -12,8 +12,10 @@ import {
   CheckSchema,
   CONFIG_PATH,
   describeIssue,
+  describePath,
   metricConfig,
   MetricSchema,
+  nameProblems,
 } from "./config.ts";
 import type { CheckConfig, Config, ConfigResult, MetricConfig } from "./config.ts";
 
@@ -24,6 +26,12 @@ export interface TaskDefinitions {
   metrics: MetricConfig[];
 }
 
+/** A task's checks and metrics as a request gives them, before they're checked; either may be left out. */
+export interface TaskDefinitionsInput {
+  checks?: unknown;
+  metrics?: unknown;
+}
+
 export const NO_TASK_DEFINITIONS: TaskDefinitions = { checks: [], metrics: [] };
 
 const TaskSchema = z
@@ -31,18 +39,7 @@ const TaskSchema = z
     checks: z.array(CheckSchema, { error: "checks must be a list" }).optional(),
     metrics: z.array(MetricSchema, { error: "metrics must be a list" }).optional(),
   })
-  .superRefine(({ checks, metrics }, ctx) => {
-    const duplicates = (list: { name: string }[] | undefined, what: "check" | "metric") => {
-      const names = new Set<string>();
-      list?.forEach(({ name }, i) => {
-        if (names.has(name)) {
-          ctx.addIssue({ code: "custom", path: [`${what}s`, i, "name"], message: `duplicate ${what} name ${name}` });
-        }
-        names.add(name);
-      });
-    };
-    duplicates(checks, "check");
-    duplicates(metrics, "metric");
+  .superRefine(({ metrics }, ctx) => {
     metrics?.forEach((metric, i) => checkMetricFields(metric, i, ctx));
   });
 
@@ -52,7 +49,7 @@ const TaskSchema = z
  * with one line per problem (`metrics[0].from: …`) when they don't merge with it.
  */
 export function taskDefinitionsFrom(
-  input: { checks?: unknown; metrics?: unknown },
+  input: TaskDefinitionsInput,
   current: TaskDefinitions,
   project: ConfigResult,
 ): { definitions: TaskDefinitions } | { error: string } {
@@ -72,7 +69,7 @@ export function taskDefinitionsFrom(
 }
 
 /** Whether a task defines any checks or metrics. */
-export function defines(task: TaskDefinitions): boolean {
+function defines(task: TaskDefinitions): boolean {
   return task.checks.length > 0 || task.metrics.length > 0;
 }
 
@@ -100,29 +97,9 @@ export function withTask(project: ConfigResult, task: TaskDefinitions): ConfigRe
 }
 
 /**
- * Each task name the project's config already uses, each task metric named like one of the task's
- * checks, and each task metric read from a check neither layer defines.
+ * Each name rule the task's checks and metrics break over the project's config (`nameProblems`), one
+ * line each: `metrics[0].from: no check is named lint`.
  */
 function clashes(project: Config | null, task: TaskDefinitions): string[] {
-  const checks = new Set(project?.checks.map((check) => check.name));
-  const metrics = new Set(project?.metrics.map((metric) => metric.name));
-  const taskChecks = new Set(task.checks.map((check) => check.name));
-  const projectClash = (name: string, path: string): string[] => {
-    if (checks.has(name)) return [`${path}: ${name} is also a check's name in ${CONFIG_PATH}`];
-    if (metrics.has(name)) return [`${path}: ${name} is also a metric's name in ${CONFIG_PATH}`];
-    return [];
-  };
-  return [
-    ...task.checks.flatMap((check, i) => projectClash(check.name, `checks[${i}].name`)),
-    ...task.metrics.flatMap((metric, i) => {
-      const path = `metrics[${i}].name`;
-      const problems = projectClash(metric.name, path);
-      if (problems.length === 0 && taskChecks.has(metric.name)) {
-        problems.push(`${path}: ${metric.name} is also the name of one of the task's checks`);
-      }
-      const check = metric.from.split(".")[0] ?? "";
-      if (!checks.has(check) && !taskChecks.has(check)) problems.push(`metrics[${i}].from: no check is named ${check}`);
-      return problems;
-    }),
-  ];
+  return nameProblems(task, project).map(({ path, message }) => `${describePath(path)}: ${message}`);
 }

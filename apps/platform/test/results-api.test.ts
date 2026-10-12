@@ -364,6 +364,25 @@ describe("the arena", () => {
     ]);
   });
 
+  it("declares the task's own metrics after the project's, each with its source", async () => {
+    const { call, ada, repos, projectId, base, drafts } = await setup();
+    await drafts(1);
+    const config = [
+      "checks:",
+      "  - name: test",
+      "    command: pnpm test",
+      "metrics:",
+      "  - { name: coverage, from: test.coverage.pct, type: number, unit: '%' }",
+    ].join("\n");
+    repos.commit(`${projectId}-main`, { files: { "README.md": "hi\n", ".throng/config.yml": config } });
+    const lines = { name: "lines", from: "test.coverage.lines", type: "number", order: "asc" };
+    expect((await call("PATCH", `${base}/tasks/t1`, ada, { metrics: [lines] })).status).toBe(200);
+    expect((await call("GET", `${base}/tasks/t1/arena`, ada)).body["metrics"]).toEqual([
+      { name: "coverage", from: "test.coverage.pct", type: "number", unit: "%", order: "desc", source: "project" },
+      { ...lines, unit: null, source: "task" },
+    ]);
+  });
+
   it("shows where a forked attempt came from, and bases it on main, not on its source", async () => {
     const { call, ada, repos, projectId, root, base, drafts, commit } = await setup();
     await drafts(1);

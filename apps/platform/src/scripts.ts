@@ -6,7 +6,7 @@ import { CONFLICT_CAPS, MERGE_LABELS } from "./conflicts.ts";
 import type { ConflictCaps, Remerge } from "./conflicts.ts";
 import { THRONG_COMMITTER } from "./landing.ts";
 import { PREVIEW_LOG, setupLogName } from "./logs.ts";
-import { METRIC_VALUES_SOURCE, metricValue } from "./metric-values.ts";
+import { METRIC_VALUES_SOURCE, metricValue, parseFrom } from "./metric-values.ts";
 import { MAX_OUTPUT_BYTES, SETUP_TIMEOUT_MS } from "./results.ts";
 import type { PlannedMetric, ScorePlan } from "./results.ts";
 import { taskBranchRef } from "./task-refs.ts";
@@ -168,7 +168,7 @@ const load = (name) => {
 const loaded = new Map();
 const values = {};
 for (const { name, from, rule } of JSON.parse(metrics)) {
-  const file = from.split(".")[1];
+  const { file } = ${parseFrom.name}(from);
   if (!loaded.has(file)) loaded.set(file, load(file));
   values[name] = ${metricValue.name}(from, rule, loaded.get(file));
 }

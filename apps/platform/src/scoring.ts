@@ -3,7 +3,8 @@
 // `request`; the queue keeps one record per run in the project Durable Object's SQLite:
 //
 // - a head that is already queued or running isn't queued again, and one with a `done` run isn't
-//   either, unless the request is a rescore;
+//   either, unless the request is a rescore. A rescore of a running head queues one follow-up
+//   behind it, since the running run may have read the task's definitions before they changed;
 // - a newer head for an attempt cancels its queued or running run, so newest head wins;
 // - at most `SCORING_CAP` runs are running per project, less the slot the merge queue's landing
 //   holds (it counts toward the cap and goes first); the rest wait, oldest first.
@@ -241,6 +242,17 @@ export class ScoringQueue {
     return row === undefined ? null : toRun(row);
   }
 
+  /** The newest `done` or `errored` run of the attempt's current head, or null when that head has none. */
+  scoredRun({ task, attempt }: ScoredAttempt): number | null {
+    const [row] = this.#sql.exec<{ id: number }>(
+      `SELECT r.id FROM scoring_runs r JOIN scoring_heads h ON h.task = r.task AND h.attempt = r.attempt AND h.sha = r.sha
+       WHERE r.task = ? AND r.attempt = ? AND r.status IN ('done', 'errored') ORDER BY r.id DESC LIMIT 1`,
+      task,
+      attempt,
+    );
+    return row?.id ?? null;
+  }
+
   /**
    * Asks for the attempt's head `sha` to be scored. Checks no permission: the task store has
    * already decided the request is allowed.
@@ -255,8 +267,13 @@ export class ScoringQueue {
           input.attempt,
         )
         .map(toRun);
-      const same = live.find((r) => r.sha === input.sha);
-      if (same !== undefined) return { queued: false, reason: `already ${same.status}`, run: same };
+      const same = live.filter((r) => r.sha === input.sha);
+      const waiting = same.find((r) => r.status === "queued");
+      if (waiting !== undefined) return { queued: false, reason: "already queued", run: waiting };
+      const running = same.find((r) => r.status === "running");
+      if (running !== undefined && input.trigger !== "rescore") {
+        return { queued: false, reason: "already running", run: running };
+      }
       if (input.readSince !== undefined) {
         const [newer] = this.#sql.exec<RunRow>(
           "SELECT * FROM scoring_runs WHERE task = ? AND attempt = ? AND id > ? ORDER BY id DESC",
@@ -267,7 +284,7 @@ export class ScoringQueue {
         if (newer !== undefined) return { queued: false, reason: "a newer push is queued", run: toRun(newer) };
       }
       // Whatever happens to this head, runs for older heads are superseded now.
-      for (const older of live) this.#cancel(older, { superseded_by: input.sha });
+      for (const older of live.filter((r) => r.sha !== input.sha)) this.#cancel(older, { superseded_by: input.sha });
       if (input.trigger !== "rescore") {
         const [done] = this.#sql.exec<RunRow>(
           "SELECT * FROM scoring_runs WHERE task = ? AND attempt = ? AND sha = ? AND status = 'done' ORDER BY id DESC",
@@ -336,8 +353,9 @@ export class ScoringQueue {
   }
 
   /**
-   * Stops cancelled runs that had started, then starts queued runs while there are free slots.
-   * Rows are claimed before any await, so drains that overlap never start or stop a run twice.
+   * Stops cancelled runs that had started, then starts queued runs while there are free slots; a
+   * rescore queued behind its attempt's running run waits for it to end. Rows are claimed before any
+   * await, so drains that overlap never start or stop a run twice.
    */
   async drain(): Promise<void> {
     if (this.#runner === null) return;
@@ -358,7 +376,12 @@ export class ScoringQueue {
       const free = SCORING_CAP - this.running() - this.#reserved();
       if (free <= 0) return [];
       const rows = this.#sql
-        .exec<RunRow>("SELECT * FROM scoring_runs WHERE status = 'queued' ORDER BY id LIMIT ?", free)
+        .exec<RunRow>(
+          `SELECT * FROM scoring_runs q WHERE status = 'queued' AND NOT EXISTS (
+             SELECT 1 FROM scoring_runs r WHERE r.status = 'running' AND r.task = q.task AND r.attempt = q.attempt
+           ) ORDER BY id LIMIT ?`,
+          free,
+        )
         .map(toRun);
       for (const run of rows) {
         this.#sql.exec("UPDATE scoring_runs SET status = 'running', started_at = ? WHERE id = ?", this.#ms(), run.id);

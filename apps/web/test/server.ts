@@ -62,6 +62,7 @@ export function attempt(taskNumber: number, number: number, fields: Partial<Atte
     alias: null,
     state: "draft",
     fork: ref,
+    remote: `https://throng.test/git/greg/throng/${ref}.git`,
     branch: null,
     note: "",
     createdAt: me.user.createdAt,

@@ -4,6 +4,19 @@ Every name and value a client of the API sees is camelCase: JSON field names at 
 
 Inside the platform, SQL columns and the `Stored*` row types that mirror them stay snake_case, and all other TypeScript is camelCase. Rows are converted once, at the API boundary, by one function per row type (`publicTask`, `publicAttempt`, `publicMergeRequest`, `publicRun`, `publicToken`, `publicUser`). Anything already camelCase inside, such as a scoring result or a dequeue's details, is served as it is.
 
+## Amendment: MCP names
+
+The MCP server at `/mcp` is the one exception, and only for the names MCP itself gives a style to:
+
+| MCP element     | Casing              | Example                              |
+| --------------- | ------------------- | ------------------------------------ |
+| Tool names      | snake_case          | `start_attempts`, `wait_for_attempt` |
+| Tool parameters | camelCase           | `project`, `attempt`, `attemptLimit` |
+| Server ID       | kebab-case          | `throng`                             |
+| Resource names  | Title Case, or URIs | `Application Logs`, `file://path`    |
+
+Tool names are snake_case because that is the MCP ecosystem's convention: the reference servers and most others name their tools that way, and the models that call them are trained on those names, so an agent finds and calls `list_tasks` more reliably than `listTasks`. Tool parameters stay camelCase: they are the API's request fields, reused from its schemas, and the data a tool returns is the API's own camelCase JSON. The server ID is kebab-case, as MCP clients key their server configs. The server has no resources yet; any it gains follow the table. A test lists the tools and fails on a tool name that isn't snake_case or a parameter name that isn't camelCase.
+
 ## Considered options
 
 - **Keep snake_case on the wire and map at the boundary.** Rejected: every camelCase object inside needed a `public*` mapping (results, file diffs, conflict hunks), and enum values would have needed a mapping layer too, or stayed in a third style.

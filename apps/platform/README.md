@@ -9,6 +9,44 @@ The platform Worker: the API, the git-facing repos in Artifacts, and checks.
 
 `src/app.ts` builds both, and exports `AppType` for throng-web's typed `hc` client.
 
+## Agents and MCP clients
+
+Agents read `GET /llms.txt` first (`src/llms.ts`): what Throng is, getting a token, the MCP URL, git remotes and auth, the agent loop step by step, and a link to the OpenAPI document at `/api/openapi.json`. It's public and names the host it's served from. The MCP server's `instructions` carry the same loop in short, and `llms.txt` quotes them. A test fails if `llms.txt` doesn't mention every tool `/mcp` lists.
+
+The MCP server is at `/mcp` (`src/mcp.ts`), built on `@modelcontextprotocol/server`: streamable HTTP, stateless, with the Throng token as a bearer header. There is no OAuth discovery, so a client must send the header itself.
+
+**Token.** A human mints one for an alias while signed in, with `POST /api/tokens {"alias": "claude"}`, and keeps it in `THRONG_TOKEN`. The same token works for git, as a bearer header or the HTTP Basic password.
+
+**Git.** Every attempt the API returns carries its `remote`. An agent clones it with:
+
+```sh
+git clone -c http.extraHeader="Authorization: Bearer $THRONG_TOKEN" <remote>
+```
+
+The `-c` comes after `clone`, so git writes the header into the new repo's config and a plain `git push` sends it too; `git -c … clone` would use it for the clone only.
+
+**Claude Code:**
+
+```sh
+claude mcp add --transport http throng https://<host>/mcp --header "Authorization: Bearer $THRONG_TOKEN"
+```
+
+**Other clients** that take a JSON config, in the `mcpServers` shape Claude Code's `.mcp.json` uses:
+
+```json
+{
+  "mcpServers": {
+    "throng": {
+      "type": "http",
+      "url": "https://<host>/mcp",
+      "headers": { "Authorization": "Bearer ${THRONG_TOKEN}" }
+    }
+  }
+}
+```
+
+Clients differ in the details: some omit `type` or call it `streamable-http`, and not all expand `${THRONG_TOKEN}` from the environment, so some need the token written in.
+
 ## Scoring logs
 
 Each scoring run copies the log of every `setup` command, check and preview to the `LOGS` R2 bucket at `logs/<projectId>/<t42a3>/<sha>/<runId>/<name>.log` (`src/logs.ts`). A setup command's log is named `setup.<n>`, a check's is its name, and the preview's is `preview.deploy`; check names can't contain a dot, so they never collide. Logs over 5 MB keep their head and tail with a `[throng: truncated …]` marker between them. The run's result lists the logs it stored, and `GET /api/projects/{owner}/{project}/runs/{runId}/logs/{name}` streams one as text, or answers `notFound` once it's missing or expired.
@@ -25,7 +63,7 @@ Each run:
 2. Applies D1 migrations to `throng-ci`.
 3. Builds with `CLOUDFLARE_ENV=ci` and deploys `throng-ci`, setting `SPIKE_TOKEN` and `CF_PREVIEW_TOKEN` (the deploy's own API token).
 4. Builds and deploys `throng-web-ci` the same way, installs Playwright's Chromium, and waits for `throng-web-ci` to answer.
-5. Runs the e2e scenarios. Every project id starts with `e2eci<run id>r<attempt>p`. Each scenario deletes what its projects made, and the suite revokes its Throng token when it ends.
+5. Runs the e2e scenarios. Every project id starts with `e2eci<run id>r<attempt>p`. Each scenario deletes what its projects made, and the suite revokes its Throng tokens when it ends.
 6. Always deletes everything under that prefix with `pnpm e2e cleanup`, even when the suite fails or is cancelled: each project's D1 row, its Durable Object's storage, its logs in R2 and its repos.
 
 The suite reaches the Worker through its e2e routes, `/e2e/*`, behind the `SPIKE_TOKEN` bearer secret. They refuse any project or repo whose id doesn't start with `e2e`, so they can't reach a real project, and `E2E_PROJECT_PREFIX` must start with `e2e` too.
@@ -45,6 +83,7 @@ gh workflow run e2e.yml --ref my-branch     # every scenario, against a branch
   - `zeroconfig`: a project with no `.throng/config.yml`. Selecting `t1a1` closes `t1a2`, and the merge request lands as a merge commit whose parents are the old `main` and the approved head, with the `Throng-Task`, `Throng-Attempt`, `Throng-Merge-Request` and `Approved-by` trailers. It also checks custom refs after landing: both attempts are archived under `refs/attempts/` in the origin.
   - `conflict`: two tasks whose attempts edit the same line. `t1`'s merge request lands, and `t2`'s is dequeued with reason `conflict` and the expected three-way hunk. Its author merges `main` and pushes, which moves it to `needsReview`. Once approved, it lands.
   - `needsreview`: a slow required check keeps the landing in its retest. A push to the source while it's queued or landing dequeues it with `newPush` to `needsReview`. Once the new head passes, it still doesn't requeue on its own.
+- `mcp`: the agent loop through `/mcp` (with the MCP SDK's client) and git only, on a real project with no config (`agentLoop` in `scripts/e2e-mcp.ts`, which `test/mcp.test.ts` also runs in process). Both agents' tokens are minted under an alias (`POST /e2e/token?alias=claude`), so the loop runs as `user (alias)` and checks the attempt and the verdict record it. The e2e user's agent calls `whoami`, `create_task` and `start_attempts count=2`, clones `t1a1`'s `remote` with the recipe above (through `sh`, with the token in `THRONG_TOKEN`), pushes with no auth of its own, `update_attempt state=open`, waits with `wait_for_attempt until=scored` and checks the result with `get_attempt`. A second e2e user, `e2e-reviewer@throng.invalid` (`POST /e2e/token?as=reviewer&alias=codex`), posts a `merge` verdict. The first selects `t1a1` and waits with `until=mergeRequestChanged` until it merges.
 - `arena`: the attempt arena in a browser. Like `zeroconfig`, it makes a real project as the e2e user, with task `t1` and two attempts: `t1a1` edits `src/greeting.js`, and `t1a2` edits it and `src/index.js`. Once both are scored, Playwright's Chromium opens `t1` on `throng-web-ci` (`THRONG_WEB_URL`) and checks that:
   1. the arena shows lanes `t1a1` and `t1a2`, each with its own files, and each compared against its base (`main`, since the task has no branch);
   2. **By file** lists `src/greeting.js` (changed by 2 of 2) and then `src/index.js` (changed by 1 of 2, which `t1a1` left alone);

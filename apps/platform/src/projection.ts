@@ -8,13 +8,13 @@
 // outbox id as its version, and D1 only replaces a row with a newer version, so deliveries that
 // arrive late, twice or out of order leave the newest one standing.
 //
-// A delivery covers at most `PROJECTION_BATCH` changes, so a large backfill goes out over several
-// deliveries instead of one past a Worker's subrequest limit. Read by `my-listings.ts`.
+// A delivery covers at most `PROJECTION_BATCH` changes, sent as one D1 batch, so a large backfill
+// goes out over several bounded deliveries. Read by `my-listings.ts`.
 
 import type { AttemptState, Sql, TaskState } from "./task-store.ts";
-import type { Database } from "./users.ts";
+import type { BatchDatabase } from "./users.ts";
 
-/** The most outbox rows one delivery covers: one D1 statement each, at most. */
+/** The most outbox rows one delivery covers: one statement each, at most, in its one D1 batch. */
 export const PROJECTION_BATCH = 50;
 /** How long the first retry after a failed delivery waits; each further failure doubles it. */
 export const PROJECTION_RETRY_MS = 60_000;
@@ -148,7 +148,7 @@ export class Projection {
    * to wait before publishing again: 0 while changes remain, a growing back-off after a failed
    * delivery (whose changes stay pending), and null once nothing is left.
    */
-  async publish(db: Database, project: string): Promise<number | null> {
+  async publish(db: BatchDatabase, project: string): Promise<number | null> {
     const batch = this.pending(project);
     if (batch === null) return null;
     try {
@@ -165,38 +165,35 @@ export class Projection {
 }
 
 /**
- * Upserts a batch's rows into D1, each only over an older version. Tasks go first, so an attempt's
- * task is in D1 once the attempt is.
+ * Upserts a batch's rows into D1, each only over an older version, in one `batch`: one round trip and
+ * one transaction, so a delivery lands whole or not at all. Tasks go first, so an attempt's task is in
+ * D1 once the attempt is.
  */
-export async function deliver(db: Database, batch: ProjectionBatch): Promise<void> {
-  await Promise.all(
-    batch.tasks.map((t) =>
-      db
-        .prepare(
-          `INSERT INTO projected_tasks (project_id, number, title, creator_id, state, created_at, closed_at, version)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT (project_id, number) DO UPDATE SET
-             title = excluded.title, creator_id = excluded.creator_id, state = excluded.state,
-             created_at = excluded.created_at, closed_at = excluded.closed_at, version = excluded.version
-           WHERE excluded.version > projected_tasks.version`,
-        )
-        .bind(t.project_id, t.number, t.title, t.creator_id, t.state, t.created_at, t.closed_at, t.version)
-        .all(),
-    ),
+export async function deliver(db: BatchDatabase, batch: ProjectionBatch): Promise<void> {
+  const tasks = batch.tasks.map((t) =>
+    db
+      .prepare(
+        `INSERT INTO projected_tasks (project_id, number, title, creator_id, state, created_at, closed_at, version)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (project_id, number) DO UPDATE SET
+           title = excluded.title, creator_id = excluded.creator_id, state = excluded.state,
+           created_at = excluded.created_at, closed_at = excluded.closed_at, version = excluded.version
+         WHERE excluded.version > projected_tasks.version`,
+      )
+      .bind(t.project_id, t.number, t.title, t.creator_id, t.state, t.created_at, t.closed_at, t.version),
   );
-  await Promise.all(
-    batch.attempts.map((a) =>
-      db
-        .prepare(
-          `INSERT INTO projected_attempts (project_id, task, number, author_id, state, created_at, closed_at, version)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT (project_id, task, number) DO UPDATE SET
-             author_id = excluded.author_id, state = excluded.state,
-             created_at = excluded.created_at, closed_at = excluded.closed_at, version = excluded.version
-           WHERE excluded.version > projected_attempts.version`,
-        )
-        .bind(a.project_id, a.task, a.number, a.author_id, a.state, a.created_at, a.closed_at, a.version)
-        .all(),
-    ),
+  const attempts = batch.attempts.map((a) =>
+    db
+      .prepare(
+        `INSERT INTO projected_attempts (project_id, task, number, author_id, state, created_at, closed_at, version)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (project_id, task, number) DO UPDATE SET
+           author_id = excluded.author_id, state = excluded.state,
+           created_at = excluded.created_at, closed_at = excluded.closed_at, version = excluded.version
+         WHERE excluded.version > projected_attempts.version`,
+      )
+      .bind(a.project_id, a.task, a.number, a.author_id, a.state, a.created_at, a.closed_at, a.version),
   );
+  const statements = [...tasks, ...attempts];
+  if (statements.length > 0) await db.batch(statements);
 }

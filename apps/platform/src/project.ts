@@ -9,6 +9,15 @@ import type { ScoringOutcome, ScoringRequest, StoredRun } from "./scoring";
 import { parseAttemptRef } from "./task-refs";
 import { runTaskMethod, TaskStore } from "./task-store";
 import type { ProjectContext, Sql, TaskOutcome } from "./task-store";
+import type { BatchDatabase } from "./users";
+
+/**
+ * D1 as the projection's `BatchDatabase`. Every statement it batches came from this `prepare`, so it
+ * is D1's own.
+ */
+function batchDatabase(db: D1Database): BatchDatabase {
+  return { prepare: (sql) => db.prepare(sql), batch: (statements) => db.batch(statements as D1PreparedStatement[]) };
+}
 
 /** Where the project's id is kept, for alarms, which carry no call that names it. */
 const PROJECT_KEY = "project";
@@ -145,7 +154,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
   override async alarm(): Promise<void> {
     const project = this.ctx.storage.kv.get<string>(PROJECT_KEY);
     if (project === undefined) return;
-    const next = await this.#tasks.projection.publish(this.env.DB, project);
+    const next = await this.#tasks.projection.publish(batchDatabase(this.env.DB), project);
     if (next !== null) await this.ctx.storage.setAlarm(Date.now() + next);
   }
 

@@ -4,7 +4,7 @@ import { deliver, MAX_PROJECTION_RETRY_MS, PROJECTION_BATCH, PROJECTION_RETRY_MS
 import { TaskStore } from "../src/task-store.ts";
 import type { AttemptState, ProjectContext, TaskState } from "../src/task-store.ts";
 import type { Actor } from "../src/tokens.ts";
-import type { Database } from "../src/users.ts";
+import type { BatchDatabase, Database, Statement } from "../src/users.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
 import { defined } from "./support/defined.ts";
@@ -56,8 +56,11 @@ function firstPages(listings: ReturnType<typeof myListings>) {
   };
 }
 
-const down: Database = {
+const down: BatchDatabase = {
   prepare: () => {
+    throw new Error("D1 is down");
+  },
+  batch: async () => {
     throw new Error("D1 is down");
   },
 };
@@ -186,6 +189,43 @@ describe("the D1 projection of tasks and attempts", () => {
     expect((await listings.tasks(ada, { state: "obsolete" })).map((t) => t.ref)).toEqual(["t2"]);
     expect((await listings.attempts(ada, {})).map((a) => a.ref)).toEqual(["t1a1"]);
     expect((await listings.attempts(ada, { state: "obsolete" })).map((a) => a.ref)).toEqual(["t2a1"]);
+  });
+
+  it("delivers each batch to D1 in one round trip", async () => {
+    const { store, db, listings } = await setup();
+    for (let i = 0; i < PROJECTION_BATCH / 2; i++) {
+      const task = store.createTask(PROJECT, ada, { title: `Task ${i + 1}` });
+      await store.createAttempts(PROJECT, ada, { task: task.number });
+    }
+    let roundTrips = 0;
+    const unwrapped = new WeakMap<Statement, Statement>();
+    const counted = (statement: Statement): Statement => {
+      const wrapper: Statement = {
+        bind: (...values) => counted(statement.bind(...values)),
+        first: async () => {
+          roundTrips++;
+          return statement.first();
+        },
+        all: async () => {
+          roundTrips++;
+          return statement.all();
+        },
+      };
+      unwrapped.set(wrapper, statement);
+      return wrapper;
+    };
+    const countingDb: BatchDatabase = {
+      prepare: (sql) => counted(db.prepare(sql)),
+      batch: async (statements) => {
+        roundTrips++;
+        return db.batch(statements.map((s) => unwrapped.get(s) ?? s));
+      },
+    };
+
+    expect(await store.projection.publish(countingDb, PROJECT.id)).toBeNull();
+
+    expect(roundTrips).toBe(1);
+    expect(await listings.attempts(ada)).toHaveLength(PROJECTION_BATCH / 2);
   });
 
   it("backfills the tasks and attempts a store had before the projection existed", async () => {

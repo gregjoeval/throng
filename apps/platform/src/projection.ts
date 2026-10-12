@@ -4,9 +4,13 @@
 // The project's Durable Object stays the source of truth, and nothing reads the projection to decide
 // a write. SQLite triggers on its `tasks` and `attempts` tables add a row to its outbox for every
 // change to a listed field, in the same transaction as the change. Publishing snapshots the changed
-// rows, upserts them into D1, then removes the outbox rows it covered. Each row carries its latest
-// outbox id as its version, and D1 only replaces a row with a newer version, so deliveries that
-// arrive late, twice or out of order leave the newest one standing.
+// rows, upserts them into D1, then removes the outbox rows it covered. Each row carries its store's
+// epoch and its latest outbox id as its version, and D1 only replaces a row with a newer
+// (epoch, version), so deliveries that arrive late, twice or out of order leave the newest one standing.
+//
+// The epoch is when the store's outbox was created. Outbox ids start again from 1 when a Durable
+// Object's storage is reset (`deleteAll()`), so without it the rows an earlier store published would
+// outrank every row of the fresh one for good; with it, the fresh store's later epoch outranks them.
 //
 // A delivery covers at most `PROJECTION_BATCH` changes, sent as one D1 batch, so a large backfill
 // goes out over several bounded deliveries. Read by `my-listings.ts`.
@@ -23,6 +27,8 @@ export const MAX_PROJECTION_RETRY_MS = 60 * 60_000;
 
 const SCHEMA = [
   // AUTOINCREMENT keeps ids rising after rows are removed, so they can serve as versions.
+  // One row: when this store's outbox was created, which outranks every earlier store of the project.
+  `CREATE TABLE IF NOT EXISTS projection_epoch (epoch INTEGER NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS projection_outbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task INTEGER NOT NULL,
@@ -49,6 +55,7 @@ export interface StoredProjectedTask {
   state: TaskState;
   created_at: string;
   closed_at: string | null;
+  epoch: number;
   version: number;
 }
 
@@ -61,6 +68,7 @@ export interface StoredProjectedAttempt {
   state: AttemptState;
   created_at: string;
   closed_at: string | null;
+  epoch: number;
   version: number;
 }
 
@@ -75,14 +83,15 @@ export interface ProjectionBatch {
 }
 
 /**
- * Creates the outbox and its triggers. A store that had tasks before the projection existed queues
- * all of them, so its first publish backfills D1.
+ * Creates the outbox and its triggers, starting a new epoch at `now`. A store that had tasks before
+ * the projection existed queues all of them, so its first publish backfills D1.
  */
-export function migrateProjection(sql: Sql): void {
+export function migrateProjection(sql: Sql, now: Date): void {
   const fresh =
     sql.exec("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'projection_outbox'").length === 0;
   for (const statement of SCHEMA) sql.exec(statement);
   if (!fresh) return;
+  sql.exec("INSERT INTO projection_epoch (epoch) VALUES (?)", now.getTime());
   sql.exec("INSERT INTO projection_outbox (task) SELECT number FROM tasks ORDER BY number");
   sql.exec("INSERT INTO projection_outbox (task, attempt) SELECT task, number FROM attempts ORDER BY task, number");
 }
@@ -116,7 +125,8 @@ export class Projection {
       limit,
     )[0]?.id;
     if (through === undefined || through === null) return null;
-    const tasks = this.#sql.exec<Omit<StoredProjectedTask, "project_id">>(
+    const epoch = this.#sql.exec<{ epoch: number }>("SELECT epoch FROM projection_epoch")[0]?.epoch ?? 0;
+    const tasks = this.#sql.exec<Omit<StoredProjectedTask, "project_id" | "epoch">>(
       `SELECT t.number, t.title, t.creator AS creator_id, t.state, t.created_at, t.closed_at, MAX(o.id) AS version
        FROM projection_outbox o JOIN tasks t ON t.number = o.task
        WHERE o.attempt IS NULL
@@ -124,7 +134,7 @@ export class Projection {
        GROUP BY t.number ORDER BY t.number`,
       through,
     );
-    const attempts = this.#sql.exec<Omit<StoredProjectedAttempt, "project_id">>(
+    const attempts = this.#sql.exec<Omit<StoredProjectedAttempt, "project_id" | "epoch">>(
       `SELECT a.task, a.number, a.author AS author_id, a.state, a.created_at, a.closed_at, MAX(o.id) AS version
        FROM projection_outbox o JOIN attempts a ON a.task = o.task AND a.number = o.attempt
        WHERE (a.task, a.number) IN (SELECT task, attempt FROM projection_outbox WHERE id <= ?)
@@ -133,8 +143,8 @@ export class Projection {
     );
     return {
       through,
-      tasks: tasks.map((t) => ({ project_id: project, ...t })),
-      attempts: attempts.map((a) => ({ project_id: project, ...a })),
+      tasks: tasks.map((t) => ({ project_id: project, epoch, ...t })),
+      attempts: attempts.map((a) => ({ project_id: project, epoch, ...a })),
     };
   }
 
@@ -165,7 +175,7 @@ export class Projection {
 }
 
 /**
- * Upserts a batch's rows into D1, each only over an older version, in one `batch`: one round trip and
+ * Upserts a batch's rows into D1, each only over an older (epoch, version), in one `batch`: one round trip and
  * one transaction, so a delivery lands whole or not at all. Tasks go first, so an attempt's task is in
  * D1 once the attempt is.
  */
@@ -173,26 +183,30 @@ export async function deliver(db: BatchDatabase, batch: ProjectionBatch): Promis
   const tasks = batch.tasks.map((t) =>
     db
       .prepare(
-        `INSERT INTO projected_tasks (project_id, number, title, creator_id, state, created_at, closed_at, version)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO projected_tasks
+           (project_id, number, title, creator_id, state, created_at, closed_at, epoch, version)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (project_id, number) DO UPDATE SET
            title = excluded.title, creator_id = excluded.creator_id, state = excluded.state,
-           created_at = excluded.created_at, closed_at = excluded.closed_at, version = excluded.version
-         WHERE excluded.version > projected_tasks.version`,
+           created_at = excluded.created_at, closed_at = excluded.closed_at,
+           epoch = excluded.epoch, version = excluded.version
+         WHERE (excluded.epoch, excluded.version) > (projected_tasks.epoch, projected_tasks.version)`,
       )
-      .bind(t.project_id, t.number, t.title, t.creator_id, t.state, t.created_at, t.closed_at, t.version),
+      .bind(t.project_id, t.number, t.title, t.creator_id, t.state, t.created_at, t.closed_at, t.epoch, t.version),
   );
   const attempts = batch.attempts.map((a) =>
     db
       .prepare(
-        `INSERT INTO projected_attempts (project_id, task, number, author_id, state, created_at, closed_at, version)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO projected_attempts
+           (project_id, task, number, author_id, state, created_at, closed_at, epoch, version)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (project_id, task, number) DO UPDATE SET
            author_id = excluded.author_id, state = excluded.state,
-           created_at = excluded.created_at, closed_at = excluded.closed_at, version = excluded.version
-         WHERE excluded.version > projected_attempts.version`,
+           created_at = excluded.created_at, closed_at = excluded.closed_at,
+           epoch = excluded.epoch, version = excluded.version
+         WHERE (excluded.epoch, excluded.version) > (projected_attempts.epoch, projected_attempts.version)`,
       )
-      .bind(a.project_id, a.task, a.number, a.author_id, a.state, a.created_at, a.closed_at, a.version),
+      .bind(a.project_id, a.task, a.number, a.author_id, a.state, a.created_at, a.closed_at, a.epoch, a.version),
   );
   const statements = [...tasks, ...attempts];
   if (statements.length > 0) await db.batch(statements);

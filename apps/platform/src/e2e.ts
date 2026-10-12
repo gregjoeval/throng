@@ -126,6 +126,10 @@ export async function deleteE2eProject<E>(deps: E2eDeps<E>, env: E, id: string):
     .prepare("DELETE FROM projects WHERE id = ? AND owner_id = ? RETURNING id")
     .bind(id, owner.id)
     .first();
+  // The project's alarm can still publish between the delete above and `destroy()`. D1 refuses its
+  // rows (their project is gone, and foreign keys are enforced), so the delivery fails whole and
+  // backs off until `destroy()` clears the alarm. Had one landed, no listing would show it: listings
+  // join `projects`.
   await deps.project(env, id).destroy();
   await deleteLogs(deps.logs(env), `${LOG_PREFIX}${id}/`);
   const names = await repos.list(`${id}-`);

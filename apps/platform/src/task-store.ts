@@ -448,7 +448,7 @@ export class TaskStore {
     this.#landing = landing;
     this.#follow = follow;
     migrate(sql);
-    migrateProjection(sql);
+    migrateProjection(sql, now());
     this.projection = new Projection({ sql });
     this.landings = new Landings({ sql, now });
     this.follows = new Follows({ sql, now });

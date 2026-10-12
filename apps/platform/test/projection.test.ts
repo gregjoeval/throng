@@ -228,6 +228,34 @@ describe("the D1 projection of tasks and attempts", () => {
     expect(await listings.attempts(ada)).toHaveLength(PROJECTION_BATCH / 2);
   });
 
+  it("lets a store whose storage was reset replace the rows its earlier self published", async () => {
+    const { repos, store, db, listings } = await setup();
+    const old = store.createTask(PROJECT, ada, { title: "Old" });
+    await store.createAttempts(PROJECT, ada, { task: old.number });
+    await store.closeTask(PROJECT, ada, { task: old.number });
+    expect(await store.projection.publish(db, PROJECT.id)).toBeNull();
+
+    const reset = new TaskStore({ sql: testSql(), repos, now: () => new Date("2026-10-11T12:00:00.000Z") });
+    reset.createTask(PROJECT, ada, { title: "New" });
+    expect(await reset.projection.publish(db, PROJECT.id)).toBeNull();
+
+    expect((await listings.tasks(ada)).map((t) => [t.ref, t.title, t.state])).toEqual([["t1", "New", "open"]]);
+  });
+
+  it("lands nothing for a project deleted from D1, keeping its changes pending", async () => {
+    const { store, db, listings } = await setup();
+    const task = store.createTask(PROJECT, ada, { title: "Fix login" });
+    await store.createAttempts(PROJECT, ada, { task: task.number });
+    await db.prepare("DELETE FROM projects WHERE id = ?").bind(PROJECT.id).all();
+
+    expect(await store.projection.publish(db, PROJECT.id)).toBe(PROJECTION_RETRY_MS);
+
+    expect(store.projection.hasChanges()).toBeTruthy();
+    expect(await db.prepare("SELECT * FROM projected_tasks").all()).toEqual({ results: [] });
+    expect(await db.prepare("SELECT * FROM projected_attempts").all()).toEqual({ results: [] });
+    expect(await listings.tasks(ada)).toEqual([]);
+  });
+
   it("backfills the tasks and attempts a store had before the projection existed", async () => {
     const { repos, sql, store, db, listings } = await setup();
     const task = store.createTask(PROJECT, ada, { title: "Fix login" });

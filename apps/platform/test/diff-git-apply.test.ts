@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { diffCommit, unifiedPatch } from "../src/diff.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import type { FakeFile } from "./fake-repos.ts";
+import { defined } from "./support/defined.ts";
 
 const REPO = "p1-main";
 const dirs: string[] = [];
@@ -69,7 +70,7 @@ describe("unified patches against git apply", () => {
     await repos.create(REPO);
     repos.commit(REPO, { files: before });
     const child = repos.commit(REPO, { files: after });
-    const diff = (await diffCommit(repos, REPO, child.hash))!;
+    const diff = defined(await diffCommit(repos, REPO, child.hash));
     expect(diff.files.every((f) => f.flags.length === 0)).toBeTruthy();
 
     const dir = checkout(before);

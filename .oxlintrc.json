@@ -45,7 +45,8 @@
         "classes": false
       }
     ],
-    "require-unicode-regexp": "error"
+    "require-unicode-regexp": "error",
+    "typescript/no-non-null-assertion": "error"
   },
   "overrides": [
     {

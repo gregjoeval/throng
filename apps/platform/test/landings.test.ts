@@ -13,6 +13,7 @@ import type { AttemptInput, ProjectContext } from "../src/task-store.ts";
 import type { Actor } from "../src/tokens.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { conflictFile } from "./support/conflicts.ts";
+import { at } from "./support/defined.ts";
 import { testSql } from "./support/task-backend.ts";
 
 const PROJECT: ProjectContext = { id: "abc123", owner: "owner001" };
@@ -71,14 +72,14 @@ async function setup() {
   /** An open attempt by ada on a new task, with its first scoring run queued. */
   const attempt = async (title: string): Promise<AttemptInput> => {
     const task = store.createTask(PROJECT, owner, { title });
-    const [a] = await store.createAttempts(PROJECT, ada, { task: task.number });
-    const ref = { task: a!.task, number: a!.number };
+    const a = at(await store.createAttempts(PROJECT, ada, { task: task.number }), 0);
+    const ref = { task: a.task, number: a.number };
     await store.openAttempt(PROJECT, ada, ref);
     return ref;
   };
   /** Finishes the attempt's latest scoring run with a passing gate; the run must be running. */
   const score = (ref: AttemptInput) => {
-    const run = store.scoring.listRuns({ task: ref.task, attempt: ref.number }).at(-1)!;
+    const run = at(store.scoring.listRuns({ task: ref.task, attempt: ref.number }), -1);
     expect(store.scoringFinished(run.id, { status: "done", result: passed })).toBeTruthy();
   };
   /** An attempt whose head passed, selected: its merge request is queued. */
@@ -90,7 +91,7 @@ async function setup() {
     return ref;
   };
   const runStates = (refs: AttemptInput[]) =>
-    refs.map((r) => store.scoring.listRuns({ task: r.task, attempt: r.number }).at(-1)!.status);
+    refs.map((r) => at(store.scoring.listRuns({ task: r.task, attempt: r.number }), -1).status);
   const mr = (task: number) => store.getMergeRequest(PROJECT, owner, { task });
   let n = 0;
   const push = (ref: AttemptInput, as: Actor = ada) => {
@@ -182,12 +183,12 @@ describe("the Sandbox cap", () => {
     expect(mr(source.task).state).toBe("queued");
     expect(landingWorkflow.created).toHaveLength(0);
 
-    score(others[0]!);
+    score(at(others, 0));
     await drain();
     expect(landingWorkflow.created).toHaveLength(1);
     expect(runStates(others)).toEqual(["done", "running", "running", "queued"]);
 
-    score(others[1]!);
+    score(at(others, 1));
     await drain();
     expect(runStates(others)).toEqual(["done", "done", "running", "running"]);
   });

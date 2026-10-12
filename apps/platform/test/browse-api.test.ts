@@ -8,6 +8,7 @@ import { MAX_TEXT_BYTES } from "../src/browse.ts";
 import { FORWARDED_EMAIL_HEADER } from "../src/forwarded.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
+import { at, defined } from "./support/defined.ts";
 import type { Json } from "./support/json.ts";
 import { testTaskBackends } from "./support/task-backend.ts";
 
@@ -71,7 +72,7 @@ describe("ref resolution", () => {
     repos.setRef(origin, `${ARCHIVE_REF_PREFIX}t1a3`, first.hash);
     backends.sql(id).exec("UPDATE attempts SET archived_sha = NULL WHERE task = 1 AND number = 2");
 
-    const readme = async (ref: string) => (await get(`${base}/blob/${ref}/README.md`)).body!;
+    const readme = async (ref: string) => defined((await get(`${base}/blob/${ref}/README.md`)).body);
     expect(await readme("main")).toMatchObject({ ref: "main", sha: first.hash, content: "v1\n" });
     expect(await readme("t1a1")).toMatchObject({ ref: "t1a1", sha: active.hash, content: "attempt 1\n" });
     expect(await readme("t1a2")).toMatchObject({ ref: "t1a2", sha: archived.hash, content: "attempt 2\n" });
@@ -176,7 +177,7 @@ describe("GET /tree", () => {
     const root = await get(`${base}/tree/main`);
     expect(root.status).toBe(200);
     expect(root.body).toMatchObject({ ref: "main", sha: head.hash, path: "" });
-    expect(root.body!["entries"].map((e: Json) => [e.name, e.type])).toEqual([
+    expect(defined(root.body)["entries"].map((e: Json) => [e.name, e.type])).toEqual([
       ["docs", "tree"],
       ["src", "tree"],
       ["Alpha.md", "blob"],
@@ -184,7 +185,7 @@ describe("GET /tree", () => {
       ["run.sh", "exec"],
       ["zeta.md", "blob"],
     ]);
-    expect(root.body!["entries"][0]).toEqual({
+    expect(defined(root.body)["entries"][0]).toEqual({
       name: "docs",
       path: "docs",
       type: "tree",
@@ -205,7 +206,7 @@ describe("GET /tree", () => {
     repos.commit(origin, { files: { "my docs/héllo wörld/日本.md": "こんにちは\n" } });
     const dir = await get(`${base}/tree/main/${encodeURI("my docs/héllo wörld")}`);
     expect(dir.status).toBe(200);
-    expect(dir.body!["entries"]).toEqual([
+    expect(defined(dir.body)["entries"]).toEqual([
       expect.objectContaining({ name: "日本.md", path: "my docs/héllo wörld/日本.md" }),
     ]);
     const file = await get(`${base}/blob/main/${encodeURIComponent("my docs/héllo wörld/日本.md")}`);
@@ -310,15 +311,15 @@ describe("GET /commits and /commit", () => {
 
     const first = await get(`${base}/commits/main`);
     expect(first.body).toMatchObject({ ref: "main", sha: shas[0], offset: 0, limit: 50, next: 50 });
-    expect(first.body!["commits"].map((c: Json) => c.sha)).toEqual(shas.slice(0, 50));
+    expect(defined(first.body)["commits"].map((c: Json) => c.sha)).toEqual(shas.slice(0, 50));
 
     const last = await get(`${base}/commits/main?offset=100&limit=100`);
     expect(last.body).toMatchObject({ offset: 100, limit: 100, next: null });
-    expect(last.body!["commits"].map((c: Json) => c.sha)).toEqual(shas.slice(100));
+    expect(defined(last.body)["commits"].map((c: Json) => c.sha)).toEqual(shas.slice(100));
 
     const exact = await get(`${base}/commits/main?offset=20&limit=100`);
     expect(exact.body).toMatchObject({ next: null });
-    expect(exact.body!["commits"]).toHaveLength(100);
+    expect(defined(exact.body)["commits"]).toHaveLength(100);
 
     for (const query of ["limit=101", "limit=0", "offset=-1", "limit=abc"]) {
       expect((await get(`${base}/commits/main?${query}`)).status, query).toBe(400);
@@ -331,7 +332,7 @@ describe("GET /commits and /commit", () => {
     const side = repos.commit(origin, { files: { a: "side" }, branch: "side", parents: [root.hash] });
     const merge = repos.commit(origin, { files: { a: "merged" }, parents: [root.hash, side.hash] });
     const res = await get(`${base}/commits/main`);
-    expect(res.body!["commits"].map((c: Json) => c.sha)).toEqual([merge.hash, root.hash]);
+    expect(defined(res.body)["commits"].map((c: Json) => c.sha)).toEqual([merge.hash, root.hash]);
   });
 
   it("returns a commit's message, people, dates, parents and tree", async () => {
@@ -371,13 +372,13 @@ describe("GET /commit/{sha}/diff", () => {
       truncated: false,
       totals: { files: 3, additions: 2, deletions: 2 },
     });
-    const files = res.body!["files"] as Json[];
+    const files = defined(res.body)["files"] as Json[];
     expect(files.map((f) => [f["path"], f["status"]])).toEqual([
       ["a.txt", "modified"],
       ["b.txt", "deleted"],
       ["c.txt", "added"],
     ]);
-    expect(files[0]!["patch"]).toContain("@@ -1 +1 @@\n-1\n+2\n");
+    expect(at(files, 0)["patch"]).toContain("@@ -1 +1 @@\n-1\n+2\n");
   });
 
   it("answers the concatenated unified patch for Accept: text/x-diff", async () => {

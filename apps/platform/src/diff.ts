@@ -222,6 +222,13 @@ function isTree(e: TreeEntry): boolean {
   return e.type === "tree";
 }
 
+/** `preferred`, or else `other`: the side a change has. Every change has at least one. */
+function eitherSide<T>(preferred: T | null | undefined, other: T | null | undefined): T {
+  const found = preferred ?? other;
+  if (found === null || found === undefined) throw new Error("a change needs at least one side");
+  return found;
+}
+
 /** Git orders a tree's entries comparing a directory's name as if it ended in "/". */
 function orderKey(e: TreeEntry): string {
   return isTree(e) ? `${e.name}/` : e.name;
@@ -244,11 +251,10 @@ async function walkTrees(
   const byKey = new Map<string, { old?: TreeEntry; new?: TreeEntry }>();
   for (const e of olds) byKey.set(orderKey(e), { old: e });
   for (const e of news) byKey.set(orderKey(e), { ...byKey.get(orderKey(e)), new: e });
-  const keys = [...byKey.keys()].toSorted(byteOrder);
-  for (const key of keys) {
-    const { old, new: next } = byKey.get(key)!;
+  const sorted = [...byKey].toSorted(([a], [b]) => byteOrder(a, b));
+  for (const [, { old, new: next }] of sorted) {
     if (old !== undefined && next !== undefined && old.hash === next.hash && old.mode === next.mode) continue;
-    const path = prefix + (old ?? next)!.name;
+    const path = prefix + eitherSide(old, next).name;
     if ((old !== undefined && isTree(old)) || (next !== undefined && isTree(next))) {
       const done = await walkTrees(repos, repo, old?.hash ?? null, next?.hash ?? null, `${path}/`, out, limit);
       if (!done) return false;
@@ -321,7 +327,7 @@ function renameable(s: FileSide): boolean {
 }
 
 function pathOf(c: Change): string {
-  return (c.new ?? c.old)!.path;
+  return eitherSide(c.new, c.old).path;
 }
 
 /** Byte order of UTF-8: for strings, code point order. */
@@ -354,7 +360,7 @@ async function readBlob(repos: Repos, repo: string, hash: string): Promise<Blob>
 }
 
 function describe(old: FileSide | null, next: FileSide | null): Omit<FileDiff, "patch" | "flags"> {
-  const either = (next ?? old)!;
+  const either = eitherSide(next, old);
   const renamed = old !== null && next !== null && old.path !== next.path;
   const status = fileStatus(old, next, renamed);
   return {
@@ -445,8 +451,8 @@ function label(prefix: "a" | "b", s: FileSide | null): string {
 
 /** The `diff --git` line and git's extended headers, in the order git writes them. */
 function gitHeader(old: FileSide | null, next: FileSide | null): string[] {
-  const a = (old ?? next)!;
-  const b = (next ?? old)!;
+  const a = eitherSide(old, next);
+  const b = eitherSide(next, old);
   const lines = [`diff --git a/${a.path} b/${b.path}`];
   if (old === null) lines.push(`new file mode ${b.mode}`);
   else if (next === null) lines.push(`deleted file mode ${a.mode}`);

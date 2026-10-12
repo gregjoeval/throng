@@ -8,6 +8,7 @@ import { buildResult, scorePlan } from "../src/results.ts";
 import type { RawScore, ScorePlan } from "../src/results.ts";
 import { parseResult, previewScript, scoreScript } from "../src/scripts.ts";
 import type { PreviewScriptResult } from "../src/scripts.ts";
+import { at } from "./support/defined.ts";
 
 // Runs the Sandbox scripts against local bare repos standing in for Artifacts remotes.
 
@@ -135,8 +136,8 @@ describe("scoreScript", () => {
       scoreScript(fork, origin, head, plan({ checks: [check("slow", "sleep 20", 1000)] })),
     );
     expect(raw.checks[0]).toMatchObject({ exit: 124 });
-    expect(raw.checks[0]!.durationMs).toBeGreaterThanOrEqual(1000);
-    expect(raw.checks[0]!.durationMs).toBeLessThan(10_000);
+    expect(at(raw.checks, 0).durationMs).toBeGreaterThanOrEqual(1000);
+    expect(at(raw.checks, 0).durationMs).toBeLessThan(10_000);
   });
 
   it("quotes commands so a check can't break out of the script", () => {
@@ -149,7 +150,7 @@ describe("scoreScript", () => {
         plan({ checks: [check("quotes", `echo "it's" '$HOME' "$(echo ok)" > ../quoted`)] }),
       ),
     );
-    expect(raw.checks[0]!.exit).toBe(0);
+    expect(at(raw.checks, 0).exit).toBe(0);
   });
 
   it("is idempotent: rerunning in the same directory gives the same result", () => {
@@ -193,7 +194,7 @@ describe("scoreScript", () => {
         { name: "lint", required: false, outcome: "failed", metrics: {} },
       ],
     });
-    expect(result.checks[0]!.notes).toEqual(["ignored metric junk: not declared by this check"]);
+    expect(at(result.checks, 0).notes).toEqual(["ignored metric junk: not declared by this check"]);
   });
 });
 

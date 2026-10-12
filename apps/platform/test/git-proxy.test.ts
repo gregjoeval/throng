@@ -16,6 +16,7 @@ import type { Actor } from "../src/tokens.ts";
 import { userForEmail } from "../src/users.ts";
 import { conflictDetails, ERRORED } from "./support/conflicts.ts";
 import { testDatabase } from "./support/d1.ts";
+import { at } from "./support/defined.ts";
 import { git, gitEnv, LocalGitHost, serve, tryGit } from "./support/git-host.ts";
 import { testTaskBackends } from "./support/task-backend.ts";
 
@@ -140,7 +141,7 @@ describe("git proxy", () => {
 
     expect(journal()).toHaveLength(1);
     expect(journal()[0]).toMatchObject({ kind: "pushed", user_id: ada.user.id, task: 1, attempt: 1 });
-    expect(JSON.parse(journal()[0]!.detail)).toEqual({ ref: "t1a1", gitRef: "refs/heads/main", before, after: sha });
+    expect(JSON.parse(at(journal(), 0).detail)).toEqual({ ref: "t1a1", gitRef: "refs/heads/main", before, after: sha });
     // A draft isn't scored on push.
     expect(pushed.stderr).not.toMatch(/scoring/u);
   });
@@ -338,7 +339,7 @@ describe("merge request notices on a push to the source attempt", () => {
     await store(project.id).openAttempt(project, ada.actor, ref);
     await store(project.id).selectAttempt(project, ada.actor, ref);
     await store(project.id).scoring.drain();
-    const run = store(project.id).scoring.listRuns({ task: 1, attempt: 1 }).at(-1)!;
+    const run = at(store(project.id).scoring.listRuns({ task: 1, attempt: 1 }), -1);
     store(project.id).scoringFinished(run.id, { status: "done", result: passed });
     expect(store(project.id).getMergeRequest(project, ada.actor, { task: 1 }).state).toBe("queued");
     const dir = await clone("throng/t1a1.git", ada.token);

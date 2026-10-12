@@ -56,7 +56,8 @@ describe("forwardToPlatform", () => {
     );
     expect(res.status).toBe(200);
     expect(received).toHaveLength(1);
-    const forwarded = received[0]!;
+    const [forwarded] = received;
+    if (forwarded === undefined) throw new Error("no request was forwarded");
     expect(new URL(forwarded.url).pathname + new URL(forwarded.url).search).toBe("/api/me?x=1");
     expect(forwarded.headers.get("X-Throng-Access-Email")).toBe("ada@example.com");
     expect(forwarded.headers.get("Accept")).toBe("application/json");

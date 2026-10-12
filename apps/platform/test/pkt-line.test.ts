@@ -13,6 +13,7 @@ import {
   updatedRefs,
   writeReport,
 } from "../src/pkt-line.ts";
+import { defined } from "./support/defined.ts";
 
 const A = "a".repeat(40);
 const B = "b".repeat(40);
@@ -157,7 +158,7 @@ describe("readReport and writeReport", () => {
 describe("rejectionReport", () => {
   it("marks every ref ng with its reason", () => {
     const rejected = rejectionReport(twoRefPush(["report-status"]), ["no\nway", "nope"]);
-    expect(text(rejected!).split(/(?=[0-9a-f]{4}(?:unpack|ng|$))/u)).toEqual([
+    expect(text(defined(rejected, "a rejection report")).split(/(?=[0-9a-f]{4}(?:unpack|ng|$))/u)).toEqual([
       "000eunpack ok\n",
       "001eng refs/heads/main no way\n",
       "0019ng refs/heads/x nope\n",
@@ -166,8 +167,8 @@ describe("rejectionReport", () => {
   });
 
   it("wraps the report in band 1 under side-band-64k", () => {
-    const plain = rejectionReport(twoRefPush(["report-status"]), ["a", "b"])!;
-    const banded = rejectionReport(twoRefPush(["report-status", "side-band-64k"]), ["a", "b"])!;
+    const plain = defined(rejectionReport(twoRefPush(["report-status"]), ["a", "b"]));
+    const banded = defined(rejectionReport(twoRefPush(["report-status", "side-band-64k"]), ["a", "b"]));
     expect(text(banded)).toBe(`${(plain.length + 5).toString(16).padStart(4, "0")}\x01${text(plain)}0000`);
     expect(updatedRefs(banded, true)).toEqual([]);
   });

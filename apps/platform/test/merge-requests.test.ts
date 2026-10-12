@@ -8,6 +8,7 @@ import type { AttemptInput, ProjectContext } from "../src/task-store.ts";
 import type { Actor } from "../src/tokens.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { conflictDetails, ERRORED } from "./support/conflicts.ts";
+import { at, defined } from "./support/defined.ts";
 import { testSql } from "./support/task-backend.ts";
 
 const PROJECT: ProjectContext = { id: "abc123", owner: "owner001" };
@@ -74,7 +75,7 @@ async function setup() {
   const task = store.createTask(PROJECT, cat, { title: "Fix it" });
   const [a1] = await store.createAttempts(PROJECT, ada, { task: task.number });
   const [a2] = await store.createAttempts(PROJECT, bob, { task: task.number });
-  const refs = [a1!, a2!].map((a) => ({ task: a.task, number: a.number }));
+  const refs = [defined(a1, "attempt 1"), defined(a2, "attempt 2")].map((a) => ({ task: a.task, number: a.number }));
   const [ref1, ref2] = refs as [AttemptInput, AttemptInput];
 
   const author = (ref: AttemptInput) => (ref.number === 1 ? ada : bob);
@@ -82,7 +83,7 @@ async function setup() {
   /** Finishes the attempt's latest run with `outcome`, starting it first. */
   const score = async (ref: AttemptInput, outcome: ScoringOutcome = done()) => {
     await store.scoring.drain();
-    const run = store.scoring.listRuns({ task: ref.task, attempt: ref.number }).at(-1)!;
+    const run = at(store.scoring.listRuns({ task: ref.task, attempt: ref.number }), -1);
     store.scoringFinished(run.id, outcome);
   };
   let n = 0;
@@ -176,8 +177,8 @@ describe("pending → queued", () => {
     await open(ref1);
     await store.selectAttempt(PROJECT, cat, ref1);
     const other = store.createTask(PROJECT, cat, { title: "Other" });
-    const [made] = await store.createAttempts(PROJECT, ada, { task: other.number });
-    const ref = { task: made!.task, number: made!.number };
+    const made = at(await store.createAttempts(PROJECT, ada, { task: other.number }), 0);
+    const ref = { task: made.task, number: made.number };
     await store.openAttempt(PROJECT, ada, ref);
     await score(ref);
     expect(mr().state).toBe("pending");
@@ -208,8 +209,8 @@ describe("selection permissions and requirements", () => {
   it("lets the task creator select their own attempt", async () => {
     const { store } = await setup();
     const task = store.createTask(PROJECT, cat, { title: "Mine" });
-    const [mine] = await store.createAttempts(PROJECT, cat, { task: task.number });
-    const ref = { task: mine!.task, number: mine!.number };
+    const mine = at(await store.createAttempts(PROJECT, cat, { task: task.number }), 0);
+    const ref = { task: mine.task, number: mine.number };
     await store.openAttempt(PROJECT, cat, ref);
     expect(await store.selectAttempt(PROJECT, catAgent, ref)).toMatchObject({ task: 2, attempt: 1, state: "pending" });
   });
@@ -217,8 +218,8 @@ describe("selection permissions and requirements", () => {
   it("merges a single-attempt task through the same call, closing nothing else", async () => {
     const { store } = await setup();
     const task = store.createTask(PROJECT, cat, { title: "Solo" });
-    const [only] = await store.createAttempts(PROJECT, ada, { task: task.number });
-    const ref = { task: only!.task, number: only!.number };
+    const only = at(await store.createAttempts(PROJECT, ada, { task: task.number }), 0);
+    const ref = { task: only.task, number: only.number };
     await store.openAttempt(PROJECT, ada, ref);
     expect((await store.selectAttempt(PROJECT, cat, ref)).state).toBe("pending");
     expect(store.getAttempt(PROJECT, cat, ref).state).toBe("open");
@@ -365,8 +366,8 @@ describe("the source attempt ending", () => {
 /** Adds a task by cat with one opened, scored attempt by ada, and selects it; returns its number. */
 async function queuedTask(env: Awaited<ReturnType<typeof setup>>, title: string): Promise<number> {
   const task = env.store.createTask(PROJECT, cat, { title });
-  const [made] = await env.store.createAttempts(PROJECT, ada, { task: task.number });
-  const ref = { task: made!.task, number: made!.number };
+  const made = at(await env.store.createAttempts(PROJECT, ada, { task: task.number }), 0);
+  const ref = { task: made.task, number: made.number };
   await env.store.openAttempt(PROJECT, ada, ref);
   await env.score(ref);
   await env.store.selectAttempt(PROJECT, cat, ref);

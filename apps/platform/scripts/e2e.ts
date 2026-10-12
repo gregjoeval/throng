@@ -311,7 +311,8 @@ async function conflict(): Promise<void> {
   await throng(p, "POST", `/tasks/${t1}/selection`, { attempt: a1 });
   const landed = await mergeRequestUntil(p, t1, (mr) => mr.state === "merged");
   timeline.mark("t1 merged");
-  const mainSha = landed.mergeSha!;
+  const mainSha = landed.mergeSha;
+  assert(mainSha !== null, "a merged merge request has no mergeSha");
 
   await throng(p, "POST", `/tasks/${t2}/selection`, { attempt: a2 });
   timeline.mark("t2a1 selected");
@@ -377,7 +378,8 @@ async function conflict(): Promise<void> {
   timeline.mark("t2 approved");
   const merged = await mergeRequestUntil(p, t2, (mr) => mr.state === "merged");
   timeline.mark("t2 merged");
-  const commit = await readCommit(p, merged.mergeSha!);
+  assert(merged.mergeSha !== null, "a merged merge request has no mergeSha");
+  const commit = await readCommit(p, merged.mergeSha);
   assert(
     JSON.stringify(commit.parents) === JSON.stringify([mainSha, resolved]),
     `expected parents [t1's merge, t2a1's head], got ${JSON.stringify(commit.parents)}`,
@@ -469,7 +471,7 @@ writeFileSync(process.env.THRONG_METRICS, JSON.stringify({ coverage: 87.5, stray
   const sha = await commitAndPush(work, fork, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
   timeline.mark("attempt pushed");
 
-  const result = (await scored(project, sha)).result!;
+  const result = await scored(project, sha);
   assert(result.gate === "passed", `expected the gate to pass: ${JSON.stringify(result.checks)}`);
   const [test, coverage] = result.checks;
   assert(
@@ -504,7 +506,7 @@ async function failing(): Promise<void> {
   const sha = await commitAndPush(work, fork, "src/greeting.js", (s) => s.replace('"hello"', '"hi"'), "a1: hi");
   timeline.mark("attempt pushed");
 
-  const result = (await scored(project, sha)).result!;
+  const result = await scored(project, sha);
   assert(result.gate === "failed", "expected the gate to fail");
   assert(
     result.checks.map((c) => c.outcome).join() === "failed,passed",
@@ -526,10 +528,10 @@ async function invalid(): Promise<void> {
   const sha = await commitAndPush(work, fork, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
   timeline.mark("attempt pushed");
 
-  const result = (await scored(project, sha)).result!;
+  const result = await scored(project, sha);
   assert(result.config.kind === "invalid" && result.gate === "failed", `expected an invalid config to fail the gate`);
   assert(
-    result.checks.length === 1 && result.checks[0]!.name === "config",
+    result.checks.length === 1 && result.checks[0]?.name === "config",
     `expected one config entry, got ${JSON.stringify(result.checks)}`,
   );
   assert(result.builtin.filesChanged === 1, "the built-in metrics were not recorded");
@@ -552,7 +554,7 @@ async function preview(): Promise<void> {
   const sha = await commitAndPush(work, fork, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
   timeline.mark("attempt pushed");
 
-  const result = (await scored(project, sha)).result!;
+  const result = await scored(project, sha);
   timeline.mark("scored");
   assert(result.gate === "passed", `expected the gate to pass: ${JSON.stringify(result.checks)}`);
   const deployed = result.preview;
@@ -651,7 +653,7 @@ test("cannot reach the Cloudflare API", async () => {
   const sha = await commitAndPush(work, fork, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
   timeline.mark("attempt pushed");
 
-  const result = (await scored(project, sha)).result!;
+  const result = await scored(project, sha);
   assert(result.gate === "passed", `expected the probes to be blocked and pass, got ${JSON.stringify(result.checks)}`);
   const log = await api<{ message: string }[]>("GET", `/e2e/repos/${originRepo(project)}/log?ref=main&limit=20`);
   assert(!log.some((c) => c.message === "intrusion"), "the forged commit reached main");
@@ -695,7 +697,7 @@ test("the dependency is installed", () => {
   );
   timeline.mark("attempt pushed");
 
-  const result = (await scored(project, sha)).result!;
+  const result = await scored(project, sha);
   assert(
     result.gate === "passed",
     `expected the dependency to install and the tests to pass: ${JSON.stringify(result.checks)}`,
@@ -832,8 +834,8 @@ function report(timeline: Timeline, journal: JournalEntry[]): void {
   for (const d of cancelled) console.log(`  ${JSON.stringify(d.detail)}`);
 }
 
-/** Waits for `sha`'s run to finish and reads it back; an errored run fails the scenario. */
-async function scored(project: string, sha: string): Promise<Run> {
+/** Waits for `sha`'s run to finish and returns its result; an errored run fails the scenario. */
+async function scored(project: string, sha: string): Promise<NonNullable<Run["result"]>> {
   const event = await waitFor(
     project,
     (e) => (e.kind === "scored" || e.kind === "scoringErrored") && e.detail.sha === sha,
@@ -842,7 +844,7 @@ async function scored(project: string, sha: string): Promise<Run> {
   const { result } = found;
   assert(found.status === "done" && result !== null, `run ${found.id} ended ${found.status}: ${found.error ?? ""}`);
   console.log(`  gate ${result.gate}: ${JSON.stringify(result.checks.map((c) => [c.name, c.outcome]))}`);
-  return found;
+  return result;
 }
 
 /**

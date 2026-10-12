@@ -91,9 +91,10 @@ export class LocalGitHost implements Repos {
     let host: LocalGitHost | undefined;
     const server = createServer((req, res) => {
       const respond = async () => {
+        if (host === undefined) throw new Error("a request arrived before the git host started");
         let response: HostResponse;
         try {
-          response = await host!.#handle(req);
+          response = await host.#handle(req);
         } catch (error: unknown) {
           res.writeHead(500, { "Content-Type": "text/plain" });
           res.end(String(error));

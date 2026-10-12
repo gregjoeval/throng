@@ -14,6 +14,7 @@ import { mintToken } from "../src/tokens.ts";
 import type { Actor } from "../src/tokens.ts";
 import { userForEmail } from "../src/users.ts";
 import { testDatabase } from "./support/d1.ts";
+import { at, defined } from "./support/defined.ts";
 import { git, gitEnv, LocalGitHost, serve, tryGit } from "./support/git-host.ts";
 import { testTaskBackends } from "./support/task-backend.ts";
 
@@ -155,7 +156,7 @@ describe("push-to-create", () => {
       ["scoringQueued", 1],
     ]);
     expect(pushed.stderr).toMatch(new RegExp(`remote: scoring queued for t2a1 \\(${sha}\\)`, "u"));
-    expect(JSON.parse(events[3]!.detail)).toEqual({
+    expect(JSON.parse(at(events, 3).detail)).toEqual({
       ref: "t2a1",
       gitRef: "refs/heads/main",
       before: mainSha,
@@ -223,19 +224,19 @@ describe("push-to-create", () => {
 
     const results = await Promise.all([push(one, "search"), push(two, "search")]);
     expect(results.filter((r) => r.ok)).toHaveLength(1);
-    const loser = results.find((r) => !r.ok)!;
+    const loser = defined(results.find((r) => !r.ok));
     expect(loser.stderr).toMatch(
       /\[remote rejected\] HEAD -> search \((another push of branch search|branch search belongs to)/u,
     );
 
     const made = tasks.listTasks(project, ada.actor, {}).filter((t) => t.number !== 1);
     expect(made).toHaveLength(1);
-    const attempts = tasks.listAttempts(project, ada.actor, { task: made[0]!.number });
+    const attempts = tasks.listAttempts(project, ada.actor, { task: at(made, 0).number });
     expect(attempts).toHaveLength(1);
-    expect(attempts[0]!.branch).toBe("search");
+    expect(at(attempts, 0).branch).toBe("search");
     // Every fork left belongs to an attempt.
     expect(await host.list(`${project.id}-t`)).toEqual(
-      [`${project.id}-t1a1`, `${project.id}-${attempts[0]!.fork}`].toSorted(),
+      [`${project.id}-t1a1`, `${project.id}-${at(attempts, 0).fork}`].toSorted(),
     );
     expect(pending()).toEqual([]);
   });

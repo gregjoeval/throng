@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { FakeRepos } from "./fake-repos.ts";
+import { defined } from "./support/defined.ts";
 
 describe("FakeRepos", () => {
   it("creates an origin and forks it for an attempt", async () => {
@@ -89,7 +90,7 @@ describe("FakeRepos", () => {
       ["bin", "tree", "40000"],
       ["src", "tree", "40000"],
     ]);
-    expect(await (await repos.readBlob("k3x9q2-main", readme!.hash))?.text()).toBe("hello\n");
+    expect(await (await repos.readBlob("k3x9q2-main", defined(readme, "README.md").hash))?.text()).toBe("hello\n");
     expect(await (await repos.readFile("k3x9q2-main", { ref: "main", path: "src/a.ts" }))?.text()).toBe("a\n");
     expect(await repos.readCommit("k3x9q2-main", first.hash)).toEqual(first);
 

@@ -11,6 +11,7 @@ import type { LogStore } from "../src/logs.ts";
 import type { ScoringResult } from "../src/results.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
+import { at } from "./support/defined.ts";
 import type { Json } from "./support/json.ts";
 import { testTaskBackends } from "./support/task-backend.ts";
 
@@ -106,7 +107,7 @@ async function setup() {
 
   const tasks = store(id);
   await tasks.drain(id);
-  const run = tasks.scoring.listRuns({ task: 1, attempt: 1 }).at(-1)!;
+  const run = at(tasks.scoring.listRuns({ task: 1, attempt: 1 }), -1);
   tasks.scoringFinished(run.id, { status: "done", result: passed });
   expect((await call("POST", `${p}/tasks/t1/selection`, ada, { attempt: "t1a1" })).body["state"]).toBe("queued");
   await tasks.drain(id);

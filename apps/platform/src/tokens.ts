@@ -1,6 +1,7 @@
 // Throng tokens: what machines (agents, the CLI, git) present instead of an Access session.
 // The plaintext `thr_<random>` is returned once at mint time; only its SHA-256 hash is stored.
 
+import { ServiceError } from "./errors.ts";
 import { randomId } from "./users.ts";
 import type { Database, User } from "./users.ts";
 
@@ -101,6 +102,54 @@ export async function revokeToken(
     .bind(...(scoped ? [now.toISOString(), id, userId, agent] : [now.toISOString(), id, userId]))
     .first<Token>();
 }
+
+export interface TokenServiceDeps {
+  db: Database;
+  now: () => Date;
+}
+
+/** The token services: an actor mints, lists and revokes their own tokens. */
+export function tokenService({ db, now }: TokenServiceDeps) {
+  return {
+    /**
+     * Mints a token for the actor's human, or for `agent`. An agent mints only for itself. A token (`via`, the
+     * one the caller authenticated with; null under an Access session) can't mint one that outlives it: without
+     * `expiresIn`, the default lifetime is cut to what it has left.
+     */
+    async mint(
+      actor: Actor,
+      input: { agent?: string | undefined; expiresIn?: number | undefined; via: Token | null },
+    ): Promise<{ token: Token; plaintext: string }> {
+      if (actor.agent !== null && input.agent !== undefined && input.agent !== actor.agent) {
+        throw new ServiceError("forbidden", "an agent's token can only mint tokens for that agent");
+      }
+      const at = now();
+      let ttlSeconds = input.expiresIn ?? DEFAULT_TOKEN_TTL_SECONDS;
+      if (input.via !== null) {
+        const remaining = Math.floor((Date.parse(input.via.expires_at) - at.getTime()) / 1000);
+        if (input.expiresIn === undefined) ttlSeconds = Math.min(ttlSeconds, remaining);
+        if (ttlSeconds > remaining || ttlSeconds < 1) {
+          throw new ServiceError("invalidRequest", "a token can't mint a token that outlives it");
+        }
+      }
+      return mintToken(db, { userId: actor.user.id, agent: actor.agent ?? input.agent ?? null, ttlSeconds, now: at });
+    },
+
+    /** The actor's tokens, newest first; an agent sees only its own. */
+    list(actor: Actor): Promise<Token[]> {
+      return listTokens(db, actor.user.id, actor.agent);
+    },
+
+    /** Revokes one of the actor's tokens, keeping its first revocation time. */
+    async revoke(actor: Actor, input: { id: string }): Promise<Token> {
+      const revoked = await revokeToken(db, { userId: actor.user.id, agent: actor.agent, id: input.id, now: now() });
+      if (revoked === null) throw new ServiceError("notFound", "no such token");
+      return revoked;
+    },
+  };
+}
+
+export type TokenService = ReturnType<typeof tokenService>;
 
 /** The actor and token for a plaintext token, or null when it is unknown, revoked or expired at `now`. */
 export async function authenticateToken(

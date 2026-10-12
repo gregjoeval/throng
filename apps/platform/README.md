@@ -38,7 +38,11 @@ gh workflow run e2e.yml --ref my-branch     # every scenario, against a branch
 
 ### Scenarios
 
-- `zeroconfig`, `conflict`, `metrics`, `failing`, `invalid`, `preview`, `coalesce`, `intrusion`, `deps`: scoring; see the header of `scripts/e2e.ts`. The spike's landing is gone: the merge queue's Landing Workflow lands only selected attempts, so the scenarios that wait for a landing (`zeroconfig`, `conflict`) fail until they're rewritten for merge requests.
+- `zeroconfig`, `conflict`, `needsreview`: the merge queue. These make real projects (with task rows) owned by an e2e user, `e2e@throng.invalid`, through `POST /spike/projects/:project`, then drive them only through `/api` and the git proxy with that user's Throng token (`POST /spike/token`). The fixture is the one push that goes around the proxy, since the proxy refuses pushes to the origin's `main`.
+  - `zeroconfig`: a project with no `.throng/config.yml`. Selecting `t1a1` closes `t1a2`, and the merge request lands as a merge commit whose parents are the old `main` and the approved head, with the `Throng-Task`, `Throng-Attempt`, `Throng-Merge-Request` and `Approved-by` trailers. It also checks custom refs after landing: both attempts are archived under `refs/attempts/` in the origin.
+  - `conflict`: two tasks whose attempts edit the same line. `t1`'s merge request lands, and `t2`'s is dequeued with reason `conflict` and the expected three-way hunk. Its author merges `main` and pushes, which moves it to `needs_review`. Once approved, it lands.
+  - `needsreview`: a slow required check keeps the landing in its retest. A push to the source while it's queued or landing dequeues it with `new_push` to `needs_review`. Once the new head passes, it still doesn't requeue on its own.
+- `metrics`, `failing`, `invalid`, `preview`, `coalesce`, `intrusion`, `deps`: scoring, through the spike's attempts (forks with no task rows); see the header of `scripts/e2e.ts`.
 - `refs`: attempt archives. Closing an attempt pushes its fork's `main` to `refs/attempts/t42a3` in the origin (`ARCHIVE_REF_PREFIX` in `src/archive.ts`), and reopening copies it back. The scenario checks, against real Artifacts, that:
   1. a plain `git push` to a ref under that prefix succeeds and `git ls-remote` lists it;
   2. the Worker's own git client (`src/git-client.ts`, behind `POST /spike/repos/:name/copy-ref`) copies one origin's `main` into another origin's archive ref, and an archive ref back out again;

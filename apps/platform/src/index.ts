@@ -5,6 +5,7 @@ import { reposFor } from "./artifacts";
 import { walk } from "./browse";
 import { gitRoutes, type GitProxyOptions } from "./git-proxy";
 import { forkRepo, originRepo } from "./repos";
+import { spikeProject, spikeToken } from "./spike";
 
 export { ProjectCoordinator } from "./project";
 export { RunSandbox, OutboundAuth } from "./sandbox";
@@ -46,14 +47,23 @@ app.use("/spike/*", async (c, next) => {
   await next();
 });
 
-/** Creates the project's origin and returns a write token so the caller can push the fixture. */
+/**
+ * Creates a real project owned by the e2e user, whose id and handle are both `:project`, and returns
+ * a write token for its origin so the caller can push the fixture to `main`.
+ */
 app.post("/spike/projects/:project", async (c) => {
   const project = c.req.param("project");
   const began = Date.now();
-  const repo = await reposFor(c.env).create(originRepo(project));
+  const made = await spikeProject(c.env.DB, reposFor(c.env), project);
   const createMs = Date.now() - began;
   await c.env.PROJECT.getByName(project).note("repo-created", { project, createMs });
-  return c.json({ remote: repo.remote, token: repo.token, createMs });
+  return c.json({ remote: made.remote, token: made.token, createMs, owner: made.project.owner.handle });
+});
+
+/** A Throng token for the e2e user, for the product API (`/api`) and the git proxy (`/git`). */
+app.post("/spike/token", async (c) => {
+  const { token, user } = await spikeToken(c.env.DB, new Date());
+  return c.json({ token, user: { id: user.id, handle: user.handle } });
 });
 
 /** Forks the origin for an attempt (`t1a1`), waits until the fork is usable, and mints a write token. */

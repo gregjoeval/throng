@@ -2,10 +2,16 @@
 //
 //   THRONG_URL=https://throng.<subdomain>.workers.dev SPIKE_TOKEN=... pnpm e2e [scenario...]
 //
-// Scenarios: zeroconfig (no config: the gate passes with no checks, built-in metrics recorded, and
-// the spike's landing puts the head on main), conflict (two attempts edit the same line; the second
-// passes its gate but bounces when landing),
-// metrics (a passing project whose checks report metrics), failing (a required check fails the gate),
+// Merge queue scenarios, through the product API (`/api`) and the git proxy (`/git`) as the e2e user:
+// zeroconfig (no config: the gate passes with no checks; selecting an attempt closes its sibling, and
+// the merge request lands as a two-parent merge commit with the Throng trailers; both attempts are
+// archived under `refs/attempts/`), conflict (two tasks' attempts edit the same line: the first
+// lands, the second is dequeued with reason `conflict` and the expected hunk; its author merges main
+// and pushes, which moves it to `needs_review`; approved again, it lands), needsreview (a push to a
+// queued or landing merge request's source dequeues it with `new_push` to `needs_review`, and it
+// doesn't requeue on its own once the new head passes).
+//
+// Scoring scenarios, through the spike's control plane: metrics (a passing project whose checks report metrics), failing (a required check fails the gate),
 // invalid (an invalid config fails the gate with a config entry), preview (a passing gate deploys a
 // Worker Preview built with `preview.command`, and its URL serves it), coalesce (two quick pushes; the first
 // run is cancelled and only the newest sha is scored), intrusion (an attempt's checks try to push to
@@ -24,6 +30,7 @@ import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { ARCHIVE_REF_PREFIX, archiveRef } from "../src/archive.ts";
 import { forkRepo, originRepo } from "../src/repos.ts";
+import { basicAuthHeader, type Commit, parseCommit } from "./e2e-git.ts";
 
 const run = promisify(execFile);
 const FIXTURE = new URL("../fixtures/fixture-worker/", import.meta.url).pathname;
@@ -97,9 +104,70 @@ interface Run {
   error: string | null;
 }
 
+/** A project driven through the product API as the e2e user (see `setUpRealProject`). */
+interface RealProject {
+  project: string;
+  owner: string;
+  work: string;
+  origin: Grant;
+  /** The e2e user's Throng token, for `/api` and the git proxy. */
+  token: string;
+  user: { id: string; handle: string };
+}
+
+/** What the scenarios read of the API's attempt, merge request, dequeue and scoring shapes (`src/api.ts`). */
+interface Attempt {
+  ref: string;
+  state: string;
+  archived_sha: string | null;
+  merge_request: { state: string; last_dequeue: { reason: string } | null } | null;
+}
+
+interface MergeRequest {
+  task: string;
+  attempt: string;
+  state: "pending" | "queued" | "landing" | "needs_review" | "merged" | "cancelled";
+  approved_head: string;
+  last_dequeue: { reason: string; at: string } | null;
+  merge_sha: string | null;
+}
+
+interface ConflictHunk {
+  start_line: number;
+  base: string[];
+  main: string[];
+  attempt: string[];
+}
+
+interface Dequeue {
+  reason: string;
+  at: string;
+  details: {
+    attempt: string;
+    head: string;
+    main: string;
+    base: string;
+    files: { path: string; type: string; truncated: boolean; hunks?: ConflictHunk[] }[];
+  } | null;
+}
+
+interface ApiResult {
+  config: { kind: string };
+  gate: "passed" | "failed";
+  checks: { name: string; outcome: string }[];
+  builtin: { files_changed: number; additions: number; deletions: number };
+}
+
+interface ScoringStatus {
+  status: "none" | "queued" | "running" | "done" | "errored";
+  sha: string | null;
+  result?: ApiResult;
+}
+
 const scenarios: Record<string, () => Promise<void>> = {
   zeroconfig,
   conflict,
+  needsreview,
   metrics,
   failing,
   invalid,
@@ -141,64 +209,232 @@ async function deleteRun(): Promise<void> {
   }
 }
 
-/** No `.throng/config.yml`: the gate passes with no checks, and the diff size is still recorded. */
+/**
+ * No `.throng/config.yml`: the gate passes with no checks. Selecting t1a1 closes its sibling t1a2,
+ * and the merge request lands as a merge commit of main and the approved head, with the trailers.
+ * Both attempts' forks are archived under `refs/attempts/` in the origin.
+ */
 async function zeroconfig(): Promise<void> {
   const timeline = new Timeline();
-  const { project, work } = await setUpProject(timeline);
-  const fork = await createAttempt(project, "t1a1", timeline);
-  const sha = await commitAndPush(work, fork, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
-  timeline.mark("attempt pushed");
+  const p = await setUpRealProject(timeline);
+  const fixture = (await git(p.work, "rev-parse", "HEAD")).trim();
+  const [t1, a1, a2] = ["t1", "t1a1", "t1a2"];
+  await createTask(p, t1, "Greet from a1");
+  await createAttempts(p, t1, [a1, a2], timeline);
 
-  const result = (await scored(project, sha)).result!;
+  const head = await editAndPush(p, a1, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
+  await throng(p, "POST", `/attempts/${a1}/open`);
+  timeline.mark("t1a1 pushed and opened");
+  const scoring = await scoredHead(p, a1, head);
+  const { result } = scoring;
   assert(result.config.kind === "none", `expected no config, got ${JSON.stringify(result.config)}`);
-  assert(result.gate === "passed" && result.checks.length === 0, `expected a passing gate with no checks`);
-  assert(result.base !== null, "no merge base recorded");
-  const { filesChanged, additions, deletions } = result.builtin;
+  assert(result.gate === "passed" && result.checks.length === 0, "expected a passing gate with no checks");
+  const { files_changed, additions, deletions } = result.builtin;
   assert(
-    filesChanged === 1 && additions === 1 && deletions === 1,
+    files_changed === 1 && additions === 1 && deletions === 1,
     `unexpected diff size ${JSON.stringify(result.builtin)}`,
   );
 
-  const mainSha = await landed(project, sha);
-  const head = await api<{ sha: string }>("GET", `/spike/repos/${originRepo(project)}/head`);
-  assert(head.sha === mainSha, `main is ${head.sha}, expected the landed ${mainSha}`);
-  const greeting = await gitShow(work, project, mainSha, "src/greeting.js");
+  const selected = await throng<MergeRequest>(p, "POST", `/tasks/${t1}/selection`, { attempt: a1 });
+  timeline.mark("t1a1 selected");
+  assert(selected.approved_head === head, `approved ${selected.approved_head}, expected ${head}`);
+  const sibling = await throng<Attempt>(p, "GET", `/attempts/${a2}`);
+  assert(sibling.state === "closed", `selecting ${a1} left ${a2} ${sibling.state}`);
+
+  const merged = await mergeRequestUntil(p, t1, (mr) => mr.state === "merged");
+  timeline.mark("t1 merged");
+  const mainSha = merged.merge_sha;
+  assert(mainSha !== null, "a merged merge request has no merge_sha");
+  const onMain = await api<{ sha: string }>("GET", `/spike/repos/${originRepo(p.project)}/head`);
+  assert(onMain.sha === mainSha, `main is ${onMain.sha}, expected the merge commit ${mainSha}`);
+
+  const commit = await readCommit(p, mainSha);
+  assert(
+    JSON.stringify(commit.parents) === JSON.stringify([fixture, head]),
+    `expected parents [main, approved head], got ${JSON.stringify(commit.parents)}`,
+  );
+  assert(commit.subject === `Merge ${a1}: Greet from a1`, `unexpected subject ${commit.subject}`);
+  const trailers = {
+    "Throng-Task": [t1],
+    "Throng-Attempt": [a1],
+    "Throng-Merge-Request": [t1],
+    "Approved-by": [`${p.user.handle} <${p.user.id}+${p.user.handle}@users.noreply.throng>`],
+  };
+  assert(
+    JSON.stringify(commit.trailers) === JSON.stringify(trailers),
+    `unexpected trailers ${JSON.stringify(commit.trailers)}`,
+  );
+  const greeting = await git(p.work, "show", `${mainSha}:src/greeting.js`);
   assert(greeting.includes("hello from a1"), "main does not contain the attempt's change");
-  await finish(project, ["t1a1"], work, timeline);
+
+  // Custom refs: the merged attempt and the sibling the selection closed are both archived.
+  const task = await throng<{ state: string }>(p, "GET", `/tasks/${t1}`);
+  assert(task.state === "closed", `landing left ${t1} ${task.state}`);
+  await assertArchived(p, a1, head);
+  await assertArchived(p, a2, fixture);
+  await finish(p.project, [a1, a2], p.work, timeline);
 }
 
-/** Two attempts forked from the same main edit the same line: the first lands, the second bounces. */
+/**
+ * Two tasks' attempts, forked from the same main, edit the same line. t1a1 lands; t2a1 is dequeued
+ * with reason `conflict` and the expected hunk. Its author merges main and pushes, which moves it to
+ * `needs_review`; approved again, it lands.
+ */
 async function conflict(): Promise<void> {
   const timeline = new Timeline();
-  const { project, work } = await setUpProject(timeline);
-  const base = (await git(work, "rev-parse", "HEAD")).trim();
-
+  const p = await setUpRealProject(timeline);
+  const fixture = (await git(p.work, "rev-parse", "HEAD")).trim();
+  const [t1, a1, t2, a2] = ["t1", "t1a1", "t2", "t2a1"];
+  await createTask(p, t1, "Greet from a1");
+  await createTask(p, t2, "Greet from a2");
   // Fork both before either lands, so both start from the same main.
-  const a1 = await createAttempt(project, "t1a1", timeline);
-  const a2 = await createAttempt(project, "t1a2", timeline);
-  const first = await commitAndPush(work, a1, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
-  timeline.mark("a1 pushed");
-  const mainSha = await landed(project, first);
-  timeline.mark("a1 landed");
+  await createAttempts(p, t1, [a1], timeline);
+  await createAttempts(p, t2, [a2], timeline);
 
-  await git(work, "checkout", "-q", "--detach", base);
-  const second = await commitAndPush(work, a2, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a2"'), "a2");
-  timeline.mark("a2 pushed");
-  const failed = await landing(project, second);
-  const outcome = failed.detail.landed as { kind: string; files?: string[]; diff?: string } | undefined;
-  assert(outcome?.kind === "bounced", `expected a2 to bounce, got ${JSON.stringify(failed.detail)}`);
+  const first = await editAndPush(p, a1, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
+  await throng(p, "POST", `/attempts/${a1}/open`);
+  await git(p.work, "checkout", "-q", "--detach", fixture);
+  const second = await editAndPush(p, a2, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a2"'), "a2");
+  await throng(p, "POST", `/attempts/${a2}/open`);
+  timeline.mark("both pushed and opened");
+
+  await throng(p, "POST", `/tasks/${t1}/selection`, { attempt: a1 });
+  const landed = await mergeRequestUntil(p, t1, (mr) => mr.state === "merged");
+  timeline.mark("t1 merged");
+  const mainSha = landed.merge_sha!;
+
+  await throng(p, "POST", `/tasks/${t2}/selection`, { attempt: a2 });
+  timeline.mark("t2a1 selected");
+  const dequeued = await mergeRequestUntil(p, t2, (mr) => mr.last_dequeue !== null);
+  timeline.mark("t2 dequeued");
   assert(
-    JSON.stringify(outcome.files) === JSON.stringify(["src/greeting.js"]),
-    `unexpected conflict files ${JSON.stringify(outcome.files)}`,
+    dequeued.last_dequeue?.reason === "conflict" && dequeued.state === "pending",
+    `expected a conflict dequeue to pending, got ${dequeued.state} ${JSON.stringify(dequeued.last_dequeue)}`,
   );
-  assert(/hello from a1[\s\S]*hello from a2/.test(outcome.diff ?? ""), "the hunks do not show both sides");
+  const attempt = await throng<Attempt>(p, "GET", `/attempts/${a2}`);
+  assert(attempt.merge_request?.last_dequeue?.reason === "conflict", "the attempt doesn't show the conflict");
 
-  const journal = await settle(project);
-  const head = await api<{ sha: string }>("GET", `/spike/repos/${originRepo(project)}/head`);
-  assert(head.sha === mainSha, `main moved to ${head.sha} after the bounce; expected ${mainSha}`);
-  assert(journal.filter((e) => e.kind === "main_advanced").length === 1, "expected only a1 to advance main");
+  const { reason, details } = await throng<Dequeue>(p, "GET", `/tasks/${t2}/merge-request/dequeue`);
+  assert(reason === "conflict" && details !== null, `unexpected dequeue ${reason}`);
+  assert(
+    details.attempt === a2 && details.head === second && details.main === mainSha && details.base === fixture,
+    `unexpected conflict commits ${JSON.stringify({ ...details, files: undefined })}`,
+  );
+  const expectedFiles = [
+    {
+      path: "src/greeting.js",
+      type: "content",
+      truncated: false,
+      hunks: [
+        {
+          // The fixture's line 2: line 1 is a comment.
+          start_line: 2,
+          base: ['export const GREETING = "hello";'],
+          main: ['export const GREETING = "hello from a1";'],
+          attempt: ['export const GREETING = "hello from a2";'],
+        },
+      ],
+    },
+  ];
+  const files = details.files.map(({ path, type, truncated, hunks }) => ({ path, type, truncated, hunks }));
+  assert(
+    JSON.stringify(files) === JSON.stringify(expectedFiles),
+    `unexpected conflict files ${JSON.stringify(details.files)}`,
+  );
+  const patch = await throngText(p, `/tasks/${t2}/merge-request/dequeue/files/src/greeting.js/diff?side=main`);
+  assert(patch.includes('+export const GREETING = "hello from a1";'), `unexpected main-side diff:\n${patch}`);
+
+  // The author merges main into the attempt and pushes; the approved head no longer matches.
+  await fetchMain(p);
+  const merge = await git(p.work, "merge", "--no-edit", "FETCH_HEAD").then(
+    () => "clean",
+    () => "conflicted",
+  );
+  assert(merge === "conflicted", "expected merging main into t2a1 to conflict locally too");
+  const resolved = await editAndPush(
+    p,
+    a2,
+    "src/greeting.js",
+    (s) => s.replace(/<<<<<<<[\s\S]*>>>>>>> [^\n]*\n/, 'export const GREETING = "hello from a1 and a2";\n'),
+    "a2: merge main",
+  );
+  timeline.mark("t2a1 merged main and pushed");
+  const review = await mergeRequestUntil(p, t2, (mr) => mr.state !== "pending");
+  assert(review.state === "needs_review", `expected needs_review after the push, got ${review.state}`);
+
+  const approved = await throng<MergeRequest>(p, "POST", `/tasks/${t2}/merge-request/approve`);
+  assert(approved.approved_head === resolved, `approved ${approved.approved_head}, expected ${resolved}`);
+  timeline.mark("t2 approved");
+  const merged = await mergeRequestUntil(p, t2, (mr) => mr.state === "merged");
+  timeline.mark("t2 merged");
+  const commit = await readCommit(p, merged.merge_sha!);
+  assert(
+    JSON.stringify(commit.parents) === JSON.stringify([mainSha, resolved]),
+    `expected parents [t1's merge, t2a1's head], got ${JSON.stringify(commit.parents)}`,
+  );
+  const greeting = await git(p.work, "show", `${merged.merge_sha}:src/greeting.js`);
+  assert(greeting.includes("hello from a1 and a2"), "main does not contain the resolution");
+
+  const journal = await settle(p.project);
+  assert(journal.filter((e) => e.kind === "main_advanced").length === 2, "expected exactly two landings");
+  await assertArchived(p, a1, first);
+  await assertArchived(p, a2, resolved);
   report(timeline, journal);
-  await cleanUp(project, ["t1a1", "t1a2"], work);
+  await cleanUp(p.project, [a1, a2], p.work);
+}
+
+/**
+ * A push to a queued or landing merge request's source dequeues it with `new_push` to
+ * `needs_review`, and it stays there once the new head passes: only an approval requeues it. A slow
+ * required check keeps the landing in its retest long enough to push.
+ */
+async function needsreview(): Promise<void> {
+  const timeline = new Timeline();
+  const p = await setUpRealProject(timeline, {
+    ".throng/config.yml": `checks:
+  - name: slow
+    command: sleep 90
+`,
+  });
+  const fixture = (await git(p.work, "rev-parse", "HEAD")).trim();
+  const [t1, a1] = ["t1", "t1a1"];
+  await createTask(p, t1, "Greet slowly");
+  await createAttempts(p, t1, [a1], timeline);
+  const head = await editAndPush(p, a1, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
+  await throng(p, "POST", `/attempts/${a1}/open`);
+  const scoring = await scoredHead(p, a1, head);
+  assert(scoring.result.gate === "passed", `expected the gate to pass: ${JSON.stringify(scoring.result.checks)}`);
+  timeline.mark("t1a1 scored");
+
+  await throng(p, "POST", `/tasks/${t1}/selection`, { attempt: a1 });
+  const inQueue = await mergeRequestUntil(p, t1, (mr) => mr.state === "queued" || mr.state === "landing");
+  timeline.mark(`t1 ${inQueue.state}`);
+  const next = await editAndPush(p, a1, "src/greeting.js", (s) => s.replace("from a1", "from a1, again"), "a1: again");
+  timeline.mark("pushed while in the queue");
+
+  const dequeued = await mergeRequestUntil(p, t1, (mr) => mr.last_dequeue !== null);
+  assert(
+    dequeued.last_dequeue?.reason === "new_push" && dequeued.state === "needs_review",
+    `expected a new_push dequeue to needs_review, got ${dequeued.state} ${JSON.stringify(dequeued.last_dequeue)}`,
+  );
+  assert(dequeued.approved_head === head, "the push changed the approved head");
+  const { details } = await throng<Dequeue>(p, "GET", `/tasks/${t1}/merge-request/dequeue`);
+  assert(details === null, `a new_push dequeue has no details, got ${JSON.stringify(details)}`);
+
+  // The new head passes too, and still nothing requeues it.
+  const rescored = await scoredHead(p, a1, next);
+  assert(rescored.result.gate === "passed", "expected the new head's gate to pass");
+  timeline.mark("new head scored");
+  const journal = await settle(p.project);
+  const after = await throng<MergeRequest>(p, "GET", `/tasks/${t1}/merge-request`);
+  assert(after.state === "needs_review", `the merge request requeued on its own: ${after.state}`);
+  const queue = await throng<{ queue: unknown[] }>(p, "GET", "/merge-queue");
+  assert(queue.queue.length === 0, `the merge queue isn't empty: ${JSON.stringify(queue.queue)}`);
+  const onMain = await api<{ sha: string }>("GET", `/spike/repos/${originRepo(p.project)}/head`);
+  assert(onMain.sha === fixture, `main moved to ${onMain.sha}`);
+  assert(!journal.some((e) => e.kind === "main_advanced"), "something landed");
+  report(timeline, journal);
+  await cleanUp(p.project, [a1], p.work);
 }
 
 /** A passing project whose checks report metrics: declared ones are kept, the rest noted. */
@@ -599,22 +835,174 @@ async function scored(project: string, sha: string): Promise<Run> {
   return found;
 }
 
-/** Waits for the spike's landing of `sha` to end, either advancing main or failing. */
-async function landing(project: string, sha: string): Promise<JournalEntry> {
-  return waitFor(project, (e) => (e.kind === "main_advanced" || e.kind === "land_failed") && e.detail.head === sha);
+/**
+ * A project with task rows, for the merge queue scenarios: made through the spike (so its id
+ * carries E2E_PROJECT_PREFIX and cleanup finds its repos) and then driven only through `/api` and
+ * the git proxy as the e2e user. Only the fixture is pushed around the proxy, which refuses pushes
+ * to the origin's `main`.
+ */
+async function setUpRealProject(timeline: Timeline, files: Record<string, string> = {}): Promise<RealProject> {
+  const { project, work, origin } = await setUpProject(timeline, files);
+  const { token, user } = await e2eUser();
+  return { project, owner: user.handle, work, origin, token, user };
 }
 
-/** Waits for `sha` to land and returns main's new commit; a failed landing fails the scenario. */
-async function landed(project: string, sha: string): Promise<string> {
-  const event = await landing(project, sha);
-  assert(event.kind === "main_advanced", `expected ${sha} to land, got ${JSON.stringify(event.detail)}`);
-  return String(event.detail.sha);
+let e2eUserToken: Promise<{ token: string; user: { id: string; handle: string } }> | null = null;
+
+/** The e2e user's Throng token, minted once per run. */
+function e2eUser(): Promise<{ token: string; user: { id: string; handle: string } }> {
+  e2eUserToken ??= api("POST", "/spike/token");
+  return e2eUserToken;
 }
 
-async function gitShow(work: string, project: string, sha: string, path: string): Promise<string> {
-  const { token } = await api<{ token: string }>("POST", `/spike/repos/${originRepo(project)}/read-token`);
-  await git(work, ...auth(token), "fetch", "-q", "origin", "main");
-  return git(work, "show", `${sha}:${path}`);
+/** Creates the task the scenario expects to be `expected` (numbers are per project, from 1). */
+async function createTask(p: RealProject, expected: string, title: string): Promise<void> {
+  const { ref } = await throng<{ ref: string }>(p, "POST", "/tasks", { title });
+  assert(ref === expected, `created ${ref}, expected ${expected}`);
+}
+
+/** Fans `task` out to draft attempts, each with its own fork, which must be numbered `expected`. */
+async function createAttempts(p: RealProject, task: string, expected: string[], timeline: Timeline): Promise<void> {
+  const { attempts } = await throng<{ attempts: Attempt[] }>(p, "POST", `/tasks/${task}/attempts`, {
+    count: expected.length,
+  });
+  const made = attempts.map((a) => a.ref);
+  assert(made.join() === expected.join(), `created ${made.join(", ")}, expected ${expected.join(", ")}`);
+  timeline.mark(`created ${made.join(", ")}`);
+}
+
+/**
+ * Edits `path` in the work tree, commits everything tracked (finishing a merge, if one is in
+ * progress) and pushes it to the attempt's fork through the git proxy, which records the push and
+ * queues scoring for an open attempt. A new fork can take a moment to accept pushes, so it retries.
+ */
+async function editAndPush(
+  p: RealProject,
+  attempt: string,
+  path: string,
+  edit: (source: string) => string,
+  message: string,
+): Promise<string> {
+  const file = join(p.work, path);
+  await writeFile(file, edit(await readFile(file, "utf8")));
+  await git(p.work, "commit", "-q", "-am", message);
+  const remote = `${baseUrl}/git/${p.owner}/${p.project}/${attempt}.git`;
+  const deadline = Date.now() + 60_000;
+  for (;;) {
+    try {
+      await git(p.work, ...proxyAuth(p), "push", "-q", remote, "HEAD:refs/heads/main");
+      break;
+    } catch (cause) {
+      if (Date.now() > deadline) throw cause;
+      await new Promise((r) => setTimeout(r, 2_000));
+    }
+  }
+  return (await git(p.work, "rev-parse", "HEAD")).trim();
+}
+
+/** Fetches the origin's `main` through the git proxy into FETCH_HEAD. */
+async function fetchMain(p: RealProject): Promise<void> {
+  await git(p.work, ...proxyAuth(p), "fetch", "-q", `${baseUrl}/git/${p.owner}/${p.project}.git`, "main");
+}
+
+/** A commit on the origin's `main`, parsed. */
+async function readCommit(p: RealProject, sha: string): Promise<Commit> {
+  await fetchMain(p);
+  return parseCommit(await git(p.work, "cat-file", "-p", sha));
+}
+
+/** Waits for the attempt's head to be `sha` and scored; an errored run fails the scenario. */
+async function scoredHead(
+  p: RealProject,
+  attempt: string,
+  sha: string,
+): Promise<ScoringStatus & { result: ApiResult }> {
+  const status = await poll(`${attempt}'s scoring of ${sha.slice(0, 7)}`, async () => {
+    const s = await throng<ScoringStatus>(p, "GET", `/attempts/${attempt}/scoring`);
+    return s.sha === sha && (s.status === "done" || s.status === "errored") ? s : null;
+  });
+  const { result } = status;
+  assert(status.status === "done" && result !== undefined, `${attempt}'s run ended ${status.status}`);
+  console.log(`  ${attempt} gate ${result.gate}: ${JSON.stringify(result.checks.map((c) => [c.name, c.outcome]))}`);
+  return { ...status, result };
+}
+
+/**
+ * Polls the task's merge request until `done` holds. One that has ended (merged or cancelled)
+ * without `done` holding fails the scenario at once rather than at the timeout.
+ */
+async function mergeRequestUntil(
+  p: RealProject,
+  task: string,
+  done: (mr: MergeRequest) => boolean,
+): Promise<MergeRequest> {
+  let last = "";
+  return poll(`${task}'s merge request`, async () => {
+    const mr = await throng<MergeRequest>(p, "GET", `/tasks/${task}/merge-request`);
+    const seen = `${mr.state} ${JSON.stringify(mr.last_dequeue)}`;
+    if (seen !== last) console.log(`  ${task}: ${seen}`);
+    last = seen;
+    if (done(mr)) return mr;
+    assert(mr.state !== "merged" && mr.state !== "cancelled", `${task}'s merge request ended ${seen}`);
+    return null;
+  });
+}
+
+/**
+ * The attempt's fork was archived at `sha`: the attempt records it, and the origin lists it at
+ * `refs/attempts/<attempt>` through the git proxy.
+ */
+async function assertArchived(p: RealProject, attempt: string, sha: string): Promise<void> {
+  const archived = await poll(`${attempt}'s archive`, async () => {
+    const a = await throng<Attempt>(p, "GET", `/attempts/${attempt}`);
+    return a.archived_sha;
+  });
+  assert(archived === sha, `${attempt} archived ${archived}, expected ${sha}`);
+  const ref = archiveRef(attempt);
+  const origin = `${baseUrl}/git/${p.owner}/${p.project}.git`;
+  const listed = await git(p.work, ...proxyAuth(p), "ls-remote", origin, ref);
+  const line = listed.split("\n").find((l) => l.endsWith(`\t${ref}`));
+  assert(line?.split("\t")[0] === sha, `the origin lists ${ref} as ${line ?? "nothing"}, expected ${sha}`);
+}
+
+/** Calls the product API for the project as the e2e user. */
+async function throng<T>(p: RealProject, method: string, path: string, body?: unknown): Promise<T> {
+  const response = await fetch(`${baseUrl}/api/projects/${p.owner}/${p.project}${path}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${p.token}`,
+      ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  const text = await response.text();
+  if (!response.ok) throw new Error(`${method} ${path}: ${response.status} ${text}`);
+  return JSON.parse(text) as T;
+}
+
+/** A product API route that answers a bare diff. */
+async function throngText(p: RealProject, path: string): Promise<string> {
+  const response = await fetch(`${baseUrl}/api/projects/${p.owner}/${p.project}${path}`, {
+    headers: { Authorization: `Bearer ${p.token}`, Accept: "text/x-diff" },
+  });
+  const text = await response.text();
+  if (!response.ok) throw new Error(`GET ${path}: ${response.status} ${text}`);
+  return text;
+}
+
+/** Calls `read` every POLL_MS until it returns something other than null. */
+async function poll<T>(what: string, read: () => Promise<T | null>): Promise<T> {
+  const deadline = Date.now() + CHECK_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const value = await read();
+    if (value !== null) return value;
+    await new Promise((r) => setTimeout(r, POLL_MS));
+  }
+  throw new Error(`timed out waiting on ${what}`);
+}
+
+function proxyAuth(p: RealProject): string[] {
+  return ["-c", `http.extraHeader=${basicAuthHeader(p.token)}`];
 }
 
 /** Reports a scenario's journal and deletes what it made. */

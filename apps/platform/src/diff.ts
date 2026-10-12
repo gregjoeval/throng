@@ -88,6 +88,25 @@ export interface CommitDiff extends TreeDiff {
   newTree: string;
 }
 
+/** The diff from one commit's tree straight to another's. */
+export interface CommitsDiff extends TreeDiff {
+  from: string;
+  to: string;
+  oldTree: string;
+  newTree: string;
+}
+
+/** A commit, or a tree, and the repo to read it and everything under it from. */
+export interface InRepo {
+  repo: string;
+  sha: string;
+}
+
+export interface DiffOptions {
+  caps?: DiffCaps;
+  cache?: DiffCache | undefined;
+}
+
 /**
  * A commit's diff against its first parent (the empty tree for a root commit), or null when the
  * repo has no such commit. Merge commits diff against their first parent only.
@@ -96,7 +115,7 @@ export async function diffCommit(
   repos: Repos,
   repo: string,
   sha: string,
-  { caps = DIFF_CAPS, cache }: { caps?: DiffCaps; cache?: DiffCache | undefined } = {},
+  options: DiffOptions = {},
 ): Promise<CommitDiff | null> {
   const commit = await repos.readCommit(repo, sha);
   if (commit === null) return null;
@@ -105,16 +124,26 @@ export async function diffCommit(
   if (parent !== null && base === null) throw new Error(`parent ${parent} of ${sha} is missing from ${repo}`);
   const oldTree = base?.treeHash ?? null;
   const newTree = commit.treeHash;
-  const key = cache === undefined ? null : cacheKey(oldTree, newTree, caps);
-  const hit = key === null ? undefined : await cache?.match(key);
-  let diff: TreeDiff;
-  if (hit !== undefined) {
-    diff = (await hit.json()) as TreeDiff;
-  } else {
-    diff = await diffTrees(repos, repo, oldTree, newTree, caps);
-    if (key !== null) await cache?.put(key, cacheable(diff));
-  }
+  const old = oldTree === null ? null : { repo, sha: oldTree };
+  const diff = await diffTrees(repos, old, { repo, sha: newTree }, options);
   return { sha, parent, oldTree, newTree, ...diff };
+}
+
+/**
+ * The diff from `from`'s tree to `to`'s, ignoring the history between them, or null when either
+ * commit is missing. The two may be in different repos, such as origin and an attempt's fork.
+ */
+export async function diffCommits(
+  repos: Repos,
+  from: InRepo,
+  to: InRepo,
+  options: DiffOptions = {},
+): Promise<CommitsDiff | null> {
+  const [before, after] = await Promise.all([repos.readCommit(from.repo, from.sha), repos.readCommit(to.repo, to.sha)]);
+  if (before === null || after === null) return null;
+  const [oldTree, newTree] = [before.treeHash, after.treeHash];
+  const diff = await diffTrees(repos, { repo: from.repo, sha: oldTree }, { repo: to.repo, sha: newTree }, options);
+  return { from: from.sha, to: to.sha, oldTree, newTree, ...diff };
 }
 
 /**
@@ -141,22 +170,34 @@ function cacheable(diff: TreeDiff): Response {
   });
 }
 
-/** The diff from `oldTree` (null for the empty tree) to `newTree`, with every cap applied. */
+/**
+ * The diff from `old` (null for the empty tree) to `next`, two trees each read from its own repo,
+ * with every cap applied. Served from `cache` when it has the tree pair, and stored there when not.
+ */
 export async function diffTrees(
   repos: Repos,
-  repo: string,
-  oldTree: string | null,
-  newTree: string,
-  caps: DiffCaps = DIFF_CAPS,
+  old: InRepo | null,
+  next: InRepo,
+  { caps = DIFF_CAPS, cache }: DiffOptions = {},
 ): Promise<TreeDiff> {
+  const key = cache === undefined ? null : cacheKey(old?.sha ?? null, next.sha, caps);
+  const hit = key === null ? undefined : await cache?.match(key);
+  if (hit !== undefined) return (await hit.json()) as TreeDiff;
+  const diff = await walkAndRender(repos, old, next, caps);
+  if (key !== null) await cache?.put(key, cacheable(diff));
+  return diff;
+}
+
+async function walkAndRender(repos: Repos, old: InRepo | null, next: InRepo, caps: DiffCaps): Promise<TreeDiff> {
   const changes: Change[] = [];
   // Renames pair a delete with an add, so the walk may need up to twice the listed files.
-  const complete = await walkTrees(repos, repo, oldTree, newTree, "", changes, 2 * caps.maxFiles + 1);
+  const sides = { old: old?.repo ?? next.repo, new: next.repo };
+  const complete = await walkTrees(repos, sides, old?.sha ?? null, next.sha, "", changes, 2 * caps.maxFiles + 1);
   const paired = pairRenames(changes);
   const truncated = !complete || paired.length > caps.maxFiles;
   const listed = paired.slice(0, caps.maxFiles);
 
-  const read = (hash: string) => readBlob(repos, repo, hash);
+  const read = { old: reader(repos, sides.old), new: reader(repos, sides.new) };
   const patched = await mapLimit(listed.slice(0, caps.maxPatchedFiles), READ_CONCURRENCY, (c) =>
     computeFile(read, c.old, c.new, caps),
   );
@@ -190,7 +231,8 @@ export async function diffFile(
   next: FileSide | null,
   caps: DiffCaps = DIFF_CAPS,
 ): Promise<FileDiff> {
-  const computed = await computeFile((hash) => readBlob(repos, repo, hash), old, next, caps);
+  const read = reader(repos, repo);
+  const computed = await computeFile({ old: read, new: read }, old, next, caps);
   return render(computed, { bytes: Infinity, lines: Infinity });
 }
 
@@ -212,6 +254,12 @@ export function capsKey(caps: DiffCaps): string {
 }
 
 // --- Tree walk -------------------------------------------------------------------------------
+
+/** One thing for each side of a diff: the old and the new. */
+interface Sides<T> {
+  old: T;
+  new: T;
+}
 
 interface Change {
   old: FileSide | null;
@@ -240,14 +288,14 @@ function orderKey(e: TreeEntry): string {
  */
 async function walkTrees(
   repos: Repos,
-  repo: string,
+  sides: Sides<string>,
   oldTree: string | null,
   newTree: string | null,
   prefix: string,
   out: Change[],
   limit: number,
 ): Promise<boolean> {
-  const [olds, news] = await Promise.all([entries(repos, repo, oldTree), entries(repos, repo, newTree)]);
+  const [olds, news] = await Promise.all([entries(repos, sides.old, oldTree), entries(repos, sides.new, newTree)]);
   const byKey = new Map<string, { old?: TreeEntry; new?: TreeEntry }>();
   for (const e of olds) byKey.set(orderKey(e), { old: e });
   for (const e of news) byKey.set(orderKey(e), { ...byKey.get(orderKey(e)), new: e });
@@ -256,7 +304,7 @@ async function walkTrees(
     if (old !== undefined && next !== undefined && old.hash === next.hash && old.mode === next.mode) continue;
     const path = prefix + eitherSide(old, next).name;
     if ((old !== undefined && isTree(old)) || (next !== undefined && isTree(next))) {
-      const done = await walkTrees(repos, repo, old?.hash ?? null, next?.hash ?? null, `${path}/`, out, limit);
+      const done = await walkTrees(repos, sides, old?.hash ?? null, next?.hash ?? null, `${path}/`, out, limit);
       if (!done) return false;
       continue;
     }
@@ -353,10 +401,12 @@ interface Computed {
 
 type ReadBlob = (hash: string) => Promise<Blob>;
 
-async function readBlob(repos: Repos, repo: string, hash: string): Promise<Blob> {
-  const blob = await repos.readBlob(repo, hash);
-  if (blob === null) throw new Error(`blob ${hash} is missing from ${repo}`);
-  return blob;
+function reader(repos: Repos, repo: string): ReadBlob {
+  return async (hash) => {
+    const blob = await repos.readBlob(repo, hash);
+    if (blob === null) throw new Error(`blob ${hash} is missing from ${repo}`);
+    return blob;
+  };
 }
 
 function describe(old: FileSide | null, next: FileSide | null): Omit<FileDiff, "patch" | "flags"> {
@@ -383,7 +433,7 @@ function fileStatus(old: FileSide | null, next: FileSide | null, renamed: boolea
 }
 
 async function computeFile(
-  read: ReadBlob,
+  read: Sides<ReadBlob>,
   old: FileSide | null,
   next: FileSide | null,
   caps: DiffCaps,
@@ -397,8 +447,8 @@ async function computeFile(
   if (sameContent) return { file: { ...described, flags: [] }, header, hunks: [] };
 
   // One side after the other, so files diffed READ_CONCURRENCY at a time keep that many reads in flight.
-  const before = await content(read, old, caps);
-  const after = await content(read, next, caps);
+  const before = await content(read.old, old, caps);
+  const after = await content(read.new, next, caps);
   if (before.size > caps.maxBlobBytes || after.size > caps.maxBlobBytes) return flagged("tooLarge");
   if (before.binary || after.binary) return flagged("binary");
 

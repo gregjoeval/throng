@@ -2,8 +2,9 @@
 // Access does not sit in front of it: machine clients use Throng bearer tokens. Only `/me` and
 // `/tokens` also accept an Access session, so a human can mint their first token. Over the service
 // binding (see `app.ts`), those, the project routes and the read API (`browse-api.ts`) the browser
-// needs also take throng-web's forwarded identity. Handlers stay thin: they call services, which
-// throw `ServiceError`s that `onError` turns into the error shape.
+// needs also take throng-web's forwarded identity. Handlers stay thin: they call a service function
+// `(actor, input)`, which checks permissions itself (MCP tools call the same functions) and throws
+// `ServiceError`s that `onError` turns into the error shape.
 
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import type { AccessBindings } from "./access.ts";
@@ -26,7 +27,7 @@ import { ATTEMPT_SCORING_STATUSES, RUN_STATUSES, SCORING_TRIGGERS } from "./scor
 import { ATTEMPT_STATES, TASK_STATES } from "./task-store.ts";
 import { taskService } from "./tasks.ts";
 import type { TaskBackend } from "./tasks.ts";
-import { DEFAULT_TOKEN_TTL_SECONDS, listTokens, MAX_TOKEN_TTL_SECONDS, mintToken, revokeToken } from "./tokens.ts";
+import { DEFAULT_TOKEN_TTL_SECONDS, MAX_TOKEN_TTL_SECONDS, tokenService } from "./tokens.ts";
 import type { Token } from "./tokens.ts";
 import type { User } from "./users.ts";
 
@@ -636,6 +637,7 @@ export function apiRoutes(options: ApiOptions = {}) {
   const backendFor = options.tasks ?? noTasks;
   const logsFor = options.logs ?? noLogs;
   const tasks = (env: AccessBindings) => taskService({ db: env.DB, backend: backendFor(env) });
+  const tokens = (env: AccessBindings) => tokenService({ db: env.DB, now });
   const taskPath = ({ t, ...rest }: z.infer<typeof TaskPathSchema>) => ({ ...rest, task: t });
   const attemptPath = ({ a, ...rest }: z.infer<typeof AttemptPathSchema>) => ({ ...rest, attempt: a });
 
@@ -710,27 +712,8 @@ export function apiRoutes(options: ApiOptions = {}) {
         },
       }),
       async (c) => {
-        const body = c.req.valid("json") ?? {};
-        const { actor, token: caller } = c.var;
-        if (actor.agent !== null && body.agent !== undefined && body.agent !== actor.agent) {
-          return c.json(errorBody("forbidden", "an agent's token can only mint tokens for that agent"), 403);
-        }
-        const at = now();
-        let ttlSeconds = body.expiresIn ?? DEFAULT_TOKEN_TTL_SECONDS;
-        if (caller !== null) {
-          // A token can't be used to extend itself: what it mints expires no later than it does.
-          const remaining = Math.floor((Date.parse(caller.expires_at) - at.getTime()) / 1000);
-          if (body.expiresIn === undefined) ttlSeconds = Math.min(ttlSeconds, remaining);
-          if (ttlSeconds > remaining || ttlSeconds < 1) {
-            return c.json(errorBody("invalidRequest", "a token can't mint a token that outlives it"), 400);
-          }
-        }
-        const { token, plaintext } = await mintToken(c.env.DB, {
-          userId: actor.user.id,
-          agent: actor.agent ?? body.agent ?? null,
-          ttlSeconds,
-          now: at,
-        });
+        const input = { ...c.req.valid("json"), via: c.var.token };
+        const { token, plaintext } = await tokens(c.env).mint(c.var.actor, input);
         return c.json({ ...publicToken(token), token: plaintext }, 201);
       },
     )
@@ -753,9 +736,8 @@ export function apiRoutes(options: ApiOptions = {}) {
         },
       }),
       async (c) => {
-        const { user, agent } = c.var.actor;
-        const tokens = await listTokens(c.env.DB, user.id, agent);
-        return c.json({ tokens: tokens.map(publicToken) }, 200);
+        const list = await tokens(c.env).list(c.var.actor);
+        return c.json({ tokens: list.map(publicToken) }, 200);
       },
     )
     .openapi(
@@ -775,17 +757,7 @@ export function apiRoutes(options: ApiOptions = {}) {
           404: errorResponse("The caller has no token with this id."),
         },
       }),
-      async (c) => {
-        const { user, agent } = c.var.actor;
-        const revoked = await revokeToken(c.env.DB, {
-          userId: user.id,
-          agent,
-          id: c.req.valid("param").id,
-          now: now(),
-        });
-        if (revoked === null) return c.json(errorBody("notFound", "no such token"), 404);
-        return c.json(publicToken(revoked), 200);
-      },
+      async (c) => c.json(publicToken(await tokens(c.env).revoke(c.var.actor, c.req.valid("param"))), 200),
     )
     .openapi(
       createRoute({

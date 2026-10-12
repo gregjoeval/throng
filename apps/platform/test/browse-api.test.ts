@@ -430,6 +430,102 @@ describe("GET /commit/{sha}/diff", () => {
   });
 });
 
+/** A project with one attempt whose fork moved on, and main moved on separately. */
+async function diverged() {
+  const ctx = await setup();
+  const { repos, post, id, origin, base } = ctx;
+  const root = repos.commit(origin, { files: { "a.txt": "a\n", "m.txt": "m\n" } });
+  await post(`${base}/tasks`, { title: "Work" });
+  await post(`${base}/tasks/t1/attempts`, { count: 1 });
+  const head = repos.commit(`${id}-t1a1`, { files: { "a.txt": "attempt\n", "m.txt": "m\n" } });
+  const main = repos.commit(origin, { files: { "a.txt": "a\n", "m.txt": "main moved\n" } });
+  return { ...ctx, root, head, main };
+}
+
+describe("GET /compare/{from}...{to}", () => {
+  it("diffs two refs as JSON, naming each side's ref and resolved sha", async () => {
+    const { get, base, head, main } = await diverged();
+    const res = await get(`${base}/compare/main...t1a1`);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      from: { ref: "main", sha: main.hash },
+      to: { ref: "t1a1", sha: head.hash },
+      oldTree: main.treeHash,
+      newTree: head.treeHash,
+      truncated: false,
+      totals: { files: 2, additions: 2, deletions: 2 },
+    });
+    const files = defined(res.body)["files"] as Json[];
+    expect(files.map((f) => f["path"])).toEqual(["a.txt", "m.txt"]);
+    expect(at(files, 0)["patch"]).toContain("-a\n+attempt\n");
+  });
+
+  it("diffs a base sha against an attempt, finding fork-only shas through ?attempt=", async () => {
+    const { get, base, root, head } = await diverged();
+    const res = await get(`${base}/compare/${root.hash}...t1a1`);
+    expect(res.body).toMatchObject({ from: { sha: root.hash }, to: { sha: head.hash }, totals: { files: 1 } });
+    expect((await get(`${base}/compare/${root.hash}...${head.hash}`)).status).toBe(404);
+    const bySha = await get(`${base}/compare/${root.hash}...${head.hash}?attempt=t1a1`);
+    expect(bySha.status).toBe(200);
+    expect(bySha.body).toMatchObject({ from: { ref: root.hash }, to: { ref: head.hash, sha: head.hash } });
+  });
+
+  it("answers the unified patch for Accept: text/x-diff", async () => {
+    const { get, base } = await diverged();
+    const res = await get(`${base}/compare/main...t1a1`, { Accept: "text/x-diff" });
+    expect(res.headers.get("Content-Type")).toBe("text/x-diff; charset=utf-8");
+    expect(res.headers.get("Vary")).toBe("Accept");
+    const text = await res.res.text();
+    expect(text.startsWith("diff --git a/a.txt b/a.txt\n")).toBeTruthy();
+    expect(text).toContain("diff --git a/m.txt b/m.txt\n");
+  });
+
+  it("is immutable sha to sha, and otherwise revalidates against both resolved shas", async () => {
+    const { repos, get, base, origin, root, main } = await diverged();
+    const pinned = await get(`${base}/compare/${root.hash}...${main.hash}`);
+    expect(pinned.headers.get("Cache-Control")).toBe(IMMUTABLE);
+    expect(pinned.headers.get("ETag")).toBe(`"${root.hash}...${main.hash}"`);
+
+    const byRef = await get(`${base}/compare/${root.hash}...main`);
+    expect(byRef.headers.get("Cache-Control")).toBe(REF_CACHE);
+    const tag = `"${root.hash}...${main.hash}"`;
+    expect(byRef.headers.get("ETag")).toBe(tag);
+    const reads = repos.calls.length;
+    const cached = await get(`${base}/compare/${root.hash}...main`, { "If-None-Match": tag });
+    expect(cached.status).toBe(304);
+    expect(repos.calls.slice(reads).map((c) => c.method)).not.toContain("readTree");
+
+    const moved = repos.commit(origin, { files: { "a.txt": "later\n" } });
+    const changed = await get(`${base}/compare/${root.hash}...main`, { "If-None-Match": tag });
+    expect(changed.status).toBe(200);
+    expect(changed.headers.get("ETag")).toBe(`"${root.hash}...${moved.hash}"`);
+  });
+
+  it("is empty for the same commit on both sides", async () => {
+    const { get, base, main } = await diverged();
+    const res = await get(`${base}/compare/main...${main.hash}`);
+    expect(res.body).toMatchObject({ files: [], totals: { files: 0, additions: 0, deletions: 0 } });
+  });
+
+  it("404s an unknown ref on either side and a path that isn't a range", async () => {
+    const { get, base } = await diverged();
+    for (const range of ["main...nope", "t1a9...main", "main..t1a1", "main", "main...", "...main"]) {
+      expect((await get(`${base}/compare/${range}`)).status, range).toBe(404);
+    }
+    expect((await get(`/projects/greg/nope/compare/main...main`)).status).toBe(404);
+  });
+
+  it("is documented with from and to as path parameters", async () => {
+    const { request } = await setup();
+    const doc = (await (await request("/openapi.json")).json()) as Json;
+    const paths = doc["paths"] as Json;
+    const compare = paths["/projects/{owner}/{project}/compare/{from}...{to}"]["get"];
+    expect(compare).toMatchObject({ operationId: "compareCommits", tags: ["Browse"] });
+    expect(compare["parameters"].map((p: Json) => p["name"])).toEqual(["owner", "project", "from", "to", "attempt"]);
+    expect(Object.keys(paths).filter((p) => p.includes("compare"))).toHaveLength(1);
+  });
+});
+
 describe("caching", () => {
   it("marks sha-addressed responses immutable", async () => {
     const { repos, get, origin, base } = await setup();

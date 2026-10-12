@@ -3,7 +3,7 @@ import { highlight } from "@/lib/highlighter";
 import type { LineRange } from "@/lib/highlighter";
 import { cn } from "@/lib/utils";
 
-export type CodeProps = {
+export interface CodeProps {
   code: string;
   /** A Shiki language id or alias. Takes precedence over `path`. */
   lang?: string;
@@ -14,7 +14,7 @@ export type CodeProps = {
   /** Lines to highlight, e.g. from a `#L10-L20` anchor. */
   highlightLines?: LineRange;
   className?: string;
-};
+}
 
 /**
  * Source code highlighted by the shared Shiki highlighter. Shows the plain text

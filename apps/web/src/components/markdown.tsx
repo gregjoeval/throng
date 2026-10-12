@@ -43,14 +43,14 @@ const components: Components = {
   a: ({ node: _node, ...props }) => <a {...props} rel="noopener noreferrer" />,
 };
 
-export type MarkdownProps = {
+export interface MarkdownProps {
   children: string;
   /** The URL relative links resolve against, e.g. the README's directory in the file browser. End it with `/`. */
   baseUrl?: string;
   /** The URL relative images resolve against, e.g. the `/raw` directory. Defaults to `baseUrl`. */
   imageBaseUrl?: string;
   className?: string;
-};
+}
 
 /** GitHub-flavoured Markdown, sanitized, with code blocks highlighted by Shiki. */
 export function Markdown({ children, baseUrl, imageBaseUrl, className }: MarkdownProps) {

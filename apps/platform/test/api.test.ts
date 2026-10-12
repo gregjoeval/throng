@@ -13,7 +13,10 @@ const HOUR = 60 * 60;
 const DAY = 24 * HOUR;
 
 type Json = Record<string, any>;
-type As = { access?: string; bearer?: string };
+interface As {
+  access?: string;
+  bearer?: string;
+}
 
 const NOW = new Date("2026-10-10T12:00:00.000Z");
 

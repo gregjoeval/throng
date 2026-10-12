@@ -543,7 +543,10 @@ function passThrough(length: number | null): ByteStream {
   return new TransformStream<Uint8Array, Uint8Array>();
 }
 
-type ByteStream = { readable: ReadableStream<Uint8Array>; writable: WritableStream<Uint8Array> };
+interface ByteStream {
+  readable: ReadableStream<Uint8Array>;
+  writable: WritableStream<Uint8Array>;
+}
 
 /** The Workers-only streams, looked up at runtime so the module also loads in Node. */
 interface WorkersStreams {

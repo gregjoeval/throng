@@ -340,9 +340,9 @@ describe("joining a task with a t<n>/ branch", () => {
 
     expect(await rejection("t9/x")).toBe("branch t9/x is for t9, which doesn't exist");
 
-    tasks.editTask(project, ada.actor, { task: 1, attemptLimit: 1 });
+    await tasks.editTask(project, ada.actor, { task: 1, attemptLimit: 1 });
     expect(await rejection("t1/x")).toBe("t1 has 1 of 1 active attempts");
-    tasks.editTask(project, ada.actor, { task: 1, attemptLimit: null });
+    await tasks.editTask(project, ada.actor, { task: 1, attemptLimit: null });
 
     const mergeRequest = vi.spyOn(tasks, "hasOpenMergeRequest").mockReturnValue(true);
     expect(await rejection("t1/x")).toBe("t1 has an open merge request, so it takes no new attempts");

@@ -84,24 +84,57 @@ const BOTH = ONE | TWO;
 
 /**
  * The newest common ancestor of `one` and `two`, each read from its own repo, found the way
- * `merge-base` does: walk both histories newest commit first, marking each commit with the sides
- * that reach it, and stop at the first commit both reach. Null when there is none within
- * `MAX_BASE_WALK` commits.
+ * `merge-base` does: the first commit, newest first, that both sides reach. Null when there is none
+ * within `MAX_BASE_WALK` commits.
  */
 async function mergeBase(repos: Repos, one: Side, two: Side): Promise<string | null> {
   const marks = new Map<string, number>([[one.sha, ONE]]);
   marks.set(two.sha, (marks.get(two.sha) ?? 0) | TWO);
+  for await (const { next } of walkNewestFirst(repos, one.sha === two.sha ? [one] : [one, two], marks)) {
+    if (marks.get(next) === BOTH) return next;
+  }
+  return null;
+}
+
+/**
+ * How many commits `head` reaches that `other` (null for none) doesn't, both in `repo`: `git rev-list
+ * --count head ^other`. Stops once every commit left to walk is one `other` reaches.
+ */
+async function commitsNotIn(repos: Repos, repo: string, head: string, other: string | null): Promise<number> {
+  const marks = new Map<string, number>([[head, ONE]]);
+  if (other !== null) marks.set(other, (marks.get(other) ?? 0) | TWO);
+  const walked = new Set<string>();
+  const starts = [...marks.keys()].map((sha) => ({ repo, sha }));
+  for await (const { next, queued } of walkNewestFirst(repos, starts, marks)) {
+    if (queued.every((sha) => (marks.get(sha) ?? 0) & TWO)) break;
+    walked.add(next);
+  }
+  return [...walked].filter((sha) => marks.get(sha) === ONE).length;
+}
+
+/**
+ * Walks history from `starts`, each read from its own repo, newest commit first the way git does.
+ * `marks` holds the sides (`ONE`, `TWO`) that reach each commit, and walking a commit marks its
+ * parents with its sides. Before walking each commit it yields it as `next`, with every commit
+ * queued (`next` first), so a caller can stop. Stops by itself after `MAX_BASE_WALK` commits.
+ */
+async function* walkNewestFirst(
+  repos: Repos,
+  starts: Side[],
+  marks: Map<string, number>,
+): AsyncGenerator<{ next: string; queued: string[] }> {
   const queue: { commit: Commit; repo: string }[] = [];
   const enqueue = async ({ repo, sha }: Side) => {
     const commit = await missingAsNull(repos.readCommit(repo, sha));
     if (commit !== null) queue.push({ commit, repo });
   };
-  await Promise.all((one.sha === two.sha ? [one] : [one, two]).map(enqueue));
+  await Promise.all(starts.map(enqueue));
   for (let read = 0; queue.length > 0 && read < MAX_BASE_WALK; read++) {
     queue.sort((a, b) => b.commit.committedAt - a.commit.committedAt);
-    const { commit, repo } = queue.shift() as { commit: Commit; repo: string };
+    const { commit, repo } = queue[0] as { commit: Commit; repo: string };
+    yield { next: commit.hash, queued: queue.map((q) => q.commit.hash) };
+    queue.shift();
     const mark = marks.get(commit.hash) ?? 0;
-    if (mark === BOTH) return commit.hash;
     const fresh: Side[] = [];
     for (const parent of commit.parents) {
       const seen = marks.get(parent) ?? 0;
@@ -112,38 +145,4 @@ async function mergeBase(repos: Repos, one: Side, two: Side): Promise<string | n
     }
     await Promise.all(fresh.map(enqueue));
   }
-  return null;
-}
-
-/**
- * How many commits `head` reaches that `other` (null for none) doesn't, both in `repo`: `git rev-list
- * --count head ^other`. Walks newest first and stops once every commit left is one `other` reaches,
- * or after `MAX_BASE_WALK` commits.
- */
-async function commitsNotIn(repos: Repos, repo: string, head: string, other: string | null): Promise<number> {
-  const marks = new Map<string, number>([[head, ONE]]);
-  if (other !== null) marks.set(other, (marks.get(other) ?? 0) | TWO);
-  const queue: Commit[] = [];
-  const enqueue = async (sha: string) => {
-    const commit = await missingAsNull(repos.readCommit(repo, sha));
-    if (commit !== null) queue.push(commit);
-  };
-  await Promise.all([...marks.keys()].map(enqueue));
-  const walked = new Set<string>();
-  const onlyOther = () => queue.every((c) => (marks.get(c.hash) ?? 0) & TWO);
-  for (let read = 0; queue.length > 0 && !onlyOther() && read < MAX_BASE_WALK; read++) {
-    queue.sort((a, b) => b.committedAt - a.committedAt);
-    const commit = queue.shift() as Commit;
-    walked.add(commit.hash);
-    const mark = marks.get(commit.hash) ?? 0;
-    const fresh: string[] = [];
-    for (const parent of commit.parents) {
-      const seen = marks.get(parent) ?? 0;
-      if ((seen | mark) === seen) continue;
-      marks.set(parent, seen | mark);
-      if (!queue.some((q) => q.hash === parent)) fresh.push(parent);
-    }
-    await Promise.all(fresh.map(enqueue));
-  }
-  return [...walked].filter((sha) => marks.get(sha) === ONE).length;
 }

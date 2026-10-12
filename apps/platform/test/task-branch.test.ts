@@ -313,20 +313,33 @@ async function following() {
  */
 async function followedAttempt() {
   const s = await following();
-  const { bob, env, clone, commit, tasks, project, attemptRemote, pushTaskBranch, runFollow } = s;
+  const mine = await bobsAttempt(s);
+  const tests = await s.pushTaskBranch();
+  const merged = await s.runFollow(1);
+  return { ...s, mine, tests, merged };
+}
+
+/** Starts bob's attempt t1a1 and pushes a first commit to it from his clone, which it returns. */
+async function bobsAttempt({
+  bob,
+  env,
+  clone,
+  commit,
+  tasks,
+  project,
+  attemptRemote,
+}: Awaited<ReturnType<typeof setup>>) {
   await tasks.createAttempts(project, bob.actor, { task: 1 });
   const mine = await clone(bob.token);
   await git(mine, env, "remote", "add", "attempt", attemptRemote(bob.token, "t1a1"));
   await commit(mine, "Fix login");
   expect((await tryGit(mine, env, "push", "attempt", "HEAD:main")).ok).toBeTruthy();
-  const tests = await pushTaskBranch();
-  const merged = await runFollow(1);
-  return { ...s, mine, tests, merged };
+  return mine;
 }
 
 /** A pushed reply's line saying the push dropped the task branch. */
 const dropped = (tests: string, attempt: string) =>
-  new RegExp(`remote: This push doesn't contain t1's task branch at ${tests}; merging it into ${attempt}\\.`, "u");
+  new RegExp(`remote: This push doesn't contain t1's task branch at ${tests}; merging it into ${attempt} again`, "u");
 
 describe("an author's push that drops the task branch", () => {
   it("follows again after a forced push, which the host accepts, drops the follow's merge", async () => {
@@ -343,6 +356,19 @@ describe("an author's push that drops the task branch", () => {
     const again = await runFollow(1);
     expect(follows(1)).toBe(count + 1);
     expect(await host.head(fork("t1a1"))).toBe(again);
+  });
+
+  it("marks the attempt needs update when following again conflicts", async () => {
+    const { env, commit, tasks, project, bob, followed, mine, tests } = await followedAttempt();
+    const fix = await commit(mine, "More of the fix");
+    expect((await tryGit(mine, env, "push", "--force", "attempt", "HEAD:main")).ok).toBeTruthy();
+    await tasks.drain(project.id);
+    const follow = followed.findLast((f) => f.attempt === 1);
+    if (follow === undefined) throw new Error("no follow of t1a1");
+    expect(follow.taskHead).toBe(tests);
+    expect(tasks.claimFollowPush(follow.follow)).toBeTruthy();
+    await tasks.followFinished(follow.follow, { kind: "conflict", head: fix });
+    expect(tasks.getAttempt(project, bob.actor, { task: 1, number: 1 })).toMatchObject({ needs_update: true });
   });
 
   it("queues nothing when the push contains the task head", async () => {
@@ -376,11 +402,10 @@ describe("an author's push that drops the task branch", () => {
   });
 
   it("leaves an attempt on a task with no task branch alone", async () => {
-    const { bob, env, clone, commit, tasks, project, attemptRemote, followed } = await setup();
-    await tasks.createAttempts(project, bob.actor, { task: 1 });
-    const mine = await clone(bob.token);
-    await git(mine, env, "remote", "add", "attempt", attemptRemote(bob.token, "t1a1"));
-    await commit(mine, "Fix login");
+    const s = await setup();
+    const { env, commit, tasks, project, followed } = s;
+    const mine = await bobsAttempt(s);
+    await commit(mine, "More of the fix");
     const pushed = await tryGit(mine, env, "push", "--force", "attempt", "HEAD:main");
     expect(pushed.ok).toBeTruthy();
     expect(pushed.stderr).not.toMatch(/task branch/u);

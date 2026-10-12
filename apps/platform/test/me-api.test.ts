@@ -47,8 +47,10 @@ async function setup() {
   }
   /** What each project's Durable Object does after a transition: publish to the projection. */
   const publish = async () => {
-    for (const project of projects)
-      await store(String(project["id"])).projection.publish(env.DB, String(project["id"]));
+    for (const project of projects) {
+      const id = String(project["id"]);
+      while ((await store(id).projection.publish(env.DB, id)) !== null);
+    }
   };
   return { call, callAs, env, greg, ada, adaClaude, projects, publish };
 }
@@ -67,7 +69,12 @@ describe("GET /me/tasks and /me/attempts", () => {
     expect(tasks.status).toBe(200);
     expect(tasks.body["tasks"]).toEqual([
       {
-        project: { id: expect.any(String), handle: "throng", owner: { id: expect.any(String), handle: "greg" } },
+        project: {
+          id: expect.any(String),
+          handle: "throng",
+          owner: { id: expect.any(String), handle: "greg" },
+          createdAt: expect.any(String),
+        },
         ref: "t1",
         number: 1,
         title: "Fix login",

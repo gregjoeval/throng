@@ -34,7 +34,7 @@ import { FORWARDED_EMAIL_HEADER } from "./forwarded.ts";
 import { LOG_CONTENT_TYPE, LOG_RETENTION_DAYS, MAX_LOG_BYTES, missingLog } from "./logs.ts";
 import type { LogStore } from "./logs.ts";
 import { DEQUEUE_REASONS, MERGE_REQUEST_STATES } from "./merge-requests.ts";
-import { projectionService } from "./projection.ts";
+import { myListings } from "./my-listings.ts";
 import { MAX_PROJECT_HANDLE, PROJECT_HANDLE, projectService } from "./projects.ts";
 import type { Repos } from "./repos.ts";
 import { CHECK_OUTCOMES, GATES } from "./results.ts";
@@ -189,17 +189,13 @@ const ListedTaskSchema = TaskSchema.extend({
     .openapi({ description: "Its latest merge request's state, or null when it has none." }),
 }).openapi("ListedTask");
 
-const ListedProjectSchema = z
-  .object({ id: z.string(), handle: z.string().openapi({ example: "throng" }), owner: UserRefSchema })
-  .openapi("ListedProject", { description: "The project it belongs to, addressed as `owner/project` by handles." });
-
 const PROJECTION_NOTE =
   "Read from a copy every project publishes after each change, so it can trail the project by a moment. " +
   "Obsolete ones are left out unless `state=obsolete` asks for them.";
 
 const MyTaskSchema = z
   .object({
-    project: ListedProjectSchema,
+    project: ProjectSchema,
     ref: z.string().openapi({ example: "t42" }),
     number: z.number().int().openapi({ example: 42 }),
     title: z.string(),
@@ -212,7 +208,7 @@ const MyTaskSchema = z
 
 const MyAttemptSchema = z
   .object({
-    project: ListedProjectSchema,
+    project: ProjectSchema,
     ref: z.string().openapi({ example: "t42a3" }),
     task: z.object({ ref: z.string().openapi({ example: "t42" }), number: z.number().int(), title: z.string() }),
     number: z.number().int().openapi({ example: 3 }),
@@ -594,7 +590,7 @@ export interface ApiOptions extends AuthOptions {
 }
 
 /** The caller's tasks and attempts across projects, read from the D1 projection. */
-const listings = (env: AccessBindings) => projectionService({ db: env.DB });
+const myListingsFor = (env: AccessBindings) => myListings({ db: env.DB });
 
 function noRepos(): Repos {
   throw new Error("this API was built without repos");
@@ -853,7 +849,7 @@ export function apiRoutes(options: ApiOptions = {}) {
           401: unauthorizedBearer,
         },
       }),
-      async (c) => c.json({ tasks: await listings(c.env).tasks(c.var.actor, c.req.valid("query")) }, 200),
+      async (c) => c.json({ tasks: await myListingsFor(c.env).tasks(c.var.actor, c.req.valid("query")) }, 200),
     )
     .openapi(
       createRoute({
@@ -872,7 +868,7 @@ export function apiRoutes(options: ApiOptions = {}) {
           401: unauthorizedBearer,
         },
       }),
-      async (c) => c.json({ attempts: await listings(c.env).attempts(c.var.actor, c.req.valid("query")) }, 200),
+      async (c) => c.json({ attempts: await myListingsFor(c.env).attempts(c.var.actor, c.req.valid("query")) }, 200),
     )
     .openapi(
       createRoute({

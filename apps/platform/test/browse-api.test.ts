@@ -8,9 +8,8 @@ import { MAX_TEXT_BYTES } from "../src/browse.ts";
 import { FORWARDED_EMAIL_HEADER } from "../src/forwarded.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
+import type { Json } from "./support/json.ts";
 import { testTaskBackends } from "./support/task-backend.ts";
-
-type Json = Record<string, any>;
 
 const verify: AccessVerifier = async (token) => (token.startsWith("as:") ? { email: token.slice(3) } : null);
 const now = () => new Date("2026-10-10T12:00:00.000Z");

@@ -8,6 +8,7 @@ import { userForEmail } from "../src/users.ts";
 import type { Database } from "../src/users.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
+import type { Json } from "./support/json.ts";
 
 const NOW = new Date("2026-10-10T12:00:00.000Z");
 const SECRET = "s3cret";
@@ -80,7 +81,7 @@ function setup() {
       { SPIKE_TOKEN: SECRET },
     );
     const type = res.headers.get("Content-Type") ?? "";
-    return { status: res.status, body: type.startsWith("application/json") ? ((await res.json()) as any) : null };
+    return { status: res.status, body: type.startsWith("application/json") ? ((await res.json()) as Json) : null };
   };
   return { db, repos, logs, destroyed, call };
 }
@@ -154,12 +155,13 @@ describe("the e2e routes", () => {
 
   it("revoke the run's token, and only the e2e user's", async () => {
     const { db, call } = setup();
-    const minted = await call("POST", "/e2e/token");
+    const { body: minted } = await call("POST", "/e2e/token");
+    if (minted === null) throw new Error("minting the run's token returned no JSON");
     const other = await userForEmail(db, "ada@example.com");
     const { token: adas } = await mintToken(db, { userId: other.id, agent: null, ttlSeconds: 60, now: new Date() });
 
     expect((await call("DELETE", `/e2e/tokens/${adas.id}`)).status).toBe(404);
-    expect((await call("DELETE", `/e2e/tokens/${minted.body.id}`)).status).toBe(200);
-    expect(await authenticateToken(db, minted.body.token, new Date())).toBeNull();
+    expect((await call("DELETE", `/e2e/tokens/${minted["id"]}`)).status).toBe(200);
+    expect(await authenticateToken(db, minted["token"], new Date())).toBeNull();
   });
 });

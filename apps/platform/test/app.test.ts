@@ -6,11 +6,10 @@ import { mintToken } from "../src/tokens.ts";
 import { userForEmail } from "../src/users.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
+import type { Json } from "./support/json.ts";
 
 const NOW = new Date("2026-10-10T12:00:00.000Z");
 const verify: AccessVerifier = async (token) => (token === "valid" ? { email: "greg@example.com" } : null);
-
-type Json = Record<string, any>;
 
 async function setup() {
   const env = { DB: testDatabase(), ACCESS_TEAM_DOMAIN: "throng.cloudflareaccess.com", ACCESS_AUD: "aud" };

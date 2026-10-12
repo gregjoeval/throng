@@ -8,9 +8,8 @@ import type { ScoringOutcome } from "../src/scoring.ts";
 import type { User } from "../src/users.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
+import type { Json } from "./support/json.ts";
 import { testTaskBackends } from "./support/task-backend.ts";
-
-type Json = Record<string, any>;
 
 /** Access sessions are `as:<email>`. */
 const verify: AccessVerifier = async (token) => (token.startsWith("as:") ? { email: token.slice(3) } : null);

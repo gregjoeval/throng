@@ -3,6 +3,7 @@ import type { AccessVerifier } from "../src/access.ts";
 import { apiRoutes } from "../src/api.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
+import type { Json } from "./support/json.ts";
 
 const verify: AccessVerifier = async (token) => (token === "valid" ? { email: "greg@example.com" } : null);
 
@@ -78,7 +79,7 @@ describe("POST /api/config/validate", () => {
 
   it("is described in the OpenAPI document", async () => {
     const { request } = setup();
-    const doc = (await (await request("/openapi.json", {})).json()) as Record<string, any>;
+    const doc = (await (await request("/openapi.json", {})).json()) as Json;
     const op = doc["paths"]["/config/validate"]["post"];
     expect(op).toMatchObject({ operationId: "validateConfig", tags: ["Config"], summary: expect.any(String) });
     expect(Object.keys(op["requestBody"]["content"])).toEqual(["application/yaml", "text/plain"]);

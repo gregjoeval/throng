@@ -19,6 +19,7 @@ import { userForEmail } from "../src/users.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
 import { git, gitEnv, LocalGitHost, serve, tryGit } from "./support/git-host.ts";
+import type { Json } from "./support/json.ts";
 import { testSql, testTaskBackends } from "./support/task-backend.ts";
 
 const PROJECT: ProjectContext = { id: "abc123", owner: "owner001" };
@@ -184,7 +185,7 @@ async function e2eSetup() {
       },
       bindings,
     );
-    return { status: res.status, body: (await res.json()) as Record<string, any> };
+    return { status: res.status, body: (await res.json()) as Json };
   };
 
   let clones = 0;

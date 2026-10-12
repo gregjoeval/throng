@@ -35,7 +35,8 @@
       }
     ],
     "unicorn/catch-error-name": "error",
-    "typescript/consistent-type-definitions": "error"
+    "typescript/consistent-type-definitions": "error",
+    "typescript/no-explicit-any": "error"
   },
   "overrides": [
     {

@@ -6,13 +6,13 @@ import { mintToken } from "../src/tokens.ts";
 import { userForEmail } from "../src/users.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
+import type { Json } from "./support/json.ts";
 
 const verify: AccessVerifier = async (token) => (token === "valid" ? { email: "greg@example.com" } : null);
 
 const HOUR = 60 * 60;
 const DAY = 24 * HOUR;
 
-type Json = Record<string, any>;
 interface As {
   access?: string;
   bearer?: string;

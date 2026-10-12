@@ -49,16 +49,26 @@ function systemQuery(): MediaQueryList | null {
   return typeof matchMedia === "function" ? matchMedia("(prefers-color-scheme: dark)") : null;
 }
 
+/** The query `followSystem` listens on while anyone is subscribed. */
+let followedQuery: MediaQueryList | null = null;
+
 /**
  * Calls `onChange` whenever the theme changes, by `setTheme` or by following the OS setting, which
  * it follows while anyone is subscribed. Returns the unsubscribe function. Shaped for
  * `useSyncExternalStore` with `currentTheme`.
  */
 export function subscribeTheme(onChange: () => void): () => void {
-  if (listeners.size === 0) systemQuery()?.addEventListener("change", followSystem);
+  if (listeners.size === 0) {
+    // Each `matchMedia` call returns a new list, so keep this one to remove the listener from.
+    followedQuery = systemQuery();
+    followedQuery?.addEventListener("change", followSystem);
+  }
   listeners.add(onChange);
   return () => {
     listeners.delete(onChange);
-    if (listeners.size === 0) systemQuery()?.removeEventListener("change", followSystem);
+    if (listeners.size === 0) {
+      followedQuery?.removeEventListener("change", followSystem);
+      followedQuery = null;
+    }
   };
 }

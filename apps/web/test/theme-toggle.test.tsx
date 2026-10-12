@@ -3,19 +3,28 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { ThemeToggle } from "@/components/theme-toggle";
 
 type Listener = (event: { matches: boolean }) => void;
-let systemListeners: Listener[] = [];
+// Browsers return a new MediaQueryList on every `matchMedia` call, each with its own listeners.
+let queries: { listeners: Listener[] }[] = [];
+
+function systemListeners(): Listener[] {
+  return queries.flatMap((query) => query.listeners);
+}
 
 beforeEach(() => {
   localStorage.clear();
   document.documentElement.classList.remove("dark");
-  systemListeners = [];
-  vi.stubGlobal("matchMedia", () => ({
-    matches: false,
-    addEventListener: (_type: string, listener: Listener) => systemListeners.push(listener),
-    removeEventListener: (_type: string, listener: Listener) => {
-      systemListeners = systemListeners.filter((l) => l !== listener);
-    },
-  }));
+  queries = [];
+  vi.stubGlobal("matchMedia", () => {
+    const query = { listeners: [] as Listener[] };
+    queries.push(query);
+    return {
+      matches: false,
+      addEventListener: (_type: string, listener: Listener) => query.listeners.push(listener),
+      removeEventListener: (_type: string, listener: Listener) => {
+        query.listeners = query.listeners.filter((l) => l !== listener);
+      },
+    };
+  });
 });
 
 afterEach(() => {
@@ -39,7 +48,7 @@ test("switches the theme and remembers the choice", () => {
 test("follows the system theme until the user picks one", () => {
   render(<ThemeToggle />);
   act(() => {
-    for (const listener of systemListeners) listener({ matches: true });
+    for (const listener of systemListeners()) listener({ matches: true });
   });
   expect(document.documentElement).toHaveClass("dark");
   expect(screen.getByRole("button", { name: "Switch to light theme" })).toBeInTheDocument();
@@ -48,7 +57,7 @@ test("follows the system theme until the user picks one", () => {
 test("stops following the system once unmounted", () => {
   const { unmount } = render(<ThemeToggle />);
   unmount();
-  expect(systemListeners).toHaveLength(0);
+  expect(systemListeners()).toHaveLength(0);
 });
 
 test("keeps following the system while another toggle is mounted", () => {
@@ -56,7 +65,7 @@ test("keeps following the system while another toggle is mounted", () => {
   render(<ThemeToggle />);
   first.unmount();
   act(() => {
-    for (const listener of systemListeners) listener({ matches: true });
+    for (const listener of systemListeners()) listener({ matches: true });
   });
   expect(document.documentElement).toHaveClass("dark");
 });

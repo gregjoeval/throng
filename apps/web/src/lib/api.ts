@@ -38,6 +38,46 @@ export const projectQuery = (owner: string, project: string) =>
     client.api.projects[":owner"][":project"].$get({ param: { owner, project } }, { init }),
   );
 
+const projectApi = client.api.projects[":owner"][":project"];
+
+/**
+ * One page of first-parent history from a ref, newest first. `attempt` is the fork to look a sha up
+ * in; `offset` is how many commits to skip.
+ */
+export const commitsQuery = (
+  owner: string,
+  project: string,
+  ref: string,
+  { attempt, offset = 0 }: { attempt?: string; offset?: number } = {},
+) =>
+  apiQuery(["projects", owner, project, "commits", ref, { attempt, offset }], (init) =>
+    projectApi.commits[":ref"].$get(
+      {
+        param: { owner, project, ref },
+        query: { offset: String(offset), ...(attempt === undefined ? {} : { attempt }) },
+      },
+      { init },
+    ),
+  );
+
+/** One commit's message, author, committer, parents and tree. */
+export const commitQuery = (owner: string, project: string, sha: string, attempt?: string) =>
+  apiQuery(["projects", owner, project, "commit", sha, { attempt }], (init) =>
+    projectApi.commit[":sha"].$get(
+      { param: { owner, project, sha }, query: attempt === undefined ? {} : { attempt } },
+      { init },
+    ),
+  );
+
+/** One commit's diff against its first parent: a patch per file, flags where a cap left it out. */
+export const commitDiffQuery = (owner: string, project: string, sha: string, attempt?: string) =>
+  apiQuery(["projects", owner, project, "commit", sha, "diff", { attempt }], (init) =>
+    projectApi.commit[":sha"].diff.$get(
+      { param: { owner, project, sha }, query: attempt === undefined ? {} : { attempt } },
+      { init },
+    ),
+  );
+
 /** Creates a project owned by the signed-in user. Rejects with hono's `DetailedError` on failure. */
 export async function createProject(handle: string) {
   return parseResponse(client.api.projects.$post({ json: { handle } }));

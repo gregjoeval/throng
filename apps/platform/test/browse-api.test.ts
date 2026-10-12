@@ -191,7 +191,6 @@ describe("GET /tree", () => {
       path: "docs",
       type: "tree",
       mode: "40000",
-      size: null,
       hash: expect.stringMatching(/^[0-9a-f]{40}$/u),
     });
 
@@ -203,7 +202,7 @@ describe("GET /tree", () => {
     expect((await get(`${base}/tree/main/src/`)).body).toMatchObject({ path: "src" });
   });
 
-  it("gives each file's size in bytes, and none for a folder", async () => {
+  it("gives each file's size in bytes when asked, and none for a folder", async () => {
     const { repos, get, origin, base } = await setup();
     repos.commit(origin, {
       files: {
@@ -213,13 +212,30 @@ describe("GET /tree", () => {
         link: { content: "héllo.md", type: "symlink" },
       },
     });
-    const entries = defined((await get(`${base}/tree/main`)).body)["entries"];
+    const entries = defined((await get(`${base}/tree/main?sizes=true`)).body)["entries"];
     expect(entries.map((e: Json) => [e.name, e.size])).toEqual([
       ["src", null],
       ["héllo.md", 7],
       ["link", 9],
       ["logo.png", 12],
     ]);
+    const src = defined((await get(`${base}/tree/main/src?sizes=true`)).body)["entries"];
+    expect(src.map((e: Json) => [e.name, e.size])).toEqual([["a.ts", 1]]);
+  });
+
+  it("reads no blobs for a listing unless sizes are asked for", async () => {
+    const { repos, get, origin, base } = await setup();
+    repos.commit(origin, { files: { "a.md": "a", "src/b.ts": "b" } });
+    let reads = 0;
+    const readBlob = repos.readBlob.bind(repos);
+    repos.readBlob = async (name, hash) => {
+      reads += 1;
+      return readBlob(name, hash);
+    };
+    const entries = defined((await get(`${base}/tree/main`)).body)["entries"];
+    expect(entries.map((e: Json) => Object.hasOwn(e, "size"))).toEqual([false, false]);
+    expect(reads).toBe(0);
+    expect((await get(`${base}/tree/main?sizes=maybe`)).status).toBe(400);
   });
 
   it("handles paths with spaces and unicode", async () => {

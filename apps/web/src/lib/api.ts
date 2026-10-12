@@ -279,11 +279,14 @@ export interface BrowseAt {
 const encodePath = (path: string) => path.split("/").filter(Boolean).map(encodeURIComponent).join("/");
 const attemptQuery = (attempt: string | undefined) => (attempt === undefined ? {} : { attempt });
 
-/** One directory's entries at a ref, folders first, each file with its size. */
-export const treeQuery = (projectRef: ProjectRef, { ref, path, attempt }: BrowseAt) =>
-  apiQuery([...projectKey(projectRef), "tree", ref, encodePath(path), { attempt }], (init) => {
+/**
+ * One directory's entries at a ref, folders first. With `sizes`, each file has its size too, which
+ * costs the platform a read per file: ask only where sizes show.
+ */
+export const treeQuery = (projectRef: ProjectRef, { ref, path, attempt }: BrowseAt, { sizes = false } = {}) =>
+  apiQuery([...projectKey(projectRef), "tree", ref, encodePath(path), { attempt, sizes }], (init) => {
     const param = { ...projectRef, ref: encodeURIComponent(ref) };
-    const query = attemptQuery(attempt);
+    const query = { ...attemptQuery(attempt), ...(sizes ? { sizes: "true" as const } : {}) };
     const tail = encodePath(path);
     return tail === ""
       ? projectApi.tree[":ref"].$get({ param, query }, { init })

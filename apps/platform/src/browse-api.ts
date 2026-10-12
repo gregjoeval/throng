@@ -85,8 +85,19 @@ const EntrySchema = z
   .openapi("TreeEntry");
 
 const ListedEntrySchema = EntrySchema.extend({
-  size: z.number().int().nullable().openapi({ description: "A file's bytes; null for a folder or a submodule." }),
+  size: z
+    .number()
+    .int()
+    .nullable()
+    .optional()
+    .openapi({ description: "With `?sizes=true`: a file's bytes; null for a folder or a submodule." }),
 }).openapi("ListedTreeEntry");
+
+const TreeQuerySchema = AttemptQuerySchema.extend({
+  sizes: z.enum(["true", "false"]).optional().openapi({
+    description: "`true` adds each file's size. Each costs a blob read, so leave it off when sizes aren't shown.",
+  }),
+});
 
 const TreeSchema = z
   .object({
@@ -236,13 +247,16 @@ export function browseRoutes({ auth, repos, tasks, diffCache }: BrowseOptions) {
         tags: ["Browse"],
         security,
         middleware: [auth] as const,
-        request: { params: RefParamSchema, query: AttemptQuerySchema },
+        request: { params: RefParamSchema, query: TreeQuerySchema },
         responses: treeResponses,
       }),
       async (c) => {
-        const at = await resolved(c, browse(c.env), c.var.actor, { ...c.req.valid("param"), ...c.req.valid("query") });
+        const at = await resolved(c, browse(c.env), c.var.actor, {
+          ...c.req.valid("param"),
+          attempt: c.req.valid("query").attempt,
+        });
         if (at instanceof Response) return at;
-        const entries = await browse(c.env).tree(at, "");
+        const entries = await listing(browse(c.env), at, "", c.req.valid("query").sizes);
         cacheFor(c, at);
         return c.json({ ref: c.req.valid("param").ref, sha: at.sha, path: "", entries }, 200);
       },
@@ -258,15 +272,15 @@ export function browseRoutes({ auth, repos, tasks, diffCache }: BrowseOptions) {
           tags: ["Browse"],
           security,
           middleware: [auth] as const,
-          request: { params: PathParamSchema, query: AttemptQuerySchema },
+          request: { params: PathParamSchema, query: TreeQuerySchema },
           responses: treeResponses,
         }),
       ),
       async (c) => {
         const { path, ...params } = c.req.valid("param");
-        const at = await resolved(c, browse(c.env), c.var.actor, { ...params, ...c.req.valid("query") });
+        const at = await resolved(c, browse(c.env), c.var.actor, { ...params, attempt: c.req.valid("query").attempt });
         if (at instanceof Response) return at;
-        const entries = await browse(c.env).tree(at, path);
+        const entries = await listing(browse(c.env), at, path, c.req.valid("query").sizes);
         cacheFor(c, at);
         return c.json({ ref: params.ref, sha: at.sha, path: trimSlashes(path), entries }, 200);
       },
@@ -470,6 +484,12 @@ export function browseRoutes({ auth, repos, tasks, diffCache }: BrowseOptions) {
  * Resolves the ref. When `If-None-Match` already names the resolved sha, returns the 304 to send
  * instead, so nothing else is read.
  */
+/** A directory's entries, with each file's size when `sizes` is `"true"`. */
+async function listing(browse: BrowseService, at: Resolved, path: string, sizes: "true" | "false" | undefined) {
+  const entries = await browse.tree(at, path);
+  return sizes === "true" ? browse.sized(at, entries) : entries;
+}
+
 async function resolved(
   c: Context,
   browse: BrowseService,

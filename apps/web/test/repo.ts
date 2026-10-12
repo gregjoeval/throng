@@ -50,7 +50,8 @@ function list(files: Record<string, Content>, dir: string): TreeEntry[] | null {
 
 /**
  * Serves `/refs`, `/tree` and `/blob` for `files` at each ref, the way the platform answers them.
- * Returns every tree and blob URL asked for, as `tree <ref> <path>` and `blob <ref> <path>`.
+ * Returns every tree and blob URL asked for, as `tree <ref> <path>` (then ` +sizes` when sizes were
+ * asked for) and `blob <ref> <path>`.
  */
 export function serveRepo(files: Files, refs: Refs = REFS) {
   const asked: string[] = [];
@@ -61,11 +62,13 @@ export function serveRepo(files: Files, refs: Refs = REFS) {
   };
   server.use(
     http.get("*/api/projects/:owner/:project/refs", () => HttpResponse.json(refs)),
-    http.get("*/api/projects/:owner/:project/tree/:ref/:path*", ({ params }) => {
+    http.get("*/api/projects/:owner/:project/tree/:ref/:path*", ({ params, request }) => {
       const { ref, path, sha, files: tree } = at(params);
-      asked.push(`tree ${ref} ${path}`);
-      const entries = tree === undefined ? null : list(tree, path);
-      if (entries === null || sha == null) return notFound(`no directory ${path} at ${ref}`);
+      const sizes = new URL(request.url).searchParams.get("sizes") === "true";
+      asked.push(`tree ${ref} ${path}${sizes ? " +sizes" : ""}`);
+      const listed = tree === undefined ? null : list(tree, path);
+      if (listed === null || sha == null) return notFound(`no directory ${path} at ${ref}`);
+      const entries = sizes ? listed : listed.map(({ size: _size, ...entry }) => entry);
       return HttpResponse.json({ ref, sha, path, entries } satisfies Tree);
     }),
     http.get("*/api/projects/:owner/:project/blob/:ref/:path+", ({ params }) => {

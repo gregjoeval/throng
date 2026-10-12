@@ -1,7 +1,9 @@
 import { screen, waitFor, within } from "@testing-library/react";
+import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
 import { renderApp } from "./app";
 import { serveRepo } from "./repo";
+import { server } from "./server";
 
 const FILES = {
   "README.md": "# Alpha\n\nSee the [guide](docs/guide.md).\n\n![logo](docs/logo.png)\n",
@@ -33,7 +35,7 @@ describe("project home", () => {
     expect(within(table).getByRole("link", { name: "docs" })).toHaveAttribute("href", "/ada/alpha/tree/main/docs");
     const readme = await screen.findByRole("region", { name: "README.md" });
     expect(await within(readme).findByRole("heading", { name: "Alpha" })).toBeInTheDocument();
-    expect(asked).toContain("tree main ");
+    expect(asked).toContain("tree main  +sizes");
     expect(asked).toContain("blob main README.md");
   });
 
@@ -314,7 +316,19 @@ describe("the file tree sidebar", () => {
     const docs = within(tree).getByRole("row", { name: /docs/u });
     await user.click(within(docs).getByRole("button", { name: /expand/iu }));
     await waitFor(() => expect(outline(tree)).toContain("  guide.md"));
+    // The sidebar shows no sizes, so it never asks for them.
     expect(asked).toContain("tree main docs");
+    expect(asked).toContain("tree main src");
+  });
+
+  it("says so when a folder can't be read, instead of loading forever", async () => {
+    serveRepo({ main: FILES });
+    server.use(
+      http.get("*/api/projects/:owner/:project/tree/main/docs", () => new HttpResponse(null, { status: 502 })),
+    );
+    await renderApp("/ada/alpha/tree/main/docs");
+    const tree = await sidebar();
+    await waitFor(() => expect(outline(tree)).toContain("  Couldn't load this folder"));
   });
 
   it("opens a file picked in the tree, keeping the ref and attempt hint", async () => {

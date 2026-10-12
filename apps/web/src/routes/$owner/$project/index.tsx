@@ -15,7 +15,7 @@ function ProjectHome() {
   const root: BrowseLocation = { view: "tree", owner, project, ref: "main", path: "" };
   const refs = useQuery(refsQuery({ owner, project }));
   const pushed = refs.isSuccess && refs.data.main.sha !== null;
-  const tree = useQuery({ ...treeQuery({ owner, project }, root), enabled: pushed });
+  const tree = useQuery({ ...treeQuery({ owner, project }, root, { sizes: true }), enabled: pushed });
   const readme = tree.isSuccess ? findReadme(tree.data.entries) : undefined;
 
   return (

@@ -16,7 +16,7 @@ export const Route = createFileRoute("/$owner/$project/tree/$ref/$")({
 function Directory() {
   const { owner, project, ref, _splat: path = "" } = Route.useParams();
   const location = { view: "tree", owner, project, ref, path, ...attemptSearch(Route.useSearch()) } as const;
-  const tree = useQuery(treeQuery({ owner, project }, location));
+  const tree = useQuery(treeQuery({ owner, project }, location, { sizes: true }));
   return (
     <ProjectView location={location}>
       <Breadcrumbs location={location} />

@@ -36,7 +36,7 @@ export function DirectoryEntries({ at, entries }: { at: BrowseLocation; entries:
                 </span>
               </td>
               <td className="px-4 py-2 text-right whitespace-nowrap text-muted-foreground tabular-nums">
-                {entry.size === null ? "" : formatBytes(entry.size)}
+                {entry.size == null ? "" : formatBytes(entry.size)}
               </td>
             </tr>
           );

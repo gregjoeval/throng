@@ -35,64 +35,67 @@ export function FileTree({ at }: { at: BrowseLocation }) {
   // The root is always read; each other folder once it's open.
   const dirs = ["", ...[...expanded].map(String)];
   const results = useQueries({ queries: dirs.map((path) => treeQuery(projectRef, { ...at, path })) });
-  const contents = new Map(dirs.map((path, i) => [path, results[i]?.data?.entries]));
-  const entries = new Map([...contents.values()].flatMap((list) => list ?? []).map((e) => [e.path, e]));
+  const reads = new Map(dirs.map((path, i) => [path, results[i]]));
+  const entries = new Map(results.flatMap((read) => read.data?.entries ?? []).map((e) => [e.path, e]));
 
-  const open = (keys: Selection) => {
+  const goToSelected = (keys: Selection) => {
     const [key] = keys === "all" ? [] : [...keys];
     const entry = key === undefined ? undefined : entries.get(String(key));
     if (entry !== undefined) void navigate({ href: buildPath(entryLocation(at, entry)) });
   };
 
   const items = (parent: string, level: number): ReactNode => {
-    const list = contents.get(parent);
-    return list === undefined ? (
-      <TreeItem id={`loading:${parent}`} textValue="Loading…" isDisabled>
-        <TreeItemContent>
-          <span style={{ paddingLeft: `${level}rem` }} className="text-muted-foreground">
-            Loading…
-          </span>
-        </TreeItemContent>
-      </TreeItem>
-    ) : (
-      list.map((entry) => {
-        const folder = entry.type === "tree";
-        return (
-          <TreeItem
-            key={entry.path}
-            id={entry.path}
-            textValue={entry.name}
-            hasChildItems={folder}
-            className={cn(
-              "cursor-default rounded-md px-1 py-0.5 outline-none",
-              "data-hovered:bg-muted data-focus-visible:ring-2 data-focus-visible:ring-ring data-selected:bg-muted data-selected:font-medium",
+    const read = reads.get(parent);
+    const list = read?.data?.entries;
+    if (list === undefined) {
+      const note = read?.isError ? "Couldn't load this folder" : "Loading…";
+      return (
+        <TreeItem id={`note:${parent}`} textValue={note} isDisabled>
+          <TreeItemContent>
+            <span style={{ paddingLeft: `${level}rem` }} className="text-muted-foreground">
+              {note}
+            </span>
+          </TreeItemContent>
+        </TreeItem>
+      );
+    }
+    return list.map((entry) => {
+      const folder = entry.type === "tree";
+      return (
+        <TreeItem
+          key={entry.path}
+          id={entry.path}
+          textValue={entry.name}
+          hasChildItems={folder}
+          className={cn(
+            "cursor-default rounded-md px-1 py-0.5 outline-none",
+            "data-hovered:bg-muted data-focus-visible:ring-2 data-focus-visible:ring-ring data-selected:bg-muted data-selected:font-medium",
+          )}
+        >
+          <TreeItemContent>
+            {({ isExpanded }) => (
+              <span style={{ paddingLeft: `${level}rem` }} className="flex items-center gap-1">
+                {folder ? (
+                  <Button slot="chevron" className="rounded-sm text-muted-foreground hover:text-foreground">
+                    <ChevronRightIcon className={cn("size-4 transition-transform", isExpanded && "rotate-90")} />
+                  </Button>
+                ) : (
+                  <span className="w-4" />
+                )}
+                {folder ? (
+                  <FolderIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+                ) : (
+                  <FileIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+                )}
+                <span className="truncate">{entry.name}</span>
+              </span>
             )}
-          >
-            <TreeItemContent>
-              {({ isExpanded }) => (
-                <span style={{ paddingLeft: `${level}rem` }} className="flex items-center gap-1">
-                  {folder ? (
-                    <Button slot="chevron" className="rounded-sm text-muted-foreground hover:text-foreground">
-                      <ChevronRightIcon className={cn("size-4 transition-transform", isExpanded && "rotate-90")} />
-                    </Button>
-                  ) : (
-                    <span className="w-4" />
-                  )}
-                  {folder ? (
-                    <FolderIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden />
-                  ) : (
-                    <FileIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden />
-                  )}
-                  <span className="truncate">{entry.name}</span>
-                </span>
-              )}
-            </TreeItemContent>
-            {/* Tree only marks a row expandable when it has children, so a shut folder not yet read gets the placeholder. */}
-            {folder ? items(entry.path, level + 1) : null}
-          </TreeItem>
-        );
-      })
-    );
+          </TreeItemContent>
+          {/* Tree only marks a row expandable when it has children, so a shut folder not yet read gets the placeholder. */}
+          {folder ? items(entry.path, level + 1) : null}
+        </TreeItem>
+      );
+    });
   };
 
   return (
@@ -101,7 +104,7 @@ export function FileTree({ at }: { at: BrowseLocation }) {
       selectionMode="single"
       selectionBehavior="replace"
       selectedKeys={at.path === "" ? [] : [at.path]}
-      onSelectionChange={open}
+      onSelectionChange={goToSelected}
       expandedKeys={expanded}
       onExpandedChange={setExpanded}
       className="flex flex-col text-sm"

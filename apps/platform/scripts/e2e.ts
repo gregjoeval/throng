@@ -15,7 +15,7 @@
 // `e2e-browser.ts`): two scored attempts load as lanes against their base, by file lines up their
 // files, and selecting one there lands its merge request and closes the task.
 //
-// Scoring scenarios, through the e2e routes (`/e2e/*`): metrics (a check writes two JSON files into $THRONG_OUTPUT and fails; metrics are read from both), taskmetrics (a task adds a metric over a project check, scored with source task; a clash main later adds makes the next run invalid; through `/api`), taskchecks (a task adds a metric over a project check and a required check of its own; the gate follows the task check; through `/api`), failing (a required check fails the gate),
+// Scoring scenarios, through the e2e routes (`/e2e/*`): metrics (a check writes two JSON files into $THRONG_OUTPUT and fails; metrics are read from both), taskmetrics (a task adds a metric over a project check, scored with source task; a clash main later adds makes the next run invalid; through `/api`), taskchecks (a task adds a metric over a project check and a required check of its own; the gate follows the task check; making the check optional rescores the open attempts; through `/api`), failing (a required check fails the gate),
 // invalid (an invalid config fails the gate with a config entry), preview (a passing gate deploys a
 // Worker Preview built with `preview.command`, and its URL serves it), coalesce (two quick pushes; the first
 // run is cancelled and only the newest sha is scored), intrusion (an attempt's checks try to push to
@@ -761,8 +761,12 @@ writeFileSync(process.env.THRONG_OUTPUT + "/coverage-summary.json", JSON.stringi
 /**
  * A task adds a metric over the project's `report` check and a required `smoke` check of its own,
  * which needs the greeting to say who it's from. Both attempts show the task's check and metrics with
- * `source: task`, after the project's; the gate follows `smoke`: passed for a1, failed for a2.
+ * `source: task`, after the project's; the gate follows `smoke`: passed for a1, failed for a2. Then
+ * the task makes `smoke` optional, which rescores the open a2 at the same head: `smoke` still fails,
+ * but the gate passes.
  */
+const SMOKE = { name: "smoke", command: "node scripts/smoke.js", timeout: "2m" };
+
 async function taskchecks(): Promise<void> {
   const timeline = new Timeline();
   const p = await setUpRealProject(timeline, {
@@ -783,7 +787,7 @@ process.exit(ok ? 0 : 1);
     "/tasks",
     {
       title: "Greet",
-      checks: [{ name: "smoke", command: "node scripts/smoke.js", timeout: "2m" }],
+      checks: [SMOKE],
       metrics: [
         { name: "lines", from: "report.coverage-summary.total.lines.total", type: "number", order: "asc" },
         { name: "smoked", from: "smoke.smoke.ok", type: "boolean" },
@@ -823,6 +827,20 @@ process.exit(ok ? 0 : 1);
     );
   }
   timeline.mark("task check gated");
+
+  await throng(p, "PATCH", `/tasks/${t1}`, { checks: [{ ...SMOKE, required: false }] });
+  const rescored = await poll(`${a2}'s rescore under the edited checks`, async () => {
+    const s = await throng<ScoringStatus>(p, "GET", `/attempts/${a2}/scoring`);
+    assert(s.status !== "errored", `${a2}'s rescore errored`);
+    const smoke = s.result?.checks.find((c) => c.name === "smoke");
+    return s.sha === unsigned && s.status === "done" && smoke?.required === false ? (s.result ?? null) : null;
+  });
+  const smoke = rescored.checks.find((c) => c.name === "smoke");
+  assert(
+    rescored.gate === "passed" && smoke?.outcome === "failed",
+    `expected the rescore to fail smoke and pass the gate: ${JSON.stringify(rescored)}`,
+  );
+  timeline.mark("edit rescored");
   await finish(p.project, p.work, timeline);
 }
 

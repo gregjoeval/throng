@@ -4,6 +4,8 @@
 
 import { currentBase, taskBranchHead } from "./base.ts";
 import type { Base } from "./base.ts";
+import { loadConfig } from "./config.ts";
+import type { MetricConfig } from "./config.ts";
 import type { ConflictDetails, ConflictFile } from "./conflicts.ts";
 import { ServiceError } from "./errors.ts";
 import type { ErroredDetails, FailedChecksDetails } from "./landing.ts";
@@ -218,6 +220,8 @@ export interface ArenaAttempt extends ScoringStatus {
 /** A task's arena: the current result of every attempt in it. */
 export interface TaskArena {
   task: string;
+  /** Every metric the config on `origin/main` declares, in check order; none without a valid config. */
+  metrics: MetricConfig[];
   attempts: ArenaAttempt[];
 }
 
@@ -415,7 +419,7 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
       const number = taskNumber(input.task);
       const ctx = await project(input);
       const list = await invoke("taskArena", ctx, actor, { task: number });
-      const [users, bases] = await Promise.all([
+      const [users, bases, config] = await Promise.all([
         handles(
           db,
           list.map((a) => a.author),
@@ -425,9 +429,11 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
             (ACTIVE as readonly AttemptState[]).includes(state) ? currentBase(repos, ctx.id, fork) : null,
           ),
         ),
+        loadConfig(repos, ctx.id),
       ]);
       return {
         task: taskRef(number),
+        metrics: config.kind === "valid" ? config.config.checks.flatMap((check) => check.metrics) : [],
         attempts: list.map(({ scoring, fork, state, author, verdicts, forked_from }, i) => ({
           ref: fork,
           state,

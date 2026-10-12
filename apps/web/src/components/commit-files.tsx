@@ -17,8 +17,17 @@ const NOTICES: Record<DiffFlag, string> = {
 /** How far outside the viewport a file's diff starts rendering. */
 const LAZY_MARGIN = "800px 0px";
 
-/** The files of a commit diff, or of any answer shaped like one (the compare endpoint's). */
-export function CommitFiles({ diff }: { diff: Pick<CommitDiff, "files" | "totals" | "truncated"> }) {
+/**
+ * The files of a commit diff, or of any answer shaped like one (the compare endpoint's). `idPrefix`
+ * keeps the file anchors apart when several diffs share a page, as the arena's lanes do.
+ */
+export function CommitFiles({
+  diff,
+  idPrefix = "",
+}: {
+  diff: Pick<CommitDiff, "files" | "totals" | "truncated">;
+  idPrefix?: string;
+}) {
   const { files, totals } = diff;
   return (
     <div className="flex flex-col gap-4">
@@ -37,7 +46,7 @@ export function CommitFiles({ diff }: { diff: Pick<CommitDiff, "files" | "totals
         {files.map((file) => (
           <li key={file.path} aria-label={file.path} className="flex items-center gap-3 px-4 py-2">
             <span className="w-16 shrink-0 text-xs text-muted-foreground">{file.status}</span>
-            <a href={`#${anchor(file.path)}`} className="min-w-0 flex-1 truncate font-mono hover:underline">
+            <a href={`#${anchor(file.path, idPrefix)}`} className="min-w-0 flex-1 truncate font-mono hover:underline">
               {file.oldPath === undefined ? file.path : `${file.oldPath} → ${file.path}`}
             </a>
             <Counts additions={file.additions} deletions={file.deletions} />
@@ -45,14 +54,15 @@ export function CommitFiles({ diff }: { diff: Pick<CommitDiff, "files" | "totals
         ))}
       </ul>
       {files.map((file) => (
-        <FileSection key={file.path} file={file} />
+        <FileSection key={file.path} file={file} idPrefix={idPrefix} />
       ))}
     </div>
   );
 }
 
-function FileSection({ file }: { file: FileDiff }) {
-  const titleId = `${anchor(file.path)}-title`;
+function FileSection({ file, idPrefix }: { file: FileDiff; idPrefix: string }) {
+  const id = anchor(file.path, idPrefix);
+  const titleId = `${id}-title`;
   const [ref, visible] = useNearViewport<HTMLElement>();
   const { patch } = file;
   const left = file.flags.find((flag) => flag !== "truncated") ?? (patch === undefined ? "truncated" : undefined);
@@ -70,7 +80,7 @@ function FileSection({ file }: { file: FileDiff }) {
     );
   }
   return (
-    <section ref={ref} id={anchor(file.path)} aria-labelledby={titleId} className="rounded-xl border">
+    <section ref={ref} id={id} aria-labelledby={titleId} className="rounded-xl border">
       <h3 id={titleId} className="border-b px-4 py-2 font-mono text-sm">
         {file.path}
       </h3>
@@ -106,8 +116,8 @@ function Counts({ additions, deletions }: { additions: number; deletions: number
 }
 
 /** The fragment a file's section is at. */
-function anchor(path: string): string {
-  return `diff-${encodeURIComponent(path)}`;
+function anchor(path: string, prefix: string): string {
+  return `${prefix}diff-${encodeURIComponent(path)}`;
 }
 
 /**

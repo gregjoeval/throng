@@ -1,13 +1,15 @@
 // The task page (`/:owner/:project/tasks/:t`): the task's header, then a body chosen by its state.
-// The single-attempt, arena and merge request views are placeholders their own slices fill in.
+// The merge request view is a placeholder its own slice fills in.
 
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { ChevronDownIcon, ChevronRightIcon } from "lucide-react";
 import { useState } from "react";
 import type { ReactNode } from "react";
+import { Arena } from "@/components/arena";
 import { Markdown } from "@/components/markdown";
 import { Placeholder } from "@/components/project-view";
+import { SingleAttemptView } from "@/components/single-attempt";
 import { EmptyState, ErrorState, Loading } from "@/components/states";
 import { TaskActions } from "@/components/task-actions";
 import { taskAttemptsQuery, taskQuery } from "@/lib/api";
@@ -101,19 +103,10 @@ function TaskBody({ owner, project, task, attempts }: TaskAt & { task: Task; att
       return <NoAttempts owner={owner} project={project} task={task} />;
     }
     case "singleAttempt": {
-      return (
-        <Slot id="single-attempt-view">
-          The single-attempt view of <span className="font-mono">{body.attempt.ref}</span> will show here: its change
-          set against its base, its scorecard, and Merge.
-        </Slot>
-      );
+      return <SingleAttemptView owner={owner} project={project} task={task} attempt={body.attempt} />;
     }
     case "arena": {
-      return (
-        <Slot id="arena">
-          The arena of <span className="font-mono">{body.attempts.map((a) => a.ref).join(", ")}</span> will show here.
-        </Slot>
-      );
+      return <Arena owner={owner} project={project} task={task.ref} attempts={body.attempts} />;
     }
     case "mergeRequest": {
       return (

@@ -60,14 +60,17 @@ describe("the task page body", () => {
     expect(within(body()).getByText(/git push \S+\/git\/ada\/alpha\.git HEAD:t1\/my-change/u)).toBeInTheDocument();
   });
 
-  it("holds the single-attempt view's place for one active attempt", async () => {
+  it("shows the single-attempt view for one active attempt", async () => {
     await openTask(task(1), [attempt(1, 1, { state: "open" }), attempt(1, 2, { state: "closed" })]);
-    expect(within(body()).getByTestId("single-attempt-view")).toHaveTextContent("t1a1");
+    const view = await within(body()).findByTestId("single-attempt-view");
+    expect(within(view).getAllByRole("region", { name: /^Lane /u })).toHaveLength(1);
+    expect(within(view).getByRole("region", { name: "Lane t1a1" })).toBeInTheDocument();
   });
 
-  it("holds the arena's place for two or more active attempts", async () => {
+  it("shows the arena for two or more active attempts", async () => {
     await openTask(task(1), [attempt(1, 1), attempt(1, 2, { state: "open" })]);
-    expect(within(body()).getByTestId("arena")).toHaveTextContent("t1a1, t1a2");
+    const arena = await within(body()).findByTestId("arena");
+    expect(within(arena).getByRole("list", { name: "Attempts" })).toHaveTextContent(/t1a1.*t1a2/u);
   });
 
   it("holds the merge request view's place while a merge request is open", async () => {
@@ -79,7 +82,7 @@ describe("the task page body", () => {
   it("goes back to the attempts once the merge request is cancelled", async () => {
     const source = attempt(1, 1, { state: "open", mergeRequest: { state: "cancelled", lastDequeue: null } });
     await openTask(task(1), [source]);
-    expect(within(body()).getByTestId("single-attempt-view")).toBeInTheDocument();
+    expect(await within(body()).findByTestId("single-attempt-view")).toBeInTheDocument();
   });
 
   it("summarises a closed task: its merge commit and archived attempts", async () => {

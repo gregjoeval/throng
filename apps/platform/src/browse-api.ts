@@ -23,7 +23,14 @@ import {
   tailedRoutes,
 } from "./api-shared.ts";
 import type { AuthEnv, bearerOrForwarded } from "./auth.ts";
-import { browseService, DEFAULT_COMMITS_PAGE, MAX_COMMITS_PAGE, MAX_TEXT_BYTES, SHA } from "./browse.ts";
+import {
+  browseService,
+  DEFAULT_COMMITS_PAGE,
+  MAX_COMMITS_PAGE,
+  MAX_SIZED_FILES,
+  MAX_TEXT_BYTES,
+  SHA,
+} from "./browse.ts";
 import type { BrowseService, Resolved } from "./browse.ts";
 import { DIFF_CAPS, diffCommit, diffCommits, unifiedPatch } from "./diff.ts";
 import type { DiffCache } from "./diff.ts";
@@ -84,11 +91,36 @@ const EntrySchema = z
   })
   .openapi("TreeEntry");
 
+const ListedEntrySchema = EntrySchema.extend({
+  size: z
+    .number()
+    .int()
+    .nullable()
+    .optional()
+    .openapi({
+      description:
+        `With \`?sizes=true\`: a file's bytes. Null for a folder, a submodule, or a file past the ` +
+        `first ${MAX_SIZED_FILES} files listed.`,
+    }),
+}).openapi("ListedTreeEntry");
+
+const TreeQuerySchema = AttemptQuerySchema.extend({
+  sizes: z
+    .enum(["true", "false"])
+    .optional()
+    .transform((sizes) => sizes === "true")
+    .openapi({
+      description:
+        `\`true\` adds a \`size\` to each of the first ${MAX_SIZED_FILES} files. Each costs a blob read ` +
+        "(cached by the blob's hash), so leave it off when sizes aren't shown.",
+    }),
+});
+
 const TreeSchema = z
   .object({
     ...ResolvedSchema,
     path: z.string().openapi({ description: "The directory; empty for the root." }),
-    entries: z.array(EntrySchema).openapi({ description: "Directories first, then files, each by name." }),
+    entries: z.array(ListedEntrySchema).openapi({ description: "Directories first, then files, each by name." }),
   })
   .openapi("Tree");
 
@@ -99,6 +131,10 @@ const BlobSchema = z
     size: z.number().int().openapi({ description: "Bytes." }),
     binary: z.boolean().openapi({ description: "A NUL byte appears in the first 8,000 bytes." }),
     tooLarge: z.boolean().openapi({ description: `Larger than ${MAX_TEXT_BYTES} bytes.` }),
+    contentType: z.string().openapi({
+      description: "The type `/raw` serves the file as: by its extension, else text or octet-stream.",
+      example: "image/png",
+    }),
     content: z.string().nullable().openapi({ description: "UTF-8 text; null when `binary` or `tooLarge`." }),
   })
   .openapi("Blob");
@@ -183,7 +219,8 @@ const refErrors = {
 };
 
 export function browseRoutes({ auth, repos, tasks, diffCache }: BrowseOptions) {
-  const browse = (env: AccessBindings) => browseService({ db: env.DB, repos: repos(env), backend: tasks(env) });
+  const browse = (env: AccessBindings) =>
+    browseService({ db: env.DB, repos: repos(env), backend: tasks(env), cache: diffCache(env) });
 
   const api = new OpenAPIHono<AuthEnv>({
     defaultHook: (result, c) => {
@@ -196,7 +233,8 @@ export function browseRoutes({ auth, repos, tasks, diffCache }: BrowseOptions) {
 
   const treeResponses = { 200: { description: "The directory.", ...json(TreeSchema) }, ...refErrors };
   const treeDescription =
-    "Resolves the ref, then lists one directory. A path that is missing or isn't a directory is a 404.";
+    "Resolves the ref, then lists one directory. A path that is missing or isn't a directory is a 404. " +
+    `With \`?sizes=true\`, each of the first ${MAX_SIZED_FILES} files has its \`size\` in bytes.`;
 
   return api
     .openapi(
@@ -232,13 +270,16 @@ export function browseRoutes({ auth, repos, tasks, diffCache }: BrowseOptions) {
         tags: ["Browse"],
         security,
         middleware: [auth] as const,
-        request: { params: RefParamSchema, query: AttemptQuerySchema },
+        request: { params: RefParamSchema, query: TreeQuerySchema },
         responses: treeResponses,
       }),
       async (c) => {
-        const at = await resolved(c, browse(c.env), c.var.actor, { ...c.req.valid("param"), ...c.req.valid("query") });
+        const at = await resolved(c, browse(c.env), c.var.actor, {
+          ...c.req.valid("param"),
+          attempt: c.req.valid("query").attempt,
+        });
         if (at instanceof Response) return at;
-        const entries = await browse(c.env).tree(at, "");
+        const entries = await listing(browse(c.env), at, "", c.req.valid("query").sizes);
         cacheFor(c, at);
         return c.json({ ref: c.req.valid("param").ref, sha: at.sha, path: "", entries }, 200);
       },
@@ -254,15 +295,15 @@ export function browseRoutes({ auth, repos, tasks, diffCache }: BrowseOptions) {
           tags: ["Browse"],
           security,
           middleware: [auth] as const,
-          request: { params: PathParamSchema, query: AttemptQuerySchema },
+          request: { params: PathParamSchema, query: TreeQuerySchema },
           responses: treeResponses,
         }),
       ),
       async (c) => {
         const { path, ...params } = c.req.valid("param");
-        const at = await resolved(c, browse(c.env), c.var.actor, { ...params, ...c.req.valid("query") });
+        const at = await resolved(c, browse(c.env), c.var.actor, { ...params, attempt: c.req.valid("query").attempt });
         if (at instanceof Response) return at;
-        const entries = await browse(c.env).tree(at, path);
+        const entries = await listing(browse(c.env), at, path, c.req.valid("query").sizes);
         cacheFor(c, at);
         return c.json({ ref: params.ref, sha: at.sha, path: trimSlashes(path), entries }, 200);
       },
@@ -460,6 +501,12 @@ export function browseRoutes({ auth, repos, tasks, diffCache }: BrowseOptions) {
         ) as never;
       },
     );
+}
+
+/** A directory's entries, with each file's size when `sizes` asks for them. */
+async function listing(browse: BrowseService, at: Resolved, path: string, sizes: boolean) {
+  const entries = await browse.tree(at, path);
+  return sizes ? browse.sized(at, entries) : entries;
 }
 
 /**

@@ -654,7 +654,7 @@ export interface ApiOptions extends AuthOptions {
   tasks?: (env: AccessBindings) => (projectId: string) => TaskBackend;
   /** The environment's logs bucket: production passes its R2 binding, tests one in memory. */
   logs?: (env: AccessBindings) => LogStore;
-  /** Where commit diffs are cached: the Workers Cache API by default, none outside a Worker. */
+  /** Where commit diffs and blob sizes are cached: the Workers Cache API by default, none outside a Worker. */
   diffCache?: (env: AccessBindings) => DiffCache | undefined;
 }
 

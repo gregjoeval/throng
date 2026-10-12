@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { Breadcrumbs, ProjectView } from "@/components/project-view";
+import { LocationBar, ProjectView } from "@/components/project-view";
 import { EmptyState } from "@/components/states";
 import { attemptSearch, buildPath } from "@/lib/paths";
 
@@ -17,7 +17,7 @@ function Raw() {
   const location = { view: "raw", owner, project, ref, path, ...attemptSearch(Route.useSearch()) } as const;
   return (
     <ProjectView location={location}>
-      <Breadcrumbs location={location} />
+      <LocationBar location={location} />
       <EmptyState title="Raw file">
         <a href={buildPath(location)} className="underline underline-offset-4">
           Open the raw file

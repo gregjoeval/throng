@@ -11,6 +11,11 @@ interface InProject {
   project: string;
 }
 
+/** The project a location is in, without the rest of the location. */
+export function projectRefOf({ owner, project }: InProject): InProject {
+  return { owner, project };
+}
+
 /**
  * One place in a project. A `ref` is `main`, an attempt (`t42a3`) or a full sha; `attempt` is the
  * `?attempt=` hint that tells the platform which fork to look up a sha in. `path` has no leading or
@@ -25,7 +30,15 @@ export type ProjectLocation =
   | (InProject & { view: "commits"; ref: string; attempt?: string; offset?: number })
   | (InProject & { view: "commit"; sha: string; attempt?: string });
 
+/** A place addressed by a ref and a path: a directory, a file or a file's raw bytes. */
+export type BrowseLocation = Extract<ProjectLocation, { path: string }>;
+
 const segment = (value: string) => encodeURIComponent(value);
+
+/** A repository path as a URL path: each segment percent-encoded, empty segments dropped. */
+export function encodePath(path: string): string {
+  return splitPath(path).map(segment).join("/");
+}
 
 /** The pathname (and `?attempt=` query, if any) for a location. */
 export function buildPath(location: ProjectLocation): string {
@@ -50,7 +63,7 @@ export function buildPath(location: ProjectLocation): string {
       break;
     }
     default: {
-      const rest = splitPath(location.path).map(segment).join("/");
+      const rest = encodePath(location.path);
       path = `${base}/${location.view}/${segment(location.ref)}${rest === "" ? "" : `/${rest}`}`;
     }
   }
@@ -78,7 +91,7 @@ export function parsePath(href: string): ProjectLocation | null {
   const [owner, project, view, ref, ...rest] = decoded;
   if (!owner || !project) return null;
   const attempt = url.searchParams.get("attempt");
-  const hint = attempt === null ? {} : { attempt };
+  const hint = attemptHint(attempt ?? undefined);
   if (view === undefined) return { owner, project, view: "home" };
   if (view === "tasks" && ref === undefined) return { owner, project, view };
   if (!ref) return null;
@@ -94,15 +107,39 @@ export function parsePath(href: string): ProjectLocation | null {
   return null;
 }
 
+/** The `attempt` hint to spread into a location or a query: there only when there is one. */
+export function attemptHint(attempt: string | undefined): { attempt?: string } {
+  return attempt === undefined ? {} : { attempt };
+}
+
 /** The search params of a ref-addressed route: only the `?attempt=` hint, when it's a string. */
 export function attemptSearch(search: Record<string, unknown>): { attempt?: string } {
-  return typeof search["attempt"] === "string" ? { attempt: search["attempt"] } : {};
+  const attempt = search["attempt"];
+  return attemptHint(typeof attempt === "string" ? attempt : undefined);
 }
 
 /** The commit log's search params: the `?attempt=` hint, and `?offset=` when it's a positive integer. */
 export function commitsSearch(search: Record<string, unknown>): { attempt?: string; offset?: number } {
   const offset = Number(search["offset"]);
   return { ...attemptSearch(search), ...(Number.isSafeInteger(offset) && offset > 0 ? { offset } : {}) };
+}
+
+const MARKDOWN = /\.(?:md|markdown|mdown|mkd)$/iu;
+
+/** Whether a path names a Markdown file. */
+export function isMarkdown(path: string): boolean {
+  return MARKDOWN.test(path);
+}
+
+/**
+ * What a Markdown file's relative links and images resolve against: its directory in the file view
+ * and under `/raw` (each ending in `/`), and the `?attempt=` hint each resolved URL carries.
+ */
+export function markdownLinks(at: BrowseLocation) {
+  const dir = splitPath(at.path).slice(0, -1).join("/");
+  const { owner, project, ref } = at;
+  const base = (view: "blob" | "raw") => `${buildPath({ view, owner, project, ref, path: dir })}/`;
+  return { baseUrl: base("blob"), imageBaseUrl: base("raw"), search: attemptHint(at.attempt) };
 }
 
 /** A path's segments, ignoring leading, trailing and doubled slashes. */

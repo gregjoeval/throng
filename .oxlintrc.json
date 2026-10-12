@@ -24,7 +24,8 @@
         "ignoreDeclarationSort": true,
         "ignoreCase": true
       }
-    ]
+    ],
+    "unicorn/switch-case-braces": "error"
   },
   "overrides": [
     {

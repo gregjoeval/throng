@@ -57,14 +57,18 @@ export class OutboundAuth extends WorkerEntrypoint<Env, OutboundAccess> {
       console.log({ event: "sandbox.cloudflare-api", method: request.method, path: url.pathname, decision });
     }
     switch (decision.action) {
-      case "deny":
+      case "deny": {
         return new Response(`no grant for ${request.method} ${url.host}${url.pathname}\n`, { status: 403 });
-      case "pass":
+      }
+      case "pass": {
         return fetch(request);
-      case "bearer":
+      }
+      case "bearer": {
         return fetch(withBearer(request, decision.token));
-      case "preview-token":
+      }
+      case "preview-token": {
         return fetch(withBearer(request, this.env.CF_PREVIEW_TOKEN));
+      }
     }
   }
 }

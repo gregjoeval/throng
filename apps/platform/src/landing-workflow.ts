@@ -173,15 +173,18 @@ export class LandingWorkflow extends WorkflowEntrypoint<Env, LandingParams> {
       return result;
     });
     switch (landed.kind) {
-      case "landed":
+      case "landed": {
         return { kind: "landed", sha: landed.sha };
-      case "moved":
+      }
+      case "moved": {
         return { kind: "errored", details: { step: "land", error: `main moved from ${merge.main}; the lease failed` } };
-      case "mismatch":
+      }
+      case "mismatch": {
         return {
           kind: "errored",
           details: { step: "land", error: `the merge gave tree ${landed.tree}, not the checked ${merge.tree}` },
         };
+      }
     }
   }
 

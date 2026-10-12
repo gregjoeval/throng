@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { AccessVerifier } from "../src/access.ts";
 import { apiRoutes } from "../src/api.ts";
 import type { ApiRoutes } from "../src/api.ts";
+import type { FollowParams } from "../src/follows.ts";
 import type { ScoringResult } from "../src/results.ts";
 import type { ScoringOutcome } from "../src/scoring.ts";
 import type { User } from "../src/users.ts";
@@ -41,7 +42,9 @@ async function setup() {
     },
     teardown: async () => {},
   };
-  const { backend, store } = testTaskBackends(repos, now, runner);
+  const followed: FollowParams[] = [];
+  const follow = { workflow: { create: async ({ params }: { params: FollowParams }) => followed.push(params) } };
+  const { backend, store } = testTaskBackends(repos, now, runner, undefined, follow);
   const api = apiRoutes({ verifierFor: () => verify, now, repos: () => repos, tasks: () => backend });
   const env = { DB: testDatabase(), ACCESS_TEAM_DOMAIN: "throng.cloudflareaccess.com", ACCESS_AUD: "aud" };
 
@@ -95,7 +98,37 @@ async function setup() {
     expect(scoring().finish(id, outcome)).toBeTruthy();
   };
 
-  return { api, env, repos, projectId, root, call, greg, ada, bob, base, drafts, commit, push, scoring, finish };
+  /** Marks ada's attempt needs update: the task branch moves and its follow conflicts. */
+  const conflict = async (task: number, attempt: number) => {
+    const tasks = store(projectId);
+    const project = { id: projectId, owner: "" };
+    const head = repos.commit(`${projectId}-main`, { files: { "test.txt": "t\n" }, branch: `tasks-t${task}` }).hash;
+    tasks.recordTaskBranchPush(project, me, { task, head });
+    await tasks.drain(projectId);
+    const started = followed.findLast((p) => p.task === task && p.attempt === attempt);
+    if (started === undefined) throw new Error(`no follow of t${task}a${attempt}`);
+    expect(tasks.claimFollowPush(started.follow)).toBeTruthy();
+    const before = repos.ref(`${projectId}-t${task}a${attempt}`, "refs/heads/main") ?? root;
+    expect(await tasks.followFinished(started.follow, { kind: "conflict", head: before })).toBeTruthy();
+  };
+  return {
+    api,
+    env,
+    repos,
+    projectId,
+    root,
+    call,
+    greg,
+    ada,
+    bob,
+    base,
+    drafts,
+    commit,
+    push,
+    scoring,
+    finish,
+    conflict,
+  };
 }
 
 describe("OpenAPI document", () => {
@@ -168,6 +201,7 @@ describe("the arena", () => {
         status: "done",
         sha: scored,
         base: { sha: root, on: "main" },
+        needsUpdate: false,
         verdicts: expect.anything(),
         result: {
           ...result(),
@@ -184,6 +218,7 @@ describe("the arena", () => {
         status: "running",
         sha: running,
         base: { sha: root, on: "main" },
+        needsUpdate: false,
       },
       {
         ref: "t1a3",
@@ -193,6 +228,7 @@ describe("the arena", () => {
         status: "none",
         sha: null,
         base: { sha: root, on: "main" },
+        needsUpdate: false,
       },
       {
         ref: "t1a4",
@@ -202,6 +238,7 @@ describe("the arena", () => {
         status: "none",
         sha: moved,
         base: { sha: root, on: "main" },
+        needsUpdate: false,
       },
     ]);
   });
@@ -261,6 +298,22 @@ describe("the arena", () => {
       ["t1a2", { sha: root, on: "main" }, "t1a1"],
     ]);
     expect("forkedFrom" in res.body["attempts"][0]).toBeFalsy();
+  });
+
+  it("says which attempts need update", async () => {
+    const { call, ada, base, drafts, conflict } = await setup();
+    await drafts(2);
+    expect(
+      (await call("GET", `${base}/tasks/t1/arena`, ada)).body["attempts"].map((a: Json) => a["needsUpdate"]),
+    ).toEqual([false, false]);
+    await conflict(1, 2);
+    const res = await call("GET", `${base}/tasks/t1/arena`, ada);
+    expect(res.body["attempts"].map((a: Json) => [a["ref"], a["needsUpdate"]])).toEqual([
+      ["t1a1", false],
+      ["t1a2", true],
+    ]);
+    const needsUpdate = async (ref: string) => (await call("GET", `${base}/attempts/${ref}`, ada)).body["needsUpdate"];
+    expect([await needsUpdate("t1a1"), await needsUpdate("t1a2")]).toEqual([false, true]);
   });
 
   it("gives an ended attempt no base", async () => {

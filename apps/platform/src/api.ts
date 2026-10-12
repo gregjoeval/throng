@@ -183,6 +183,12 @@ const ForkedFromSchema = z
     example: "t42a1",
   });
 
+const NeedsUpdateSchema = z.boolean().openapi({
+  description:
+    "True while the task's task branch has moved and merging it into this active attempt conflicted. Nothing " +
+    "was written; its author merges the task branch (`refs/tasks/t42`) and pushes, which clears it.",
+});
+
 const AttemptSchema = z
   .object({
     ref: z.string().openapi({ description: "The attempt's reference.", example: "t42a3" }),
@@ -198,6 +204,7 @@ const AttemptSchema = z
     mergedSha: z.string().nullable(),
     archivedSha: z.string().nullable(),
     forkedFrom: ForkedFromSchema,
+    needsUpdate: NeedsUpdateSchema,
     scoring: z
       .object({
         status: z.enum(ATTEMPT_SCORING_STATUSES),
@@ -371,6 +378,7 @@ const TaskArenaSchema = z
         state: z.enum(ATTEMPT_STATES),
         author: UserRefSchema,
         forkedFrom: ForkedFromSchema,
+        needsUpdate: NeedsUpdateSchema,
         base: BaseSchema.nullable().openapi({
           description:
             "An active attempt's base at its current head (its fork's `main`), scored or not; diff it with " +

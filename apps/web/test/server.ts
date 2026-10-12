@@ -65,6 +65,7 @@ export function attempt(taskNumber: number, number: number, fields: Partial<Atte
     closedAt: null,
     mergedSha: null,
     archivedSha: null,
+    needsUpdate: false,
     scoring: { status: "none", sha: null },
     mergeRequest: null,
     verdicts: { head: null, merge: 0, revise: 0, reject: 0 },
@@ -137,6 +138,7 @@ export function arenaAttempt(taskNumber: number, number: number, fields: Partial
     status: "none",
     sha: `${taskNumber}${number}`.padEnd(40, "c"),
     base: { sha: BASE, on: "main" },
+    needsUpdate: false,
     verdicts: { head: null, merge: 0, revise: 0, reject: 0 },
     ...fields,
   };

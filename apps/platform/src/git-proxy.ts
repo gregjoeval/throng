@@ -107,6 +107,7 @@ export function gitRoutes(options: GitProxyOptions) {
     const scope: TokenScope = target.service === "git-receive-pack" ? "write" : "read";
 
     let pushed: PushRequest | null = null;
+    let taskBranch: number | null = null;
     if (target.service === "git-receive-pack") {
       // Claims are checked on every push request, so a hand-off or close between git's requests counts.
       const claim =
@@ -121,8 +122,9 @@ export function gitRoutes(options: GitProxyOptions) {
         pushed = read;
         const refusal = claim?.message ?? (target.attempt === null ? originRefusal(pushed) : null);
         if (refusal !== null) return reject(c, target, pushed, refusal);
-        const task = target.attempt === null ? taskBranchPush(pushed) : null;
-        if (task !== null) {
+        taskBranch = target.attempt === null ? taskBranchPush(pushed) : null;
+        if (taskBranch !== null) {
+          const task = taskBranch;
           const outcome = await backend.call("authorizeTaskBranchPush", [target.project, c.var.actor, { task }]);
           if (!outcome.ok) return reject(c, target, pushed, outcome.message);
         } else if (target.attempt === null && pushed.updates.length > 0) {
@@ -159,6 +161,10 @@ export function gitRoutes(options: GitProxyOptions) {
       pushed.updates.length > 0
     ) {
       const reply = await recordForkPush(c, target, target.attempt, pushed, backend, upstream);
+      return new Response(reply, { status: upstream.status, headers });
+    }
+    if (upstream.ok && upstream.body !== null && pushed !== null && taskBranch !== null) {
+      const reply = await recordTaskBranchPush(c, target, taskBranch, pushed, backend, upstream);
       return new Response(reply, { status: upstream.status, headers });
     }
     return new Response(upstream.body, { status: upstream.status, headers });
@@ -329,6 +335,7 @@ async function pushToCreate(
     let messages: string[] = [];
     if (!landed) {
       await abandon();
+      if (route.kind === "attempt" && nonFastForward(report)) messages = await pullFirst(target, attempt, c, backend);
     } else if (route.kind === "create") {
       const done = await backend.call("completeBranchPush", [
         project,
@@ -621,7 +628,10 @@ async function recordForkPush(
   }
   const ok = new Set(updatedRefs(bytes, sideband));
   const updates = push.updates.filter((u) => ok.has(u.ref));
-  if (updates.length === 0) return bytes;
+  if (updates.length === 0) {
+    const notice = nonFastForward(report) ? await pullFirst(target, attempt, c, backend) : [];
+    return notice.length === 0 ? bytes : writeReport(report, notice, sideband);
+  }
 
   const recorded = await backend
     .call("recordPush", [target.project, c.var.actor, { ...attempt, updates }])
@@ -633,6 +643,74 @@ async function recordForkPush(
   }
   const messages = recordLines(c, recorded.value as PushRecord);
   return messages.length === 0 ? bytes : writeReport(report, messages, sideband);
+}
+
+/** Whether the host refused the fork's `main` as not a fast-forward. */
+function nonFastForward(report: PushReport): boolean {
+  return report.lines.some((line) => /^ng refs\/heads\/main (?:non-fast-forward|fetch first)/u.test(line));
+}
+
+/**
+ * The `remote:` line for a push the fork refused as non-fast-forward when a follow wrote its head:
+ * the task branch was merged in, and the author hasn't pulled it. Git refuses such a push before
+ * sending it unless it is forced, so only a forced push the host refuses gets here.
+ */
+async function pullFirst(
+  target: Target,
+  attempt: AttemptInput,
+  c: GitContext,
+  backend: TaskBackend,
+): Promise<string[]> {
+  const outcome = await backend
+    .call("pullFirstNotice", [target.project, c.var.actor, attempt])
+    .catch((error: unknown) => ({ ok: false, message: String(error) }) as const);
+  if (!outcome.ok) {
+    console.error({ event: "git.pull_first_failed", repo: target.repo, error: outcome.message });
+    return [];
+  }
+  return outcome.value === null ? [] : [outcome.value as string];
+}
+
+/**
+ * Records a push of a task branch the origin accepted (`recordTaskBranchPush`), which queues a
+ * follow of the new task head for each of the task's active attempts, and names them in a `remote:`
+ * line. The response is buffered for that, as `recordForkPush` does. One that can't be read, or that
+ * didn't update the task branch, is passed on as it came.
+ */
+async function recordTaskBranchPush(
+  c: GitContext,
+  target: Target,
+  task: number,
+  push: PushRequest,
+  backend: TaskBackend,
+  upstream: Response,
+): Promise<Uint8Array> {
+  const bytes = new Uint8Array(await upstream.arrayBuffer());
+  const sideband = push.capabilities.has("side-band-64k");
+  let report: PushReport;
+  try {
+    report = readReport(bytes, sideband);
+  } catch (error) {
+    if (!(error instanceof ProtocolError)) throw error;
+    console.error({ event: "git.report_unreadable", repo: target.repo, error: error.message });
+    return bytes;
+  }
+  const ref = taskBranchRef(task);
+  const update = push.updates.find((u) => u.ref === ref);
+  if (update === undefined || !updatedRefs(bytes, sideband).includes(ref)) return bytes;
+
+  const recorded = await backend
+    .call("recordTaskBranchPush", [target.project, c.var.actor, { task, head: update.after }])
+    .catch((error: unknown) => ({ ok: false, message: String(error) }) as const);
+  if (!recorded.ok) {
+    // The task branch moved either way; only its attempts' follows are missing.
+    console.error({ event: "git.record_task_branch_failed", repo: target.repo, error: recorded.message });
+    return bytes;
+  }
+  const following = recorded.value as string[];
+  if (following.length === 0) return bytes;
+  const line = `${taskRef(task)}'s task branch is at ${update.after}; merging it into ${following.join(", ")}.`;
+  return writeReport(report, [line], sideband);
 }
 
 /** Calls a task method; null when it succeeds, its `ServiceError` when it refuses. */

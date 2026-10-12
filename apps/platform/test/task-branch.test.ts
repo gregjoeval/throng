@@ -90,6 +90,7 @@ async function setup() {
     `${server.origin.replace("://", `://git:${token}@`)}/git/greg/throng/${attempt}.git`;
   return {
     host,
+    work,
     env,
     greg,
     ada,
@@ -270,54 +271,120 @@ describe("following the task branch", () => {
 });
 
 /**
- * `setup` with bob's attempt t1a1, his clone `mine` (remote `attempt` is the fork), and a task
- * branch ada pushed that a follow merged into t1a1, as its Workflow would. `mine` doesn't have the
- * merge: bob never pulled it.
+ * `setup` and what a task branch's follows need: `pushTaskBranch`, as ada, and `runFollow`, which
+ * does what the latest Follow Workflow of an attempt does: merges the task head into the fork's
+ * `main` and reports it.
+ */
+async function following() {
+  const s = await setup();
+  const { ada, env, host, work, clone, commit, push, tasks, project, fork, origin, followed } = s;
+  const pushTaskBranch = async () => {
+    const dir = await clone(ada.token);
+    const head = await commit(dir, "Add login tests");
+    expect((await push(dir, "refs/tasks/t1")).ok).toBeTruthy();
+    return head;
+  };
+  let runs = 0;
+  /** Runs the latest follow of attempt `t1a<attempt>`, as its Workflow would, and returns its merge. */
+  const runFollow = async (attempt: number) => {
+    await tasks.drain(project.id);
+    const follow = followed.findLast((f) => f.attempt === attempt);
+    if (follow === undefined) throw new Error(`no follow of t1a${attempt}`);
+    const dir = join(work, `follow${++runs}`);
+    await git(work, env, "clone", "-q", host.path(fork(`t1a${attempt}`)), dir);
+    const before = (await git(dir, env, "rev-parse", "HEAD")).trim();
+    await git(dir, env, "fetch", "-q", host.path(origin), "refs/tasks/t1");
+    await git(dir, env, "merge", "-q", "--no-edit", "FETCH_HEAD");
+    const head = (await git(dir, env, "rev-parse", "HEAD")).trim();
+    await git(dir, env, "push", "-q", "origin", "HEAD:main");
+    expect(tasks.claimFollowPush(follow.follow)).toBeTruthy();
+    await tasks.followFinished(follow.follow, { kind: "merged", before, head });
+    await tasks.drain(project.id);
+    return head;
+  };
+  /** How many follows of `t1a<attempt>` have started. */
+  const follows = (attempt: number) => followed.filter((f) => f.attempt === attempt).length;
+  return { ...s, pushTaskBranch, runFollow, follows };
+}
+
+/**
+ * `following` with bob's attempt t1a1 and his clone `mine` (remote `attempt` is the fork), and a
+ * task branch a follow merged into t1a1. `mine` doesn't have the merge: bob never pulled it.
  */
 async function followedAttempt() {
-  const s = await setup();
-  const { ada, bob, env, host, clone, commit, push, tasks, project, fork, followed, attemptRemote } = s;
+  const s = await following();
+  const { bob, env, clone, commit, tasks, project, attemptRemote, pushTaskBranch, runFollow } = s;
   await tasks.createAttempts(project, bob.actor, { task: 1 });
   const mine = await clone(bob.token);
   await git(mine, env, "remote", "add", "attempt", attemptRemote(bob.token, "t1a1"));
   await commit(mine, "Fix login");
   expect((await tryGit(mine, env, "push", "attempt", "HEAD:main")).ok).toBeTruthy();
-
-  const dir = await clone(ada.token);
-  const tests = await commit(dir, "Add login tests");
-  expect((await push(dir, "refs/tasks/t1")).ok).toBeTruthy();
-  await tasks.drain(project.id);
-  const follow = followed.find((f) => f.attempt === 1);
-  if (follow === undefined) throw new Error("no follow of t1a1");
-  const before = (await host.head(fork("t1a1"))) ?? "";
-  await git(mine, env, "fetch", "-q", "origin", "refs/tasks/t1");
-  await git(mine, env, "merge", "-q", "--no-edit", "FETCH_HEAD");
-  const merged = (await git(mine, env, "rev-parse", "HEAD")).trim();
-  await git(mine, env, "push", "-q", host.path(fork("t1a1")), "HEAD:main");
-  await git(mine, env, "reset", "-q", "--hard", "HEAD~1");
-  expect(tasks.claimFollowPush(follow.follow)).toBeTruthy();
-  await tasks.followFinished(follow.follow, { kind: "merged", before, head: merged });
-  await tasks.drain(project.id);
-  /** How many follows of t1a1 have started. */
-  const follows = () => followed.filter((f) => f.attempt === 1).length;
-  return { ...s, mine, tests, merged, follows };
+  const tests = await pushTaskBranch();
+  const merged = await runFollow(1);
+  return { ...s, mine, tests, merged };
 }
+
+/** A pushed reply's line saying the push dropped the task branch. */
+const dropped = (tests: string, attempt: string) =>
+  new RegExp(`remote: This push doesn't contain t1's task branch at ${tests}; merging it into ${attempt}\\.`, "u");
 
 describe("an author's push that drops the task branch", () => {
   it("follows again after a forced push, which the host accepts, drops the follow's merge", async () => {
-    const { env, host, commit, tasks, project, fork, followed, mine, tests, merged, follows } = await followedAttempt();
-    expect(follows()).toBe(1);
+    const { env, host, commit, fork, mine, tests, merged, follows, runFollow } = await followedAttempt();
+    const count = follows(1);
 
     const fix = await commit(mine, "More of the fix");
     const forced = await tryGit(mine, env, "push", "--force", "attempt", "HEAD:main");
     expect(forced.ok).toBeTruthy();
-    expect(forced.stderr).toMatch(
-      new RegExp(`remote: This push doesn't contain t1's task branch at ${tests}; merging it into t1a1\\.`, "u"),
-    );
+    expect(forced.stderr).toMatch(dropped(tests, "t1a1"));
     expect(await host.head(fork("t1a1"))).toBe(fix);
     expect(fix).not.toBe(merged);
+
+    const again = await runFollow(1);
+    expect(follows(1)).toBe(count + 1);
+    expect(await host.head(fork("t1a1"))).toBe(again);
+  });
+
+  it("queues nothing when the push contains the task head", async () => {
+    const { env, commit, mine, follows } = await followedAttempt();
+    const count = follows(1);
+    await git(mine, env, "pull", "-q", "--no-rebase", "--no-edit", "attempt", "main");
+    await commit(mine, "More of the fix");
+    const pushed = await tryGit(mine, env, "push", "attempt", "HEAD:main");
+    expect(pushed.ok).toBeTruthy();
+    expect(pushed.stderr).not.toMatch(/task branch/u);
+    expect(follows(1)).toBe(count);
+  });
+
+  it("checks a push-to-create push into an existing attempt the same way", async () => {
+    const { bob, host, clone, commit, push, fork, follows, pushTaskBranch, runFollow } = await following();
+    const tests = await pushTaskBranch();
+    const mine = await clone(bob.token);
+    await commit(mine, "Fix login");
+    expect((await push(mine, "refs/heads/t1/bob")).ok).toBeTruthy();
+    await runFollow(1);
+    const count = follows(1);
+
+    // bob pushes his branch again without the follow's merge; it replaces the fork's main.
+    const fix = await commit(mine, "More of the fix");
+    const again = await push(mine, "refs/heads/t1/bob");
+    expect(again.ok).toBeTruthy();
+    expect(again.stderr).toMatch(dropped(tests, "t1a1"));
+    expect(await host.head(fork("t1a1"))).toBe(fix);
+    await runFollow(1);
+    expect(follows(1)).toBe(count + 1);
+  });
+
+  it("leaves an attempt on a task with no task branch alone", async () => {
+    const { bob, env, clone, commit, tasks, project, attemptRemote, followed } = await setup();
+    await tasks.createAttempts(project, bob.actor, { task: 1 });
+    const mine = await clone(bob.token);
+    await git(mine, env, "remote", "add", "attempt", attemptRemote(bob.token, "t1a1"));
+    await commit(mine, "Fix login");
+    const pushed = await tryGit(mine, env, "push", "--force", "attempt", "HEAD:main");
+    expect(pushed.ok).toBeTruthy();
+    expect(pushed.stderr).not.toMatch(/task branch/u);
     await tasks.drain(project.id);
-    expect(follows()).toBe(2);
-    expect(followed.at(-1)).toMatchObject({ attempt: 1, taskHead: tests });
+    expect(followed).toHaveLength(0);
   });
 });

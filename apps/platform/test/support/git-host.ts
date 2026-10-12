@@ -238,8 +238,11 @@ export class LocalGitHost implements Repos {
       });
   }
 
-  async readCommit(): Promise<Commit | null> {
-    throw new Error("LocalGitHost doesn't read commits");
+  async readCommit(name: string, hash: string): Promise<Commit | null> {
+    if (!(await this.#exists(name))) throw repoError("NOT_FOUND", name);
+    if (!/^[0-9a-f]{40}$/u.test(hash)) return null;
+    const [commit] = await this.listCommits(name, { ref: hash, limit: 1 });
+    return commit ?? null;
   }
 
   async readTree(): Promise<TreeEntry[] | null> {

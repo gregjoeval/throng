@@ -3,11 +3,13 @@
 
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { describe, expect, it } from "vitest";
+import { agentLoop, toolCaller } from "../scripts/e2e-mcp.ts";
 import type { AccessVerifier } from "../src/access.ts";
 import { publicApp } from "../src/app.ts";
 import { FORWARDED_EMAIL_HEADER } from "../src/forwarded.ts";
 import type { LogStore } from "../src/logs.ts";
 import { MAX_FILE_BYTES, MAX_LOG_SLICE_BYTES } from "../src/mcp.ts";
+import type { ScoringResult } from "../src/results.ts";
 import { userForEmail } from "../src/users.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
@@ -63,10 +65,26 @@ async function call(client: Client, name: string, args: Record<string, unknown> 
   return { isError: result.isError === true, summary: texts[0] ?? "", data: result.structuredContent as Json };
 }
 
+const PASSED: ScoringResult = {
+  base: null,
+  config: { kind: "none" },
+  gate: "passed",
+  checks: [],
+  builtin: { filesChanged: 1, additions: 1, deletions: 1, durationMs: 1 },
+  preview: { status: "none" },
+  logs: [],
+};
+
+/** Workflows that start and do nothing: `runPlatform` reports for them. */
+const runner = {
+  workflow: { create: async () => ({}), get: async () => ({ terminate: async () => {} }) },
+  teardown: async () => {},
+};
+
 async function setup() {
   const repos = new FakeRepos();
   const logs = new MemoryLogs();
-  const { backend, store } = testTaskBackends(repos, now);
+  const { backend, store, sql } = testTaskBackends(repos, now, runner, runner);
   const app = publicApp({ verifierFor: () => verify, now, repos: () => repos, tasks: () => backend, logs: () => logs });
   const env = { DB: testDatabase(), ACCESS_TEAM_DOMAIN: "throng.cloudflareaccess.com", ACCESS_AUD: "aud" };
   const fetchApp = (input: string | URL | Request, init?: RequestInit) =>
@@ -91,7 +109,33 @@ async function setup() {
     return client;
   };
 
-  return { repos, logs, store, env, app, fetchApp, tokenFor, connect };
+  /**
+   * Plays the project's Durable Object and Workflows until stopped: drains after each tick, every
+   * scoring run passes, and every landing lands as a new commit on `main`.
+   */
+  const runPlatform = (projectId: string) => {
+    const stopped = new AbortController();
+    const ticking = (async () => {
+      while (!stopped.signal.aborted) {
+        const tasks = store(projectId);
+        await tasks.drain(projectId);
+        const runs = sql(projectId).exec<{ id: number }>("SELECT id FROM scoring_runs WHERE status = 'running'");
+        for (const { id } of runs) tasks.scoringFinished(id, { status: "done", result: PASSED });
+        const landing = tasks.landings.active();
+        if (landing !== null) {
+          const merge = repos.commit(`${projectId}-main`, { files: { "README.md": "merged\n" } }).hash;
+          await tasks.landingFinished(landing.id, { kind: "landed", sha: merge });
+        }
+        await new Promise((r) => setTimeout(r, 5));
+      }
+    })();
+    return async () => {
+      stopped.abort();
+      await ticking;
+    };
+  };
+
+  return { repos, logs, store, env, app, fetchApp, tokenFor, connect, runPlatform };
 }
 
 /** greg's project with one commit on `main` and a task t1, and clients for greg, ada, and ada as `claude`. */
@@ -190,6 +234,47 @@ describe("/mcp", () => {
     expect(task.data).toMatchObject({ task: { ref: "t1", title: "Fix it" }, mergeRequest: null });
     expect(task.data["attempts"].map((a: Json) => a["ref"])).toEqual(["t1a1", "t1a2"]);
     expect((await call(greg, "list_tasks", { project })).data["tasks"]).toHaveLength(1);
+  });
+
+  it("runs the e2e suite's agent loop: start, push, open, wait for scoring, review, select, wait for the merge", async () => {
+    const { connect, tokenFor, runPlatform, repos, env, store, projectId, project, ada } = await withProject();
+    const codex = await connect(await tokenFor("greg@example.com", "codex"));
+    const stop = runPlatform(projectId);
+    const pushed: string[] = [];
+    try {
+      const result = await agentLoop({
+        creator: toolCaller(codex),
+        reviewer: toolCaller(ada),
+        project,
+        // What `git push` to the attempt's remote does, through the git proxy.
+        push: async ({ ref, clone, remote }) => {
+          expect(clone).toBe(`git -c http.extraHeader="Authorization: Bearer $THRONG_TOKEN" clone ${remote}`);
+          const [, task = "", number = ""] = /^t(\d+)a(\d+)$/u.exec(ref) ?? [];
+          const fork = `${projectId}-${ref}`;
+          const before = repos.ref(fork, "refs/heads/main") ?? "0".repeat(40);
+          const after = repos.commit(fork, { files: { "README.md": "hello\n" } }).hash;
+          const user = await userForEmail(env.DB, "greg@example.com");
+          const updates = [{ ref: "refs/heads/main", before, after }];
+          store(projectId).recordPush(
+            { id: projectId, owner: "" },
+            { user, alias: "codex" },
+            { task: Number(task), number: Number(number), updates },
+          );
+          pushed.push(ref);
+          return after;
+        },
+        wait: 1,
+        timeoutMs: 10_000,
+      });
+      expect(pushed).toEqual(["t2a1"]);
+      expect(result).toMatchObject({
+        task: "t2",
+        attempt: "t2a1",
+        mergeSha: repos.ref(`${projectId}-main`, "refs/heads/main"),
+      });
+    } finally {
+      await stop();
+    }
   });
 
   it("records a verdict under the reviewer's alias", async () => {

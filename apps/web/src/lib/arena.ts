@@ -22,7 +22,22 @@ export function gateState(attempt: ArenaAttempt): GateState | null {
   const { result } = attempt;
   if (result === undefined) return null;
   if (result.gate === "failed") return "failed";
-  return result.config.kind === "none" || result.checks.length === 0 ? "noChecks" : "passed";
+  const configured = result.checks.filter((check) => check.source !== "platform");
+  return result.config.kind === "none" || configured.length === 0 ? "noChecks" : "passed";
+}
+
+type Result = NonNullable<ArenaAttempt["result"]>;
+
+/** A number metric's value in a result; null when it's missing, null or not a number. */
+export function numberValue(result: Result | undefined, name: string): number | null {
+  const metric = result?.metrics[name];
+  return metric?.type === "number" ? metric.value : null;
+}
+
+/** Where the attempt's Preview is served: `_preview.url`, null unless `_preview` passed. */
+export function previewUrl(result: Result | undefined): string | null {
+  const metric = result?.metrics["_preview.url"];
+  return metric?.type === "string" ? metric.value : null;
 }
 
 export const GATE_STATE_LABELS: Record<GateState, string> = {
@@ -50,14 +65,14 @@ const BUILTIN_COLUMNS: MetricColumn[] = [
     label: "Files changed",
     unit: null,
     order: "asc",
-    value: (a) => a.result?.builtin.filesChanged ?? null,
+    value: (a) => numberValue(a.result, "_diff.filesChanged"),
   },
   {
     key: "additions",
     label: "Lines added",
     unit: null,
     order: "asc",
-    value: (a) => a.result?.builtin.additions ?? null,
+    value: (a) => numberValue(a.result, "_diff.additions"),
   },
 ];
 
@@ -69,7 +84,7 @@ export function metricColumns(metrics: Metric[]): MetricColumn[] {
       label: metric.name,
       unit: metric.unit,
       order: metric.order,
-      value: (a: ArenaAttempt) => a.result?.metrics[metric.name] ?? null,
+      value: (a: ArenaAttempt) => numberValue(a.result, metric.name),
     })),
     ...BUILTIN_COLUMNS,
   ];

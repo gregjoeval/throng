@@ -9,9 +9,12 @@ import {
   arenaAttempt,
   BASE,
   bob,
+  check,
   MAIN,
   me,
+  platformCheck,
   result,
+  scoredMetrics,
   serveArena,
   serveCompare,
   server,
@@ -110,7 +113,7 @@ describe("the arena's lanes", () => {
   it("heads each lane with its gate, verdict counts, the author's note and a menu", async () => {
     const t1a1 = passing(1, {
       verdicts: { head: "x", merge: 2, revise: 1, reject: 0 },
-      result: result({ preview: { status: "ready", url: "https://t1a1.preview.test" } }),
+      result: result({ metrics: scoredMetrics({ preview: "https://t1a1.preview.test" }) }),
     });
     const asked: string[] = [];
     server.use(
@@ -287,11 +290,8 @@ const only = () =>
   arenaAttempt(1, 1, {
     status: "done",
     result: result({
-      metrics: { coverage: 81.5 },
-      checks: [
-        { name: "test", required: true, outcome: "passed", durationMs: 1200, metrics: { coverage: 81.5 }, notes: [] },
-        { name: "lint", required: false, outcome: "failed", durationMs: 300, metrics: {}, notes: [] },
-      ],
+      metrics: scoredMetrics({ values: { coverage: 81.5 } }),
+      checks: [check("test", true, "passed", 1200), check("lint", false, "failed", 300)],
     }),
   });
 
@@ -342,8 +342,7 @@ const scored = (n: number, gate: "passed" | "failed", coverage: number, bundle: 
     status: "done",
     result: result({
       gate,
-      metrics: { coverage, bundle_kb: bundle },
-      builtin: { filesChanged: files, additions: files * 10, deletions: 0, durationMs: 1 },
+      metrics: scoredMetrics({ files, additions: files * 10, values: { coverage, bundle_kb: bundle } }),
     }),
   });
 
@@ -416,8 +415,10 @@ describe("the arena's rail", () => {
   });
 
   it("tells a gate with no checks configured from one that passed, and shows scoring in progress", async () => {
+    // A config with no checks still runs Throng's own `_diff` and `_preview`.
+    const unchecked = result({ checks: [platformCheck("_diff", "passed"), platformCheck("_preview", "skipped")] });
     await openArena([
-      arenaAttempt(1, 1, { status: "done", result: result({ config: { kind: "none" }, checks: [] }) }),
+      arenaAttempt(1, 1, { status: "done", result: unchecked }),
       passing(2),
       arenaAttempt(1, 3, { status: "running" }),
       arenaAttempt(1, 4, { needsUpdate: true, forkedFrom: "t1a1" }),

@@ -15,7 +15,7 @@
 // `e2e-browser.ts`): two scored attempts load as lanes against their base, by file lines up their
 // files, and selecting one there lands its merge request and closes the task.
 //
-// Scoring scenarios, through the e2e routes (`/e2e/*`): metrics (a check writes two JSON files into $THRONG_OUTPUT and fails; metrics are read from both), failing (a required check fails the gate),
+// Scoring scenarios, through the e2e routes (`/e2e/*`): metrics (a check writes two JSON files into $THRONG_OUTPUT and fails; metrics are read from both), taskmetrics (a task adds a metric over a project check, scored with source task; a clash main later adds makes the next run invalid; through `/api`), failing (a required check fails the gate),
 // invalid (an invalid config fails the gate with a config entry), preview (a passing gate deploys a
 // Worker Preview built with `preview.command`, and its URL serves it), coalesce (two quick pushes; the first
 // run is cancelled and only the newest sha is scored), intrusion (an attempt's checks try to push to
@@ -184,7 +184,7 @@ interface Dequeue {
 }
 
 interface ApiResult {
-  config: { kind: string };
+  config: { kind: string; error?: string };
   gate: "passed" | "failed";
   checks: Check[];
   metrics: Record<string, Metric>;
@@ -202,6 +202,7 @@ const scenarios: Record<string, () => Promise<void>> = {
   needsreview,
   arena,
   metrics,
+  taskmetrics,
   failing,
   invalid,
   preview,
@@ -644,6 +645,82 @@ metrics:
     `expected both checks' logs stored: ${JSON.stringify(result.logs)}`,
   );
   await finish(project, work, timeline);
+}
+
+/** `taskmetrics`' project config: a `report` check writing coverage, read as `coverage`. */
+const TASK_METRICS_CONFIG = `checks:
+  - name: report
+    command: node scripts/report.js
+metrics:
+  - { name: coverage, from: report.coverage-summary.total.lines.pct, type: number, unit: "%" }
+`;
+
+/**
+ * A task adds a metric over the project's `report` check: saving one that clashes with the project's
+ * names is refused, and the task's metric is scored with `source: task`. Then `main` gains a metric
+ * with the task's name, and the attempt's next run is `config: invalid`, naming the clash.
+ */
+async function taskmetrics(): Promise<void> {
+  const timeline = new Timeline();
+  const p = await setUpRealProject(timeline, {
+    "scripts/report.js": `import { writeFileSync } from "node:fs";
+writeFileSync(process.env.THRONG_OUTPUT + "/coverage-summary.json", JSON.stringify({ total: { lines: { pct: 87.5, total: 40 } } }));
+`,
+    ".throng/config.yml": TASK_METRICS_CONFIG,
+  });
+  const fixture = (await git(p.work, "rev-parse", "HEAD")).trim();
+  const [t1, a1] = ["t1", "t1a1"];
+  const lines = { name: "lines", from: "report.coverage-summary.total.lines.total", type: "number", order: "asc" };
+  const refused = await throng(p, "POST", "/tasks", { title: "Cover", metrics: [{ ...lines, name: "coverage" }] }).then(
+    () => null,
+    (error: unknown) => String(error),
+  );
+  assert(
+    refused?.includes("400") === true && refused.includes("coverage is also a metric's name in .throng/config.yml"),
+    `expected a clashing task metric refused, got ${refused ?? "a created task"}`,
+  );
+  const { ref, metrics: saved } = await throng<{ ref: string; metrics: { name: string }[] }>(p, "POST", "/tasks", {
+    title: "Cover",
+    metrics: [lines],
+  });
+  assert(ref === t1 && saved.map((m) => m.name).join() === "lines", `unexpected task ${ref}: ${JSON.stringify(saved)}`);
+  await createAttempts(p, t1, [a1], timeline);
+  const head = await editAndPush(p, a1, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
+  await throng(p, "POST", `/attempts/${a1}/open`);
+  const { result } = await scoredHead(p, a1, head);
+  assert(result.config.kind === "valid" && result.gate === "passed", `unexpected result ${JSON.stringify(result)}`);
+  const metric = result.metrics["lines"];
+  assert(
+    metric?.source === "task" && metric.value === 40 && result.metrics["coverage"]?.source === "project",
+    `expected lines from the task over report's output: ${JSON.stringify(result.metrics)}`,
+  );
+  timeline.mark("task metric scored");
+
+  // The project now names a metric `lines` too: around the proxy, which refuses pushes to `main`.
+  await git(p.work, "checkout", "-q", "-b", "config", fixture);
+  await writeFile(
+    join(p.work, ".throng/config.yml"),
+    `${TASK_METRICS_CONFIG}  - { name: lines, from: report.coverage-summary.total.lines.pct, type: number }\n`,
+  );
+  await git(p.work, "commit", "-q", "-am", "config: lines");
+  await git(p.work, ...auth(p.origin.token), "push", "-q", p.origin.remote, "HEAD:refs/heads/main");
+  await git(p.work, "checkout", "-q", "main");
+  timeline.mark("main names lines");
+  const next = await editAndPush(
+    p,
+    a1,
+    "src/greeting.js",
+    (s) => s.replace("hello from a1", "hello again"),
+    "a1 again",
+  );
+  const clashed = (await scoredHead(p, a1, next)).result;
+  assert(
+    clashed.config.kind === "invalid" &&
+      clashed.gate === "failed" &&
+      clashed.config.error?.includes("lines is also a metric's name") === true,
+    `expected the clash to make the config invalid: ${JSON.stringify(clashed.config)}`,
+  );
+  await finish(p.project, p.work, timeline);
 }
 
 /** A required check that fails fails the gate; an optional one that passes doesn't save it. */

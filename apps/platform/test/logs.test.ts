@@ -91,8 +91,8 @@ describe("withNotes", () => {
   });
 
   it("starts the trailer on its own line when the log doesn't end in a newline", () => {
-    expect(withNotes("ok", ["ignored $THRONG_METRICS: not JSON"])).toBe(
-      "ok\n== throng ==\nignored $THRONG_METRICS: not JSON\n",
+    expect(withNotes("ok", ["skipped: setup command 1 failed"])).toBe(
+      "ok\n== throng ==\nskipped: setup command 1 failed\n",
     );
   });
 

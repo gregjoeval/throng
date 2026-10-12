@@ -23,15 +23,16 @@ const OUTCOMES = ["passed", "failed", "timedOut", "errored", "skipped"];
 const CONFIG = parseConfig(`checks:
   - name: test
     command: npm test
-    metrics: [{ name: coverage, unit: "%", order: desc }]
   - name: bundle
     command: npm run size
     required: false
-    metrics: [{ name: bundle_kb, order: asc }]
+metrics:
+  - { name: coverage, from: test.coverage.pct, type: number, unit: "%" }
+  - { name: bundle_kb, from: bundle.size.kb, type: number, order: asc }
 preview: {}
 `);
 
-/** A run's result as the Workflow builds it: two checks with inline metrics, and a deployed Preview. */
+/** A run's result as the Workflow builds it: two checks with a metric each, and a deployed Preview. */
 function result(overrides: Partial<ScoringResult> = {}): ScoringResult {
   const scored = buildResult(CONFIG, {
     base: "b".repeat(40),
@@ -39,8 +40,8 @@ function result(overrides: Partial<ScoringResult> = {}): ScoringResult {
     builtinMs: 5,
     setupFailed: null,
     checks: [
-      { exit: 0, durationMs: 900, metrics: '{"coverage": 81.5}' },
-      { exit: 1, durationMs: 300, metrics: '{"bundle_kb": 120}' },
+      { exit: 0, durationMs: 900, metrics: { coverage: { value: 81.5 } } },
+      { exit: 1, durationMs: 300, metrics: { bundle_kb: { value: 120 } } },
     ],
   });
   return { ...withPreview(scored, { ok: true, url: "https://t1a1.preview.test" }, 40), ...overrides };
@@ -350,15 +351,16 @@ describe("the arena", () => {
       "checks:",
       "  - name: test",
       "    command: pnpm test",
-      "    metrics: [{ name: coverage, unit: '%', order: desc }]",
       "  - name: bundle",
       "    command: pnpm build",
-      "    metrics: [{ name: bundle_kb, order: asc }]",
+      "metrics:",
+      "  - { name: coverage, from: test.coverage.pct, type: number, unit: '%' }",
+      "  - { name: bundle_kb, from: bundle.size.kb, type: number, order: asc }",
     ].join("\n");
     repos.commit(`${projectId}-main`, { files: { "README.md": "hi\n", ".throng/config.yml": config } });
     expect((await call("GET", `${base}/tasks/t1/arena`, ada)).body["metrics"]).toEqual([
-      { name: "coverage", unit: "%", order: "desc" },
-      { name: "bundle_kb", unit: null, order: "asc" },
+      { name: "coverage", from: "test.coverage.pct", type: "number", unit: "%", order: "desc" },
+      { name: "bundle_kb", from: "bundle.size.kb", type: "number", unit: null, order: "asc" },
     ]);
   });
 

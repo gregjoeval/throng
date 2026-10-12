@@ -125,7 +125,7 @@ describe("an attempt's details", () => {
       result: result({ metrics: scoredMetrics({ values: { coverage: 81.5 }, preview: "https://t1a1.preview.test" }) }),
     });
     const { sheet } = await openDetails([head, arenaAttempt(1, 2)], {
-      metrics: [{ name: "coverage", unit: "%", order: "desc" }],
+      metrics: [{ name: "coverage", from: "test.coverage.pct", type: "number", unit: "%", order: "desc" }],
       runs: [
         run(9, String(head.sha), { trigger: "rescore", status: "running", finishedAt: null, result: null }),
         run(8, String(head.sha)),

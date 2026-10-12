@@ -3,7 +3,9 @@
 // gate live here so they're tested without a container.
 
 import { DEFAULT_CHECK_TIMEOUT_MS } from "./config.ts";
-import type { CheckConfig, ConfigResult, MetricOrder } from "./config.ts";
+import type { CheckConfig, ConfigResult, MetricConfig, MetricOrder } from "./config.ts";
+import { typedValue } from "./metric-values.ts";
+import type { MetricType, MetricValue } from "./metric-values.ts";
 import type { PreviewScriptResult } from "./scripts.ts";
 
 /** A check's outcome, best first; they are also the values of the check's outcome metric. */
@@ -20,8 +22,8 @@ type MetricFormat = (typeof METRIC_FORMATS)[number];
 
 /** Longest a `setup` command may run; the spec gives setup no timeout of its own. */
 export const SETUP_TIMEOUT_MS = DEFAULT_CHECK_TIMEOUT_MS;
-/** Most bytes of a check's `$THRONG_METRICS` file the score script reads. */
-export const MAX_METRICS_BYTES = 64 * 1024;
+/** The parse guard: largest output file in `$THRONG_OUTPUT` the score script parses. */
+export const MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
 /** Exit codes `timeout` gives a command it stopped: TERM (124), then KILL after the grace (128 + 9). */
 const TIMED_OUT_EXITS = new Set([124, 137]);
 
@@ -37,7 +39,7 @@ export interface CheckResult {
   required: boolean;
   outcome: CheckOutcome;
   durationMs: number;
-  /** What the run noticed about the check: ignored metrics, why it was skipped. */
+  /** What the run noticed about the check, such as why it was skipped. */
   notes: string[];
 }
 
@@ -67,7 +69,7 @@ export interface ScoringResult {
   gate: Gate;
   /** Every check in run order: `_diff`, the config's checks, then `_preview`. */
   checks: CheckResult[];
-  /** Every metric by name: each check's outcome metric, followed by that check's own metrics. */
+  /** Every metric by name: each check's outcome metric, followed by the metrics read from its output. */
   metrics: Record<string, MetricResult>;
   /**
    * The run's stored logs, by name (`setup.<n>`, a check's name, `preview.deploy`), in run order. A
@@ -76,14 +78,24 @@ export interface ScoringResult {
   logs: string[];
 }
 
-/** What the score script runs, and the hosts it may reach beyond the npm registry. */
+/**
+ * What the score script runs, and the hosts it may reach beyond the npm registry. Each check carries
+ * the metrics read from its output, which the script reads as soon as the check exits.
+ */
 export interface ScorePlan {
   setup: string[];
-  checks: { name: string; command: string; timeoutMs: number }[];
+  checks: { name: string; command: string; timeoutMs: number; metrics: PlannedMetric[] }[];
   allow: string[];
 }
 
-/** The score script's raw output, before metrics are parsed and the gate is computed. */
+/** A metric as the score script reads it: where from, and as which type. */
+export interface PlannedMetric {
+  name: string;
+  from: string;
+  type: MetricType;
+}
+
+/** The score script's raw output, before values are checked again and the gate is computed. */
 export interface RawScore {
   base: string | null;
   /** `git diff --shortstat` from the base (or the empty tree) to the head. */
@@ -92,8 +104,16 @@ export interface RawScore {
   builtinMs: number;
   /** The 1-based `setup` command that failed, or null when setup succeeded. */
   setupFailed: number | null;
-  /** One per planned check, in order; `exit` is null for a check that didn't run. */
-  checks: { exit: number | null; durationMs: number; metrics: string | null }[];
+  /**
+   * One per planned check, in order; `exit` is null for a check that didn't run. `metrics` holds the
+   * value of each metric read from its output, by name; none for a check that didn't run.
+   */
+  checks: { exit: number | null; durationMs: number; metrics: Record<string, MetricValue> }[];
+}
+
+/** The metrics read from `check`'s output, in config order. */
+function metricsFrom(check: string, metrics: MetricConfig[]): MetricConfig[] {
+  return metrics.filter((metric) => metric.from.split(".")[0] === check);
 }
 
 /** The config's setup, checks and `network.allow`; nothing at all without a valid config. */
@@ -101,7 +121,16 @@ export function scorePlan(config: ConfigResult): ScorePlan {
   if (config.kind !== "valid") return { setup: [], checks: [], allow: [] };
   return {
     setup: config.config.setup,
-    checks: config.config.checks.map(({ name, command, timeoutMs }) => ({ name, command, timeoutMs })),
+    checks: config.config.checks.map(({ name, command, timeoutMs }) => ({
+      name,
+      command,
+      timeoutMs,
+      metrics: metricsFrom(name, config.config.metrics).map((metric) => ({
+        name: metric.name,
+        from: metric.from,
+        type: metric.type,
+      })),
+    })),
     allow: config.config.network.allow,
   };
 }
@@ -131,44 +160,6 @@ export function parseShortstat(line: string): { filesChanged: number; additions:
     additions: count(/(\d+) insertions?\(\+\)/u),
     deletions: count(/(\d+) deletions?\(-\)/u),
   };
-}
-
-/** A declared metric's reported value, or null with why. */
-type Reported = { value: number } | { value: null; note: string };
-
-/**
- * A check's `$THRONG_METRICS` file: a JSON object of `name → number`. Each declared metric gets its
- * finite number, or null with a note saying why. What isn't declared is noted on the check and ignored.
- */
-export function parseMetrics(
-  text: string | null,
-  declared: string[],
-): { metrics: Record<string, Reported>; notes: string[] } {
-  const every = (note: string) => Object.fromEntries(declared.map((name) => [name, { value: null, note }]));
-  if (text === null || text.trim() === "") return { metrics: every("not reported"), notes: [] };
-  let value: unknown;
-  try {
-    value = JSON.parse(text);
-  } catch {
-    return { metrics: every("$THRONG_METRICS was not JSON"), notes: ["ignored $THRONG_METRICS: not JSON"] };
-  }
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    const why = "not a JSON object of name to number";
-    return { metrics: every(`$THRONG_METRICS was ${why}`), notes: [`ignored $THRONG_METRICS: ${why}`] };
-  }
-  const reported = new Map(Object.entries(value));
-  const notes = [...reported.keys()]
-    .filter((name) => !declared.includes(name))
-    .map((name) => `ignored metric ${name}: not declared by this check`);
-  const metrics = Object.fromEntries(
-    declared.map((name): [string, Reported] => {
-      const v = reported.get(name);
-      if (v === undefined) return [name, { value: null, note: "not reported" }];
-      if (typeof v !== "number" || !Number.isFinite(v)) return [name, { value: null, note: "not a number" }];
-      return [name, { value: v }];
-    }),
-  );
-  return { metrics, notes };
 }
 
 /** Passed when every required check passed; no checks at all passes. */
@@ -274,39 +265,30 @@ export function withPreview(
   };
 }
 
-/** A config check from its run: its outcome, its declared metrics as project numbers, and its notes. */
+/**
+ * A metric's value as the score script reported it, checked against its type again: the script runs
+ * beside the attempt's code, so the Worker trusts nothing it hands back.
+ */
+function checkedValue(metric: MetricConfig, reported: MetricValue | undefined): MetricValue {
+  if (typeof reported !== "object" || reported === null) return { value: null, note: `${metric.from}: not reported` };
+  if (reported.value === null) return { value: null, note: String(reported.note) };
+  const typed = typedValue(reported.value, metric.type);
+  return "problem" in typed ? { value: null, note: `${metric.from}: ${typed.problem}` } : typed;
+}
+
+/** A config check from its run: its outcome and notes, and the metrics read from its output. */
 function configScored(
   check: CheckConfig,
+  metrics: MetricConfig[],
   ran: RawScore["checks"][number] | undefined,
   setupFailed: number | null,
 ): Scored {
   const outcome = checkOutcome(ran?.exit ?? null, ran?.durationMs ?? 0, check.timeoutMs);
   const skipped = setupFailed === null ? "skipped" : `skipped: setup command ${setupFailed} failed`;
-  const parsed =
+  const value = (metric: MetricConfig): MetricValue =>
     outcome === "skipped"
-      ? {
-          metrics: Object.fromEntries(
-            check.metrics.map((m) => [m.name, { value: null, note: `${check.name} was ${skipped}` }]),
-          ),
-          notes: [],
-        }
-      : parseMetrics(
-          ran?.metrics ?? null,
-          check.metrics.map((m) => m.name),
-        );
-  const notes = outcome === "skipped" && setupFailed !== null ? [...parsed.notes, skipped] : parsed.notes;
-  const metrics = Object.fromEntries(
-    check.metrics.map(({ name, order, unit }): [string, MetricResult] => [
-      name,
-      {
-        source: "project",
-        type: "number",
-        order,
-        ...(unit === null ? {} : { unit }),
-        ...(parsed.metrics[name] ?? { value: null, note: "not reported" }),
-      },
-    ]),
-  );
+      ? { value: null, note: `${check.name}: ${check.name} was ${skipped}` }
+      : checkedValue(metric, ran?.metrics[metric.name]);
   return {
     check: {
       name: check.name,
@@ -314,9 +296,20 @@ function configScored(
       required: check.required,
       outcome,
       durationMs: ran?.durationMs ?? 0,
-      notes,
+      notes: outcome === "skipped" && setupFailed !== null ? [skipped] : [],
     },
-    metrics,
+    metrics: Object.fromEntries(
+      metricsFrom(check.name, metrics).map((metric): [string, MetricResult] => [
+        metric.name,
+        {
+          source: "project",
+          type: metric.type,
+          order: metric.order,
+          ...(metric.unit === null ? {} : { unit: metric.unit }),
+          ...value(metric),
+        },
+      ]),
+    ),
   };
 }
 
@@ -328,7 +321,9 @@ function configScored(
 export function buildResult(config: ConfigResult, raw: RawScore): ScoringResult {
   const checks =
     config.kind === "valid"
-      ? config.config.checks.map((check, i) => configScored(check, raw.checks[i], raw.setupFailed))
+      ? config.config.checks.map((check, i) =>
+          configScored(check, config.config.metrics, raw.checks[i], raw.setupFailed),
+        )
       : [];
   const gate = config.kind === "invalid" ? "failed" : gateFor(checks.map((s) => s.check));
   const scored = [

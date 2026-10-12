@@ -5,6 +5,8 @@
 
 import { parseDocument } from "yaml";
 import { z } from "zod";
+import { METRIC_TYPES } from "./metric-values.ts";
+import type { MetricType } from "./metric-values.ts";
 import { originRepo } from "./repos.ts";
 import type { Repos } from "./repos.ts";
 
@@ -13,14 +15,19 @@ export const CONFIG_PATH = ".throng/config.yml";
 export const MAX_CONFIG_BYTES = 64 * 1024;
 export const DEFAULT_CHECK_TIMEOUT_MS = 10 * 60 * 1000;
 export const MAX_CHECK_TIMEOUT_MS = 30 * 60 * 1000;
-/** Check and metric names. */
+/** Check and metric names. A leading `_` is Throng's, and a dot would split a metric's `from`. */
 export const CONFIG_NAME = /^[a-z0-9][a-z0-9_-]*$/u;
+/** A metric's `from`: `<check>.<file>.<path>`, the file being a name in `$THRONG_OUTPUT` without `.json`. */
+const FROM = /^[^.]+\.[^./\\]+(\.[^.]+)+$/u;
 /** A metric's stored `order`: `asc` when lower values are better, `desc` when higher are. */
 export const METRIC_ORDERS = ["asc", "desc"] as const;
 export type MetricOrder = (typeof METRIC_ORDERS)[number];
 
 export interface MetricConfig {
   name: string;
+  /** Where its value is read: `<check>.<file>.<path>`. */
+  from: string;
+  type: MetricType;
   unit: string | null;
   /** Which way is better: `asc` when lower values are better, `desc` when higher are. */
   order: MetricOrder;
@@ -32,7 +39,6 @@ export interface CheckConfig {
   /** Whether the gate needs it to pass. */
   required: boolean;
   timeoutMs: number;
-  metrics: MetricConfig[];
 }
 
 export interface Config {
@@ -42,6 +48,8 @@ export interface Config {
   network: { allow: string[] };
   /** Run in order. */
   checks: CheckConfig[];
+  /** Read from the checks' output files, in order. */
+  metrics: MetricConfig[];
   /** Null when the project doesn't deploy previews; `command` is null when it needs no build. */
   preview: { command: string | null } | null;
   /** Null to use the default cap on active attempts per task. */
@@ -68,18 +76,34 @@ const UNIT_MS = { s: 1000, m: 60 * 1000, h: 60 * 60 * 1000 } as const;
 const HOST = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/u;
 
 const name = (what: string) =>
-  z.string({ error: `${what} must be a string` }).regex(CONFIG_NAME, `${what} must match ${CONFIG_NAME.source}`);
+  z.string({ error: `${what} must be a string` }).superRefine((text, ctx) => {
+    let message: string | null = null;
+    if (text.startsWith("_")) {
+      message = `${what} must not start with _, which is reserved for Throng's own checks and metrics`;
+    } else if (text.includes(".")) {
+      message = `${what} must not contain a dot; dots separate the parts of a metric's from`;
+    } else if (!CONFIG_NAME.test(text)) {
+      message = `${what} must match ${CONFIG_NAME.source}`;
+    }
+    if (message !== null) ctx.addIssue({ code: "custom", message });
+  });
+/** `a`, `a or b`, `a, b or c`. */
+const oneOf = (values: readonly string[]) =>
+  values.length === 1 ? (values[0] ?? "") : `${values.slice(0, -1).join(", ")} or ${values.at(-1) ?? ""}`;
+const FROM_FORMAT = "from must be <check>.<file>.<path>, like test.coverage-summary.total.lines.pct";
 const command = z.string({ error: "must be a string" }).trim().min(1, "must not be empty");
 
 const MetricSchema = z.strictObject({
   name: name("metric name"),
-  unit: z.string({ error: "unit must be a string" }).optional(),
-  order: z.enum(ORDER_ALIASES, {
+  from: z
+    .string({ error: (issue) => (issue.input === undefined ? "from is required: <check>.<file>.<path>" : FROM_FORMAT) })
+    .regex(FROM, FROM_FORMAT),
+  type: z.enum(METRIC_TYPES, {
     error: (issue) =>
-      issue.input === undefined
-        ? "order is required: ascending, asc, descending or desc"
-        : "order must be ascending, asc, descending or desc",
+      issue.input === undefined ? `type is required: ${oneOf(METRIC_TYPES)}` : `type must be ${oneOf(METRIC_TYPES)}`,
   }),
+  unit: z.string({ error: "unit must be a string" }).optional(),
+  order: z.enum(ORDER_ALIASES, { error: "order must be ascending, asc, descending or desc" }).optional(),
   target: z.never({ error: "target is reserved and not supported yet; remove it" }).optional(),
 });
 
@@ -98,7 +122,13 @@ const CheckSchema = z.strictObject({
   command,
   required: z.boolean({ error: "required must be true or false" }).optional(),
   timeout: TimeoutSchema.optional(),
-  metrics: z.array(MetricSchema, { error: "metrics must be a list" }).optional(),
+  metrics: z
+    .never({
+      error:
+        "a check no longer declares metrics; move each to the top-level metrics list, with " +
+        "from: <check>.<file>.<path> naming a JSON file the check writes into $THRONG_OUTPUT, and a type",
+    })
+    .optional(),
 });
 
 const ConfigSchema = z
@@ -119,6 +149,7 @@ const ConfigSchema = z
         })
         .optional(),
       checks: z.array(CheckSchema, { error: "checks must be a list" }).optional(),
+      metrics: z.array(MetricSchema, { error: "metrics must be a list" }).optional(),
       preview: z.strictObject({ command: command.optional() }, { error: "preview must be a mapping" }).optional(),
       attempts: z
         .strictObject({
@@ -134,23 +165,26 @@ const ConfigSchema = z
   )
   .superRefine((config, ctx) => {
     // Each check's outcome is a metric named after it, so checks and metrics share one namespace.
-    const checkNames = new Set(config.checks?.map((check) => check.name));
     const checks = new Set<string>();
-    const metrics = new Set<string>();
     config.checks?.forEach((check, i) => {
       if (checks.has(check.name)) {
         ctx.addIssue({ code: "custom", path: ["checks", i, "name"], message: `duplicate check name ${check.name}` });
       }
       checks.add(check.name);
-      check.metrics?.forEach((metric, j) => {
-        const path = ["checks", i, "metrics", j, "name"];
-        if (checkNames.has(metric.name)) {
-          ctx.addIssue({ code: "custom", path, message: `metric name ${metric.name} is also a check's name` });
-        } else if (metrics.has(metric.name)) {
-          ctx.addIssue({ code: "custom", path, message: `duplicate metric name ${metric.name}` });
-        }
-        metrics.add(metric.name);
-      });
+    });
+    const metrics = new Set<string>();
+    config.metrics?.forEach((metric, i) => {
+      const path = ["metrics", i, "name"];
+      if (checks.has(metric.name)) {
+        ctx.addIssue({ code: "custom", path, message: `metric name ${metric.name} is also a check's name` });
+      } else if (metrics.has(metric.name)) {
+        ctx.addIssue({ code: "custom", path, message: `duplicate metric name ${metric.name}` });
+      }
+      metrics.add(metric.name);
+      const check = metric.from.split(".")[0] ?? "";
+      if (!checks.has(check)) {
+        ctx.addIssue({ code: "custom", path: ["metrics", i, "from"], message: `no check is named ${check}` });
+      }
     });
   });
 
@@ -188,11 +222,13 @@ export function parseConfig(text: string | null): ConfigResult {
         command: check.command,
         required: check.required ?? true,
         timeoutMs: check.timeout ?? DEFAULT_CHECK_TIMEOUT_MS,
-        metrics: (check.metrics ?? []).map((metric) => ({
-          name: metric.name,
-          unit: metric.unit ?? null,
-          order: ORDERS[metric.order],
-        })),
+      })),
+      metrics: (config.metrics ?? []).map((metric) => ({
+        name: metric.name,
+        from: metric.from,
+        type: metric.type,
+        unit: metric.unit ?? null,
+        order: metric.order === undefined ? "desc" : ORDERS[metric.order],
       })),
       preview: config.preview === undefined ? null : { command: config.preview.command ?? null },
       attempts: { limit: config.attempts?.limit ?? null },

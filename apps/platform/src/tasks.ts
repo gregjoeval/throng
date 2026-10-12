@@ -223,7 +223,7 @@ export interface ArenaAttempt extends ScoringStatus, AttemptStanding {
 /** A task's arena: the current result of every attempt in it. */
 export interface TaskArena {
   task: string;
-  /** Every metric the config on `origin/main` declares, in check order; none without a valid config. */
+  /** Every metric the config on `origin/main` declares, in its order; none without a valid config. */
   metrics: MetricConfig[];
   attempts: ArenaAttempt[];
 }
@@ -432,7 +432,7 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
       ]);
       return {
         task: taskRef(number),
-        metrics: config.kind === "valid" ? config.config.checks.flatMap((check) => check.metrics) : [],
+        metrics: config.kind === "valid" ? config.config.metrics : [],
         attempts: list.map(({ scoring, fork, state, author, alias, verdicts, forked_from, needs_update }, i) => ({
           ref: fork,
           state,

@@ -15,7 +15,7 @@
 // `e2e-browser.ts`): two scored attempts load as lanes against their base, by file lines up their
 // files, and selecting one there lands its merge request and closes the task.
 //
-// Scoring scenarios, through the e2e routes (`/e2e/*`): metrics (a passing project whose checks report metrics), failing (a required check fails the gate),
+// Scoring scenarios, through the e2e routes (`/e2e/*`): metrics (a check writes two JSON files into $THRONG_OUTPUT and fails; metrics are read from both), failing (a required check fails the gate),
 // invalid (an invalid config fails the gate with a config entry), preview (a passing gate deploys a
 // Worker Preview built with `preview.command`, and its URL serves it), coalesce (two quick pushes; the first
 // run is cancelled and only the newest sha is scored), intrusion (an attempt's checks try to push to
@@ -582,22 +582,32 @@ async function describePage({ page }: BrowserSession): Promise<void> {
   console.error(`page at ${page.url()}:\n${text}`);
 }
 
-/** A passing project whose checks report metrics: declared ones are kept, the rest noted. */
+/**
+ * A passing project whose optional `report` check writes two JSON files into `$THRONG_OUTPUT`, then
+ * fails: its metrics are still read from both files, through objects and an array, and one whose path
+ * doesn't exist is null with a note naming the segment and the keys there.
+ */
 async function metrics(): Promise<void> {
   const timeline = new Timeline();
   const { project, work } = await setUpProject(timeline, {
     // The fixture is an ES module package, so no `require`.
-    "scripts/metrics.js": `import { writeFileSync } from "node:fs";
-writeFileSync(process.env.THRONG_METRICS, JSON.stringify({ coverage: 87.5, stray: 1 }));
+    "scripts/report.js": `import { writeFileSync } from "node:fs";
+const out = process.env.THRONG_OUTPUT;
+writeFileSync(out + "/report.json", JSON.stringify({ numTotalTests: 12, testResults: [{ name: "greeting", duration: 7 }] }));
+writeFileSync(out + "/coverage-summary.json", JSON.stringify({ total: { lines: { pct: 87.5 } } }));
+process.exit(1);
 `,
     ".throng/config.yml": `checks:
   - name: test
     command: npm test
-  - name: coverage
-    command: node scripts/metrics.js
+  - name: report
+    command: node scripts/report.js
     required: false
-    metrics:
-      - { name: coverage, unit: "%", order: desc }
+metrics:
+  - { name: tests, from: report.report.numTotalTests, type: number }
+  - { name: slowest, from: report.report.testResults.0.duration, type: number, unit: ms, order: asc }
+  - { name: coverage, from: report.coverage-summary.total.lines.pct, type: number, unit: "%" }
+  - { name: branches, from: report.coverage-summary.total.branches.pct, type: number, unit: "%" }
 `,
   });
   const fork = await createAttempt(project, "t1a1", timeline);
@@ -606,26 +616,31 @@ writeFileSync(process.env.THRONG_METRICS, JSON.stringify({ coverage: 87.5, stray
 
   const result = await scored(project, sha);
   assert(result.gate === "passed", `expected the gate to pass: ${JSON.stringify(result.checks)}`);
-  const [test, coverage] = configChecks(result);
+  const [test, reporter] = configChecks(result);
   assert(
-    test?.outcome === "passed" && coverage?.outcome === "passed",
+    test?.outcome === "passed" && reporter?.outcome === "failed",
     `unexpected outcomes ${JSON.stringify(result.checks)}`,
   );
-  const reported = result.metrics["coverage"];
+  const expected: Record<string, number> = { tests: 12, slowest: 7, coverage: 87.5 };
+  for (const [name, value] of Object.entries(expected)) {
+    const metric = result.metrics[name];
+    assert(
+      metric?.source === "project" && metric.type === "number" && metric.value === value,
+      `${name} not read from the failed check's output as ${value}: ${JSON.stringify(metric)}`,
+    );
+  }
+  const missing = result.metrics["branches"];
   assert(
-    reported?.source === "project" && reported.type === "number" && reported.value === 87.5,
-    `coverage not recorded as a project number: ${JSON.stringify(reported)}`,
+    missing?.value === null &&
+      missing.note === "report.coverage-summary.total.branches: no key branches; keys there: lines",
+    `expected branches null with a note: ${JSON.stringify(missing)}`,
   );
   assert(
     result.metrics["test"]?.type === "enum" && result.metrics["test"].value === "passed",
     `expected test's outcome metric: ${JSON.stringify(result.metrics["test"])}`,
   );
   assert(
-    coverage.notes.some((n) => n.includes("stray")),
-    "the undeclared metric was not noted",
-  );
-  assert(
-    JSON.stringify(result.logs) === JSON.stringify(["test", "coverage"]),
+    JSON.stringify(result.logs) === JSON.stringify(["test", "report"]),
     `expected both checks' logs stored: ${JSON.stringify(result.logs)}`,
   );
   await finish(project, work, timeline);

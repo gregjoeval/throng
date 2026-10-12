@@ -21,6 +21,7 @@ import { FORWARDED_EMAIL_HEADER } from "./forwarded.ts";
 import { LOG_CONTENT_TYPE, LOG_RETENTION_DAYS, MAX_LOG_BYTES, missingLog } from "./logs.ts";
 import type { LogStore } from "./logs.ts";
 import { DEQUEUE_REASONS, MERGE_REQUEST_STATES } from "./merge-requests.ts";
+import { METRIC_TYPES } from "./metric-values.ts";
 import { MAX_PROJECT_HANDLE, PROJECT_HANDLE, projectService } from "./projects.ts";
 import type { Repos } from "./repos.ts";
 import { CHECK_OUTCOMES, GATES, METRIC_FORMATS, METRIC_SOURCES } from "./results.ts";
@@ -396,6 +397,13 @@ const ConfigNameSchema = z.string().regex(CONFIG_NAME);
 const MetricSchema = z
   .object({
     name: ConfigNameSchema.openapi({ example: "coverage" }),
+    from: z.string().openapi({
+      description:
+        "Where its value is read: the check, a JSON file it writes into `$THRONG_OUTPUT` (without `.json`), then " +
+        "object keys and array indexes.",
+      example: "test.coverage-summary.total.lines.pct",
+    }),
+    type: z.enum(METRIC_TYPES).openapi({ description: "How its values compare." }),
     unit: z.string().nullable().openapi({ example: "%" }),
     order: z.enum(METRIC_ORDERS).openapi({ description: "`asc` when lower is better, `desc` when higher is." }),
   })
@@ -406,7 +414,7 @@ const TaskArenaSchema = z
     task: z.string().openapi({ example: "t42" }),
     metrics: z.array(MetricSchema).openapi({
       description:
-        "Every metric the `.throng/config.yml` on `origin/main` declares, in check order; empty without a valid config.",
+        "Every metric the `.throng/config.yml` on `origin/main` declares, in order; empty without a valid config.",
     }),
     attempts: z.array(
       ScoringStatusSchema.extend({
@@ -557,10 +565,10 @@ const ConfigSchema = z
             .int()
             .max(MAX_CHECK_TIMEOUT_MS)
             .openapi({ description: "Defaults to 10 minutes.", example: 600_000 }),
-          metrics: z.array(MetricSchema),
         }),
       )
       .openapi({ description: "Run in order." }),
+    metrics: z.array(MetricSchema).openapi({ description: "Read from the checks' output files, in order." }),
     preview: z
       .object({ command: z.string().nullable().openapi({ description: "Builds before the preview deploys." }) })
       .nullable()
@@ -579,7 +587,7 @@ const ConfigResultSchema = z
       kind: z.literal("invalid"),
       error: z.string().openapi({
         description: "One line per problem, each prefixed with its path.",
-        example: "checks[0].metrics[0].order: order is required: ascending, asc, descending or desc",
+        example: "metrics[0].from: no check is named tests",
       }),
     }),
   ])

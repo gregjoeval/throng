@@ -19,7 +19,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { compareQuery, mainHeadQuery, meQuery, projectKey, scoreNow } from "@/lib/api";
 import type { Compare, ProjectRef } from "@/lib/api";
-import { GATE_STATE_LABELS, gateState } from "@/lib/arena";
+import { GATE_STATE_LABELS, gateState, previewUrl } from "@/lib/arena";
 import type { ArenaAttempt } from "@/lib/arena";
 import type { Layout, Reference } from "@/lib/arena-view";
 import { apiError } from "@/lib/errors";
@@ -77,7 +77,7 @@ export function Lane({
 /** The lane's menu: the details sheet, the preview, and the attempt in the code browser. */
 function LaneMenu({ projectRef, attempt, onDetails }: InProject & { attempt: ArenaAttempt; onDetails: () => void }) {
   const navigate = useNavigate();
-  const preview = attempt.result?.preview;
+  const preview = previewUrl(attempt.result);
   return (
     <DropdownMenu>
       <DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" aria-label={`${attempt.ref} actions`} />}>
@@ -85,12 +85,12 @@ function LaneMenu({ projectRef, attempt, onDetails }: InProject & { attempt: Are
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-auto min-w-48">
         <DropdownMenuItem onClick={onDetails}>Checks, logs and verdicts</DropdownMenuItem>
-        {preview?.status === "ready" ? (
-          <DropdownMenuItem render={<a href={preview.url} target="_blank" rel="noreferrer" />}>
+        {preview === null ? (
+          <DropdownMenuItem disabled>No preview</DropdownMenuItem>
+        ) : (
+          <DropdownMenuItem render={<a href={preview} target="_blank" rel="noreferrer" />}>
             Open preview
           </DropdownMenuItem>
-        ) : (
-          <DropdownMenuItem disabled>No preview</DropdownMenuItem>
         )}
         <DropdownMenuItem
           onClick={() =>

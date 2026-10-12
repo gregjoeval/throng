@@ -132,11 +132,34 @@ export const AttemptLimitSchema = z
   .nullable()
   .openapi({ description: "Overrides the project's cap on active attempts; null to use the project's." });
 
+/** A task's checks as a request gives them: checked like `.throng/config.yml`'s, so they're described there. */
+export const TaskChecksInputSchema = z.array(z.unknown()).openapi({
+  description:
+    "The task's own checks, run after the project's in the same container, under its `setup` and " +
+    "`network.allow`, in the shape of `.throng/config.yml`'s `checks`: `name`, `command`, and optionally " +
+    "`required` (true by default; a required task check gates the task's attempts) and `timeout`. Names must " +
+    "not start with `_` or clash with a check or metric in the project's config on `main`. Replaces the " +
+    "task's checks; its metrics may read them.",
+  example: [{ name: "smoke", command: "./smoke.sh", timeout: "2m" }],
+});
+
+/** A task's metrics as a request gives them: checked like `.throng/config.yml`'s, so they're described there. */
+export const TaskMetricsInputSchema = z.array(z.unknown()).openapi({
+  description:
+    "The task's own metrics, read after the project's, in the shape of `.throng/config.yml`'s `metrics`: " +
+    "`name`, `from`, `type`, and as its type allows `unit`, `order`, `values` and `format`. Names must not " +
+    "start with `_` or clash with a check or metric in the project's config on `main`, or one of the task's " +
+    "checks, and each `from` must name one of the project's or the task's checks. Replaces the task's metrics.",
+  example: [{ name: "lines", from: "test.coverage-summary.total.lines.total", type: "number", order: "asc" }],
+});
+
 export const CreateTaskSchema = z
   .object({
     title: z.string().trim().min(1).max(200),
     body: z.string().max(65_536).optional().openapi({ description: "Markdown." }),
     attemptLimit: AttemptLimitSchema.optional(),
+    checks: TaskChecksInputSchema.optional(),
+    metrics: TaskMetricsInputSchema.optional(),
   })
   .openapi("CreateTask");
 

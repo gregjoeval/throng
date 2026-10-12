@@ -3,7 +3,8 @@
 // `request`; the queue keeps one record per run in the project Durable Object's SQLite:
 //
 // - a head that is already queued or running isn't queued again, and one with a `done` run isn't
-//   either, unless the request is a rescore;
+//   either, unless the request is a rescore. A rescore of a running head queues one follow-up
+//   behind it, since the running run may have read the task's definitions before they changed;
 // - a newer head for an attempt cancels its queued or running run, so newest head wins;
 // - at most `SCORING_CAP` runs are running per project, less the slot the merge queue's landing
 //   holds (it counts toward the cap and goes first); the rest wait, oldest first.
@@ -17,7 +18,8 @@
 import { normaliseResult } from "./casing.ts";
 import { addColumns, renameColumns } from "./columns.ts";
 import { forkRepo } from "./repos.ts";
-import type { ScoringResult } from "./results.ts";
+import { upgradeResult } from "./results.ts";
+import type { LegacyResult, ScoringResult } from "./results.ts";
 import { attemptRef } from "./task-refs.ts";
 import type { Sql } from "./task-store.ts";
 import type { Actor } from "./tokens.ts";
@@ -265,8 +267,13 @@ export class ScoringQueue {
           input.attempt,
         )
         .map(toRun);
-      const same = live.find((r) => r.sha === input.sha);
-      if (same !== undefined) return { queued: false, reason: `already ${same.status}`, run: same };
+      const same = live.filter((r) => r.sha === input.sha);
+      const waiting = same.find((r) => r.status === "queued");
+      if (waiting !== undefined) return { queued: false, reason: "already queued", run: waiting };
+      const running = same.find((r) => r.status === "running");
+      if (running !== undefined && input.trigger !== "rescore") {
+        return { queued: false, reason: "already running", run: running };
+      }
       if (input.readSince !== undefined) {
         const [newer] = this.#sql.exec<RunRow>(
           "SELECT * FROM scoring_runs WHERE task = ? AND attempt = ? AND id > ? ORDER BY id DESC",
@@ -277,7 +284,7 @@ export class ScoringQueue {
         if (newer !== undefined) return { queued: false, reason: "a newer push is queued", run: toRun(newer) };
       }
       // Whatever happens to this head, runs for older heads are superseded now.
-      for (const older of live) this.#cancel(older, { superseded_by: input.sha });
+      for (const older of live.filter((r) => r.sha !== input.sha)) this.#cancel(older, { superseded_by: input.sha });
       if (input.trigger !== "rescore") {
         const [done] = this.#sql.exec<RunRow>(
           "SELECT * FROM scoring_runs WHERE task = ? AND attempt = ? AND sha = ? AND status = 'done' ORDER BY id DESC",
@@ -346,8 +353,9 @@ export class ScoringQueue {
   }
 
   /**
-   * Stops cancelled runs that had started, then starts queued runs while there are free slots.
-   * Rows are claimed before any await, so drains that overlap never start or stop a run twice.
+   * Stops cancelled runs that had started, then starts queued runs while there are free slots; a
+   * rescore queued behind its attempt's running run waits for it to end. Rows are claimed before any
+   * await, so drains that overlap never start or stop a run twice.
    */
   async drain(): Promise<void> {
     if (this.#runner === null) return;
@@ -368,7 +376,12 @@ export class ScoringQueue {
       const free = SCORING_CAP - this.running() - this.#reserved();
       if (free <= 0) return [];
       const rows = this.#sql
-        .exec<RunRow>("SELECT * FROM scoring_runs WHERE status = 'queued' ORDER BY id LIMIT ?", free)
+        .exec<RunRow>(
+          `SELECT * FROM scoring_runs q WHERE status = 'queued' AND NOT EXISTS (
+             SELECT 1 FROM scoring_runs r WHERE r.status = 'running' AND r.task = q.task AND r.attempt = q.attempt
+           ) ORDER BY id LIMIT ?`,
+          free,
+        )
         .map(toRun);
       for (const run of rows) {
         this.#sql.exec("UPDATE scoring_runs SET status = 'running', started_at = ? WHERE id = ?", this.#ms(), run.id);
@@ -505,17 +518,21 @@ function toRun(row: RunRow): StoredRun {
   };
 }
 
-/** A stored result; one stored before runs kept logs has none. */
+/** A stored result in the current shape; one stored before runs kept logs has none. */
 function storedResult(json: string): ScoringResult {
-  const result = JSON.parse(json) as Omit<ScoringResult, "logs"> & { logs?: string[] };
-  return normaliseResult({ ...result, logs: result.logs ?? [] });
+  const result = JSON.parse(json) as Partial<Pick<ScoringResult, "logs">> & (ScoringResult | LegacyResult);
+  return upgradeResult(normaliseResult({ ...result, logs: result.logs ?? [] }));
 }
 
-/** A result in a few words for the journal: `no checks configured`, `2 passed, 1 failed`, `config invalid`. */
+/**
+ * A result in a few words for the journal: `no checks configured`, `2 passed, 1 failed`, `config invalid`.
+ * It counts the config's checks only, not Throng's own.
+ */
 export function summarize(result: ScoringResult): string {
   if (result.config.kind === "invalid") return "config invalid";
-  if (result.checks.length === 0) return "no checks configured";
+  const checks = result.checks.filter((check) => check.source !== "platform");
+  if (checks.length === 0) return "no checks configured";
   const counts = new Map<string, number>();
-  for (const check of result.checks) counts.set(check.outcome, (counts.get(check.outcome) ?? 0) + 1);
+  for (const check of checks) counts.set(check.outcome, (counts.get(check.outcome) ?? 0) + 1);
   return [...counts].map(([outcome, n]) => `${n} ${outcome.replace("_", " ")}`).join(", ");
 }

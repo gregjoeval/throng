@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ServiceError } from "../src/errors.ts";
-import type { CheckResult, ScoringResult } from "../src/results.ts";
+import type { CheckResult, LegacyResult, ScoringResult } from "../src/results.ts";
 import { SCORING_CAP } from "../src/scoring.ts";
 import type { ScoringOutcome, ScoringParams, ScoringRequest, ScoringWorkflow } from "../src/scoring.ts";
 import { TaskStore } from "../src/task-store.ts";
@@ -98,8 +98,7 @@ function result(overrides: Partial<ScoringResult> = {}): ScoringResult {
     config: { kind: "none" },
     gate: "passed",
     checks: [],
-    builtin: { filesChanged: 1, additions: 2, deletions: 0, durationMs: 5 },
-    preview: { status: "none" },
+    metrics: {},
     logs: [],
     ...overrides,
   };
@@ -396,15 +395,136 @@ describe("the scoring queue", () => {
   });
 });
 
+/** A task metric named `lines`, as a request gives it. */
+const lines = (from = "test.coverage.lines") => ({ name: "lines", from, type: "number" });
+
+describe("rescoring on a task edit", () => {
+  const CONFIG = ["checks:", "  - name: test", "    command: pnpm test", ""].join("\n");
+
+  /** A task by ada over a config with a `test` check: its first attempt open and scored, its second a draft. */
+  async function scored() {
+    const env = setup();
+    env.repos.writeFile(ORIGIN, "main", ".throng/config.yml", CONFIG);
+    const [open, draft] = await env.drafts(2);
+    if (open === undefined || draft === undefined) throw new Error("two drafts expected");
+    await env.store.openAttempt(PROJECT, ada, open);
+    await env.store.scoring.drain();
+    env.store.scoring.finish(at(env.runs(open), 0).id, done());
+    return { ...env, open, draft };
+  }
+
+  it("rescores each open attempt's head when the task's metrics change, and leaves drafts alone", async () => {
+    const { store, runs, base, open, draft } = await scored();
+    await store.editTask(PROJECT, ada, { task: 1, metrics: [lines()] });
+
+    expect(runs(open)).toMatchObject([
+      { trigger: "open", status: "done" },
+      { trigger: "rescore", status: "queued", sha: base.hash, user_id: ada.user.id },
+    ]);
+    expect(runs(draft)).toEqual([]);
+  });
+
+  it("rescores each open attempt's head when the task's checks change", async () => {
+    const { store, runs, open } = await scored();
+    const smoke = { name: "smoke", command: "./smoke.sh" };
+    await store.editTask(PROJECT, ada, { task: 1, checks: [smoke], metrics: [lines("smoke.report.lines")] });
+    await store.scoring.drain();
+    store.scoring.finish(at(runs(open), -1).id, done());
+    await store.editTask(PROJECT, ada, { task: 1, checks: [{ ...smoke, required: false }] });
+
+    expect(runs(open).map((r) => r.trigger)).toEqual(["open", "rescore", "rescore"]);
+    expect(await code(store.editTask(PROJECT, ada, { task: 1, checks: [] }))).toBe("invalidRequest");
+    expect(runs(open)).toHaveLength(3);
+  });
+
+  it("queues nothing when a save leaves the metrics as they were", async () => {
+    const { store, runs, open } = await scored();
+    await store.editTask(PROJECT, ada, { task: 1, metrics: [lines()] });
+    await store.scoring.drain();
+    store.scoring.finish(at(runs(open), -1).id, done());
+
+    await store.editTask(PROJECT, ada, { task: 1, title: "Renamed" });
+    await store.editTask(PROJECT, ada, { task: 1, metrics: [lines()] });
+    expect(runs(open)).toHaveLength(2);
+  });
+
+  it("coalesces repeated edits with the rescore already queued", async () => {
+    const { store, runs, open } = await scored();
+    await store.editTask(PROJECT, ada, { task: 1, metrics: [lines()] });
+    await store.editTask(PROJECT, ada, { task: 1, metrics: [lines("test.coverage.total")] });
+    await store.editTask(PROJECT, ada, { task: 1, metrics: [] });
+
+    expect(runs(open).map((r) => [r.trigger, r.status])).toEqual([
+      ["open", "done"],
+      ["rescore", "queued"],
+    ]);
+  });
+
+  it("queues one rescore behind a run that's running, which may have read the old definitions", async () => {
+    const { store, workflow, runs, open } = await scored();
+    const sha = at(runs(open), 0).sha;
+    store.scoring.request({ project: PROJECT.id, task: 1, attempt: 1, sha, trigger: "rescore", actor: ada });
+    await store.scoring.drain();
+    expect(runs(open).map((r) => [r.trigger, r.status])).toEqual([
+      ["open", "done"],
+      ["rescore", "running"],
+    ]);
+
+    await store.editTask(PROJECT, ada, { task: 1, metrics: [lines()] });
+    await store.editTask(PROJECT, ada, { task: 1, metrics: [lines("test.coverage.total")] });
+    await store.scoring.drain();
+    expect(runs(open).map((r) => [r.trigger, r.status])).toEqual([
+      ["open", "done"],
+      ["rescore", "running"],
+      ["rescore", "queued"],
+    ]);
+
+    // The follow-up starts once the run ahead of it ends.
+    store.scoring.finish(at(runs(open), 1).id, done());
+    await store.scoring.drain();
+    expect(at(runs(open), 2).status).toBe("running");
+    expect(workflow.created).toHaveLength(3);
+  });
+
+  it("still answers a push or score now for a head that's running with the run, queuing nothing", async () => {
+    const { store, runs, open } = await scored();
+    const sha = at(runs(open), 0).sha;
+    const head = { project: PROJECT.id, task: 1, attempt: 1, sha, actor: ada };
+    store.scoring.request({ ...head, trigger: "rescore" });
+    await store.scoring.drain();
+    const running = at(runs(open), 1);
+
+    for (const trigger of ["push", "scoreNow"] as const) {
+      expect(store.scoring.request({ ...head, trigger })).toMatchObject({
+        queued: false,
+        reason: "already running",
+        run: { id: running.id },
+      });
+    }
+    expect(runs(open)).toHaveLength(2);
+  });
+
+  it("refuses someone who may not manage the task before checking their metrics", async () => {
+    const { store, runs, open } = await scored();
+    expect(await code(store.editTask(PROJECT, bob, { task: 1, metrics: [lines("lint.errors")] }))).toBe("forbidden");
+    expect(await code(store.editTask(PROJECT, ada, { task: 1, metrics: [lines("lint.errors")] }))).toBe(
+      "invalidRequest",
+    );
+    expect(runs(open)).toHaveLength(1);
+  });
+});
+
 describe("results", () => {
-  it("stores a done run's result and journals scored with its gate and a summary", async () => {
+  it("stores a done run's result and journals scored with its gate and a summary of the config's checks", async () => {
     const { store, runs, draft, journal } = setup();
     const ref = await draft();
     await store.openAttempt(PROJECT, ada, ref);
     await store.scoring.drain();
     const checks: CheckResult[] = [
-      { name: "test", required: true, outcome: "passed", durationMs: 9, metrics: { coverage: 80 }, notes: [] },
-      { name: "lint", required: false, outcome: "failed", durationMs: 1, metrics: {}, notes: [] },
+      { name: "_diff", source: "platform", required: false, outcome: "passed", durationMs: 2, notes: [] },
+      { name: "test", source: "project", required: true, outcome: "passed", durationMs: 9, notes: [] },
+      { name: "lint", source: "project", required: false, outcome: "failed", durationMs: 1, notes: [] },
+      { name: "_preview", source: "platform", required: false, outcome: "skipped", durationMs: 0, notes: [] },
     ];
     expect(store.scoring.finish(at(runs(ref), 0).id, done({ config: { kind: "valid" }, checks }))).toBeTruthy();
 
@@ -424,6 +544,39 @@ describe("results", () => {
     store.scoring.finish(at(runs(ref), 0).id, { status: "done", result: older as ScoringResult });
 
     expect(at(runs(ref), 0).result).toEqual(result({ logs: [] }));
+  });
+
+  it("reads a result stored with builtin and preview in the current shape", async () => {
+    const { store, runs, draft } = setup();
+    const ref = await draft();
+    await store.openAttempt(PROJECT, ada, ref);
+    await store.scoring.drain();
+    const legacy: LegacyResult = {
+      base: null,
+      config: { kind: "valid" },
+      gate: "passed",
+      checks: [
+        { name: "test", required: true, outcome: "passed", durationMs: 9, metrics: { coverage: 80 }, notes: [] },
+      ],
+      builtin: { filesChanged: 2, additions: 5, deletions: 1, durationMs: 3 },
+      preview: { status: "ready", url: "https://x.workers.dev" },
+      logs: ["test"],
+    };
+    store.scoring.finish(at(runs(ref), 0).id, { status: "done", result: legacy as unknown as ScoringResult });
+
+    const read = at(runs(ref), 0).result;
+    expect(read?.checks.map((c) => [c.name, c.source, c.outcome])).toEqual([
+      ["_diff", "platform", "passed"],
+      ["test", "project", "passed"],
+      ["_preview", "platform", "passed"],
+    ]);
+    expect(read?.metrics).toMatchObject({
+      "_diff.filesChanged": { value: 2 },
+      coverage: { source: "project", type: "number", value: 80 },
+      "_preview.url": { value: "https://x.workers.dev" },
+    });
+    expect(read).not.toHaveProperty("builtin");
+    expect(read).not.toHaveProperty("preview");
   });
 
   it("keeps an errored run's error, with no result", async () => {

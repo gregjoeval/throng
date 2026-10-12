@@ -21,8 +21,7 @@ const RESULT: ScoringResult = {
   config: { kind: "none" },
   gate: "passed",
   checks: [],
-  builtin: { filesChanged: 1, additions: 2, deletions: 0, durationMs: 5 },
-  preview: { status: "none" },
+  metrics: {},
   logs: [],
 };
 

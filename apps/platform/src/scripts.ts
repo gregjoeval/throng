@@ -6,8 +6,9 @@ import { CONFLICT_CAPS, MERGE_LABELS } from "./conflicts.ts";
 import type { ConflictCaps, Remerge } from "./conflicts.ts";
 import { THRONG_COMMITTER } from "./landing.ts";
 import { PREVIEW_LOG, setupLogName } from "./logs.ts";
-import { MAX_METRICS_BYTES, SETUP_TIMEOUT_MS } from "./results.ts";
-import type { ScorePlan } from "./results.ts";
+import { METRIC_VALUES_SOURCE, metricValue, parseFrom } from "./metric-values.ts";
+import { MAX_OUTPUT_BYTES, SETUP_TIMEOUT_MS } from "./results.ts";
+import type { PlannedMetric, ScorePlan } from "./results.ts";
 import { taskBranchRef } from "./task-refs.ts";
 
 export const RESULT_PREFIX = "THRONG_RESULT ";
@@ -68,10 +69,11 @@ ${runPlan(plan)}
 
 /**
  * Bash that runs each `setup` command and then every check in order, in the checked-out tree, each
- * under `timeout` with `$THRONG_METRICS` pointing at an empty file. A failed setup command skips every
- * check; a failed check doesn't stop the next. Each step's output goes to `../logs/<name>.log`, named
- * by `logNames`. It ends with a `RawScore` result made from `$base`, `$shortstat` and `$builtin_ms`,
- * and needs `$out` and `now`.
+ * under `timeout` with `$THRONG_OUTPUT` pointing at an empty directory of its own. A failed setup
+ * command skips every check; a failed check doesn't stop the next. As soon as a check exits, whatever
+ * its outcome, `readValues` reads the values of its metrics from that directory. Each step's output
+ * goes to `../logs/<name>.log`, named by `logNames`. It ends with a `RawScore` result made from
+ * `$base`, `$shortstat` and `$builtin_ms`, and needs `$out` and `now`.
  */
 function runPlan(plan: ScorePlan): string {
   const setup = plan.setup
@@ -87,35 +89,37 @@ fi`,
   const checks = plan.checks
     .map(
       (check, i) => `if [ -z "$setup_failed" ]; then
-  : > "$out/${i}.metrics"
+  mkdir "$out/${i}.output"
   t0=$(now)
-  THRONG_METRICS="$out/${i}.metrics" timeout -k 10s ${seconds(check.timeoutMs)} bash -c ${quote(check.command)} < /dev/null > ../logs/${check.name}.log 2>&1
+  THRONG_OUTPUT="$out/${i}.output" timeout -k 10s ${seconds(check.timeoutMs)} bash -c ${quote(check.command)} < /dev/null > ../logs/${check.name}.log 2>&1
   code=$?
   printf '%s %s\\n' "$code" "$(( $(now) - t0 ))" > "$out/${i}.status"
+${check.metrics.length === 0 ? "" : readValues(`"$out/${i}.output"`, check.metrics, `"$out/${i}.values"`)}
 fi`,
     )
     .join("\n");
   return `setup_failed=""
 ${setup}
 ${checks}
-node - "$out" ${plan.checks.length} ${MAX_METRICS_BYTES} "$base" "$shortstat" "$builtin_ms" "$setup_failed" <<'NODE' || exit 16
+node - "$out" ${plan.checks.length} "$base" "$shortstat" "$builtin_ms" "$setup_failed" <<'NODE' || exit 16
 const fs = require("fs");
-const [out, count, max, base, shortstat, builtinMs, setupFailed] = process.argv.slice(2);
-const read = (path) => {
-  const fd = fs.openSync(path, "r");
-  const buffer = Buffer.alloc(Number(max));
-  const length = fs.readSync(fd, buffer, 0, buffer.length, 0);
-  fs.closeSync(fd);
-  return buffer.subarray(0, length).toString("utf8");
+const [out, count, base, shortstat, builtinMs, setupFailed] = process.argv.slice(2);
+const values = (path) => {
+  try {
+    const values = JSON.parse(fs.readFileSync(path, "utf8"));
+    return typeof values === "object" && values !== null && !Array.isArray(values) ? values : {};
+  } catch {
+    return {};
+  }
 };
 const checks = [];
 for (let i = 0; i < Number(count); i++) {
   if (!fs.existsSync(out + "/" + i + ".status")) {
-    checks.push({ exit: null, durationMs: 0, metrics: null });
+    checks.push({ exit: null, durationMs: 0, metrics: {} });
     continue;
   }
   const [exit, durationMs] = fs.readFileSync(out + "/" + i + ".status", "utf8").trim().split(" ").map(Number);
-  checks.push({ exit, durationMs, metrics: fs.existsSync(out + "/" + i + ".metrics") ? read(out + "/" + i + ".metrics") : null });
+  checks.push({ exit, durationMs, metrics: values(out + "/" + i + ".values") });
 }
 const result = {
   base: base || null,
@@ -125,6 +129,50 @@ const result = {
   checks,
 };
 process.stdout.write("${RESULT_PREFIX}" + JSON.stringify(result) + "\\n");
+NODE`;
+}
+
+/**
+ * Bash that reads `metrics` from the JSON files a check wrote into `dir` and writes their values, by
+ * name, as JSON to `to`. Each file is parsed once, and not at all over `MAX_OUTPUT_BYTES`; the path
+ * into it and the type check are `metricValue`'s, the same code the Worker runs.
+ */
+function readValues(dir: string, metrics: PlannedMetric[], to: string): string {
+  return `node - ${dir} ${quote(JSON.stringify(metrics))} ${MAX_OUTPUT_BYTES} > ${to} <<'NODE' || exit 16
+const fs = require("fs");
+${METRIC_VALUES_SOURCE}
+const [dir, metrics, max] = process.argv.slice(2);
+const files = () => {
+  try {
+    return fs.readdirSync(dir).filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -5)).sort();
+  } catch {
+    return [];
+  }
+};
+const load = (name) => {
+  const path = dir + "/" + name + ".json";
+  let stat;
+  try {
+    stat = fs.statSync(path);
+  } catch {
+    return { kind: "missing", files: files() };
+  }
+  if (!stat.isFile()) return { kind: "missing", files: files() };
+  if (stat.size > Number(max)) return { kind: "tooLarge", limit: Number(max) };
+  try {
+    return { kind: "parsed", json: JSON.parse(fs.readFileSync(path, "utf8")) };
+  } catch {
+    return { kind: "invalid" };
+  }
+};
+const loaded = new Map();
+const values = {};
+for (const { name, from, rule } of JSON.parse(metrics)) {
+  const { file } = ${parseFrom.name}(from);
+  if (!loaded.has(file)) loaded.set(file, load(file));
+  values[name] = ${metricValue.name}(from, rule, loaded.get(file));
+}
+process.stdout.write(JSON.stringify(values));
 NODE`;
 }
 

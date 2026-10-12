@@ -34,6 +34,9 @@
         }
       }
     ],
+    // Off: it wants uppercase hex digits (0xFF), while oxfmt prints them lowercase (0xff), and oxlint's
+    // version of the rule takes no options to agree with oxfmt.
+    "unicorn/number-literal-case": "off",
     "unicorn/catch-error-name": "error",
     "typescript/consistent-type-definitions": "error",
     "typescript/no-explicit-any": "error",

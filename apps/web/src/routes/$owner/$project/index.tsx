@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { DirectoryEntries } from "@/components/directory";
-import { Breadcrumbs, ProjectView } from "@/components/project-view";
+import { LocationBar, ProjectView } from "@/components/project-view";
 import { findReadme, Readme } from "@/components/readme";
 import { EmptyState, ErrorState, Loading } from "@/components/states";
 import { refsQuery, treeQuery } from "@/lib/api";
@@ -12,6 +12,7 @@ export const Route = createFileRoute("/$owner/$project/")({ component: ProjectHo
 /** Project home: the root directory at `main`, with the README below. */
 function ProjectHome() {
   const { owner, project } = Route.useParams();
+  const home = { view: "home", owner, project } as const;
   const root: BrowseLocation = { view: "tree", owner, project, ref: "main", path: "" };
   const refs = useQuery(refsQuery({ owner, project }));
   const pushed = refs.isSuccess && refs.data.main.sha !== null;
@@ -19,8 +20,8 @@ function ProjectHome() {
   const readme = tree.isSuccess ? findReadme(tree.data.entries) : undefined;
 
   return (
-    <ProjectView location={{ view: "home", owner, project }}>
-      <Breadcrumbs location={root} />
+    <ProjectView location={home}>
+      <LocationBar location={home} />
       {(refs.isPending || (pushed && tree.isPending)) && <Loading />}
       {refs.isError && <ErrorState error={refs.error} />}
       {tree.isError && <ErrorState error={tree.error} />}

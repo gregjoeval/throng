@@ -17,7 +17,10 @@ import type { Refs } from "@/lib/api";
 import { shortSha } from "@/lib/commits";
 import { apiError } from "@/lib/errors";
 import { buildPath, projectRefOf } from "@/lib/paths";
-import type { BrowseLocation } from "@/lib/paths";
+import type { BrowseLocation, ProjectLocation } from "@/lib/paths";
+
+/** A view the switcher can move to another ref: project home (which is at `main`), a directory or file, or a commit log. */
+export type SwitchableLocation = Extract<ProjectLocation, { view: "home" | "tree" | "blob" | "raw" | "commits" }>;
 
 /** The heads of a group of attempts, active or archived. */
 type AttemptHeads = Refs["active"] | Refs["archived"];
@@ -27,27 +30,37 @@ const SHA = /^[0-9a-f]{40}$/iu;
 /** How a ref reads in the switcher: a sha shortened, anything else as is. */
 const refLabel = (ref: string) => (SHA.test(ref) ? shortSha(ref) : ref);
 
+/** The ref a view is at: project home shows `main`. */
+const refOf = (at: SwitchableLocation) => (at.view === "home" ? "main" : at.ref);
+
 /**
- * Where switching `at` to `ref` goes: the same path at that ref when it's there, else that ref's
- * root directory. The attempt hint is dropped, since only a sha needs one.
+ * Where switching `at` to `ref` goes. Project home stays home for `main`. A commit log goes to
+ * `ref`'s log. A directory or file goes to the same path at `ref`, as a file or a folder, whichever
+ * it is there, else to `ref`'s root directory. The attempt hint is dropped, since only a sha needs one.
  */
 async function switchedTo(
-  at: BrowseLocation,
+  at: SwitchableLocation,
   ref: string,
   exists: (to: BrowseLocation) => Promise<unknown>,
-): Promise<BrowseLocation> {
-  const { owner, project, view, path } = at;
+): Promise<SwitchableLocation> {
+  const { owner, project } = at;
   const root: BrowseLocation = { view: "tree", owner, project, ref, path: "" };
-  if (path === "") return root;
-  const to: BrowseLocation = { view, owner, project, ref, path };
+  if (at.view === "home") return ref === "main" ? at : root;
+  if (at.view === "commits") return { view: "commits", owner, project, ref };
+  if (at.path === "") return root;
+  const { path } = at;
+  const same: BrowseLocation = { view: at.view, owner, project, ref, path };
+  const other: BrowseLocation = { ...same, view: same.view === "tree" ? "blob" : "tree" };
   // Only a 404 says the path isn't there; on any other failure the view at `to` shows what went wrong.
-  return exists(to).then(
-    () => to,
-    (error: unknown) => (apiError(error).code === "notFound" ? root : to),
-  );
+  const found = (to: BrowseLocation, otherwise: () => Promise<BrowseLocation>) =>
+    exists(to).then(
+      () => to,
+      (error: unknown) => (apiError(error).code === "notFound" ? otherwise() : to),
+    );
+  return found(same, () => found(other, async () => root));
 }
 
-export function RefSwitcher({ at }: { at: BrowseLocation }) {
+export function RefSwitcher({ at }: { at: SwitchableLocation }) {
   const projectRef = projectRefOf(at);
   const refs = useQuery(refsQuery(projectRef));
   const queryClient = useQueryClient();
@@ -72,7 +85,7 @@ export function RefSwitcher({ at }: { at: BrowseLocation }) {
   const item = (ref: string) => (
     <DropdownMenuItem key={ref} onClick={() => void open(ref)}>
       <span className="truncate font-mono">{ref}</span>
-      {ref === at.ref ? <CheckIcon className="ml-auto" aria-hidden /> : null}
+      {ref === refOf(at) ? <CheckIcon className="ml-auto" aria-hidden /> : null}
     </DropdownMenuItem>
   );
 
@@ -80,10 +93,10 @@ export function RefSwitcher({ at }: { at: BrowseLocation }) {
     <DropdownMenu>
       <DropdownMenuTrigger
         render={<Button variant="outline" size="sm" className="font-mono" />}
-        aria-label={`Ref: ${refLabel(at.ref)}`}
+        aria-label={`Ref: ${refLabel(refOf(at))}`}
       >
         <GitBranchIcon className="text-muted-foreground" aria-hidden />
-        <span className="truncate">{refLabel(at.ref)}</span>
+        <span className="truncate">{refLabel(refOf(at))}</span>
         <ChevronsUpDownIcon className="text-muted-foreground" aria-hidden />
       </DropdownMenuTrigger>
       <DropdownMenuContent className="w-auto min-w-48">

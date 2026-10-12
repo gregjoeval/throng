@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { BrowseLayout } from "@/components/browse-layout";
 import { DirectoryEntries } from "@/components/directory";
-import { Breadcrumbs, ProjectView } from "@/components/project-view";
+import { LocationBar, ProjectView } from "@/components/project-view";
 import { ErrorState, Loading } from "@/components/states";
 import { treeQuery } from "@/lib/api";
 import { attemptSearch } from "@/lib/paths";
@@ -19,7 +19,7 @@ function Directory() {
   const tree = useQuery(treeQuery({ owner, project }, location, { sizes: true }));
   return (
     <ProjectView location={location}>
-      <Breadcrumbs location={location} />
+      <LocationBar location={location} />
       <BrowseLayout at={location}>
         {tree.isPending && <Loading />}
         {tree.isError && <ErrorState error={tree.error} />}

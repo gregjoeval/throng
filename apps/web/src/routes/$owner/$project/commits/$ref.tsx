@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { Author, RelativeTime } from "@/components/commit-meta";
 import { ProjectView } from "@/components/project-view";
+import { RefSwitcher } from "@/components/ref-switcher";
 import { EmptyState, ErrorState, Loading } from "@/components/states";
 import { commitsQuery } from "@/lib/api";
 import { shortSha, subject } from "@/lib/commits";
@@ -18,13 +19,17 @@ function CommitLog() {
   const search = commitsSearch(Route.useSearch());
   const page = useQuery(commitsQuery({ owner, project }, ref, search));
   const attempt = attemptHint(search.attempt);
+  const location = { view: "commits", owner, project, ref, ...search } as const;
   const pageAt = (offset: number) => buildPath({ view: "commits", owner, project, ref, ...attempt, offset });
 
   return (
-    <ProjectView location={{ view: "commits", owner, project, ref, ...search }}>
-      <h2 className="font-heading font-medium">
-        Commits on <span className="font-mono">{ref}</span>
-      </h2>
+    <ProjectView location={location}>
+      <div className="flex flex-wrap items-center gap-3">
+        <RefSwitcher at={location} />
+        <h2 className="font-heading font-medium">
+          Commits on <span className="font-mono">{ref}</span>
+        </h2>
+      </div>
       {page.isPending && <Loading />}
       {page.isError && <ErrorState error={page.error} />}
       {page.isSuccess && page.data.commits.length === 0 && <EmptyState title="No commits yet" />}

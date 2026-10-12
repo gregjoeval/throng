@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { BrowseLayout } from "@/components/browse-layout";
 import { FileView } from "@/components/file-view";
-import { Breadcrumbs, ProjectView } from "@/components/project-view";
+import { LocationBar, ProjectView } from "@/components/project-view";
 import { ErrorState, Loading } from "@/components/states";
 import { blobQuery } from "@/lib/api";
 import { attemptSearch } from "@/lib/paths";
@@ -19,7 +19,7 @@ function File() {
   const blob = useQuery(blobQuery({ owner, project }, location));
   return (
     <ProjectView location={location}>
-      <Breadcrumbs location={location} />
+      <LocationBar location={location} />
       <BrowseLayout at={location}>
         {blob.isPending && <Loading />}
         {blob.isError && <ErrorState error={blob.error} />}

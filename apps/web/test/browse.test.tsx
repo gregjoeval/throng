@@ -189,6 +189,39 @@ describe("the ref switcher", () => {
     await waitFor(() => expect(path()).toBe("/ada/alpha/tree/main/src"));
   });
 
+  it("opens the folder a file's path is at the ref switched to", async () => {
+    serveRepo({ main: { notes: "a file here\n" }, t42a3: { "notes/a.md": "a folder there\n" } });
+    const { user, path } = await renderApp("/ada/alpha/blob/main/notes");
+    await user.click(await switcher());
+    await user.click(await screen.findByRole("menuitem", { name: "t42a3" }));
+    await waitFor(() => expect(path()).toBe("/ada/alpha/tree/t42a3/notes"));
+  });
+
+  it("opens the file a folder's path is at the ref switched to", async () => {
+    serveRepo({ main: { "notes/a.md": "a folder here\n" }, t42a3: { notes: "a file there\n" } });
+    const { user, path } = await renderApp("/ada/alpha/tree/main/notes");
+    await user.click(await switcher());
+    await user.click(await screen.findByRole("menuitem", { name: "t42a3" }));
+    await waitFor(() => expect(path()).toBe("/ada/alpha/blob/t42a3/notes"));
+  });
+
+  it("keeps project home on main", async () => {
+    serveRepo({ main: FILES });
+    const { user, path } = await renderApp("/ada/alpha");
+    await user.click(await switcher());
+    await user.click(await screen.findByRole("menuitem", { name: "main" }));
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    expect(path()).toBe("/ada/alpha");
+  });
+
+  it("switches the commit log to another ref's log", async () => {
+    serveRepo({ main: FILES });
+    const { user, path } = await renderApp("/ada/alpha/commits/main?offset=50");
+    await user.click(await switcher());
+    await user.click(await screen.findByRole("menuitem", { name: "t42a3" }));
+    await waitFor(() => expect(path()).toBe("/ada/alpha/commits/t42a3"));
+  });
+
   it("switches project home to the root of another ref", async () => {
     serveRepo({ main: FILES, t42a3: FILES });
     const { user, path } = await renderApp("/ada/alpha");

@@ -77,10 +77,14 @@ function Tab({ to, active, children }: { to: string; active: boolean; children: 
   );
 }
 
-/** The ref switcher, then `project / dir / file` at that ref, each part linking to its directory. */
-export function Breadcrumbs({ location }: { location: BrowseLocation }) {
-  const parts = splitPath(location.path);
-  const { owner, project, ref } = location;
+/**
+ * Where a code view is: the ref switcher, then `project / dir / file` at that ref, each part
+ * linking to its directory. Project home is the root directory at `main`.
+ */
+export function LocationBar({ location }: { location: BrowseLocation | Extract<ProjectLocation, { view: "home" }> }) {
+  const { owner, project } = location;
+  const { ref, path, attempt } = location.view === "home" ? { ref: "main", path: "", attempt: undefined } : location;
+  const parts = splitPath(path);
   const at = (count: number) =>
     buildPath({
       view: "tree",
@@ -88,7 +92,7 @@ export function Breadcrumbs({ location }: { location: BrowseLocation }) {
       project,
       ref,
       path: parts.slice(0, count).join("/"),
-      ...attemptHint(location.attempt),
+      ...attemptHint(attempt),
     });
   return (
     <div className="flex flex-wrap items-center gap-3">

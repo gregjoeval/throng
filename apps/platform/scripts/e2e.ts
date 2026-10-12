@@ -108,8 +108,8 @@ interface Check {
 /** One metric in a run's result, as far as the scenarios read it. */
 interface Metric {
   source: "platform" | "project" | "task";
-  type: "number" | "string" | "enum";
-  value: number | string | null;
+  type: "boolean" | "number" | "string" | "enum";
+  value: boolean | number | string | null;
   note?: string;
 }
 
@@ -594,7 +594,16 @@ async function metrics(): Promise<void> {
     // The fixture is an ES module package, so no `require`.
     "scripts/report.js": `import { writeFileSync } from "node:fs";
 const out = process.env.THRONG_OUTPUT;
-writeFileSync(out + "/report.json", JSON.stringify({ numTotalTests: 12, testResults: [{ name: "greeting", duration: 7 }] }));
+writeFileSync(
+  out + "/report.json",
+  JSON.stringify({
+    numTotalTests: 12,
+    success: true,
+    grade: "b",
+    url: "https://ci.example.test/1",
+    testResults: [{ name: "greeting", duration: 7 }],
+  }),
+);
 writeFileSync(out + "/coverage-summary.json", JSON.stringify({ total: { lines: { pct: 87.5 } } }));
 process.exit(1);
 `,
@@ -609,6 +618,10 @@ metrics:
   - { name: slowest, from: report.report.testResults.0.duration, type: number, unit: ms, order: asc }
   - { name: coverage, from: report.coverage-summary.total.lines.pct, type: number, unit: "%" }
   - { name: branches, from: report.coverage-summary.total.branches.pct, type: number, unit: "%" }
+  - { name: green, from: report.report.success, type: boolean }
+  - { name: grade, from: report.report.grade, type: enum, values: [a, b, c] }
+  - { name: report-url, from: report.report.url, type: string, format: url }
+  - { name: unlisted, from: report.report.grade, type: enum, values: [a] }
 `,
   });
   const fork = await createAttempt(project, "t1a1", timeline);
@@ -628,6 +641,27 @@ metrics:
     assert(
       metric?.source === "project" && metric.type === "number" && metric.value === value,
       `${name} not read from the failed check's output as ${value}: ${JSON.stringify(metric)}`,
+    );
+  }
+  const typed: Record<string, Metric> = {
+    green: { source: "project", type: "boolean", value: true },
+    grade: { source: "project", type: "enum", value: "b" },
+    "report-url": { source: "project", type: "string", value: "https://ci.example.test/1" },
+    unlisted: {
+      source: "project",
+      type: "enum",
+      value: null,
+      note: 'report.report.grade: "b" is not one of its values: a',
+    },
+  };
+  for (const [name, want] of Object.entries(typed)) {
+    const metric = result.metrics[name];
+    assert(
+      metric?.source === want.source &&
+        metric.type === want.type &&
+        metric.value === want.value &&
+        metric.note === want.note,
+      `${name} not read as ${JSON.stringify(want)}: ${JSON.stringify(metric)}`,
     );
   }
   const missing = result.metrics["branches"];

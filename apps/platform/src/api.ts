@@ -28,10 +28,10 @@ import { FORWARDED_EMAIL_HEADER } from "./forwarded.ts";
 import { LOG_CONTENT_TYPE, LOG_RETENTION_DAYS, MAX_LOG_BYTES, missingLog } from "./logs.ts";
 import type { LogStore } from "./logs.ts";
 import { DEQUEUE_REASONS, MERGE_REQUEST_STATES } from "./merge-requests.ts";
-import { METRIC_TYPES } from "./metric-values.ts";
+import { METRIC_FORMATS, METRIC_TYPES } from "./metric-values.ts";
 import { MAX_PROJECT_HANDLE, PROJECT_HANDLE, projectService } from "./projects.ts";
 import type { Repos } from "./repos.ts";
-import { CHECK_OUTCOMES, GATES, METRIC_FORMATS, METRIC_SOURCES } from "./results.ts";
+import { CHECK_OUTCOMES, GATES, METRIC_SOURCES } from "./results.ts";
 import { ATTEMPT_SCORING_STATUSES, RUN_STATUSES, SCORING_TRIGGERS } from "./scoring.ts";
 import { ATTEMPT_STATES, TASK_STATES } from "./task-store.ts";
 import { taskService } from "./tasks.ts";
@@ -118,21 +118,46 @@ const UserRefSchema = z.object({ id: z.string(), handle: z.string().openapi({ ex
 
 const ConfigNameSchema = z.string().regex(CONFIG_NAME);
 
+const configMetricFields = {
+  name: ConfigNameSchema.openapi({ example: "coverage" }),
+  from: z.string().openapi({
+    description:
+      "Where its value is read: the check, a JSON file it writes into `$THRONG_OUTPUT` (without `.json`), then " +
+      "object keys and array indexes.",
+    example: "test.coverage-summary.total.lines.pct",
+  }),
+  source: z.enum(CONFIG_LAYERS).openapi({ description: "Who defined it: the project's config, or the task." }),
+};
+
 const MetricSchema = z
-  .object({
-    name: ConfigNameSchema.openapi({ example: "coverage" }),
-    from: z.string().openapi({
-      description:
-        "Where its value is read: the check, a JSON file it writes into `$THRONG_OUTPUT` (without `.json`), then " +
-        "object keys and array indexes.",
-      example: "test.coverage-summary.total.lines.pct",
+  .discriminatedUnion("type", [
+    z.object({
+      ...configMetricFields,
+      type: z.literal("number"),
+      unit: z.string().nullable().openapi({ example: "%" }),
+      order: z.enum(METRIC_ORDERS).openapi({ description: "`asc` when lower is better, `desc` when higher is." }),
     }),
-    type: z.enum(METRIC_TYPES).openapi({ description: "How its values compare." }),
-    unit: z.string().nullable().openapi({ example: "%" }),
-    order: z.enum(METRIC_ORDERS).openapi({ description: "`asc` when lower is better, `desc` when higher is." }),
-    source: z.enum(CONFIG_LAYERS).openapi({ description: "Who defined it: the project's config, or the task." }),
-  })
-  .openapi("Metric");
+    z.object({
+      ...configMetricFields,
+      type: z.literal("boolean"),
+      order: z.enum(METRIC_ORDERS).openapi({ description: "`desc` when true is better, `asc` when false is." }),
+    }),
+    z.object({
+      ...configMetricFields,
+      type: z.literal("string"),
+      format: z.enum(METRIC_FORMATS).nullable().openapi({ description: "`url`: shown as a link." }),
+    }),
+    z.object({
+      ...configMetricFields,
+      type: z.literal("enum"),
+      values: z.array(z.string()).openapi({ description: "Every value it may take, best first." }),
+    }),
+  ])
+  .openapi("Metric", {
+    description:
+      `A metric the config declares. Its \`type\` (${METRIC_TYPES.join(", ")}) decides how its values compare; a ` +
+      "string never ranks.",
+  });
 
 /** A task's metrics as a request gives them: checked like `.throng/config.yml`'s, so they're described there. */
 const TaskMetricsInputSchema = z.array(z.unknown()).openapi({
@@ -323,6 +348,12 @@ const MetricResultSchema = z
       value: z.number().nullable(),
       order: z.enum(METRIC_ORDERS).openapi({ description: "`asc` when lower is better, `desc` when higher is." }),
       unit: z.string().optional().openapi({ example: "%" }),
+    }),
+    z.object({
+      ...metricFields,
+      type: z.literal("boolean"),
+      value: z.boolean().nullable(),
+      order: z.enum(METRIC_ORDERS).openapi({ description: "`desc` when true is better, `asc` when false is." }),
     }),
     z.object({
       ...metricFields,

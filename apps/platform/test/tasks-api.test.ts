@@ -204,6 +204,11 @@ describe("task metrics", () => {
 
   it.each([
     ["an invalid shape", { ...LINES, order: "up" }, /^metrics\[0\]\.order: order must be/u],
+    [
+      "a field its type lacks",
+      { ...LINES, type: "boolean" },
+      /^metrics\[0\]\.unit: unit is only for a number metric$/u,
+    ],
     ["a missing type", { name: "lines", from: LINES.from }, /^metrics\[0\]\.type: type is required/u],
     ["a reserved name", { ...LINES, name: "_lines" }, /^metrics\[0\]\.name: .*reserved/u],
     ["an unknown check", { ...LINES, from: "lint.report.errors" }, /^metrics\[0\]\.from: no check is named lint$/u],

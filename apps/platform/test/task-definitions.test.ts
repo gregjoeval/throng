@@ -12,7 +12,7 @@ metrics:
   - { name: coverage, from: test.coverage-summary.total.lines.pct, type: number, unit: "%" }
 `);
 
-const task = (...metrics: Partial<MetricConfig>[]) => ({
+const task = (...metrics: Partial<Pick<MetricConfig, "name" | "from">>[]) => ({
   metrics: metrics.map((metric): MetricConfig => ({
     name: "lines",
     from: "test.coverage-summary.total.lines.total",

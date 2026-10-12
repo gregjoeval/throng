@@ -33,6 +33,11 @@ metrics:
   - { name: bundle_kb, from: bundle.size.files.0.kb, type: number, unit: KB, order: asc }
   - { name: gzip-kb, from: bundle.size.gzip, type: number, order: ascending }
   - { name: score, from: bundle.size.score, type: number, order: desc }
+  - { name: typed, from: test.report.typed, type: boolean }
+  - { name: untyped, from: test.report.untyped, type: boolean, order: asc }
+  - { name: grade, from: test.report.grade, type: enum, values: [a, b, c] }
+  - { name: summary, from: test.report.summary, type: string }
+  - { name: report-url, from: test.report.url, type: string, format: url }
 preview:
   command: pnpm build
 attempts:
@@ -57,7 +62,7 @@ describe("parseConfig", () => {
     expect(parseConfig(text)).toEqual({ kind: "valid", config: EMPTY });
   });
 
-  it("reads every field, normalising orders, timeouts and hosts", () => {
+  it("reads every field, normalising orders, timeouts and hosts, and defaulting booleans to true-best", () => {
     expect(parseConfig(FULL)).toEqual({
       kind: "valid",
       config: {
@@ -96,6 +101,11 @@ describe("parseConfig", () => {
           },
           { name: "gzip-kb", from: "bundle.size.gzip", type: "number", unit: null, order: "asc", source: "project" },
           { name: "score", from: "bundle.size.score", type: "number", unit: null, order: "desc", source: "project" },
+          { name: "typed", from: "test.report.typed", type: "boolean", order: "desc", source: "project" },
+          { name: "untyped", from: "test.report.untyped", type: "boolean", order: "asc", source: "project" },
+          { name: "grade", from: "test.report.grade", type: "enum", values: ["a", "b", "c"], source: "project" },
+          { name: "summary", from: "test.report.summary", type: "string", format: null, source: "project" },
+          { name: "report-url", from: "test.report.url", type: "string", format: "url", source: "project" },
         ],
         preview: { command: "pnpm build" },
         attempts: { limit: 4 },
@@ -206,8 +216,66 @@ describe("parseConfig", () => {
       /^checks\[1\]\.name: duplicate check name t$/u,
     ],
     // metrics
-    ["a metric without a type", metric(`name: x, ${FROM}`), /^metrics\[0\]\.type: type is required: number$/u],
-    ["an unknown type", metric(`name: x, ${FROM}, type: float`), /^metrics\[0\]\.type: type must be number$/u],
+    [
+      "a metric without a type",
+      metric(`name: x, ${FROM}`),
+      /^metrics\[0\]\.type: type is required: boolean, number, string or enum$/u,
+    ],
+    [
+      "an unknown type",
+      metric(`name: x, ${FROM}, type: float`),
+      /^metrics\[0\]\.type: type must be boolean, number, string or enum$/u,
+    ],
+    [
+      "a format on a number",
+      metric(`name: x, ${FROM}, type: number, format: url`),
+      /^metrics\[0\]\.format: format is only for a string metric$/u,
+    ],
+    [
+      "an unknown format",
+      metric(`name: x, ${FROM}, type: string, format: email`),
+      /^metrics\[0\]\.format: format must be url$/u,
+    ],
+    [
+      "values on a number",
+      metric(`name: x, ${FROM}, type: number, values: [a]`),
+      /^metrics\[0\]\.values: values are only for an enum metric$/u,
+    ],
+    [
+      "an enum without values",
+      metric(`name: x, ${FROM}, type: enum`),
+      /^metrics\[0\]\.values: an enum metric needs its values, best first$/u,
+    ],
+    [
+      "an enum with no values",
+      metric(`name: x, ${FROM}, type: enum, values: []`),
+      /^metrics\[0\]\.values: an enum metric needs its values, best first$/u,
+    ],
+    [
+      "an enum with a non-string value",
+      metric(`name: x, ${FROM}, type: enum, values: [a, 1]`),
+      /^metrics\[0\]\.values\[1\]: must be a string$/u,
+    ],
+    [
+      "an enum with a duplicate value",
+      metric(`name: x, ${FROM}, type: enum, values: [a, b, a]`),
+      /^metrics\[0\]\.values\[2\]: duplicate value a$/u,
+    ],
+    [
+      "an order on a string, which never ranks",
+      metric(`name: x, ${FROM}, type: string, order: asc`),
+      /^metrics\[0\]\.order: a string metric has no order$/u,
+    ],
+    [
+      "an order on an enum, whose values give its order",
+      metric(`name: x, ${FROM}, type: enum, values: [a], order: asc`),
+      /^metrics\[0\]\.order: an enum metric's order is its values, best first$/u,
+    ],
+    [
+      "a unit on a boolean",
+      metric(`name: x, ${FROM}, type: boolean, unit: KB`),
+      /^metrics\[0\]\.unit: unit is only for a number metric$/u,
+    ],
     ["an unknown order", metric(`name: x, ${FROM}, type: number, order: up`), /^metrics\[0\]\.order: order must be/u],
     ["a metric without a name", metric(`${FROM}, type: number`), /^metrics\[0\]\.name: /u],
     [
@@ -276,7 +344,7 @@ describe("parseConfig", () => {
       "checks[0].name: check name must match ^[a-z0-9][a-z0-9_-]*$",
       "extra: unknown key",
       "metrics[0].target: target is reserved and not supported yet; remove it",
-      "metrics[0].type: type is required: number",
+      "metrics[0].type: type is required: boolean, number, string or enum",
     ]);
   });
 

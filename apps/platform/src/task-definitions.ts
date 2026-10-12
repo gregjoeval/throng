@@ -4,7 +4,7 @@
 // until the project changes. Any clash between layers is invalid: there is no implicit precedence.
 
 import { z } from "zod";
-import { CONFIG_PATH, describeIssue, metricConfig, MetricSchema } from "./config.ts";
+import { checkMetricFields, CONFIG_PATH, describeIssue, metricConfig, MetricSchema } from "./config.ts";
 import type { Config, ConfigResult, MetricConfig } from "./config.ts";
 
 export interface TaskDefinitions {
@@ -14,15 +14,18 @@ export interface TaskDefinitions {
 
 export const NO_TASK_DEFINITIONS: TaskDefinitions = { metrics: [] };
 
-const TaskMetricsSchema = z.array(MetricSchema, { error: "metrics must be a list" }).superRefine((metrics, ctx) => {
-  const names = new Set<string>();
-  metrics.forEach((metric, i) => {
-    if (names.has(metric.name)) {
-      ctx.addIssue({ code: "custom", path: [i, "name"], message: `duplicate metric name ${metric.name}` });
-    }
-    names.add(metric.name);
+const TaskSchema = z
+  .object({ metrics: z.array(MetricSchema, { error: "metrics must be a list" }) })
+  .superRefine(({ metrics }, ctx) => {
+    const names = new Set<string>();
+    metrics.forEach((metric, i) => {
+      if (names.has(metric.name)) {
+        ctx.addIssue({ code: "custom", path: ["metrics", i, "name"], message: `duplicate metric name ${metric.name}` });
+      }
+      names.add(metric.name);
+      checkMetricFields(metric, i, ctx);
+    });
   });
-});
 
 /**
  * A task's metrics as a request gave them, in the config's shape, checked against the project's
@@ -32,15 +35,9 @@ export function taskDefinitionsFrom(
   input: { metrics: unknown },
   project: ConfigResult,
 ): { definitions: TaskDefinitions } | { error: string } {
-  const parsed = TaskMetricsSchema.safeParse(input.metrics);
-  if (!parsed.success) {
-    return {
-      error: parsed.error.issues
-        .map((issue) => describeIssue({ ...issue, path: ["metrics", ...issue.path] }))
-        .join("\n"),
-    };
-  }
-  const definitions = { metrics: parsed.data.map((metric) => metricConfig(metric, "task")) };
+  const parsed = TaskSchema.safeParse(input);
+  if (!parsed.success) return { error: parsed.error.issues.map(describeIssue).join("\n") };
+  const definitions = { metrics: parsed.data.metrics.map((metric) => metricConfig(metric, "task")) };
   if (definitions.metrics.length > 0 && project.kind === "invalid") {
     return { error: `metrics can't be checked against ${CONFIG_PATH} on main, which is invalid:\n${project.error}` };
   }

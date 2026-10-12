@@ -5,7 +5,7 @@
 import { DEFAULT_CHECK_TIMEOUT_MS } from "./config.ts";
 import type { CheckConfig, ConfigResult, MetricConfig, MetricOrder } from "./config.ts";
 import { typedValue } from "./metric-values.ts";
-import type { MetricType, MetricValue } from "./metric-values.ts";
+import type { MetricFormat, MetricRule, MetricValue } from "./metric-values.ts";
 import type { PreviewScriptResult } from "./scripts.ts";
 
 /** A check's outcome, best first; they are also the values of the check's outcome metric. */
@@ -15,10 +15,6 @@ export type CheckOutcome = (typeof CHECK_OUTCOMES)[number];
 /** Who defined a check or metric: Throng itself, the project's config, or the task. */
 export const METRIC_SOURCES = ["platform", "project", "task"] as const;
 export type MetricSource = (typeof METRIC_SOURCES)[number];
-
-/** How a string metric's value is shown. */
-export const METRIC_FORMATS = ["url"] as const;
-type MetricFormat = (typeof METRIC_FORMATS)[number];
 
 /** Longest a `setup` command may run; the spec gives setup no timeout of its own. */
 export const SETUP_TIMEOUT_MS = DEFAULT_CHECK_TIMEOUT_MS;
@@ -49,9 +45,14 @@ interface MetricFields {
   note?: string;
 }
 
-/** One typed, nullable value in a run's score. An enum lists its `values` best first. */
+/**
+ * One typed, nullable value in a run's score. A number or boolean says which way is better in
+ * `order` (for a boolean, `desc` means true is), an enum lists its `values` best first, and a string
+ * never ranks.
+ */
 export type MetricResult =
   | (MetricFields & { type: "number"; value: number | null; order: MetricOrder; unit?: string })
+  | (MetricFields & { type: "boolean"; value: boolean | null; order: MetricOrder })
   | (MetricFields & { type: "string"; value: string | null; format?: MetricFormat })
   | (MetricFields & { type: "enum"; value: string | null; values: string[] });
 
@@ -88,11 +89,11 @@ export interface ScorePlan {
   allow: string[];
 }
 
-/** A metric as the score script reads it: where from, and as which type. */
+/** A metric as the score script reads it: where from, and the rule its value must fit. */
 export interface PlannedMetric {
   name: string;
   from: string;
-  type: MetricType;
+  rule: MetricRule;
 }
 
 /** The score script's raw output, before values are checked again and the gate is computed. */
@@ -116,6 +117,11 @@ function metricsFrom(check: string, metrics: MetricConfig[]): MetricConfig[] {
   return metrics.filter((metric) => metric.from.split(".")[0] === check);
 }
 
+/** The rule a metric's value must fit: its type, and an enum's values. */
+function ruleOf(metric: MetricConfig): MetricRule {
+  return metric.type === "enum" ? { type: "enum", values: metric.values } : { type: metric.type };
+}
+
 /** The config's setup, checks and `network.allow`; nothing at all without a valid config. */
 export function scorePlan(config: ConfigResult): ScorePlan {
   if (config.kind !== "valid") return { setup: [], checks: [], allow: [] };
@@ -128,7 +134,7 @@ export function scorePlan(config: ConfigResult): ScorePlan {
       metrics: metricsFrom(name, config.config.metrics).map((metric) => ({
         name: metric.name,
         from: metric.from,
-        type: metric.type,
+        rule: ruleOf(metric),
       })),
     })),
     allow: config.config.network.allow,
@@ -272,8 +278,46 @@ export function withPreview(
 function checkedValue(metric: MetricConfig, reported: MetricValue | undefined): MetricValue {
   if (typeof reported !== "object" || reported === null) return { value: null, note: `${metric.from}: not reported` };
   if (reported.value === null) return { value: null, note: String(reported.note) };
-  const typed = typedValue(reported.value, metric.type);
+  const typed = typedValue(reported.value, ruleOf(metric));
   return "problem" in typed ? { value: null, note: `${metric.from}: ${typed.problem}` } : typed;
+}
+
+/**
+ * A metric's entry in the result: its type's fields, and its value, already checked against its
+ * type, or null with the note.
+ */
+function metricResult(metric: MetricConfig, source: MetricSource, checked: MetricValue): MetricResult {
+  const note = checked.value === null ? { note: checked.note } : {};
+  const { value } = checked;
+  switch (metric.type) {
+    case "number": {
+      const unit = metric.unit === null ? {} : { unit: metric.unit };
+      return {
+        source,
+        type: "number",
+        order: metric.order,
+        ...unit,
+        value: typeof value === "number" ? value : null,
+        ...note,
+      };
+    }
+    case "boolean": {
+      return {
+        source,
+        type: "boolean",
+        order: metric.order,
+        value: typeof value === "boolean" ? value : null,
+        ...note,
+      };
+    }
+    case "string": {
+      const format = metric.format === null ? {} : { format: metric.format };
+      return { source, type: "string", ...format, value: typeof value === "string" ? value : null, ...note };
+    }
+    case "enum": {
+      return { source, type: "enum", values: metric.values, value: typeof value === "string" ? value : null, ...note };
+    }
+  }
 }
 
 /** A config check from its run: its outcome and notes, and the metrics read from its output. */
@@ -301,13 +345,7 @@ function configScored(
     metrics: Object.fromEntries(
       metricsFrom(check.name, metrics).map((metric): [string, MetricResult] => [
         metric.name,
-        {
-          source: metric.source,
-          type: metric.type,
-          order: metric.order,
-          ...(metric.unit === null ? {} : { unit: metric.unit }),
-          ...value(metric),
-        },
+        metricResult(metric, metric.source, value(metric)),
       ]),
     ),
   };

@@ -8,6 +8,25 @@ export interface ApiError {
   message: string;
 }
 
+/** A platform error thrown by a call made without `hc`, which `apiError` reads back as is. */
+export class PlatformError extends Error implements ApiError {
+  readonly code: string;
+
+  constructor({ code, message }: ApiError) {
+    super(message);
+    this.code = code;
+  }
+
+  /** The error a failed response's body names, or `unavailable` when it names none. */
+  static async from(res: Response): Promise<PlatformError> {
+    const body = (await res.json().catch(() => null)) as { error?: Partial<ApiError> } | null;
+    const { code, message } = body?.error ?? {};
+    return typeof code === "string" && typeof message === "string"
+      ? new PlatformError({ code, message })
+      : new PlatformError({ code: "unavailable", message: "The platform is unreachable." });
+  }
+}
+
 function isApiError(value: unknown): value is ApiError {
   const { code, message } = (value ?? {}) as Partial<ApiError>;
   return typeof code === "string" && typeof message === "string";

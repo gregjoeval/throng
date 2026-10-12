@@ -6,6 +6,7 @@ import type { QueryKey } from "@tanstack/react-query";
 import type { AppType } from "@throng/platform/app";
 import { hc, parseResponse } from "hono/client";
 import type { ClientResponse, InferResponseType } from "hono/client";
+import { PlatformError } from "@/lib/errors";
 
 /**
  * Same-origin, so the browser's Access session rides along. Calls go through the global `fetch` at
@@ -140,6 +141,42 @@ export const taskQuery = (owner: string, project: string, task: string) => ({
   ),
   refetchInterval: TASK_POLL_MS,
 });
+
+/**
+ * The task's arena: every attempt, obsolete ones included, by number, with its scoring status,
+ * current result, base and verdict counts, and the metrics the config declares. Polled while the
+ * page is visible.
+ */
+export const taskArenaQuery = (owner: string, project: string, task: string) => ({
+  ...apiQuery([...taskKey(owner, project, task), "arena"], (init) =>
+    tasksApi[":t"].arena.$get({ param: { owner, project, t: task } }, { init }),
+  ),
+  refetchInterval: TASK_POLL_MS,
+});
+
+/** The diff from one tree to another, as the compare endpoint answers it: a commit diff's shape. */
+export type Compare = Pick<CommitDiff, "files" | "totals" | "truncated"> & {
+  from: { ref: string; sha: string };
+  to: { ref: string; sha: string };
+};
+
+/**
+ * The diff from `from`'s tree to `to`'s (two shas), with `attempt` the fork to find them in. It's
+ * addressed by sha, so it's never refetched: a moved head is a new query. The route takes the range
+ * as one path segment, which `hc` can't type, so the URL is built here.
+ */
+export const compareQuery = (owner: string, project: string, from: string, to: string, attempt?: string) =>
+  queryOptions({
+    queryKey: [...projectKey(owner, project), "compare", from, to, { attempt }] as const,
+    staleTime: Number.POSITIVE_INFINITY,
+    queryFn: async ({ signal }): Promise<Compare> => {
+      const path = [owner, project].map(encodeURIComponent).join("/");
+      const query = attempt === undefined ? "" : `?attempt=${encodeURIComponent(attempt)}`;
+      const res = await fetch(`/api/projects/${path}/compare/${from}...${to}${query}`, { signal });
+      if (!res.ok) throw await PlatformError.from(res);
+      return (await res.json()) as Compare;
+    },
+  });
 
 /** The task's attempts by number, obsolete ones left out, polled while the page is visible. */
 export const taskAttemptsQuery = (owner: string, project: string, task: string) => ({

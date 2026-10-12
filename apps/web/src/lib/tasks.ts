@@ -31,6 +31,15 @@ const MERGE_REQUEST_STATES: Record<MergeRequestState, { label: string; open: boo
 
 export const mergeRequestLabel = (state: MergeRequestState) => MERGE_REQUEST_STATES[state].label;
 
+/** Whether a merge request in `state` is open: pending, queued, landing or needing review. */
+export const isOpenMergeRequest = (state: MergeRequestState) => MERGE_REQUEST_STATES[state].open;
+
+type MergeRequestApi = Tasks[":t"]["merge-request"];
+export type MergeRequest = InferResponseType<MergeRequestApi["$get"], 200>;
+/** Why a merge request last left the queue without landing, with its reason's details. */
+export type Dequeue = InferResponseType<MergeRequestApi["dequeue"]["$get"], 200>;
+export type DequeueReason = Dequeue["reason"];
+
 /** Draft and open attempts are active: they have a fork and a claim. */
 export const isActive = (attempt: Attempt) => attempt.state === "draft" || attempt.state === "open";
 
@@ -47,7 +56,7 @@ export function taskBody(task: Task, attempts: Attempt[]): TaskBody {
     const merged = attempts.find((a) => a.state === "merged") ?? null;
     return { kind: "ended", merged, archived: attempts.filter((a) => a !== merged && a.archivedSha !== null) };
   }
-  const source = attempts.find((a) => a.mergeRequest !== null && MERGE_REQUEST_STATES[a.mergeRequest.state].open);
+  const source = attempts.find((a) => a.mergeRequest !== null && isOpenMergeRequest(a.mergeRequest.state));
   if (source !== undefined) return { kind: "mergeRequest", source };
   const active = attempts.filter(isActive);
   const [only] = active;

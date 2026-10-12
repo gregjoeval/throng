@@ -160,6 +160,17 @@ export type Compare = Pick<CommitDiff, "files" | "totals" | "truncated"> & {
   to: { ref: string; sha: string };
 };
 
+/** A project's API path, `/api/projects/<owner>/<project>`, for URLs `hc` can't type. */
+export const projectPath = (owner: string, project: string) =>
+  `/api/projects/${[owner, project].map(encodeURIComponent).join("/")}`;
+
+/** GETs a hand-built platform URL as JSON; any other status throws a `PlatformError`. */
+async function getJson<T>(url: string, signal: AbortSignal): Promise<T> {
+  const res = await fetch(url, { signal });
+  if (!res.ok) throw await PlatformError.from(res);
+  return (await res.json()) as T;
+}
+
 /**
  * The diff from `from`'s tree to `to`'s (two shas), with `attempt` the fork to find them in. It's
  * addressed by sha, so it's never refetched: a moved head is a new query. The route takes the range
@@ -169,14 +180,72 @@ export const compareQuery = (owner: string, project: string, from: string, to: s
   queryOptions({
     queryKey: [...projectKey(owner, project), "compare", from, to, { attempt }] as const,
     staleTime: Number.POSITIVE_INFINITY,
-    queryFn: async ({ signal }): Promise<Compare> => {
-      const path = [owner, project].map(encodeURIComponent).join("/");
+    queryFn: ({ signal }) => {
       const query = attempt === undefined ? "" : `?attempt=${encodeURIComponent(attempt)}`;
-      const res = await fetch(`/api/projects/${path}/compare/${from}...${to}${query}`, { signal });
-      if (!res.ok) throw await PlatformError.from(res);
-      return (await res.json()) as Compare;
+      return getJson<Compare>(`${projectPath(owner, project)}/compare/${from}...${to}${query}`, signal);
     },
   });
+
+/** The task's latest merge request, open or not, polled while the page is visible. */
+export const mergeRequestQuery = (owner: string, project: string, task: string) => ({
+  ...apiQuery([...taskKey(owner, project, task), "merge-request"], (init) =>
+    tasksApi[":t"]["merge-request"].$get({ param: { owner, project, t: task } }, { init }),
+  ),
+  refetchInterval: TASK_POLL_MS,
+});
+
+/**
+ * Why the merge request last left the queue, with the conflict, failed checks or error. Keyed by
+ * when it happened, so a later dequeue is a new query.
+ */
+export const dequeueQuery = (owner: string, project: string, task: string, at: string) =>
+  apiQuery([...taskKey(owner, project, task), "dequeue", at], (init) =>
+    tasksApi[":t"]["merge-request"].dequeue.$get({ param: { owner, project, t: task } }, { init }),
+  );
+
+/** The URL of a log of the checks behind a `failedChecks` dequeue. */
+export const dequeueLogUrl = (owner: string, project: string, task: string, name: string) =>
+  `${projectPath(owner, project)}/tasks/${encodeURIComponent(task)}/merge-request/dequeue/logs/${encodeURIComponent(name)}`;
+
+/**
+ * One conflicting file of the dequeue at `at`, diffed from the merge base to `main` or to the
+ * attempt. The path is a tail of path segments, which `hc` can't type, so the URL is built here.
+ */
+export const dequeueFileDiffQuery = (
+  owner: string,
+  project: string,
+  task: string,
+  at: string,
+  path: string,
+  side: "main" | "attempt",
+) =>
+  queryOptions({
+    queryKey: [...taskKey(owner, project, task), "dequeue", at, "file", path, side] as const,
+    staleTime: Number.POSITIVE_INFINITY,
+    queryFn: ({ signal }) => {
+      const tail = path.split("/").map(encodeURIComponent).join("/");
+      const base = `${projectPath(owner, project)}/tasks/${encodeURIComponent(task)}/merge-request/dequeue`;
+      return getJson<FileDiff>(`${base}/files/${tail}/diff?side=${side}`, signal);
+    },
+  });
+
+/**
+ * Selects `attempt` as the task's merge request, closing its other active attempts. Rejects with
+ * hono's `DetailedError` on failure.
+ */
+export async function selectAttempt(owner: string, project: string, task: string, attempt: string) {
+  return parseResponse(tasksApi[":t"].selection.$post({ param: { owner, project, t: task }, json: { attempt } }));
+}
+
+/** Approves the source attempt's current head, or cancels the merge request. Rejects on failure. */
+export async function actOnMergeRequest(owner: string, project: string, task: string, how: "approve" | "cancel") {
+  return parseResponse(tasksApi[":t"]["merge-request"][how].$post({ param: { owner, project, t: task } }));
+}
+
+/** Reopens a closed attempt as a draft. Rejects with hono's `DetailedError` on failure. */
+export async function reopenAttempt(owner: string, project: string, attempt: string) {
+  return parseResponse(projectApi.attempts[":a"].reopen.$post({ param: { owner, project, a: attempt } }));
+}
 
 /** The task's attempts by number, obsolete ones left out, polled while the page is visible. */
 export const taskAttemptsQuery = (owner: string, project: string, task: string) => ({

@@ -73,10 +73,30 @@ describe("the task page body", () => {
     expect(within(arena).getByRole("list", { name: "Attempts" })).toHaveTextContent(/t1a1.*t1a2/u);
   });
 
-  it("holds the merge request view's place while a merge request is open", async () => {
+  it("shows the merge request view while a merge request is open", async () => {
     const source = attempt(1, 2, { state: "open", mergeRequest: { state: "queued", lastDequeue: null } });
+    server.use(
+      http.get("*/api/projects/:owner/:project/tasks/:t/merge-request", () =>
+        HttpResponse.json({
+          task: "t1",
+          attempt: "t1a2",
+          state: "queued",
+          approvedHead: SHA,
+          approvedBy: { ...me.user, agent: null },
+          approvedAt: me.user.createdAt,
+          queuedAt: me.user.createdAt,
+          position: 1,
+          lastDequeue: null,
+          mergeSha: null,
+          mergedAt: null,
+          createdAt: me.user.createdAt,
+          createdBy: { ...me.user, agent: null },
+        }),
+      ),
+    );
     await openTask(task(1), [attempt(1, 1, { state: "closed" }), source]);
-    expect(within(body()).getByTestId("merge-request-view")).toHaveTextContent("t1a2");
+    const view = await within(body()).findByTestId("merge-request-view");
+    expect(within(view).getByRole("region", { name: "Lane t1a2" })).toBeInTheDocument();
   });
 
   it("goes back to the attempts once the merge request is cancelled", async () => {

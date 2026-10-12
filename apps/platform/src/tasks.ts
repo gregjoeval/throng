@@ -2,7 +2,7 @@
 // machine in the project's Durable Object (`task-store.ts`), where the permission checks sit next
 // to the state they guard. Answers carry users as `{id, handle}`, resolved from D1 at read time.
 
-import { currentBase, taskBranchHead } from "./base.ts";
+import { currentBase, readTaskBranch } from "./base.ts";
 import type { Base } from "./base.ts";
 import { loadConfig } from "./config.ts";
 import type { MetricConfig } from "./config.ts";
@@ -72,6 +72,8 @@ export interface Task {
 
 export interface TaskBranch {
   sha: string;
+  /** How many of its commits `main` doesn't have yet: they land with the selected attempt. */
+  commits: number;
 }
 
 /** A task as the task list shows it, with what its row summarises. */
@@ -265,7 +267,7 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
         db,
         list.flatMap((t) => [t.creator, t.closed_by]),
       ),
-      Promise.all(list.map((t) => taskBranchHead(repos, ctx.id, t.number))),
+      Promise.all(list.map((t) => readTaskBranch(repos, ctx.id, t.number))),
     ]);
     return list.map((t, i) => publicTask(t, users, branches[i] ?? null));
   };

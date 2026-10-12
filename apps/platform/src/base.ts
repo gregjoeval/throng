@@ -45,6 +45,22 @@ export async function taskBranchHead(repos: Repos, project: string, task: number
   return sha === null ? null : { sha };
 }
 
+/**
+ * Task `task`'s task branch in the origin: its head, and how many of its commits `main` doesn't have
+ * yet, which land with the selected attempt. Null when it has none.
+ */
+export async function readTaskBranch(
+  repos: Repos,
+  project: string,
+  task: number,
+): Promise<{ sha: string; commits: number } | null> {
+  const head = await taskBranchHead(repos, project, task);
+  if (head === null) return null;
+  const origin = originRepo(project);
+  const main = await tip(repos, origin, "main");
+  return { sha: head.sha, commits: await commitsNotIn(repos, origin, head.sha, main) };
+}
+
 /** `attemptBase` at the attempt's current head, its fork's `main`, scored or not. Null with no head. */
 export async function currentBase(repos: Repos, project: string, attempt: string): Promise<Base | null> {
   const head = await tip(repos, forkRepo(project, attempt), "refs/heads/main");
@@ -97,4 +113,37 @@ async function mergeBase(repos: Repos, one: Side, two: Side): Promise<string | n
     await Promise.all(fresh.map(enqueue));
   }
   return null;
+}
+
+/**
+ * How many commits `head` reaches that `other` (null for none) doesn't, both in `repo`: `git rev-list
+ * --count head ^other`. Walks newest first and stops once every commit left is one `other` reaches,
+ * or after `MAX_BASE_WALK` commits.
+ */
+async function commitsNotIn(repos: Repos, repo: string, head: string, other: string | null): Promise<number> {
+  const marks = new Map<string, number>([[head, ONE]]);
+  if (other !== null) marks.set(other, (marks.get(other) ?? 0) | TWO);
+  const queue: Commit[] = [];
+  const enqueue = async (sha: string) => {
+    const commit = await missingAsNull(repos.readCommit(repo, sha));
+    if (commit !== null) queue.push(commit);
+  };
+  await Promise.all([...marks.keys()].map(enqueue));
+  const walked = new Set<string>();
+  const onlyOther = () => queue.every((c) => (marks.get(c.hash) ?? 0) & TWO);
+  for (let read = 0; queue.length > 0 && !onlyOther() && read < MAX_BASE_WALK; read++) {
+    queue.sort((a, b) => b.committedAt - a.committedAt);
+    const commit = queue.shift() as Commit;
+    walked.add(commit.hash);
+    const mark = marks.get(commit.hash) ?? 0;
+    const fresh: string[] = [];
+    for (const parent of commit.parents) {
+      const seen = marks.get(parent) ?? 0;
+      if ((seen | mark) === seen) continue;
+      marks.set(parent, seen | mark);
+      if (!queue.some((q) => q.hash === parent)) fresh.push(parent);
+    }
+    await Promise.all(fresh.map(enqueue));
+  }
+  return [...walked].filter((sha) => marks.get(sha) === ONE).length;
 }

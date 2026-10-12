@@ -120,7 +120,12 @@ const TaskSchema = z
       .nullable()
       .openapi({ description: "Overrides the project's cap on active attempts; null to use the project's." }),
     taskBranch: z
-      .object({ sha: z.string().openapi({ description: "The task branch's head." }) })
+      .object({
+        sha: z.string().openapi({ description: "The task branch's head." }),
+        commits: z.number().int().openapi({
+          description: "How many of its commits `main` doesn't have yet: they land with the selected attempt.",
+        }),
+      })
       .nullable()
       .openapi("TaskBranch", {
         description:
@@ -611,9 +616,9 @@ function taskTransition<V extends string>(
   });
 }
 
-/** A merge request action route: `POST …/tasks/{t}/merge-request/<verb>`. */
+/** A merge request action route: `POST …/tasks/{t}/merge-request/<verb>`, also open to throng-web. */
 function mergeRequestAction<V extends string>(
-  bearer: Bearer,
+  browser: Browser,
   verb: V,
   operationId: string,
   summary: string,
@@ -626,8 +631,8 @@ function mergeRequestAction<V extends string>(
     tags: ["Merge queue"],
     summary,
     description,
-    security: bearerOnly,
-    middleware: [bearer] as const,
+    security: bearerOrWeb,
+    middleware: [browser] as const,
     request: { params: TaskPathSchema },
     responses: {
       200: { description: "The merge request after the action.", ...json(MergeRequestSchema) },
@@ -656,8 +661,14 @@ interface AttemptAction<S extends z.ZodType> {
   ok: { description: string; schema: S };
 }
 
-/** An attempt action route: `POST …/attempts/{a}/<verb>`, bearer-only. */
-function attemptAction<V extends string, S extends z.ZodType>(bearer: Bearer, verb: V, action: AttemptAction<S>) {
+/** Who a route lets in: bearer tokens only, or throng-web's signed-in user too. */
+interface RouteAuth {
+  middleware: Bearer | Browser;
+  security: Record<string, string[]>[];
+}
+
+/** An attempt action route: `POST …/attempts/{a}/<verb>`. */
+function attemptAction<V extends string, S extends z.ZodType>(auth: RouteAuth, verb: V, action: AttemptAction<S>) {
   return createRoute({
     method: "post",
     path: `/projects/{owner}/{project}/attempts/{a}/${verb}`,
@@ -665,8 +676,8 @@ function attemptAction<V extends string, S extends z.ZodType>(bearer: Bearer, ve
     tags: action.tags,
     summary: action.summary,
     ...(action.description === undefined ? {} : { description: action.description }),
-    security: bearerOnly,
-    middleware: [bearer] as const,
+    security: auth.security,
+    middleware: [auth.middleware] as const,
     request: { params: AttemptPathSchema },
     responses: {
       200: { description: action.ok.description, ...json(action.ok.schema) },
@@ -681,14 +692,14 @@ function attemptAction<V extends string, S extends z.ZodType>(bearer: Bearer, ve
 
 /** An attempt transition route: `POST …/attempts/{a}/<verb>`. */
 function attemptTransition<V extends string>(
-  bearer: Bearer,
+  auth: RouteAuth,
   verb: V,
   operationId: string,
   summary: string,
   forbidden: string,
   conflicts: string[],
 ) {
-  return attemptAction(bearer, verb, {
+  return attemptAction(auth, verb, {
     operationId,
     tags: ["Attempts"],
     summary,
@@ -700,7 +711,7 @@ function attemptTransition<V extends string>(
 
 /** A scoring request route: `POST …/attempts/{a}/<verb>`. */
 function scoringRoute<V extends string>(
-  bearer: Bearer,
+  auth: RouteAuth,
   verb: V,
   operationId: string,
   summary: string,
@@ -708,7 +719,7 @@ function scoringRoute<V extends string>(
   forbidden: string,
   conflict: string,
 ) {
-  return attemptAction(bearer, verb, {
+  return attemptAction(auth, verb, {
     operationId,
     tags: ["Scoring"],
     summary,
@@ -734,6 +745,7 @@ export function apiRoutes(options: ApiOptions = {}) {
   const auth = bearerOrAccess(options);
   const bearer = bearerAuth(options.now === undefined ? {} : { now: options.now });
   const browser = bearerOrForwarded(options);
+  const bearerRoute: RouteAuth = { middleware: bearer, security: bearerOnly };
   const reposFor = options.repos ?? noRepos;
   const projects = (env: AccessBindings) => projectService({ db: env.DB, repos: reposFor(env) });
   const backendFor = options.tasks ?? noTasks;
@@ -1140,45 +1152,57 @@ export function apiRoutes(options: ApiOptions = {}) {
       },
     )
     .openapi(
-      attemptTransition(bearer, "open", "openAttempt", "Open a draft attempt for scoring and merging", AUTHOR_ONLY, [
-        "`invalidState`: the attempt isn't a draft.",
-      ]),
+      attemptTransition(
+        bearerRoute,
+        "open",
+        "openAttempt",
+        "Open a draft attempt for scoring and merging",
+        AUTHOR_ONLY,
+        ["`invalidState`: the attempt isn't a draft."],
+      ),
       async (c) => c.json(await tasks(c.env).openAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
-      attemptTransition(bearer, "draft", "draftAttempt", "Return an open attempt to draft", AUTHOR_ONLY, [
+      attemptTransition(bearerRoute, "draft", "draftAttempt", "Return an open attempt to draft", AUTHOR_ONLY, [
         "`invalidState`: the attempt isn't open.",
       ]),
       async (c) => c.json(await tasks(c.env).draftAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
-      attemptTransition(bearer, "close", "closeAttempt", "Close a draft or open attempt", AUTHOR_ONLY, [
+      attemptTransition(bearerRoute, "close", "closeAttempt", "Close a draft or open attempt", AUTHOR_ONLY, [
         "`invalidState`: the attempt isn't active.",
       ]),
       async (c) => c.json(await tasks(c.env).closeAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
-      attemptTransition(bearer, "reopen", "reopenAttempt", "Reopen a closed attempt as a draft", AUTHOR_ONLY, [
-        "`invalidState`: the attempt isn't closed or its task isn't open;",
-        "`attemptLimit`: the task is at its cap; `conflict`: another active attempt has its branch.",
-      ]),
+      attemptTransition(
+        { middleware: browser, security: bearerOrWeb },
+        "reopen",
+        "reopenAttempt",
+        "Reopen a closed attempt as a draft",
+        AUTHOR_ONLY,
+        [
+          "`invalidState`: the attempt isn't closed or its task isn't open;",
+          "`attemptLimit`: the task is at its cap; `conflict`: another active attempt has its branch.",
+        ],
+      ),
       async (c) => c.json(await tasks(c.env).reopenAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
-      attemptTransition(bearer, "obsolete", "obsoleteAttempt", "Make an attempt obsolete", OWNER_ONLY, [
+      attemptTransition(bearerRoute, "obsolete", "obsoleteAttempt", "Make an attempt obsolete", OWNER_ONLY, [
         "`invalidState`: the attempt is merged or already obsolete.",
       ]),
       async (c) => c.json(await tasks(c.env).obsoleteAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
-      attemptTransition(bearer, "restore", "restoreAttempt", "Restore an obsolete attempt to closed", OWNER_ONLY, [
+      attemptTransition(bearerRoute, "restore", "restoreAttempt", "Restore an obsolete attempt to closed", OWNER_ONLY, [
         "`invalidState`: the attempt isn't obsolete.",
       ]),
       async (c) => c.json(await tasks(c.env).restoreAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
       scoringRoute(
-        bearer,
+        bearerRoute,
         "score",
         "scoreAttempt",
         "Score a draft attempt's head now",
@@ -1191,7 +1215,7 @@ export function apiRoutes(options: ApiOptions = {}) {
     )
     .openapi(
       scoringRoute(
-        bearer,
+        bearerRoute,
         "rescore",
         "rescoreAttempt",
         "Score an open attempt's head again",
@@ -1447,8 +1471,8 @@ export function apiRoutes(options: ApiOptions = {}) {
           "merge queue once the approved head's latest scoring run is done with a passing gate. A single-attempt task's " +
           "Merge button calls this too. The task's creator or the project owner (or their agents) may; the creator may " +
           "select their own attempt. Journals `selected` and `approved`.",
-        security: bearerOnly,
-        middleware: [bearer] as const,
+        security: bearerOrWeb,
+        middleware: [browser] as const,
         request: { params: TaskPathSchema, body: { required: true, ...json(SelectionSchema) } },
         responses: {
           200: { description: "The new merge request.", ...json(MergeRequestSchema) },
@@ -1469,7 +1493,7 @@ export function apiRoutes(options: ApiOptions = {}) {
     )
     .openapi(
       mergeRequestAction(
-        bearer,
+        browser,
         "approve",
         "approveMergeRequest",
         "Approve the source attempt's current head",
@@ -1481,7 +1505,7 @@ export function apiRoutes(options: ApiOptions = {}) {
     )
     .openapi(
       mergeRequestAction(
-        bearer,
+        browser,
         "cancel",
         "cancelMergeRequest",
         "Cancel the task's open merge request",

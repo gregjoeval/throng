@@ -1,13 +1,15 @@
 // The arena (variant D): a rail of attempt cards on the left, and the shown attempts' lanes side by
 // side. Clicking a card toggles its lane; lanes keep the order they were added in.
 
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckIcon } from "lucide-react";
 import { useState } from "react";
 import type { ReactNode } from "react";
 import { GatePill, Lane, VerdictCounts } from "@/components/lane";
+import { useSelect } from "@/components/selection";
 import { ErrorState, Loading } from "@/components/states";
-import { taskArenaQuery } from "@/lib/api";
+import { Button } from "@/components/ui/button";
+import { meQuery, reopenAttempt, taskArenaQuery, taskKey } from "@/lib/api";
 import {
   bestValues,
   formatValue,
@@ -19,6 +21,7 @@ import {
   toggleLane,
 } from "@/lib/arena";
 import type { ArenaAttempt, MetricColumn, RailSort } from "@/lib/arena";
+import { apiError } from "@/lib/errors";
 import type { Attempt } from "@/lib/tasks";
 
 /** Past this many lanes, each keeps a minimum width and the lanes scroll sideways. */
@@ -45,6 +48,7 @@ export function Arena({ owner, project, task, attempts }: InTask & { attempts: A
     <ArenaLayout
       owner={owner}
       project={project}
+      task={task}
       attempts={arena.data.attempts}
       columns={metricColumns(arena.data.metrics)}
       notes={notes}
@@ -55,12 +59,11 @@ export function Arena({ owner, project, task, attempts }: InTask & { attempts: A
 function ArenaLayout({
   owner,
   project,
+  task,
   attempts,
   columns,
   notes,
-}: {
-  owner: string;
-  project: string;
+}: InTask & {
   attempts: ArenaAttempt[];
   columns: MetricColumn[];
   notes: Map<string, string>;
@@ -70,9 +73,20 @@ function ArenaLayout({
   const [lanes, toggle] = useLanes(active);
   const shown = lanes.flatMap((ref) => active.filter((a) => a.ref === ref));
   const sideways = shown.length > SHARED_WIDTH_LANES;
+  const select = useSelect(owner, project, task, active.length);
   return (
     <div data-testid="arena" className="grid gap-4 lg:grid-cols-[16rem_minmax(0,1fr)] lg:items-start">
-      <Rail attempts={active} closed={closed} columns={columns} lanes={lanes} onToggle={toggle} />
+      <Rail
+        owner={owner}
+        project={project}
+        task={task}
+        attempts={active}
+        closed={closed}
+        columns={columns}
+        lanes={lanes}
+        onToggle={toggle}
+        select={select}
+      />
       <section aria-label="Lanes" className="min-w-0 overflow-x-auto pb-2">
         <div
           className="grid gap-3"
@@ -87,6 +101,7 @@ function ArenaLayout({
               project={project}
               attempt={attempt}
               note={notes.get(attempt.ref) ?? ""}
+              actions={select?.(attempt.ref)}
             />
           ))}
         </div>
@@ -111,17 +126,22 @@ const SORT_LABELS = { number: "Number", gate: "Gate" } as const;
 
 /** The attempt cards, sortable, then the closed attempts, collapsed. */
 function Rail({
+  owner,
+  project,
+  task,
   attempts,
   closed,
   columns,
   lanes,
   onToggle,
-}: {
+  select,
+}: InTask & {
   attempts: ArenaAttempt[];
   closed: ArenaAttempt[];
   columns: MetricColumn[];
   lanes: string[];
   onToggle: (ref: string) => void;
+  select: ((ref: string) => ReactNode) | null;
 }) {
   const [sort, setSort] = useState<RailSort>("number");
   const best = bestValues(attempts, columns);
@@ -160,12 +180,13 @@ function Rail({
               best={best}
               shown={lanes.includes(attempt.ref)}
               onToggle={() => onToggle(attempt.ref)}
+              footer={select?.(attempt.ref)}
             />
           </li>
         ))}
       </ul>
       <p className="text-xs text-muted-foreground">Click a card to add or remove its lane.</p>
-      {closed.length === 0 ? null : <ClosedGroup closed={closed} />}
+      {closed.length === 0 ? null : <ClosedGroup owner={owner} project={project} task={task} closed={closed} />}
     </aside>
   );
 }
@@ -271,19 +292,46 @@ function Badge({ children }: { children: ReactNode }) {
   return <span className="rounded-md border px-1.5 text-xs text-muted-foreground">{children}</span>;
 }
 
-/** The task's closed attempts, collapsed under their count. */
-function ClosedGroup({ closed }: { closed: ArenaAttempt[] }) {
+/** The task's closed attempts, collapsed under their count; each author may reopen theirs. */
+function ClosedGroup({ owner, project, task, closed }: InTask & { closed: ArenaAttempt[] }) {
+  const me = useQuery(meQuery);
   return (
     <details className="rounded-xl border px-3 py-2 text-sm">
       <summary className="cursor-pointer text-muted-foreground">Closed ({closed.length})</summary>
       <ul aria-label="Closed attempts" className="mt-2 flex flex-col gap-1">
         {closed.map((attempt) => (
-          <li key={attempt.ref} className="flex items-center gap-2">
+          <li key={attempt.ref} className="flex flex-wrap items-center gap-2">
             <span className="font-mono">{attempt.ref}</span>
             <span className="text-xs text-muted-foreground">{attempt.author.handle}</span>
+            {me.data?.user.id === attempt.author.id ? (
+              <ReopenAttempt owner={owner} project={project} task={task} attempt={attempt.ref} />
+            ) : null}
           </li>
         ))}
       </ul>
     </details>
+  );
+}
+
+/** Reopens a closed attempt as a draft; only its author may. */
+function ReopenAttempt({ owner, project, task, attempt }: InTask & { attempt: string }) {
+  const queryClient = useQueryClient();
+  const reopen = useMutation({
+    mutationFn: () => reopenAttempt(owner, project, attempt),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: taskKey(owner, project, task) });
+    },
+  });
+  return (
+    <>
+      <Button variant="ghost" size="sm" className="ml-auto" disabled={reopen.isPending} onClick={() => reopen.mutate()}>
+        Reopen
+      </Button>
+      {reopen.isError ? (
+        <p role="alert" className="w-full text-xs text-destructive">
+          {apiError(reopen.error).message}
+        </p>
+      ) : null}
+    </>
   );
 }

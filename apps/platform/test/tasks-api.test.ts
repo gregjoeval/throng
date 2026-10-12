@@ -32,6 +32,16 @@ async function setup() {
     const res = await api.request(path, init, env);
     return { status: res.status, body: (await res.json()) as Json };
   };
+  // The same API as throng-web reaches it, trusting the identity it forwards.
+  const web = webApp({ verifierFor: () => verify, now, repos: () => repos, tasks: () => backend });
+  /** Calls as the signed-in web user with `email`. */
+  const callWeb = async (method: string, path: string, email: string, body?: unknown) => {
+    const headers: Record<string, string> = { [FORWARDED_EMAIL_HEADER]: email };
+    if (body !== undefined) headers["Content-Type"] = "application/json";
+    const init = { method, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) };
+    const res = await web.request(`/api${path}`, init, env);
+    return { status: res.status, body: (await res.json()) as Json };
+  };
   /** A bearer token for the user with `email`, under `agent` if given. */
   const tokenFor = async (email: string, agent?: string) => {
     const headers = { "Cf-Access-Jwt-Assertion": `as:${email}`, "Content-Type": "application/json" };
@@ -45,7 +55,7 @@ async function setup() {
   const bob = await tokenFor("bob@example.com");
   const project = (await call("POST", "/projects", greg, { handle: "throng" })).body;
   const base = "/projects/greg/throng";
-  return { call, repos, store, greg, ada, adaClaude, bob, project, base };
+  return { call, callWeb, repos, store, greg, ada, adaClaude, bob, project, base };
 }
 
 describe("task routes", () => {
@@ -88,10 +98,10 @@ describe("task routes", () => {
     const tests = repos.commit(origin, { branch: "tests", files: { "login.test.ts": "it()\n" } });
     repos.setRef(origin, "refs/tasks/t1", tests.hash);
 
-    expect((await call("GET", `${base}/tasks/t1`, bob)).body["taskBranch"]).toEqual({ sha: tests.hash });
+    expect((await call("GET", `${base}/tasks/t1`, bob)).body["taskBranch"]).toEqual({ sha: tests.hash, commits: 1 });
     expect((await call("GET", `${base}/tasks/t2`, bob)).body["taskBranch"]).toBeNull();
     const list = (await call("GET", `${base}/tasks`, bob)).body["tasks"];
-    expect(list.map((t: Json) => t["taskBranch"])).toEqual([{ sha: tests.hash }, null]);
+    expect(list.map((t: Json) => t["taskBranch"])).toEqual([{ sha: tests.hash, commits: 1 }, null]);
   });
 
   it("runs the task transitions with their permissions", async () => {
@@ -356,6 +366,31 @@ describe("merge request routes", () => {
     expect((await call("POST", `${base}/tasks/t1/merge-request/cancel`, ada)).body["state"]).toBe("cancelled");
     const after = await call("POST", `${base}/tasks/t1/merge-request/cancel`, ada);
     expect([after.status, after.body["error"]["code"]]).toEqual([409, "invalidState"]);
+  });
+
+  it("selects, approves and cancels for the signed-in web user, only if they created the task or own the project", async () => {
+    const env = await setup();
+    const { callWeb, base } = env;
+    await twoAttempts(env);
+    const select = (email: string) => callWeb("POST", `${base}/tasks/t1/selection`, email, { attempt: "t1a1" });
+    expect((await select("bob@example.com")).status).toBe(403);
+    expect((await select("ada@example.com")).body).toMatchObject({ state: "pending", approvedBy: { handle: "ada" } });
+    const act = (verb: string, email: string) => callWeb("POST", `${base}/tasks/t1/merge-request/${verb}`, email);
+    expect((await act("approve", "bob@example.com")).status).toBe(403);
+    expect((await act("approve", "greg@example.com")).body["state"]).toBe("pending");
+    expect((await act("cancel", "bob@example.com")).status).toBe(403);
+    expect((await act("cancel", "ada@example.com")).body["state"]).toBe("cancelled");
+  });
+
+  it("reopens a closed attempt for its author signed in on the web, and no one else", async () => {
+    const env = await setup();
+    const { call, callWeb, ada, base } = env;
+    await twoAttempts(env);
+    await call("POST", `${base}/tasks/t1/selection`, ada, { attempt: "t1a1" });
+    await call("POST", `${base}/tasks/t1/merge-request/cancel`, ada);
+    const reopen = (email: string) => callWeb("POST", `${base}/attempts/t1a2/reopen`, email);
+    expect((await reopen("ada@example.com")).status).toBe(403);
+    expect((await reopen("bob@example.com")).body["state"]).toBe("draft");
   });
 
   it("lists the project's merge queue, front first", async () => {

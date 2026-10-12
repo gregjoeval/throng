@@ -11,6 +11,7 @@ import type { AccessBindings } from "./access.ts";
 import { json, ProjectPathSchema } from "./api-shared.ts";
 import { bearerAuth, bearerOrAccess, bearerOrForwarded } from "./auth.ts";
 import type { AuthEnv, AuthOptions } from "./auth.ts";
+import { BASE_LINES } from "./base.ts";
 import { browseRoutes } from "./browse-api.ts";
 import { CONFIG_NAME, MAX_CHECK_TIMEOUT_MS, MAX_CONFIG_BYTES, METRIC_ORDERS, parseConfig } from "./config.ts";
 import { dequeueRoutes } from "./dequeue-api.ts";
@@ -316,6 +317,17 @@ const ScoringStatusSchema = z
   })
   .openapi("ScoringStatus");
 
+const BaseSchema = z
+  .object({
+    sha: z.string().openapi({ description: "The base commit." }),
+    on: z.enum(BASE_LINES).openapi({
+      description: "`task` when it lies on the task's task branch, `main` when the task has none.",
+    }),
+  })
+  .openapi("Base", {
+    description: "Where an attempt's history meets its task branch, or `origin/main` when the task has none.",
+  });
+
 const TaskArenaSchema = z
   .object({
     task: z.string().openapi({ example: "t42" }),
@@ -324,6 +336,11 @@ const TaskArenaSchema = z
         ref: z.string().openapi({ example: "t42a3" }),
         state: z.enum(ATTEMPT_STATES),
         author: UserRefSchema,
+        base: BaseSchema.nullable().openapi({
+          description:
+            "An active attempt's base at its current head (its fork's `main`), scored or not; diff it with " +
+            "`compare/{base.sha}...{ref}`. Null for an ended attempt, a fork with no commits, or no shared history.",
+        }),
         verdicts: VerdictSummarySchema,
       }).openapi("ArenaAttempt"),
     ),
@@ -687,7 +704,7 @@ export function apiRoutes(options: ApiOptions = {}) {
   const projects = (env: AccessBindings) => projectService({ db: env.DB, repos: reposFor(env) });
   const backendFor = options.tasks ?? noTasks;
   const logsFor = options.logs ?? noLogs;
-  const tasks = (env: AccessBindings) => taskService({ db: env.DB, backend: backendFor(env) });
+  const tasks = (env: AccessBindings) => taskService({ db: env.DB, repos: reposFor(env), backend: backendFor(env) });
   const tokens = (env: AccessBindings) => tokenService({ db: env.DB, now });
   const taskPath = ({ t, ...rest }: z.infer<typeof TaskPathSchema>) => ({ ...rest, task: t });
   const attemptPath = ({ a, ...rest }: z.infer<typeof AttemptPathSchema>) => ({ ...rest, attempt: a });

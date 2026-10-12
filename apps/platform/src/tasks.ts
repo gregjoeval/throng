@@ -2,12 +2,15 @@
 // machine in the project's Durable Object (`task-store.ts`), where the permission checks sit next
 // to the state they guard. Answers carry users as `{id, handle}`, resolved from D1 at read time.
 
+import { currentBase } from "./base.ts";
+import type { Base } from "./base.ts";
 import type { ConflictDetails, ConflictFile } from "./conflicts.ts";
 import { ServiceError } from "./errors.ts";
 import type { ErroredDetails, FailedChecksDetails } from "./landing.ts";
 import type { Dequeue, DequeueReason, StoredMergeRequest } from "./merge-requests.ts";
 import { resolveProject } from "./projects.ts";
 import { forkRepo, originRepo } from "./repos.ts";
+import type { Repos } from "./repos.ts";
 import type { Gate, ScoringResult } from "./results.ts";
 import { headAttemptRef } from "./scoring.ts";
 import type { AttemptScoring, ScoringRequest, StoredRun } from "./scoring.ts";
@@ -26,6 +29,7 @@ import type {
   TaskStore,
   VerdictDetail,
 } from "./task-store.ts";
+import { ACTIVE } from "./task-store.ts";
 import type { Actor } from "./tokens.ts";
 import type { Database } from "./users.ts";
 import type { VerdictRecommendation, VerdictSummary } from "./verdicts.ts";
@@ -37,6 +41,8 @@ export interface TaskBackend {
 
 export interface TaskServiceDeps {
   db: Database;
+  /** Read for each active attempt's base in the arena. */
+  repos: Repos;
   /** The backend for a project id: its Durable Object in production, an in-process store in tests. */
   backend: (projectId: string) => TaskBackend;
 }
@@ -194,6 +200,8 @@ export interface ArenaAttempt extends ScoringStatus {
   ref: string;
   state: AttemptState;
   author: UserRef;
+  /** An active attempt's base at its current head, scored or not (`currentBase`); null otherwise. */
+  base: Base | null;
   verdicts: VerdictSummary;
 }
 
@@ -222,7 +230,7 @@ type StoreArgs<K extends TaskMethod> = Parameters<TaskStore[K]>;
 type StoreResult<K extends TaskMethod> = Awaited<ReturnType<TaskStore[K]>>;
 
 /** The task and attempt services. Any signed-in actor may read any project's tasks in P0. */
-export function taskService({ db, backend }: TaskServiceDeps) {
+export function taskService({ db, repos, backend }: TaskServiceDeps) {
   async function project(path: ProjectPath): Promise<ProjectContext> {
     const found = await resolveProject(db, path.owner, path.project);
     if (found === null) throw new ServiceError("notFound", `no project ${path.owner}/${path.project}`);
@@ -380,18 +388,27 @@ export function taskService({ db, backend }: TaskServiceDeps) {
      */
     async taskArena(actor: Actor, input: TaskPath): Promise<TaskArena> {
       const number = taskNumber(input.task);
-      const list = await invoke("taskArena", await project(input), actor, { task: number });
-      const users = await handles(
-        db,
-        list.map((a) => a.author),
-      );
+      const ctx = await project(input);
+      const list = await invoke("taskArena", ctx, actor, { task: number });
+      const [users, bases] = await Promise.all([
+        handles(
+          db,
+          list.map((a) => a.author),
+        ),
+        Promise.all(
+          list.map(({ fork, state }) =>
+            (ACTIVE as readonly AttemptState[]).includes(state) ? currentBase(repos, ctx.id, fork) : null,
+          ),
+        ),
+      ]);
       return {
         task: taskRef(number),
-        attempts: list.map(({ scoring, fork, state, author, verdicts }) => ({
+        attempts: list.map(({ scoring, fork, state, author, verdicts }, i) => ({
           ref: fork,
           state,
           author: userRef(author, users),
           ...scoringStatus(scoring),
+          base: bases[i] ?? null,
           verdicts,
         })),
       };

@@ -54,7 +54,7 @@ export type TaskState = (typeof TASK_STATES)[number];
 export type AttemptState = (typeof ATTEMPT_STATES)[number];
 
 /** Draft and open attempts are active: they have a fork and a claim, and count toward the cap. */
-const ACTIVE = ["draft", "open"] as const;
+export const ACTIVE = ["draft", "open"] as const;
 
 /** The longest task title; a push-created task's title is cut to it. */
 export const MAX_TITLE = 200;

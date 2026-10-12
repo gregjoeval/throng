@@ -39,6 +39,12 @@ export async function attemptBase(
   return sha === null ? null : { sha, on: line.on };
 }
 
+/** `attemptBase` at the attempt's current head, its fork's `main`, scored or not. Null with no head. */
+export async function currentBase(repos: Repos, project: string, attempt: string): Promise<Base | null> {
+  const head = await tip(repos, forkRepo(project, attempt), "refs/heads/main");
+  return head === null ? null : attemptBase(repos, project, { attempt, head });
+}
+
 /** The commit `ref` points at in `repo`, or null when it, or the repo, doesn't exist. */
 async function tip(repos: Repos, repo: string, ref: string): Promise<string | null> {
   const found = await missingAsNull(repos.listCommits(repo, { ref, limit: 1 }));

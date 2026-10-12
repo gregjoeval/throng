@@ -8,7 +8,20 @@
 
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import type { AccessBindings } from "./access.ts";
-import { json, ProjectPathSchema } from "./api-shared.ts";
+import {
+  AttemptLimitSchema,
+  CreateAttemptsSchema,
+  CreateTaskSchema,
+  EditAttemptSchema,
+  HandOffSchema,
+  json,
+  PostVerdictSchema,
+  ProjectPathSchema,
+  requestTaskService,
+  SelectionSchema,
+  WaitQuerySchema,
+  workersCache,
+} from "./api-shared.ts";
 import { bearerAuth, bearerOrAccess, bearerOrForwarded } from "./auth.ts";
 import type { AuthEnv, AuthOptions } from "./auth.ts";
 import { BASE_LINES } from "./base.ts";
@@ -26,13 +39,12 @@ import type { Repos } from "./repos.ts";
 import { CHECK_OUTCOMES, GATES } from "./results.ts";
 import { ATTEMPT_SCORING_STATUSES, RUN_STATUSES, SCORING_TRIGGERS } from "./scoring.ts";
 import { ATTEMPT_STATES, TASK_STATES } from "./task-store.ts";
-import { taskService } from "./tasks.ts";
 import type { TaskBackend } from "./tasks.ts";
 import { DEFAULT_TOKEN_TTL_SECONDS, MAX_TOKEN_TTL_SECONDS, tokenService } from "./tokens.ts";
 import type { Token } from "./tokens.ts";
 import type { User } from "./users.ts";
-import { MAX_VERDICT_BODY, VERDICT_RECOMMENDATIONS } from "./verdicts.ts";
-import { MAX_WAIT_SECONDS, MAX_WAITERS_PER_USER, WAIT_CONDITIONS } from "./waiters.ts";
+import { VERDICT_RECOMMENDATIONS } from "./verdicts.ts";
+import { MAX_WAITERS_PER_USER } from "./waiters.ts";
 
 const UserSchema = z
   .object({ id: z.string(), handle: z.string(), email: z.string(), createdAt: z.string() })
@@ -163,13 +175,6 @@ const VerdictSchema = z
     superseded: z.boolean().openapi({ description: "Whether its head is no longer the attempt's current head." }),
   })
   .openapi("Verdict");
-
-export const PostVerdictSchema = z
-  .object({
-    recommendation: z.enum(VERDICT_RECOMMENDATIONS),
-    body: z.string().max(MAX_VERDICT_BODY).openapi({ description: "Markdown, up to 64 KB." }),
-  })
-  .openapi("PostVerdict");
 
 const ListedTaskSchema = TaskSchema.extend({
   attemptCount: z.number().int().openapi({ description: "Its attempts, obsolete ones left out.", example: 3 }),
@@ -450,10 +455,6 @@ const MergeRequestSchema = z
   })
   .openapi("MergeRequest");
 
-export const SelectionSchema = z
-  .object({ attempt: z.string().openapi({ description: "An open attempt of the task.", example: "t42a3" }) })
-  .openapi("Selection");
-
 const MergeQueueSchema = z
   .object({
     queue: z.array(
@@ -469,22 +470,6 @@ const MergeQueueSchema = z
   })
   .openapi("MergeQueue");
 
-const AttemptLimitSchema = z
-  .number()
-  .int()
-  .min(1)
-  .max(1000)
-  .nullable()
-  .openapi({ description: "Overrides the project's cap on active attempts; null to use the project's." });
-
-export const CreateTaskSchema = z
-  .object({
-    title: z.string().trim().min(1).max(200),
-    body: z.string().max(65_536).optional().openapi({ description: "Markdown." }),
-    attemptLimit: AttemptLimitSchema.optional(),
-  })
-  .openapi("CreateTask");
-
 const EditTaskSchema = z
   .object({
     title: z.string().trim().min(1).max(200).optional(),
@@ -493,55 +478,12 @@ const EditTaskSchema = z
   })
   .openapi("EditTask");
 
-export const CreateAttemptsSchema = z
-  .object({
-    count: z.number().int().min(1).max(100).optional().openapi({ description: "Attempts to create. Defaults to 1." }),
-    note: z.string().max(65_536).optional().openapi({ description: "Markdown, set on every new attempt." }),
-    from: z
-      .string()
-      .optional()
-      .openapi({
-        description:
-          "An attempt of the same task, current or archived, whose head every new attempt starts at. Each records it " +
-          "as `forkedFrom`; its base is still the task branch or `main`, and it never follows the source.",
-        example: "t42a1",
-      }),
-  })
-  .openapi("CreateAttempts");
-
-export const EditAttemptSchema = z
-  .object({ note: z.string().max(65_536).openapi({ description: "Markdown." }) })
-  .openapi("EditAttempt");
-
-export const HandOffSchema = z
-  .object({
-    to: z.string().min(1).openapi({ description: "The handle of the user who becomes the author.", example: "bob" }),
-  })
-  .openapi("HandOff");
-
 const TaskPathSchema = ProjectPathSchema.extend({
   t: z.string().openapi({ description: "A task reference: `t42` or `42`.", example: "t42" }),
 });
 
 const AttemptPathSchema = ProjectPathSchema.extend({
   a: z.string().openapi({ description: "An attempt reference.", example: "t42a3" }),
-});
-
-export const WaitQuerySchema = z.object({
-  wait: z.coerce.number().int().min(1).max(MAX_WAIT_SECONDS).optional().openapi({
-    description:
-      "Seconds to hold the request until what `until` watches changes. Without it, the attempt is returned at once.",
-    example: 30,
-  }),
-  until: z
-    .enum(WAIT_CONDITIONS)
-    .default("any")
-    .openapi({
-      description:
-        "What to wait for, with `wait`: `scored`, the current head gets a `done` or `errored` run it didn't have; " +
-        "`stateChanged`, the attempt's state; `mergeRequestChanged`, its merge request's state or last dequeue; " +
-        "`any`, any of them.",
-    }),
 });
 
 const WaitedAttemptSchema = AttemptSchema.extend({
@@ -622,11 +564,6 @@ export interface ApiOptions extends AuthOptions {
   logs?: (env: AccessBindings) => LogStore;
   /** Where commit diffs are cached: the Workers Cache API by default, none outside a Worker. */
   diffCache?: (env: AccessBindings) => DiffCache | undefined;
-}
-
-/** The Workers Cache API's default cache, when running in a Worker. */
-export function workersCache(): DiffCache | undefined {
-  return (globalThis as { caches?: { default?: DiffCache } }).caches?.default;
 }
 
 function noRepos(): Repos {
@@ -816,9 +753,7 @@ export function apiRoutes(options: ApiOptions = {}) {
   const projects = (env: AccessBindings) => projectService({ db: env.DB, repos: reposFor(env) });
   const backendFor = options.tasks ?? noTasks;
   const logsFor = options.logs ?? noLogs;
-  // Attempts name their git remotes on the origin the request came in on.
-  const tasks = ({ env, req }: { env: AccessBindings; req: { url: string } }) =>
-    taskService({ db: env.DB, repos: reposFor(env), backend: backendFor(env), origin: new URL(req.url).origin });
+  const tasks = requestTaskService(reposFor, backendFor);
   const tokens = (env: AccessBindings) => tokenService({ db: env.DB, now });
   const taskPath = ({ t, ...rest }: z.infer<typeof TaskPathSchema>) => ({ ...rest, task: t });
   const attemptPath = ({ a, ...rest }: z.infer<typeof AttemptPathSchema>) => ({ ...rest, attempt: a });

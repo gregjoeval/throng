@@ -10,19 +10,20 @@ import type { CallToolResult, ToolCallback } from "@modelcontextprotocol/server"
 import { Hono } from "hono";
 import type { AccessBindings } from "./access.ts";
 import {
+  AttemptQuerySchema,
   CreateAttemptsSchema,
   CreateTaskSchema,
   EditAttemptSchema,
   HandOffSchema,
+  PageQuerySchema,
   PostVerdictSchema,
   SelectionSchema,
   WaitQuerySchema,
   workersCache,
-} from "./api.ts";
+} from "./api-shared.ts";
 import type { ApiOptions } from "./api.ts";
 import { bearerAuth } from "./auth.ts";
 import type { AuthEnv } from "./auth.ts";
-import { AttemptQuerySchema, PageQuerySchema } from "./browse-api.ts";
 import { browseService } from "./browse.ts";
 import { DIFF_CAPS, diffCommit, unifiedPatch } from "./diff.ts";
 import { ServiceError } from "./errors.ts";

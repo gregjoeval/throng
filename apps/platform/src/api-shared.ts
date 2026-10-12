@@ -1,10 +1,20 @@
-// HTTP plumbing the browse and merge queue routes share: the project path, multi-segment `{path}`
-// routes, and the public shape of a file or commit diff with its `text/x-diff` answer.
+// HTTP plumbing more than one route module shares (the REST routes in `api.ts`, `browse-api.ts` and
+// `dequeue-api.ts`, and the MCP tools in `mcp.ts`): the project path, multi-segment `{path}` routes,
+// the public shape of a file or commit diff with its `text/x-diff` answer, the request schemas the
+// MCP tools reuse, and the task service for a request.
 
 import { z } from "@hono/zod-openapi";
 import type { OpenAPIHono, RouteConfig } from "@hono/zod-openapi";
 import type { Context } from "hono";
+import type { AccessBindings } from "./access.ts";
+import { DEFAULT_COMMITS_PAGE, MAX_COMMITS_PAGE } from "./browse.ts";
 import { DIFF_FLAGS, FILE_STATUSES } from "./diff.ts";
+import type { DiffCache } from "./diff.ts";
+import type { Repos } from "./repos.ts";
+import { taskService } from "./tasks.ts";
+import type { TaskBackend } from "./tasks.ts";
+import { MAX_VERDICT_BODY, VERDICT_RECOMMENDATIONS } from "./verdicts.ts";
+import { MAX_WAIT_SECONDS, WAIT_CONDITIONS } from "./waiters.ts";
 
 export const ProjectPathSchema = z.object({
   owner: z.string().openapi({ description: "The owner's handle.", example: "greg" }),
@@ -90,3 +100,108 @@ export function diffResponse(c: Context, patch: () => string, body: () => unknow
 export function wantsPatch(accept: string | undefined): boolean {
   return accept?.split(",").some((t) => t.split(";")[0]?.trim().toLowerCase() === "text/x-diff") ?? false;
 }
+
+/**
+ * The task service for a request, given the environment's repos and task backends. Attempts name
+ * their git remotes on the origin the request came in on.
+ */
+export function requestTaskService(
+  repos: (env: AccessBindings) => Repos,
+  tasks: (env: AccessBindings) => (projectId: string) => TaskBackend,
+) {
+  return ({ env, req }: { env: AccessBindings; req: { url: string } }) =>
+    taskService({ db: env.DB, repos: repos(env), backend: tasks(env), origin: new URL(req.url).origin });
+}
+
+export const PostVerdictSchema = z
+  .object({
+    recommendation: z.enum(VERDICT_RECOMMENDATIONS),
+    body: z.string().max(MAX_VERDICT_BODY).openapi({ description: "Markdown, up to 64 KB." }),
+  })
+  .openapi("PostVerdict");
+
+export const SelectionSchema = z
+  .object({ attempt: z.string().openapi({ description: "An open attempt of the task.", example: "t42a3" }) })
+  .openapi("Selection");
+
+export const AttemptLimitSchema = z
+  .number()
+  .int()
+  .min(1)
+  .max(1000)
+  .nullable()
+  .openapi({ description: "Overrides the project's cap on active attempts; null to use the project's." });
+
+export const CreateTaskSchema = z
+  .object({
+    title: z.string().trim().min(1).max(200),
+    body: z.string().max(65_536).optional().openapi({ description: "Markdown." }),
+    attemptLimit: AttemptLimitSchema.optional(),
+  })
+  .openapi("CreateTask");
+
+export const CreateAttemptsSchema = z
+  .object({
+    count: z.number().int().min(1).max(100).optional().openapi({ description: "Attempts to create. Defaults to 1." }),
+    note: z.string().max(65_536).optional().openapi({ description: "Markdown, set on every new attempt." }),
+    from: z
+      .string()
+      .optional()
+      .openapi({
+        description:
+          "An attempt of the same task, current or archived, whose head every new attempt starts at. Each records it " +
+          "as `forkedFrom`; its base is still the task branch or `main`, and it never follows the source.",
+        example: "t42a1",
+      }),
+  })
+  .openapi("CreateAttempts");
+
+export const EditAttemptSchema = z
+  .object({ note: z.string().max(65_536).openapi({ description: "Markdown." }) })
+  .openapi("EditAttempt");
+
+export const HandOffSchema = z
+  .object({
+    to: z.string().min(1).openapi({ description: "The handle of the user who becomes the author.", example: "bob" }),
+  })
+  .openapi("HandOff");
+
+export const WaitQuerySchema = z.object({
+  wait: z.coerce.number().int().min(1).max(MAX_WAIT_SECONDS).optional().openapi({
+    description:
+      "Seconds to hold the request until what `until` watches changes. Without it, the attempt is returned at once.",
+    example: 30,
+  }),
+  until: z
+    .enum(WAIT_CONDITIONS)
+    .default("any")
+    .openapi({
+      description:
+        "What to wait for, with `wait`: `scored`, the current head gets a `done` or `errored` run it didn't have; " +
+        "`stateChanged`, the attempt's state; `mergeRequestChanged`, its merge request's state or last dequeue; " +
+        "`any`, any of them.",
+    }),
+});
+
+/** The Workers Cache API's default cache, when running in a Worker. */
+export function workersCache(): DiffCache | undefined {
+  return (globalThis as { caches?: { default?: DiffCache } }).caches?.default;
+}
+
+export const AttemptQuerySchema = z.object({
+  attempt: z
+    .string()
+    .optional()
+    .openapi({ description: "For a sha that isn't in origin: the attempt whose fork to look in.", example: "t42a3" }),
+});
+
+export const PageQuerySchema = z.object({
+  offset: z.coerce.number().int().min(0).default(0).openapi({ description: "Commits to skip." }),
+  limit: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(MAX_COMMITS_PAGE)
+    .default(DEFAULT_COMMITS_PAGE)
+    .openapi({ description: `Defaults to ${DEFAULT_COMMITS_PAGE}, at most ${MAX_COMMITS_PAGE}.` }),
+});

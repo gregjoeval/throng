@@ -4,9 +4,15 @@
 
 import { ServiceError } from "./errors.ts";
 import { resolveProject } from "./projects.ts";
-import type { CheckResult, ScoringResult } from "./results.ts";
+import type { ScoringResult } from "./results.ts";
+import type { ConflictDetails, ConflictFile } from "./conflicts.ts";
+import type { ErroredDetails, FailedChecksDetails } from "./landing.ts";
+import type { Dequeue, DequeueReason, StoredMergeRequest } from "./merge-requests.ts";
+import { forkRepo, originRepo } from "./repos.ts";
 import { headAttemptRef, type AttemptScoring, type ScoringRequest, type StoredRun } from "./scoring.ts";
 import {
+  attemptRef,
+  type AttemptMergeRequest,
   parseAttemptRef,
   parseTaskRef,
   taskRef,
@@ -40,15 +46,84 @@ export interface UserRef {
   handle: string;
 }
 
-export interface Task extends Omit<StoredTask, "creator" | "closed_by"> {
+/** A task as the API shows it. */
+export interface Task {
   ref: string;
+  number: number;
+  title: string;
+  body: string;
   creator: UserRef;
-  closed_by: UserRef | null;
+  state: TaskState;
+  createdAt: string;
+  closedAt: string | null;
+  closedBy: UserRef | null;
+  attemptLimit: number | null;
 }
 
-export interface Attempt extends Omit<StoredAttempt, "author"> {
+/** An attempt as the API shows it. */
+export interface Attempt {
   ref: string;
+  task: number;
+  number: number;
   author: UserRef;
+  state: AttemptState;
+  fork: string;
+  branch: string | null;
+  note: string;
+  createdAt: string;
+  closedAt: string | null;
+  mergedSha: string | null;
+  archivedSha: string | null;
+  scoring: AttemptScoring;
+  mergeRequest: { state: AttemptMergeRequest["state"]; lastDequeue: { reason: DequeueReason } | null } | null;
+}
+
+/** Who approved or created a merge request: a user, and the agent they acted under. */
+export interface ActorRef extends UserRef {
+  agent: string | null;
+}
+
+/** A merge request as the API shows it. Its latest dequeue's details are read separately. */
+export interface MergeRequest {
+  /** The task, `t42`, which also names its merge request. */
+  task: string;
+  /** The source attempt, `t42a3`. */
+  attempt: string;
+  state: StoredMergeRequest["state"];
+  approvedHead: string;
+  approvedBy: ActorRef;
+  approvedAt: string;
+  queuedAt: string | null;
+  position: number | null;
+  lastDequeue: { reason: DequeueReason; at: string } | null;
+  mergeSha: string | null;
+  mergedAt: string | null;
+  createdAt: string;
+  createdBy: ActorRef;
+}
+
+/** A merge request's latest dequeue with its details: null for a new push or a cancel. */
+export interface MergeRequestDequeue {
+  reason: DequeueReason;
+  at: string;
+  details: ConflictDetails | FailedChecksDetails | ErroredDetails | null;
+}
+
+/** A conflicting file of the latest dequeue, and the repos its blobs can be read from. */
+export interface DequeueFile {
+  file: ConflictFile;
+  /** The origin: it holds the base and `main` blobs, and the attempt's once its fork is archived. */
+  origin: string;
+  /** The source attempt's fork: it holds the base and attempt blobs while the attempt is active. */
+  fork: string;
+}
+
+/** One entry of a project's merge queue. */
+export interface MergeQueueEntry {
+  position: number;
+  task: string;
+  attempt: string;
+  state: StoredMergeRequest["state"];
 }
 
 /** A scoring run as the API shows it. */
@@ -60,11 +135,11 @@ export interface ScoringRun {
   trigger: StoredRun["trigger"];
   status: StoredRun["status"];
   /** Who asked for it, or null when no user did. */
-  requested_by: UserRef | null;
+  requestedBy: UserRef | null;
   agent: string | null;
-  created_at: string;
-  started_at: string | null;
-  finished_at: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
 }
 
 /** A scoring run with how it ended: its result once `done`, its error once `errored`. */
@@ -72,22 +147,16 @@ export interface RunDetail extends ScoringRun {
   /** Whether its head is no longer the attempt's current head. */
   superseded: boolean;
   error: string | null;
-  result: PublicResult | null;
-}
-
-/** A result as answers carry it, its field names in snake_case like the rest of the API. */
-export interface PublicResult extends Omit<ScoringResult, "checks" | "builtin"> {
-  checks: (Omit<CheckResult, "durationMs"> & { duration_ms: number })[];
-  builtin: { files_changed: number; additions: number; deletions: number; duration_ms: number };
+  result: ScoringResult | null;
 }
 
 /**
  * An attempt's current result: the latest `done` run for its current head, with the run it came
  * from and every check's metrics in one map (metric names are unique per project).
  */
-export interface CurrentResult extends PublicResult {
+export interface CurrentResult extends ScoringResult {
   run: number;
-  finished_at: string;
+  finishedAt: string;
   metrics: Record<string, number>;
 }
 
@@ -131,7 +200,7 @@ type StoreResult<K extends TaskMethod> = Awaited<ReturnType<TaskStore[K]>>;
 export function taskService({ db, backend }: TaskServiceDeps) {
   async function project(path: ProjectPath): Promise<ProjectContext> {
     const found = await resolveProject(db, path.owner, path.project);
-    if (found === null) throw new ServiceError("not_found", `no project ${path.owner}/${path.project}`);
+    if (found === null) throw new ServiceError("notFound", `no project ${path.owner}/${path.project}`);
     return { id: found.id, owner: found.owner.id };
   }
 
@@ -179,14 +248,23 @@ export function taskService({ db, backend }: TaskServiceDeps) {
       return publicScoring(request, await handles(db, [request.run.user_id]));
     };
 
+  const mergeRequest = async (mr: StoredMergeRequest): Promise<MergeRequest> =>
+    publicMergeRequest(mr, await handles(db, [mr.approved_by.user, mr.created_by.user]));
+
+  /** A merge request action on a task: resolves the project and task reference, then runs `method`. */
+  const mergeRequestMove =
+    (method: "approveMergeRequest" | "cancelMergeRequest" | "getMergeRequest") =>
+    async (actor: Actor, input: TaskPath): Promise<MergeRequest> =>
+      mergeRequest(await invoke(method, await project(input), actor, { task: taskNumber(input.task) }));
+
   return {
     /** Creates an open task; the caller's human is its creator. Any signed-in user may. */
     async createTask(
       actor: Actor,
-      input: ProjectPath & { title: string; body?: string | undefined; attempt_limit?: number | null | undefined },
+      input: ProjectPath & { title: string; body?: string | undefined; attemptLimit?: number | null | undefined },
     ): Promise<Task> {
-      const { title, body, attempt_limit } = input;
-      return one(await invoke("createTask", await project(input), actor, { title, body, attempt_limit }), tasks);
+      const { title, body, attemptLimit } = input;
+      return one(await invoke("createTask", await project(input), actor, { title, body, attemptLimit }), tasks);
     },
 
     async getTask(actor: Actor, input: TaskPath): Promise<Task> {
@@ -204,11 +282,11 @@ export function taskService({ db, backend }: TaskServiceDeps) {
       input: TaskPath & {
         title?: string | undefined;
         body?: string | undefined;
-        attempt_limit?: number | null | undefined;
+        attemptLimit?: number | null | undefined;
       },
     ): Promise<Task> {
-      const { title, body, attempt_limit } = input;
-      const edit = { task: taskNumber(input.task), title, body, attempt_limit };
+      const { title, body, attemptLimit } = input;
+      const edit = { task: taskNumber(input.task), title, body, attemptLimit };
       return one(await invoke("editTask", await project(input), actor, edit), tasks);
     },
 
@@ -254,7 +332,7 @@ export function taskService({ db, backend }: TaskServiceDeps) {
     /** Scores an open attempt's head again. Its author, the task's creator or the project owner may. */
     rescore: scoringRequest("rescore"),
 
-    /** The R2 key of a run's log. An unknown run or log name is `not_found`. */
+    /** The R2 key of a run's log. An unknown run or log name is `notFound`. */
     async runLogKey(actor: Actor, input: ProjectPath & { run: number; name: string }): Promise<string> {
       return invoke("runLogKey", await project(input), actor, { run: input.run, name: input.name });
     },
@@ -304,15 +382,71 @@ export function taskService({ db, backend }: TaskServiceDeps) {
 
     /**
      * Hands an active attempt to the user with handle `to`, who becomes its author. Only its
-     * author (or their agents) may. An unknown handle is `not_found`; handing it to its own author
-     * is `invalid_request`.
+     * author (or their agents) may. An unknown handle is `notFound`; handing it to its own author
+     * is `invalidRequest`.
      */
     async handOffAttempt(actor: Actor, input: AttemptPath & { to: string }): Promise<Attempt> {
       const ref = attemptRefOf(input.attempt);
       const ctx = await project(input);
       const to = await db.prepare("SELECT id FROM users WHERE handle = ?").bind(input.to).first<{ id: string }>();
-      if (to === null) throw new ServiceError("not_found", `no user ${input.to}`);
+      if (to === null) throw new ServiceError("notFound", `no user ${input.to}`);
       return one(await invoke("handOffAttempt", ctx, actor, { ...ref, to: to.id }), attempts);
+    },
+
+    /**
+     * Selects one of the task's open attempts as its merge request, approving its current head and
+     * closing the task's other active attempts. The task's creator or the project owner may.
+     */
+    async selectAttempt(actor: Actor, input: TaskPath & { attempt: string }): Promise<MergeRequest> {
+      const task = taskNumber(input.task);
+      const ref = attemptRefOf(input.attempt);
+      if (ref.task !== task) {
+        throw new ServiceError("invalidRequest", `${input.attempt} is not an attempt of ${taskRef(task)}`);
+      }
+      return mergeRequest(await invoke("selectAttempt", await project(input), actor, ref));
+    },
+
+    /** Approves the source attempt's current head. The task's creator or the project owner may. */
+    approveMergeRequest: mergeRequestMove("approveMergeRequest"),
+    /** Cancels the task's open merge request. The task's creator or the project owner may. */
+    cancelMergeRequest: mergeRequestMove("cancelMergeRequest"),
+    /** The task's latest merge request. Any signed-in user may read it. */
+    getMergeRequest: mergeRequestMove("getMergeRequest"),
+
+    /** The task's merge request's latest dequeue, with its details. Any signed-in user may read it. */
+    async getDequeue(actor: Actor, input: TaskPath): Promise<MergeRequestDequeue> {
+      const dequeue = lastDequeue(
+        await invoke("getMergeRequest", await project(input), actor, { task: taskNumber(input.task) }),
+      );
+      return { reason: dequeue.reason, at: dequeue.at, details: "details" in dequeue ? dequeue.details : null };
+    },
+
+    /** A conflicting file of the latest dequeue, which must be a `conflict` listing `path`. */
+    async getDequeueFile(actor: Actor, input: TaskPath & { path: string }): Promise<DequeueFile> {
+      const ctx = await project(input);
+      const mr = await invoke("getMergeRequest", ctx, actor, { task: taskNumber(input.task) });
+      const dequeue = lastDequeue(mr);
+      const file = dequeue.reason === "conflict" ? dequeue.details.files.find((f) => f.path === input.path) : undefined;
+      if (file === undefined) {
+        throw new ServiceError("notFound", `${taskRef(mr.task)}'s last dequeue has no conflict in ${input.path}`);
+      }
+      return { file, origin: originRepo(ctx.id), fork: forkRepo(ctx.id, attemptRef(mr.task, mr.attempt)) };
+    },
+
+    /** Where a log of the retest behind the latest `failedChecks` dequeue is stored. */
+    async dequeueLogKey(actor: Actor, input: TaskPath & { name: string }): Promise<string> {
+      return invoke("dequeueLogKey", await project(input), actor, { task: taskNumber(input.task), name: input.name });
+    },
+
+    /** The project's merge queue, front first. Any signed-in user may read it. */
+    async mergeQueue(actor: Actor, input: ProjectPath): Promise<MergeQueueEntry[]> {
+      const queue = await invoke("mergeQueue", await project(input), actor);
+      return queue.map((mr) => ({
+        position: mr.position ?? 0,
+        task: taskRef(mr.task),
+        attempt: attemptRef(mr.task, mr.attempt),
+        state: mr.state,
+      }));
     },
   };
 }
@@ -327,14 +461,14 @@ async function one<T, U>(item: T, render: (list: T[]) => Promise<U[]>): Promise<
 /** A task reference (`t42` or `42`) as its number. */
 function taskNumber(ref: string): number {
   const number = parseTaskRef(ref);
-  if (number === null) throw new ServiceError("invalid_request", `not a task reference: ${ref}`);
+  if (number === null) throw new ServiceError("invalidRequest", `not a task reference: ${ref}`);
   return number;
 }
 
 /** An attempt reference (`t42a3`) as its task and attempt numbers. */
 function attemptRefOf(ref: string): AttemptInput {
   const parsed = parseAttemptRef(ref);
-  if (parsed === null) throw new ServiceError("invalid_request", `not an attempt reference: ${ref}`);
+  if (parsed === null) throw new ServiceError("invalidRequest", `not an attempt reference: ${ref}`);
   return parsed;
 }
 
@@ -355,15 +489,64 @@ function userRef(id: string, users: Map<string, string>): UserRef {
 
 function publicTask(t: StoredTask, users: Map<string, string>): Task {
   return {
-    ...t,
     ref: taskRef(t.number),
+    number: t.number,
+    title: t.title,
+    body: t.body,
     creator: userRef(t.creator, users),
-    closed_by: t.closed_by === null ? null : userRef(t.closed_by, users),
+    state: t.state,
+    createdAt: t.created_at,
+    closedAt: t.closed_at,
+    closedBy: t.closed_by === null ? null : userRef(t.closed_by, users),
+    attemptLimit: t.attempt_limit,
   };
 }
 
 function publicAttempt(a: StoredAttempt, users: Map<string, string>): Attempt {
-  return { ...a, ref: a.fork, author: userRef(a.author, users) };
+  const mr = a.merge_request;
+  return {
+    ref: a.fork,
+    task: a.task,
+    number: a.number,
+    author: userRef(a.author, users),
+    state: a.state,
+    fork: a.fork,
+    branch: a.branch,
+    note: a.note,
+    createdAt: a.created_at,
+    closedAt: a.closed_at,
+    mergedSha: a.merged_sha,
+    archivedSha: a.archived_sha,
+    scoring: a.scoring,
+    mergeRequest: mr === null ? null : { state: mr.state, lastDequeue: mr.last_dequeue },
+  };
+}
+
+function actorRef(acted: { user: string; agent: string | null }, users: Map<string, string>): ActorRef {
+  return { ...userRef(acted.user, users), agent: acted.agent };
+}
+
+function publicMergeRequest(mr: StoredMergeRequest, users: Map<string, string>): MergeRequest {
+  return {
+    task: taskRef(mr.task),
+    attempt: attemptRef(mr.task, mr.attempt),
+    state: mr.state,
+    approvedHead: mr.approved_head,
+    approvedBy: actorRef(mr.approved_by, users),
+    approvedAt: mr.approved_at,
+    queuedAt: mr.queued_at,
+    position: mr.position,
+    lastDequeue: mr.last_dequeue === null ? null : { reason: mr.last_dequeue.reason, at: mr.last_dequeue.at },
+    mergeSha: mr.merge_sha,
+    mergedAt: mr.merged_at,
+    createdAt: mr.created_at,
+    createdBy: actorRef(mr.created_by, users),
+  };
+}
+
+function lastDequeue(mr: StoredMergeRequest): Dequeue {
+  if (mr.last_dequeue === null) throw new ServiceError("notFound", `${taskRef(mr.task)} has never been dequeued`);
+  return mr.last_dequeue;
 }
 
 function publicScoring(request: ScoringRequest, users: Map<string, string>): ScoringAnswer {
@@ -381,30 +564,16 @@ function publicRun(run: StoredRun, users: Map<string, string>): ScoringRun {
     sha: run.sha,
     trigger: run.trigger,
     status: run.status,
-    requested_by: run.user_id === null ? null : userRef(run.user_id, users),
+    requestedBy: run.user_id === null ? null : userRef(run.user_id, users),
     agent: run.agent,
-    created_at: new Date(run.created_at).toISOString(),
-    started_at: iso(run.started_at),
-    finished_at: iso(run.finished_at),
+    createdAt: new Date(run.created_at).toISOString(),
+    startedAt: iso(run.started_at),
+    finishedAt: iso(run.finished_at),
   };
 }
 
 function runDetail(run: StoredRun, users: Map<string, string>): RunDetail {
-  const result = run.result === null ? null : publicResult(run.result);
-  return { ...publicRun(run, users), superseded: run.superseded, error: run.error, result };
-}
-
-function publicResult({ checks, builtin, ...result }: ScoringResult): PublicResult {
-  return {
-    ...result,
-    checks: checks.map(({ durationMs, ...check }) => ({ ...check, duration_ms: durationMs })),
-    builtin: {
-      files_changed: builtin.filesChanged,
-      additions: builtin.additions,
-      deletions: builtin.deletions,
-      duration_ms: builtin.durationMs,
-    },
-  };
+  return { ...publicRun(run, users), superseded: run.superseded, error: run.error, result: run.result };
 }
 
 /** An attempt's scoring status for polling, with its current result once its head has one. */
@@ -415,8 +584,7 @@ function scoringStatus({ current, ...status }: AttemptScoringDetail): ScoringSta
 function currentResult(run: StoredRun): CurrentResult {
   if (run.result === null || run.finished_at === null) throw new Error(`run ${run.id} is done without a result`);
   const metrics = Object.assign({}, ...run.result.checks.map((c) => c.metrics)) as Record<string, number>;
-  const result = publicResult(run.result);
-  return { ...result, run: run.id, finished_at: new Date(run.finished_at).toISOString(), metrics };
+  return { ...run.result, run: run.id, finishedAt: new Date(run.finished_at).toISOString(), metrics };
 }
 
 function iso(ms: number | null): string | null {

@@ -6,9 +6,10 @@
 // addressed by `main` or an attempt resolves the ref first, sends a short max-age and an ETag of
 // the resolved sha, and answers a matching `If-None-Match` with 304 before reading anything else.
 
-import { createRoute, OpenAPIHono, z, type RouteConfig } from "@hono/zod-openapi";
+import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import type { Context } from "hono";
 import type { AccessBindings } from "./access.ts";
+import { CommitDiffSchema, diffContent, diffResponse, ProjectPathSchema, TAIL, tailedRoutes } from "./api-shared.ts";
 import type { AuthEnv, bearerOrForwarded } from "./auth.ts";
 import {
   browseService,
@@ -18,7 +19,8 @@ import {
   type BrowseService,
   type Resolved,
 } from "./browse.ts";
-import { errorBody, errorResponse } from "./errors.ts";
+import { DIFF_CAPS, diffCommit, unifiedPatch, type DiffCache } from "./diff.ts";
+import { errorBody, errorResponse, ServiceError } from "./errors.ts";
 import type { Repos } from "./repos.ts";
 import { ATTEMPT_STATES } from "./task-store.ts";
 import type { TaskBackend } from "./tasks.ts";
@@ -36,12 +38,8 @@ export interface BrowseOptions {
   auth: ReturnType<typeof bearerOrForwarded>;
   repos: (env: AccessBindings) => Repos;
   tasks: (env: AccessBindings) => (projectId: string) => TaskBackend;
+  diffCache: (env: AccessBindings) => DiffCache | undefined;
 }
-
-const ProjectPathSchema = z.object({
-  owner: z.string().openapi({ description: "The owner's handle.", example: "greg" }),
-  project: z.string().openapi({ description: "The project's handle.", example: "throng" }),
-});
 
 const RefParamSchema = ProjectPathSchema.extend({
   ref: z.string().openapi({
@@ -171,25 +169,17 @@ const refErrors = {
   404: errorResponse("No such project, ref or path."),
 };
 
-/** Hono matches `{path{.+}}` across slashes; the OpenAPI document shows it as plain `{path}`. */
-const TAIL = "{path{.+}}";
-
-export function browseRoutes({ auth, repos, tasks }: BrowseOptions) {
+export function browseRoutes({ auth, repos, tasks, diffCache }: BrowseOptions) {
   const browse = (env: AccessBindings) => browseService({ db: env.DB, repos: repos(env), backend: tasks(env) });
 
   const api = new OpenAPIHono<AuthEnv>({
     defaultHook: (result, c) => {
-      if (!result.success) return c.json(errorBody("invalid_request", z.prettifyError(result.error)), 400);
+      if (!result.success) return c.json(errorBody("invalidRequest", z.prettifyError(result.error)), 400);
       return undefined;
     },
   });
 
-  /** Routes whose path ends in a multi-segment `{path}`: routed with the tail, documented without it. */
-  const tailed = <R extends { path: string }>(config: R): R & { hide: true } => {
-    const { middleware: _middleware, hide: _hide, ...documented } = config as R & RouteConfig;
-    api.openAPIRegistry.registerPath({ ...documented, path: config.path.replace(TAIL, "{path}") } as RouteConfig);
-    return { ...config, hide: true };
-  };
+  const tailed = tailedRoutes(api);
 
   const treeResponses = { 200: { description: "The directory.", ...json(TreeSchema) }, ...refErrors };
   const treeDescription =
@@ -370,6 +360,43 @@ export function browseRoutes({ auth, repos, tasks }: BrowseOptions) {
         const commit = await browse(c.env).commit(at);
         cacheFor(c, at);
         return c.json(commit, 200);
+      },
+    )
+    .openapi(
+      createRoute({
+        method: "get",
+        path: "/projects/{owner}/{project}/commit/{sha}/diff",
+        operationId: "getCommitDiff",
+        summary: "Get a commit's diff against its first parent",
+        description:
+          "Against `parents[0]`, or the empty tree for a root commit; merge commits get no combined diff. " +
+          "Exact renames are paired; similarity renames are not. Each file is flagged when a cap left its " +
+          `patch out or cut it short: at most ${DIFF_CAPS.maxFiles} files are listed and ` +
+          `${DIFF_CAPS.maxPatchedFiles} given a patch, sides over ${DIFF_CAPS.maxBlobBytes} bytes are ` +
+          `\`tooLarge\`, and patches stop at ${DIFF_CAPS.maxPatchBytes} bytes or ${DIFF_CAPS.maxPatchLines} ` +
+          "lines in all. With `Accept: text/x-diff`, the answer is the files' patches concatenated, " +
+          "ready for `git apply`.",
+        tags: ["Browse"],
+        security,
+        middleware: [auth] as const,
+        request: { params: ProjectPathSchema.extend({ sha: ShaSchema }), query: AttemptQuerySchema },
+        responses: {
+          200: { description: "The diff.", content: diffContent(CommitDiffSchema) },
+          ...refErrors,
+        },
+      }),
+      async (c) => {
+        const { sha, ...params } = c.req.valid("param");
+        const at = await resolved(c, browse(c.env), c.var.actor, { ...params, ref: sha, ...c.req.valid("query") });
+        if (at instanceof Response) return at;
+        const diff = await diffCommit(repos(c.env), at.repo, at.sha, { cache: diffCache(c.env) });
+        if (diff === null) throw new ServiceError("notFound", `no commit ${at.sha}`);
+        cacheFor(c, at);
+        return diffResponse(
+          c,
+          () => unifiedPatch(diff),
+          () => diff,
+        ) as never;
       },
     );
 }

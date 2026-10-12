@@ -1,6 +1,9 @@
 // Bash run inside a run's Sandbox. Each script is idempotent, so a retried Workflow step can rerun it
 // on a fresh container. The last stdout line is the result: `THRONG_RESULT <json>`.
 
+import { CONFIG_PATH, MAX_CONFIG_BYTES } from "./config.ts";
+import { CONFLICT_CAPS, MERGE_LABELS, type ConflictCaps, type Remerge } from "./conflicts.ts";
+import { THRONG_COMMITTER } from "./landing.ts";
 import { PREVIEW_LOG, setupLogName } from "./logs.ts";
 import { MAX_METRICS_BYTES, SETUP_TIMEOUT_MS, type ScorePlan } from "./results.ts";
 
@@ -15,13 +18,6 @@ export type PreviewScriptResult =
 
 /** Longest `preview.command` may run; the spec gives it no timeout of its own, so a check's default. */
 export const PREVIEW_BUILD_TIMEOUT_MS = SETUP_TIMEOUT_MS;
-
-export type RetestResult =
-  | { kind: "tested"; base: string; tree: string }
-  | { kind: "failed"; stage: FailureStage; output: string }
-  | { kind: "bounced"; files: string[]; diff: string };
-
-export type LandResult = { kind: "landed"; mainSha: string } | { kind: "moved" } | { kind: "mismatch"; tree: string };
 
 const quote = (s: string): string => `'${s.replaceAll("'", "'\\''")}'`;
 
@@ -45,12 +41,32 @@ fi`;
 
 /**
  * Scores the attempt's head `sha`: fetches it from the fork and `main` from the origin, records the
- * merge base and the diff size against it, runs each `setup` command and then every check in order,
- * each under `timeout` with `$THRONG_METRICS` pointing at an empty file. A failed setup command skips
- * every check; a failed check doesn't stop the next. Each step's output goes to `../logs/<name>.log`,
- * named by `logNames`. The result is a `RawScore`; `buildResult` turns it into the run's result.
+ * merge base and the diff size against it, then runs the plan (see `runPlan`). The result is a
+ * `RawScore`; `buildResult` turns it into the run's result.
  */
 export function scoreScript(forkRemote: string, originRemote: string, sha: string, plan: ScorePlan): string {
+  return `${PRELUDE}
+rm -rf score logs out && mkdir logs out && out="$PWD/out" && git init -q score && cd score
+git fetch -q ${quote(forkRemote)} '+refs/heads/*:refs/remotes/fork/*' || exit 10
+git fetch -q ${quote(originRemote)} '+refs/heads/main:refs/remotes/origin/main' || exit 12
+git checkout -q --detach ${quote(sha)} || exit 11
+now() { date +%s%3N; }
+t0=$(now)
+base=$(git merge-base HEAD refs/remotes/origin/main 2>/dev/null) || base=""
+shortstat=$(git diff --shortstat "\${base:-$(git hash-object -t tree /dev/null)}" HEAD) || exit 15
+builtin_ms=$(( $(now) - t0 ))
+${runPlan(plan)}
+`;
+}
+
+/**
+ * Bash that runs each `setup` command and then every check in order, in the checked-out tree, each
+ * under `timeout` with `$THRONG_METRICS` pointing at an empty file. A failed setup command skips every
+ * check; a failed check doesn't stop the next. Each step's output goes to `../logs/<name>.log`, named
+ * by `logNames`. It ends with a `RawScore` result made from `$base`, `$shortstat` and `$builtin_ms`,
+ * and needs `$out` and `now`.
+ */
+function runPlan(plan: ScorePlan): string {
   const setup = plan.setup
     .map(
       (
@@ -72,17 +88,7 @@ fi`,
 fi`,
     )
     .join("\n");
-  return `${PRELUDE}
-rm -rf score logs out && mkdir logs out && out="$PWD/out" && git init -q score && cd score
-git fetch -q ${quote(forkRemote)} '+refs/heads/*:refs/remotes/fork/*' || exit 10
-git fetch -q ${quote(originRemote)} '+refs/heads/main:refs/remotes/origin/main' || exit 12
-git checkout -q --detach ${quote(sha)} || exit 11
-now() { date +%s%3N; }
-t0=$(now)
-base=$(git merge-base HEAD refs/remotes/origin/main 2>/dev/null) || base=""
-shortstat=$(git diff --shortstat "\${base:-$(git hash-object -t tree /dev/null)}" HEAD) || exit 15
-builtin_ms=$(( $(now) - t0 ))
-setup_failed=""
+  return `setup_failed=""
 ${setup}
 ${checks}
 node - "$out" ${plan.checks.length} ${MAX_METRICS_BYTES} "$base" "$shortstat" "$builtin_ms" "$setup_failed" <<'NODE' || exit 16
@@ -112,8 +118,7 @@ const result = {
   checks,
 };
 process.stdout.write("${RESULT_PREFIX}" + JSON.stringify(result) + "\\n");
-NODE
-`;
+NODE`;
 }
 
 /**
@@ -154,57 +159,185 @@ result "{\\"ok\\":false,\\"stage\\":\\"deploy\\",\\"output\\":$(json < ../previe
 }
 
 /**
- * Untrusted: rebase the attempt onto the origin's current main and re-run the tests. Reports
- * the main it rebased onto and the tree it tested, for the trusted land step to check against.
+ * The conflict check's result: `main`'s sha, the merge base (null with no shared history), the raw
+ * `merge-tree` output for `parseMergeTree`, each content conflict's zdiff3 re-merge for
+ * `conflictFiles`, and for a clean merge the merged tree's config (`parseConfig` it), null with none.
  */
-export function retestScript(originRemote: string, forkRemote: string, sha: string): string {
+export interface ConflictCheckResult {
+  main: string;
+  clean: boolean;
+  base: string | null;
+  output: string;
+  remerges: Remerge[];
+  /** The merged tree's `.throng/config.yml`, cut one byte past `MAX_CONFIG_BYTES` so an oversized one stays invalid. */
+  config: string | null;
+}
+
+/** The merge the Landing Workflow lands: the approved head onto `main`, giving `tree`. */
+export interface MergePlan {
+  head: string;
+  main: string;
+  tree: string;
+}
+
+/**
+ * Landing step 1, untrusted (read grants only): fetches the origin's `main` and the approved head
+ * from the fork, then runs `git merge-tree --write-tree --messages -z` on them. It writes nothing;
+ * `parseMergeTree` reads the merged tree, or the conflicting paths, from `output`.
+ *
+ * On a conflict, each path with all three sides is re-merged with `git merge-file -p --zdiff3`, its
+ * lines outside the conflicts blanked so the output stays small but keeps its line numbers. A
+ * re-merge whose conflicting lines are over twice the per-file cap, or that would take all of them
+ * over twice the total cap, is `tooLarge`; `conflictFiles` applies the exact caps.
+ *
+ * On a clean merge it reads `.throng/config.yml` from the merged tree, before any repository code
+ * runs: the retest runs under the config the merge would land, not `main`'s.
+ */
+export function conflictCheckScript(
+  originRemote: string,
+  forkRemote: string,
+  head: string,
+  caps: ConflictCaps = CONFLICT_CAPS,
+): string {
+  const [main, base, attempt] = MERGE_LABELS;
   return `${PRELUDE}
-rm -rf retest && git init -q retest && cd retest
+rm -rf merge merge-tree.out remerge remerge.list && git init -q merge && cd merge
 git fetch -q ${quote(forkRemote)} '+refs/heads/*:refs/remotes/fork/*' || exit 10
 git fetch -q ${quote(originRemote)} '+refs/heads/main:refs/remotes/origin/main' || exit 12
-git checkout -q -B attempt ${quote(sha)} || exit 11
-base=$(git rev-parse origin/main)
-if ! git rebase -q "$base" > ../rebase.log 2>&1; then
-  files=$(git diff --name-only --diff-filter=U | node -e 'process.stdout.write(JSON.stringify(require("fs").readFileSync(0, "utf8").split("\\n").filter(Boolean)))')
-  diff=$(git diff | json)
-  git rebase --abort
-  result "{\\"kind\\":\\"bounced\\",\\"files\\":$files,\\"diff\\":$diff}"
+git cat-file -e ${quote(`${head}^{commit}`)} || exit 11
+main=$(git rev-parse refs/remotes/origin/main) || exit 12
+git merge-tree --write-tree --messages -z "$main" ${quote(head)} > ../merge-tree.out
+code=$?
+[ "$code" -le 1 ] || exit 13
+clean=$([ "$code" = 0 ] && echo true || echo false)
+base=$(git merge-base "$main" ${quote(head)}) && base="\\"$base\\"" || base=null
+mkdir ../remerge && : > ../remerge.list
+if [ "$code" = 1 ]; then
+  # Each path with all three sides: its path, then its base, main and attempt blobs, NUL-separated.
+  node -e '
+const fields = require("fs").readFileSync(0, "utf8").split("\\0");
+const sides = new Map();
+for (let i = 1; i < fields.length && fields[i] !== ""; i++) {
+  const tab = fields[i].indexOf("\\t");
+  const [, oid, stage] = fields[i].slice(0, tab).split(" ");
+  const path = fields[i].slice(tab + 1);
+  if (!sides.has(path)) sides.set(path, {});
+  sides.get(path)[stage] = oid;
+}
+for (const [path, s] of sides) if (s[1] && s[2] && s[3]) process.stdout.write([path, s[1], s[2], s[3], ""].join("\\0"));
+' < ../merge-tree.out > ../remerge/three || exit 16
+  n=0
+  total=0
+  while IFS= read -r -d '' path && IFS= read -r -d '' b && IFS= read -r -d '' m && IFS= read -r -d '' a; do
+    n=$((n + 1))
+    git merge-file -p --zdiff3 -L ${main} -L ${base} -L ${attempt} --object-id "$m" "$b" "$a" > ../remerge/raw 2> /dev/null
+    if [ $? -gt 127 ]; then
+      printf 'failed\\0%s\\0' "$path" >> ../remerge.list
+      continue
+    fi
+    awk -v max=${2 * caps.fileBytes} '
+      { l = $0; sub(/\\r$/, "", l) }
+      !c && l == "<<<<<<< ${main}" { c = 1 }
+      c { n += length($0) + 1; if (n > max) exit 3; print; if (l == ">>>>>>> ${attempt}") c = 0; next }
+      { print "" }
+    ' < ../remerge/raw > "../remerge/$n"
+    status=$?
+    size=$(wc -c < "../remerge/$n")
+    if [ "$status" = 3 ] || [ $((total + size)) -gt ${2 * caps.totalBytes} ]; then
+      printf 'tooLarge\\0%s\\0' "$path" >> ../remerge.list
+      continue
+    fi
+    total=$((total + size))
+    printf 'merged\\0%s\\0' "$path" >> ../remerge.list
+  done < ../remerge/three
 fi
-${install('"kind":"failed"')}
-if ! npm test > ../test.log 2>&1; then
-  result "{\\"kind\\":\\"failed\\",\\"stage\\":\\"test\\",\\"output\\":$(json < ../test.log)}"
+output=$(node -e 'process.stdout.write(JSON.stringify(require("fs").readFileSync(0, "utf8")))' < ../merge-tree.out) || exit 16
+remerges=$(node -e '
+const fs = require("fs");
+const list = fs.readFileSync("../remerge.list", "utf8").split("\\0");
+const out = [];
+for (let i = 0; i + 1 < list.length; i += 2) {
+  const entry = { path: list[i + 1], status: list[i] };
+  if (entry.status === "merged") entry.output = fs.readFileSync("../remerge/" + (i / 2 + 1), "utf8");
+  out.push(entry);
+}
+process.stdout.write(JSON.stringify(out));
+') || exit 16
+config=null
+if [ "$code" = 0 ]; then
+  tree=$(head -z -n 1 ../merge-tree.out | tr -d '\\0')
+  if [ "$(git cat-file -t "$tree:${CONFIG_PATH}" 2> /dev/null)" = blob ]; then
+    git cat-file blob "$tree:${CONFIG_PATH}" > ../config.yml || exit 16
+    config=$(head -c ${MAX_CONFIG_BYTES + 1} ../config.yml | node -e 'process.stdout.write(JSON.stringify(require("fs").readFileSync(0, "utf8")))') || exit 16
+  fi
 fi
-result "{\\"kind\\":\\"tested\\",\\"base\\":\\"$base\\",\\"tree\\":\\"$(git rev-parse 'HEAD^{tree}')\\"}"
+result "{\\"main\\":\\"$main\\",\\"clean\\":$clean,\\"base\\":$base,\\"output\\":$output,\\"remerges\\":$remerges,\\"config\\":$config}"
 `;
 }
 
 /**
- * Trusted: holds origin write, so it runs no repository code (no npm or node, no hooks, no config
- * from the repo). It redoes the same rebase onto the pinned main and pushes only if the result is the
- * exact tree the retest step tested, so an untrusted step can't hand over other content.
+ * Landing step 2, untrusted (read grants only): reproduces the merged tree with
+ * `git merge --no-ff --no-commit` of the approved head onto the recorded `main`, then runs the
+ * plan (setup and the required checks) on it like scoring does, ending with a `RawScore`. A merge
+ * that doesn't give the recorded tree is an infrastructure failure.
  */
-export function landScript(
-  originRemote: string,
-  forkRemote: string,
-  sha: string,
-  tested: { base: string; tree: string },
-): string {
+export function retestScript(originRemote: string, forkRemote: string, merge: MergePlan, plan: ScorePlan): string {
+  return `${PRELUDE}
+rm -rf retest logs out && mkdir logs out && out="$PWD/out" && git init -q retest && cd retest
+git fetch -q ${quote(forkRemote)} '+refs/heads/*:refs/remotes/fork/*' || exit 10
+git fetch -q ${quote(originRemote)} '+refs/heads/main:refs/remotes/origin/main' || exit 12
+git checkout -q --detach ${quote(merge.main)} || exit 11
+git merge -q --no-ff --no-commit ${quote(merge.head)} > ../merge.log 2>&1 || exit 14
+[ "$(git write-tree)" = ${quote(merge.tree)} ] || exit 14
+now() { date +%s%3N; }
+base=${quote(merge.main)}
+shortstat=""
+builtin_ms=0
+${runPlan(plan)}
+`;
+}
+
+export type LandResult = { kind: "landed"; sha: string } | { kind: "moved" } | { kind: "mismatch"; tree: string };
+
+export interface LandPlan extends MergePlan {
+  message: string;
+  author: { name: string; email: string };
+  /** The commit's author and committer time, in Unix seconds; fixed so a rerun makes the same commit. */
+  committedAt: number;
+}
+
+/**
+ * Landing step 3, trusted: holds origin write, so it runs no repository code (no npm or node, no
+ * work tree, hooks off, no system, global or repo config). It merges the approved head onto the
+ * recorded `main` with `git merge-tree`, checks the result is the tree the conflict check recorded,
+ * commits it as a two-parent (`--no-ff`) merge, author the approver and committer Throng, and pushes
+ * it with `--force-with-lease=main:<main>`, so a `main` that moved since is never overwritten. A
+ * rerun after a push that landed reports the same landing.
+ */
+export function landScript(originRemote: string, forkRemote: string, land: LandPlan): string {
+  const date = `@${land.committedAt} +0000`;
   return `
 set -uo pipefail
 result() { printf '${RESULT_PREFIX}%s\\n' "$1"; exit 0; }
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
-rm -rf land && git init -q land && cd land
+export GIT_AUTHOR_NAME=${quote(land.author.name)} GIT_AUTHOR_EMAIL=${quote(land.author.email)} GIT_AUTHOR_DATE=${quote(date)}
+export GIT_COMMITTER_NAME=${quote(THRONG_COMMITTER.name)} GIT_COMMITTER_EMAIL=${quote(THRONG_COMMITTER.email)} GIT_COMMITTER_DATE=${quote(date)}
+rm -rf land message push.log && git init -q land && cd land
 git config core.hooksPath /dev/null
+printf '%s' ${quote(land.message)} > ../message
 git fetch -q ${quote(forkRemote)} '+refs/heads/*:refs/remotes/fork/*' || exit 10
 git fetch -q ${quote(originRemote)} '+refs/heads/main:refs/remotes/origin/main' || exit 12
-[ "$(git rev-parse origin/main)" = ${quote(tested.base)} ] || result '{"kind":"moved"}'
-git checkout -q -B attempt ${quote(sha)} || exit 11
-git rebase -q ${quote(tested.base)} > /dev/null 2>&1 || exit 14
-tree=$(git rev-parse 'HEAD^{tree}')
-[ "$tree" = ${quote(tested.tree)} ] || result "{\\"kind\\":\\"mismatch\\",\\"tree\\":\\"$tree\\"}"
-if git push -q ${quote(originRemote)} HEAD:refs/heads/main; then
-  result "{\\"kind\\":\\"landed\\",\\"mainSha\\":\\"$(git rev-parse HEAD)\\"}"
+git cat-file -e ${quote(`${land.head}^{commit}`)} || exit 11
+git cat-file -e ${quote(`${land.main}^{commit}`)} 2> /dev/null || result '{"kind":"moved"}'
+tree=$(git merge-tree --write-tree ${quote(land.main)} ${quote(land.head)} | head -n 1)
+[ "$tree" = ${quote(land.tree)} ] || result "{\\"kind\\":\\"mismatch\\",\\"tree\\":\\"$tree\\"}"
+commit=$(git commit-tree "$tree" -p ${quote(land.main)} -p ${quote(land.head)} -F ../message) || exit 13
+if git push -q --force-with-lease=refs/heads/main:${quote(land.main)} ${quote(originRemote)} "$commit:refs/heads/main" 2> ../push.log; then
+  result "{\\"kind\\":\\"landed\\",\\"sha\\":\\"$commit\\"}"
 fi
+now=$(git ls-remote ${quote(originRemote)} refs/heads/main | cut -f 1) || exit 12
+[ "$now" = "$commit" ] && result "{\\"kind\\":\\"landed\\",\\"sha\\":\\"$commit\\"}"
+[ "$now" = ${quote(land.main)} ] && exit 13
 result '{"kind":"moved"}'
 `;
 }

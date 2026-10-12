@@ -5,7 +5,8 @@
 // - a head that is already queued or running isn't queued again, and one with a `done` run isn't
 //   either, unless the request is a rescore;
 // - a newer head for an attempt cancels its queued or running run, so newest head wins;
-// - at most `SCORING_CAP` runs are running per project; the rest wait, oldest first.
+// - at most `SCORING_CAP` runs are running per project, less the slot the merge queue's landing
+//   holds (it counts toward the cap and goes first); the rest wait, oldest first.
 //
 // It also tracks each attempt's head, moved by every push and scoring request, so a result for an
 // older head is superseded and the attempt's `scoring` status is about its current head.
@@ -13,15 +14,16 @@
 // `request` only writes rows, so it can sit inside the store's transactions. Starting and stopping
 // Workflows is I/O, done by `drain`, which the Durable Object runs after every store call.
 
+import { normaliseResult } from "./casing.ts";
 import { forkRepo } from "./repos.ts";
 import type { ScoringResult } from "./results.ts";
 import { attemptRef, type Sql } from "./task-store.ts";
 import type { Actor } from "./tokens.ts";
 
-/** Most scoring runs one project may have running (each holds a Sandbox) at once. */
+/** Most Sandbox-holding runs (scoring runs and the landing) one project may have running at once. */
 export const SCORING_CAP = 3;
 
-export const SCORING_TRIGGERS = ["open", "push", "score_now", "rescore"] as const;
+export const SCORING_TRIGGERS = ["open", "push", "scoreNow", "rescore"] as const;
 export const RUN_STATUSES = ["queued", "running", "done", "cancelled", "errored"] as const;
 export type ScoringTrigger = (typeof SCORING_TRIGGERS)[number];
 export type RunStatus = (typeof RUN_STATUSES)[number];
@@ -159,6 +161,8 @@ export interface ScoringQueueDeps {
   /** Starts and stops runs; without one, runs stay queued. */
   runner?: ScoringRunner | null | undefined;
   now?: () => Date;
+  /** Sandbox slots under the cap held for something else (the merge queue's landing), so runs don't take them. */
+  reserved?: () => number;
 }
 
 /** One project's scoring runs, and the queue that starts them. */
@@ -166,11 +170,13 @@ export class ScoringQueue {
   readonly #sql: Sql;
   readonly #runner: ScoringRunner | null;
   readonly #now: () => Date;
+  readonly #reserved: () => number;
 
-  constructor({ sql, runner = null, now = () => new Date() }: ScoringQueueDeps) {
+  constructor({ sql, runner = null, now = () => new Date(), reserved = () => 0 }: ScoringQueueDeps) {
     this.#sql = sql;
     this.#runner = runner;
     this.#now = now;
+    this.#reserved = reserved;
     for (const statement of SCHEMA) sql.exec(statement);
     const columns = new Set(sql.exec<{ name: string }>("PRAGMA table_info(scoring_runs)").map((c) => c.name));
     for (const column of RUN_COLUMNS) {
@@ -286,7 +292,7 @@ export class ScoringQueue {
       const instanceId = `${forkRepo(input.project, headAttemptRef(row))}-${input.sha.slice(0, 12)}-${row.id}`;
       this.#sql.exec("UPDATE scoring_runs SET instance_id = ? WHERE id = ?", instanceId, row.id);
       const run = toRun({ ...row, instance_id: instanceId });
-      this.#journal("scoring_queued", run, { trigger: input.trigger });
+      this.#journal("scoringQueued", run, { trigger: input.trigger });
       return { queued: true, run };
     });
   }
@@ -306,6 +312,14 @@ export class ScoringQueue {
         .map(toRun);
       for (const run of live) this.#cancel(run, { reason });
     });
+  }
+
+  /** How many runs are running, each holding a Sandbox slot. */
+  running(): number {
+    const [{ n } = { n: 0 }] = this.#sql.exec<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM scoring_runs WHERE status = 'running'",
+    );
+    return n;
   }
 
   /** The newest run id for the attempt, or 0; what a request's `readSince` compares against. */
@@ -338,17 +352,14 @@ export class ScoringQueue {
     await Promise.all(stopping.map((run) => this.#stop(runner, run)));
 
     const starting = this.#sql.transaction(() => {
-      const [{ n } = { n: 0 }] = this.#sql.exec<{ n: number }>(
-        "SELECT COUNT(*) AS n FROM scoring_runs WHERE status = 'running'",
-      );
-      const free = SCORING_CAP - n;
+      const free = SCORING_CAP - this.running() - this.#reserved();
       if (free <= 0) return [];
       const rows = this.#sql
         .exec<RunRow>("SELECT * FROM scoring_runs WHERE status = 'queued' ORDER BY id LIMIT ?", free)
         .map(toRun);
       for (const run of rows) {
         this.#sql.exec("UPDATE scoring_runs SET status = 'running', started_at = ? WHERE id = ?", this.#ms(), run.id);
-        this.#journal("scoring_started", run, { instance_id: run.instance_id });
+        this.#journal("scoringStarted", run, { instanceId: run.instance_id });
       }
       return rows;
     });
@@ -390,7 +401,7 @@ export class ScoringQueue {
           at,
           id,
         );
-        this.#journal("scoring_errored", run, { error: outcome.error });
+        this.#journal("scoringErrored", run, { error: outcome.error });
       }
       return true;
     });
@@ -424,7 +435,7 @@ export class ScoringQueue {
         this.#ms(),
         run.id,
       );
-      this.#journal("scoring_errored", run, { error: String(cause) });
+      this.#journal("scoringErrored", run, { error: String(cause) });
       return;
     }
     // A newer head may have cancelled the run while its Workflow was being created.
@@ -448,7 +459,7 @@ export class ScoringQueue {
 
   #cancel(run: StoredRun, detail: Record<string, unknown>): void {
     this.#sql.exec("UPDATE scoring_runs SET status = 'cancelled', finished_at = ? WHERE id = ?", this.#ms(), run.id);
-    this.#journal("scoring_cancelled", run, detail);
+    this.#journal("scoringCancelled", run, detail);
   }
 
   #journal(kind: string, run: StoredRun, extra: Record<string, unknown>): void {
@@ -484,7 +495,7 @@ function toRun(row: RunRow): StoredRun {
 /** A stored result; one stored before runs kept logs has none. */
 function storedResult(json: string): ScoringResult {
   const result = JSON.parse(json) as Omit<ScoringResult, "logs"> & { logs?: string[] };
-  return { ...result, logs: result.logs ?? [] };
+  return normaliseResult({ ...result, logs: result.logs ?? [] });
 }
 
 /** A result in a few words for the journal: `no checks configured`, `2 passed, 1 failed`, `config invalid`. */

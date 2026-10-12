@@ -73,24 +73,24 @@ describe("GET /projects/{owner}/{project}/runs/{runId}/logs/{name}", () => {
     expect(await (await request(`${base}/runs/${run}/logs/setup.1`, ada)).text()).toBe("added 12 packages\n");
   });
 
-  it("is not_found for a log the run never stored, or one the lifecycle rule expired", async () => {
+  it("is notFound for a log the run never stored, or one the lifecycle rule expired", async () => {
     const { request, logs, ada, run, prefix, base } = await setup();
     logs.objects.set(`${prefix}/test.log`, "ok\n");
     logs.objects.delete(`${prefix}/test.log`);
     for (const name of ["test", "bundle"]) {
       const res = await request(`${base}/runs/${run}/logs/${name}`, ada);
       expect(res.status).toBe(404);
-      expect(await res.json()).toEqual({ error: { code: "not_found", message: expect.any(String) } });
+      expect(await res.json()).toEqual({ error: { code: "notFound", message: expect.any(String) } });
     }
   });
 
-  it("is not_found for a run the project doesn't have, or a name no log can have", async () => {
+  it("is notFound for a run the project doesn't have, or a name no log can have", async () => {
     const { request, logs, ada, run, prefix, base } = await setup();
     logs.objects.set(`${prefix}/test.log`, "ok\n");
     for (const path of [`${base}/runs/${run + 1}/logs/test`, `${base}/runs/${run}/logs/..%2Ftest`]) {
       const res = await request(path, ada);
       expect(res.status).toBe(404);
-      expect(((await res.json()) as Json)["error"]["code"]).toBe("not_found");
+      expect(((await res.json()) as Json)["error"]["code"]).toBe("notFound");
     }
     expect((await request(`/projects/greg/other/runs/${run}/logs/test`, ada)).status).toBe(404);
     expect((await request(`${base}/runs/x/logs/test`, ada)).status).toBe(400);

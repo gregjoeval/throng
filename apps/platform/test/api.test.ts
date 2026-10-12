@@ -69,7 +69,7 @@ describe("GET /api/me", () => {
     const minted = await mint({ agent: "claude" });
     const res = await call("GET", "/me", { bearer: minted["token"] });
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ user, agent: "claude", token: { id: minted["id"], expires_at: minted["expires_at"] } });
+    expect(res.body).toEqual({ user, agent: "claude", token: { id: minted["id"], expiresAt: minted["expiresAt"] } });
   });
 });
 
@@ -81,9 +81,9 @@ describe("POST /api/tokens", () => {
       id: expect.stringMatching(/^[a-z0-9]{12}$/),
       agent: null,
       token: expect.stringMatching(/^thr_[A-Za-z0-9_-]{43}$/),
-      created_at: "2026-10-10T12:00:00.000Z",
-      expires_at: "2026-10-11T12:00:00.000Z",
-      revoked_at: null,
+      createdAt: "2026-10-10T12:00:00.000Z",
+      expiresAt: "2026-10-11T12:00:00.000Z",
+      revokedAt: null,
     });
     const row = await env.DB.prepare("SELECT * FROM tokens WHERE id = ?").bind(minted["id"]).first<Json>();
     expect(row?.["hash"]).toMatch(/^[0-9a-f]{64}$/);
@@ -92,25 +92,19 @@ describe("POST /api/tokens", () => {
 
   it("accepts an agent alias and an expiry of up to 7 days", async () => {
     const { mint } = setup();
-    expect(await mint({ agent: "claude", expires_in: 7 * DAY })).toMatchObject({
+    expect(await mint({ agent: "claude", expiresIn: 7 * DAY })).toMatchObject({
       agent: "claude",
-      expires_at: "2026-10-17T12:00:00.000Z",
+      expiresAt: "2026-10-17T12:00:00.000Z",
     });
   });
 
   it("rejects an expiry above 7 days, and malformed requests", async () => {
     const { call, human } = setup();
-    const bodies = [
-      { expires_in: 7 * DAY + 1 },
-      { expires_in: 0 },
-      { expires_in: 1.5 },
-      { agent: "" },
-      { agent: "a(b)" },
-    ];
+    const bodies = [{ expiresIn: 7 * DAY + 1 }, { expiresIn: 0 }, { expiresIn: 1.5 }, { agent: "" }, { agent: "a(b)" }];
     for (const body of bodies) {
       const res = await call("POST", "/tokens", human, body);
       expect(res.status).toBe(400);
-      expect(res.body["error"]["code"]).toBe("invalid_request");
+      expect(res.body["error"]["code"]).toBe("invalidRequest");
     }
   });
 
@@ -121,11 +115,11 @@ describe("POST /api/tokens", () => {
 
   it("lets a token mint another, no longer-lived than itself", async () => {
     const { call, mint } = setup();
-    const parent = await mint({ expires_in: 2 * HOUR });
+    const parent = await mint({ expiresIn: 2 * HOUR });
     const bearer = { bearer: parent["token"] };
-    expect((await mint({}, bearer))["expires_at"]).toBe(parent["expires_at"]);
-    expect((await mint({ expires_in: HOUR, agent: "claude" }, bearer))["agent"]).toBe("claude");
-    expect((await call("POST", "/tokens", bearer, { expires_in: 3 * HOUR })).status).toBe(400);
+    expect((await mint({}, bearer))["expiresAt"]).toBe(parent["expiresAt"]);
+    expect((await mint({ expiresIn: HOUR, agent: "claude" }, bearer))["agent"]).toBe("claude");
+    expect((await call("POST", "/tokens", bearer, { expiresIn: 3 * HOUR })).status).toBe(400);
   });
 
   it("only lets an agent's token mint for that agent", async () => {
@@ -146,7 +140,7 @@ describe("GET /api/tokens", () => {
     expect(res.status).toBe(200);
     expect(res.body["tokens"].map((t: Json) => t["id"])).toEqual([second["id"], first["id"]]);
     for (const token of res.body["tokens"]) {
-      expect(Object.keys(token).toSorted()).toEqual(["agent", "created_at", "expires_at", "id", "revoked_at"]);
+      expect(Object.keys(token).toSorted()).toEqual(["agent", "createdAt", "expiresAt", "id", "revokedAt"]);
     }
   });
 
@@ -169,12 +163,12 @@ describe("DELETE /api/tokens/{id}", () => {
 
     const revoked = await call("DELETE", `/tokens/${minted["id"]}`, human);
     expect(revoked.status).toBe(200);
-    expect(revoked.body["revoked_at"]).toBe("2026-10-10T12:00:00.000Z");
+    expect(revoked.body["revokedAt"]).toBe("2026-10-10T12:00:00.000Z");
     expect((await call("GET", "/me", bearer)).status).toBe(401);
 
     advance(60);
     const again = await call("DELETE", `/tokens/${minted["id"]}`, human);
-    expect(again.body["revoked_at"]).toBe("2026-10-10T12:00:00.000Z");
+    expect(again.body["revokedAt"]).toBe("2026-10-10T12:00:00.000Z");
   });
 
   it("lets a token revoke itself", async () => {
@@ -188,7 +182,7 @@ describe("DELETE /api/tokens/{id}", () => {
   it("is 404 for unknown ids and other callers' tokens", async () => {
     const { call, mint, human } = setup();
     expect((await call("DELETE", "/tokens/nope", human)).body).toEqual({
-      error: { code: "not_found", message: "no such token" },
+      error: { code: "notFound", message: "no such token" },
     });
     const humanToken = await mint();
     const agent = { bearer: (await mint({ agent: "claude" }))["token"] };
@@ -199,7 +193,7 @@ describe("DELETE /api/tokens/{id}", () => {
 describe("token expiry", () => {
   it("accepts a token until the instant it expires, then rejects it", async () => {
     const { call, mint, advance } = setup();
-    const bearer = { bearer: (await mint({ expires_in: HOUR }))["token"] };
+    const bearer = { bearer: (await mint({ expiresIn: HOUR }))["token"] };
     advance(HOUR - 1);
     expect((await call("GET", "/me", bearer)).status).toBe(200);
     advance(1);
@@ -217,7 +211,7 @@ describe("POST /api/projects", () => {
       id: expect.stringMatching(/^[a-z0-9]{6}$/),
       handle: "throng",
       owner: { id: expect.any(String), handle: "greg" },
-      created_at: expect.any(String),
+      createdAt: expect.any(String),
     });
     expect(await repos.list(res.body["id"])).toEqual([`${res.body["id"]}-main`]);
   });
@@ -237,7 +231,7 @@ describe("POST /api/projects", () => {
     for (const body of [{}, { handle: "Throng" }, { handle: "a/b" }, { handle: 1 }]) {
       const res = await call("POST", "/projects", bearer, body);
       expect(res.status).toBe(400);
-      expect(res.body["error"]["code"]).toBe("invalid_request");
+      expect(res.body["error"]["code"]).toBe("invalidRequest");
     }
   });
 
@@ -301,7 +295,7 @@ describe("GET /api/projects/{owner}/{project}", () => {
     for (const path of ["/projects/nobody/throng", "/projects/greg/nothing"]) {
       const res = await call("GET", path, bearer);
       expect(res.status).toBe(404);
-      expect(res.body["error"]["code"]).toBe("not_found");
+      expect(res.body["error"]["code"]).toBe("notFound");
     }
   });
 

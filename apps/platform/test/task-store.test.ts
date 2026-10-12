@@ -115,7 +115,7 @@ describe("tasks", () => {
   it("numbers tasks from 1 per project and never reuses numbers", async () => {
     const { store } = setup();
     const t1 = store.createTask(PROJECT, ada, { title: "One" });
-    const t2 = store.createTask(PROJECT, bob, { title: "Two", body: "**md**", attempt_limit: 2 });
+    const t2 = store.createTask(PROJECT, bob, { title: "Two", body: "**md**", attemptLimit: 2 });
     expect(t1).toEqual({
       number: 1,
       title: "One",
@@ -140,9 +140,9 @@ describe("tasks", () => {
 
   it("is not found for an unknown task", async () => {
     const { store } = setup();
-    expect(await code(() => store.getTask(PROJECT, ada, { task: 1 }))).toBe("not_found");
-    expect(await code(() => store.closeTask(PROJECT, owner, { task: 1 }))).toBe("not_found");
-    expect(await code(store.createAttempts(PROJECT, ada, { task: 1 }))).toBe("not_found");
+    expect(await code(() => store.getTask(PROJECT, ada, { task: 1 }))).toBe("notFound");
+    expect(await code(() => store.closeTask(PROJECT, owner, { task: 1 }))).toBe("notFound");
+    expect(await code(store.createAttempts(PROJECT, ada, { task: 1 }))).toBe("notFound");
   });
 
   it("lists tasks by number, leaving out obsolete ones unless asked", async () => {
@@ -157,13 +157,13 @@ describe("tasks", () => {
 
   it("edits title, body and attempt limit, keeping what isn't given", () => {
     const { store } = setup();
-    store.createTask(PROJECT, ada, { title: "a", body: "b", attempt_limit: 3 });
+    store.createTask(PROJECT, ada, { title: "a", body: "b", attemptLimit: 3 });
     expect(store.editTask(PROJECT, ada, { task: 1, title: "A" })).toMatchObject({
       title: "A",
       body: "b",
       attempt_limit: 3,
     });
-    expect(store.editTask(PROJECT, owner, { task: 1, attempt_limit: null })).toMatchObject({ attempt_limit: null });
+    expect(store.editTask(PROJECT, owner, { task: 1, attemptLimit: null })).toMatchObject({ attempt_limit: null });
   });
 
   it("lets the owner or the creator edit, close and reopen, and nobody else", async () => {
@@ -196,16 +196,16 @@ describe("tasks", () => {
   it("allows only the spec's task transitions", async () => {
     const { store } = setup();
     store.createTask(PROJECT, ada, { title: "a" });
-    expect(await code(() => store.reopenTask(PROJECT, owner, { task: 1 }))).toBe("invalid_state");
-    expect(await code(() => store.restoreTask(PROJECT, owner, { task: 1 }))).toBe("invalid_state");
+    expect(await code(() => store.reopenTask(PROJECT, owner, { task: 1 }))).toBe("invalidState");
+    expect(await code(() => store.restoreTask(PROJECT, owner, { task: 1 }))).toBe("invalidState");
     await store.closeTask(PROJECT, owner, { task: 1 });
-    expect(await code(() => store.closeTask(PROJECT, owner, { task: 1 }))).toBe("invalid_state");
-    expect(await code(() => store.restoreTask(PROJECT, owner, { task: 1 }))).toBe("invalid_state");
+    expect(await code(() => store.closeTask(PROJECT, owner, { task: 1 }))).toBe("invalidState");
+    expect(await code(() => store.restoreTask(PROJECT, owner, { task: 1 }))).toBe("invalidState");
     await store.obsoleteTask(PROJECT, owner, { task: 1 });
-    expect(await code(() => store.obsoleteTask(PROJECT, owner, { task: 1 }))).toBe("invalid_state");
-    expect(await code(() => store.closeTask(PROJECT, owner, { task: 1 }))).toBe("invalid_state");
-    expect(await code(() => store.reopenTask(PROJECT, owner, { task: 1 }))).toBe("invalid_state");
-    expect(await code(() => store.editTask(PROJECT, owner, { task: 1, title: "x" }))).toBe("invalid_state");
+    expect(await code(() => store.obsoleteTask(PROJECT, owner, { task: 1 }))).toBe("invalidState");
+    expect(await code(() => store.closeTask(PROJECT, owner, { task: 1 }))).toBe("invalidState");
+    expect(await code(() => store.reopenTask(PROJECT, owner, { task: 1 }))).toBe("invalidState");
+    expect(await code(() => store.editTask(PROJECT, owner, { task: 1, title: "x" }))).toBe("invalidState");
     store.restoreTask(PROJECT, owner, { task: 1 });
     expect(store.reopenTask(PROJECT, owner, { task: 1 }).state).toBe("open");
   });
@@ -230,7 +230,7 @@ describe("tasks", () => {
   it("keeps a task with a merged attempt closed", async () => {
     const { store } = setup();
     await attemptIn(store, "merged");
-    expect(await code(() => store.reopenTask(PROJECT, owner, { task: 1 }))).toBe("invalid_state");
+    expect(await code(() => store.reopenTask(PROJECT, owner, { task: 1 }))).toBe("invalidState");
   });
 });
 
@@ -253,6 +253,7 @@ describe("attempts", () => {
         merged_sha: null,
         archived_sha: null,
         scoring: { status: "none", sha: null },
+        merge_request: null,
       })),
     );
     expect(await repos.get("abc123-t1a1")).toMatchObject({ parent: "abc123-main" });
@@ -278,13 +279,13 @@ describe("attempts", () => {
     const { store } = setup();
     store.createTask(PROJECT, ada, { title: "a" });
     await store.closeTask(PROJECT, ada, { task: 1 });
-    expect(await code(store.createAttempts(PROJECT, ada, { task: 1 }))).toBe("invalid_state");
+    expect(await code(store.createAttempts(PROJECT, ada, { task: 1 }))).toBe("invalidState");
   });
 
   it("rejects a count below 1", async () => {
     const { store } = setup();
     store.createTask(PROJECT, ada, { title: "a" });
-    expect(await code(store.createAttempts(PROJECT, ada, { task: 1, count: 0 }))).toBe("invalid_request");
+    expect(await code(store.createAttempts(PROJECT, ada, { task: 1, count: 0 }))).toBe("invalidRequest");
   });
 
   it("lists a task's attempts, leaving out obsolete ones unless asked", async () => {
@@ -320,11 +321,11 @@ describe("attempts", () => {
     for (const [from, allowed] of Object.entries(valid) as [AttemptState, Partial<Record<Move, AttemptState>>][]) {
       for (const move of Object.keys(moves) as Move[]) {
         const to = allowed[move];
-        it(`${from} --${move}--> ${to ?? "invalid_state"}`, async () => {
+        it(`${from} --${move}--> ${to ?? "invalidState"}`, async () => {
           const { store } = setup();
           await attemptIn(store, from);
           if (to === undefined) {
-            expect(await code(async () => moves[move](store))).toBe("invalid_state");
+            expect(await code(async () => moves[move](store))).toBe("invalidState");
             expect(store.getAttempt(PROJECT, ada, ref).state).toBe(from);
           } else {
             await moves[move](store);
@@ -352,9 +353,9 @@ describe("attempts", () => {
       ["created", ada.user.id, null, null],
       ["created", ada.user.id, "claude", 1],
       ["opened", ada.user.id, "claude", 1],
-      ["returned_to_draft", ada.user.id, null, 1],
+      ["returnedToDraft", ada.user.id, null, 1],
       ["closed", ada.user.id, null, 1],
-      ["made_obsolete", owner.user.id, null, 1],
+      ["madeObsolete", owner.user.id, null, 1],
       ["restored", owner.user.id, null, 1],
       ["reopened", ada.user.id, null, 1],
       ["opened", ada.user.id, null, 1],
@@ -388,17 +389,17 @@ describe("attempts", () => {
     expect(await code(() => store.obsoleteAttempt(PROJECT, ada, ref))).toBe("forbidden");
     await store.obsoleteAttempt(PROJECT, owner, ref);
     expect(await code(() => store.restoreAttempt(PROJECT, ada, ref))).toBe("forbidden");
-    expect(await code(() => store.editAttempt(PROJECT, ada, { ...ref, note: "x" }))).toBe("invalid_state");
+    expect(await code(() => store.editAttempt(PROJECT, ada, { ...ref, note: "x" }))).toBe("invalidState");
   });
 
   it("reopens an attempt only on an open task", async () => {
     const { store } = setup();
     await attemptIn(store, "closed");
     await store.closeTask(PROJECT, ada, { task: 1 });
-    expect(await code(store.reopenAttempt(PROJECT, ada, { task: 1, number: 1 }))).toBe("invalid_state");
+    expect(await code(store.reopenAttempt(PROJECT, ada, { task: 1, number: 1 }))).toBe("invalidState");
   });
 
-  it("merging records the sha, closes the task and its other active attempts", async () => {
+  it("merging records the sha and closes the task, leaving siblings to the selection", async () => {
     const { store } = setup();
     store.createTask(PROJECT, ada, { title: "a" });
     await store.createAttempts(PROJECT, ada, { task: 1, count: 2 });
@@ -407,7 +408,7 @@ describe("attempts", () => {
     await store.openAttempt(PROJECT, bob, { task: 1, number: 3 });
     const merged = await store.markMerged(PROJECT, bob, { task: 1, number: 3, sha: "f00d" });
     expect(merged).toMatchObject({ state: "merged", merged_sha: "f00d", closed_at: "2026-10-10T12:00:00.000Z" });
-    expect(store.listAttempts(PROJECT, ada, { task: 1 }).map((a) => a.state)).toEqual(["closed", "closed", "merged"]);
+    expect(store.listAttempts(PROJECT, ada, { task: 1 }).map((a) => a.state)).toEqual(["open", "draft", "merged"]);
     expect(store.getTask(PROJECT, ada, { task: 1 })).toMatchObject({ state: "closed", closed_by: bob.user.id });
   });
 });
@@ -418,20 +419,20 @@ describe("attempt cap", () => {
     store.createTask(PROJECT, ada, { title: "a" });
     await store.createAttempts(PROJECT, ada, { task: 1, count: 9 });
     const forks = (await repos.list("abc123-t")).length;
-    expect(await code(store.createAttempts(PROJECT, ada, { task: 1, count: 2 }))).toBe("attempt_limit");
+    expect(await code(store.createAttempts(PROJECT, ada, { task: 1, count: 2 }))).toBe("attemptLimit");
     expect(await repos.list("abc123-t")).toHaveLength(forks);
     expect(store.listAttempts(PROJECT, ada, { task: 1 })).toHaveLength(9);
     await store.createAttempts(PROJECT, ada, { task: 1 });
-    expect(await code(store.createAttempts(PROJECT, ada, { task: 1 }))).toBe("attempt_limit");
+    expect(await code(store.createAttempts(PROJECT, ada, { task: 1 }))).toBe("attemptLimit");
   });
 
   it("counts only active attempts", async () => {
     const { store } = setup();
-    store.createTask(PROJECT, ada, { title: "a", attempt_limit: 2 });
+    store.createTask(PROJECT, ada, { title: "a", attemptLimit: 2 });
     await store.createAttempts(PROJECT, ada, { task: 1, count: 2 });
     await store.closeAttempt(PROJECT, ada, { task: 1, number: 1 });
     await store.createAttempts(PROJECT, ada, { task: 1 });
-    expect(await code(store.reopenAttempt(PROJECT, ada, { task: 1, number: 1 }))).toBe("attempt_limit");
+    expect(await code(store.reopenAttempt(PROJECT, ada, { task: 1, number: 1 }))).toBe("attemptLimit");
     await store.obsoleteAttempt(PROJECT, owner, { task: 1, number: 2 });
     expect((await store.reopenAttempt(PROJECT, ada, { task: 1, number: 1 })).state).toBe("draft");
   });
@@ -440,22 +441,22 @@ describe("attempt cap", () => {
     const { store, repos } = setup();
     repos.writeFile("abc123-main", "main", CONFIG_PATH, "attempts:\n  limit: 2\n");
     store.createTask(PROJECT, ada, { title: "a" });
-    expect(await code(store.createAttempts(PROJECT, ada, { task: 1, count: 3 }))).toBe("attempt_limit");
+    expect(await code(store.createAttempts(PROJECT, ada, { task: 1, count: 3 }))).toBe("attemptLimit");
     expect(await store.createAttempts(PROJECT, ada, { task: 1, count: 2 })).toHaveLength(2);
   });
 
   it("lets the task's attempt_limit override the project's", async () => {
     const { store, repos } = setup();
     repos.writeFile("abc123-main", "main", CONFIG_PATH, "attempts:\n  limit: 2\n");
-    store.createTask(PROJECT, ada, { title: "a", attempt_limit: 12 });
+    store.createTask(PROJECT, ada, { title: "a", attemptLimit: 12 });
     expect(await store.createAttempts(PROJECT, ada, { task: 1, count: 12 })).toHaveLength(12);
-    store.createTask(PROJECT, ada, { title: "b", attempt_limit: 1 });
-    expect(await code(store.createAttempts(PROJECT, ada, { task: 2, count: 2 }))).toBe("attempt_limit");
+    store.createTask(PROJECT, ada, { title: "b", attemptLimit: 1 });
+    expect(await code(store.createAttempts(PROJECT, ada, { task: 2, count: 2 }))).toBe("attemptLimit");
   });
 
   it("holds the cap across concurrent batches", async () => {
     const { store } = setup();
-    store.createTask(PROJECT, ada, { title: "a", attempt_limit: 3 });
+    store.createTask(PROJECT, ada, { title: "a", attemptLimit: 3 });
     const results = await Promise.allSettled([
       store.createAttempts(PROJECT, ada, { task: 1, count: 2 }),
       store.createAttempts(PROJECT, bob, { task: 1, count: 2 }),
@@ -492,7 +493,7 @@ describe("batch atomicity", () => {
       await fork(source, name);
       if (store.getTask(PROJECT, ada, { task: 1 }).state === "open") await store.closeTask(PROJECT, ada, { task: 1 });
     };
-    expect(await code(store.createAttempts(PROJECT, ada, { task: 1, count: 2 }))).toBe("invalid_state");
+    expect(await code(store.createAttempts(PROJECT, ada, { task: 1, count: 2 }))).toBe("invalidState");
     expect(await repos.list("abc123-t")).toEqual([]);
   });
 });
@@ -523,7 +524,7 @@ describe("branches", () => {
   it("puts a branch on exactly one attempt", async () => {
     const { store } = setup();
     store.createTask(PROJECT, ada, { title: "a" });
-    expect(await code(store.createAttempts(PROJECT, ada, { task: 1, count: 2, branch: "x" }))).toBe("invalid_request");
+    expect(await code(store.createAttempts(PROJECT, ada, { task: 1, count: 2, branch: "x" }))).toBe("invalidRequest");
   });
 });
 
@@ -598,11 +599,12 @@ describe("archive", () => {
     await store.createAttempts(PROJECT, ada, { task: 3, count: 2 });
     await store.openAttempt(PROJECT, ada, { task: 3, number: 1 });
     await store.markMerged(PROJECT, owner, { task: 3, number: 1, sha: "landed" });
+    // The selection closes the merged attempt's siblings; merging archives only the merged one.
     expect(store.listAttempts(PROJECT, ada, { task: 3 }).map((a) => [a.state, a.archived_sha])).toEqual([
       ["merged", "base"],
-      ["closed", "base"],
+      ["draft", null],
     ]);
-    expect(await repos.list("abc123-t")).toEqual([]);
+    expect(await repos.list("abc123-t")).toEqual(["abc123-t3a2"]);
   });
 
   it("archives nothing when a closed attempt is made obsolete", async () => {
@@ -670,14 +672,14 @@ describe("archive", () => {
       await fork(source, name);
       await store.obsoleteAttempt(PROJECT, owner, t1a1);
     };
-    expect(await code(store.reopenAttempt(PROJECT, ada, t1a1))).toBe("invalid_state");
+    expect(await code(store.reopenAttempt(PROJECT, ada, t1a1))).toBe("invalidState");
     expect(store.getAttempt(PROJECT, ada, t1a1).state).toBe("obsolete");
     expect(await repos.list("abc123-t")).toEqual([]);
   });
 
   it("holds the cap while a reopen's fork is made", async () => {
     const { store, repos } = await withWork();
-    store.editTask(PROJECT, ada, { task: 1, attempt_limit: 1 });
+    store.editTask(PROJECT, ada, { task: 1, attemptLimit: 1 });
     await store.closeAttempt(PROJECT, ada, t1a1);
     const fork = repos.fork.bind(repos);
     let racing: Promise<unknown> | undefined;
@@ -686,7 +688,7 @@ describe("archive", () => {
       return fork(source, name);
     };
     expect((await store.reopenAttempt(PROJECT, ada, t1a1)).state).toBe("draft");
-    expect(((await racing) as ServiceError).code).toBe("attempt_limit");
+    expect(((await racing) as ServiceError).code).toBe("attemptLimit");
   });
 });
 
@@ -700,6 +702,107 @@ describe("migrate", () => {
     const columns = sql.exec<{ name: string }>("PRAGMA table_info(journal)").map((c) => c.name);
     expect(columns).toEqual(["id", "at", "kind", "detail", "user_id", "agent", "task", "attempt"]);
     expect(sql.exec("SELECT kind FROM journal")).toEqual([{ kind: "duplicate" }]);
+  });
+
+  it("moves values stored in snake_case to camelCase, and reads old JSON in camelCase", () => {
+    const sql = testSql();
+    const repos = new FakeRepos();
+    const at = "2026-10-10T12:00:00.000Z";
+    // A store opened before any value moved, so the tables exist to hold old rows.
+    expect(new TaskStore({ sql, repos })).toBeDefined();
+    sql.exec(
+      `INSERT INTO tasks (number, title, body, creator, state, created_at) VALUES (1, 't', '', 'ada', 'open', ?)`,
+      at,
+    );
+    sql.exec(
+      `INSERT INTO tasks (number, title, body, creator, state, created_at) VALUES (2, 't', '', 'ada', 'open', ?)`,
+      at,
+    );
+    const conflict = {
+      reason: "conflict",
+      at,
+      details: {
+        attempt: "t1a1",
+        head: "a",
+        main: "b",
+        base: null,
+        files: [{ path: "x", type: "modify_delete", blobs: {}, modes: {}, truncated: false }],
+      },
+    };
+    const failed = {
+      reason: "failed_checks",
+      at,
+      details: { checks: [{ name: "test", outcome: "timed_out", log: "test" }] },
+    };
+    for (const [task, state, dequeue] of [
+      [1, "needs_review", conflict],
+      [2, "pending", failed],
+    ] as const) {
+      sql.exec(
+        `INSERT INTO merge_requests (task, attempt, state, approved_head, approved_by_user, approved_at, last_dequeue,
+           created_at, created_by_user) VALUES (?, 1, ?, 'a', 'ada', ?, ?, ?, 'ada')`,
+        task,
+        state,
+        at,
+        JSON.stringify(dequeue),
+        at,
+      );
+    }
+    const result = {
+      base: null,
+      config: { kind: "valid" },
+      gate: "failed",
+      checks: [{ name: "test", required: true, outcome: "timed_out", durationMs: 1, metrics: {}, notes: [] }],
+      builtin: { filesChanged: 0, additions: 0, deletions: 0, durationMs: 0 },
+      preview: { status: "none" },
+      logs: [],
+    };
+    sql.exec(
+      `INSERT INTO scoring_runs (project, task, attempt, sha, trigger, status, instance_id, created_at, result)
+       VALUES ('abc123', 1, 1, 'a', 'score_now', 'done', 'i', 0, ?)`,
+      JSON.stringify(result),
+    );
+    for (const kind of [
+      "returned_to_draft",
+      "handed_off",
+      "made_obsolete",
+      "main_advanced",
+      "needs_review",
+      "scoring_queued",
+      "fork-ready",
+    ]) {
+      sql.exec("INSERT INTO journal (at, kind, detail) VALUES (1, ?, '{}')", kind);
+    }
+
+    const store = new TaskStore({ sql, repos });
+    // Opening again migrates nothing more.
+    expect(new TaskStore({ sql, repos })).toBeDefined();
+
+    const first = store.getMergeRequest(PROJECT, ada, { task: 1 });
+    expect(first.state).toBe("needsReview");
+    expect(first.last_dequeue).toMatchObject({ reason: "conflict", details: { files: [{ type: "modifyDelete" }] } });
+    const second = store.getMergeRequest(PROJECT, ada, { task: 2 });
+    expect(second.last_dequeue).toMatchObject({
+      reason: "failedChecks",
+      details: { checks: [{ name: "test", outcome: "timedOut", log: "test" }] },
+    });
+    const run = store.getScoringRun(PROJECT, ada, { run: 1 });
+    expect(run.trigger).toBe("scoreNow");
+    expect(run.result?.checks[0]?.outcome).toBe("timedOut");
+    expect(sql.exec("SELECT kind FROM journal ORDER BY id")).toEqual(
+      ["returnedToDraft", "handedOff", "madeObsolete", "mainAdvanced", "needsReview", "scoringQueued", "forkReady"].map(
+        (kind) => ({ kind }),
+      ),
+    );
+    // One open merge request per task still holds for the migrated state.
+    expect(() =>
+      sql.exec(
+        `INSERT INTO merge_requests (task, attempt, state, approved_head, approved_by_user, approved_at, created_at,
+           created_by_user) VALUES (1, 2, 'pending', 'a', 'ada', ?, ?, 'ada')`,
+        at,
+        at,
+      ),
+    ).toThrow(/UNIQUE/);
   });
 
   it("drops the spike's push inbox tables", () => {
@@ -750,9 +853,9 @@ describe("push-to-create", () => {
   it("routes a new branch to a new task's first attempt, forked before the task exists", async () => {
     const { store, forks, exists } = clocked();
     const route = await store.routeBranchPush(PROJECT, ada, { branch: "search" });
-    expect(route).toEqual({ kind: "create", task: 1, number: 1, new_task: true });
+    expect(route).toEqual({ kind: "create", task: 1, number: 1, newTask: true });
     expect(forks()).toEqual(["abc123-t1a1"]);
-    expect(await code(() => store.getTask(PROJECT, ada, { task: 1 }))).toBe("not_found");
+    expect(await code(() => store.getTask(PROJECT, ada, { task: 1 }))).toBe("notFound");
 
     // A second push of the branch while the first is in flight is refused, by anyone.
     expect((await failure(store.routeBranchPush(PROJECT, ada, { branch: "search" }))).message).toMatch(
@@ -762,7 +865,7 @@ describe("push-to-create", () => {
     await store.abandonBranchPush(PROJECT, bob, { task: 1, number: 1 });
     expect(await exists("abc123-t1a1")).toBe(true);
     expect(await code(store.completeBranchPush(PROJECT, bob, { task: 1, number: 1, head: "x", updates: [] }))).toBe(
-      "invalid_state",
+      "invalidState",
     );
 
     await store.abandonBranchPush(PROJECT, ada, { task: 1, number: 1 });
@@ -782,12 +885,12 @@ describe("push-to-create", () => {
 
   it("joins a t<n>/ branch to its task, counting the push toward the cap until it completes", async () => {
     const { store } = clocked();
-    const task = store.createTask(PROJECT, ada, { title: "Fix it", attempt_limit: 2 });
+    const task = store.createTask(PROJECT, ada, { title: "Fix it", attemptLimit: 2 });
     await store.createAttempts(PROJECT, ada, { task: task.number });
 
     const route = await store.routeBranchPush(PROJECT, bob, { branch: "t1/bob" });
-    expect(route).toEqual({ kind: "create", task: 1, number: 2, new_task: false });
-    expect(await code(store.createAttempts(PROJECT, ada, { task: 1 }))).toBe("attempt_limit");
+    expect(route).toEqual({ kind: "create", task: 1, number: 2, newTask: false });
+    expect(await code(store.createAttempts(PROJECT, ada, { task: 1 }))).toBe("attemptLimit");
 
     const done = await store.completeBranchPush(PROJECT, bob, {
       task: 1,
@@ -812,7 +915,7 @@ describe("push-to-create", () => {
     await store.routeBranchPush(PROJECT, bob, { branch: "t1/bob" });
     store.closeTask(PROJECT, ada, { task: 1 });
     expect(await code(store.completeBranchPush(PROJECT, bob, { task: 1, number: 1, head: "b", updates: [] }))).toBe(
-      "invalid_state",
+      "invalidState",
     );
     await store.abandonBranchPush(PROJECT, bob, { task: 1, number: 1 });
     expect(await exists("abc123-t1a1")).toBe(false);

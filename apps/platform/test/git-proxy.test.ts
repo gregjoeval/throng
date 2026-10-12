@@ -8,12 +8,15 @@ import { afterEach, describe, expect, it } from "vitest";
 import { gitRoutes, UPSTREAM_TOKEN_TTL_SECONDS } from "../src/git-proxy.ts";
 import { projectService } from "../src/projects.ts";
 import { originRepo, forkRepo } from "../src/repos.ts";
+import type { ScoringResult } from "../src/results.ts";
+import type { ScoringRunner } from "../src/scoring.ts";
 import type { ProjectContext } from "../src/task-store.ts";
 import { mintToken, type Actor } from "../src/tokens.ts";
 import { userForEmail } from "../src/users.ts";
 import { testDatabase } from "./support/d1.ts";
 import { git, gitEnv, LocalGitHost, serve, tryGit } from "./support/git-host.ts";
 import { testTaskBackends } from "./support/task-backend.ts";
+import { conflictDetails, ERRORED } from "./support/conflicts.ts";
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -31,7 +34,12 @@ async function setup() {
   const env = gitEnv(work);
 
   const db = testDatabase();
-  const { backend, store, sql } = testTaskBackends(host, now);
+  // Runs start but never finish on their own: a test finishes one with `scoringFinished`.
+  const scoring: ScoringRunner = {
+    workflow: { create: async () => ({}), get: async () => ({ terminate: async () => {} }) },
+    teardown: async () => {},
+  };
+  const { backend, store, sql } = testTaskBackends(host, now, scoring);
   const app = new Hono().route("/git", gitRoutes({ repos: () => host, tasks: () => backend, now }));
   const server = await serve(app, { DB: db, ACCESS_TEAM_DOMAIN: "x", ACCESS_AUD: "x" });
   cleanups.push(server.close);
@@ -131,7 +139,7 @@ describe("git proxy", () => {
 
     expect(journal()).toHaveLength(1);
     expect(journal()[0]).toMatchObject({ kind: "pushed", user_id: ada.user.id, task: 1, attempt: 1 });
-    expect(JSON.parse(journal()[0]!.detail)).toEqual({ ref: "t1a1", git_ref: "refs/heads/main", before, after: sha });
+    expect(JSON.parse(journal()[0]!.detail)).toEqual({ ref: "t1a1", gitRef: "refs/heads/main", before, after: sha });
     // A draft isn't scored on push.
     expect(pushed.stderr).not.toMatch(/scoring/);
   });
@@ -307,5 +315,88 @@ describe("git proxy", () => {
         r.headers.some(([name]) => name.toLowerCase() === "www-authenticate" && r.status !== 401),
       ),
     ).toBe(false);
+  });
+});
+
+describe("merge request notices on a push to the source attempt", () => {
+  const passed: ScoringResult = {
+    base: "b".repeat(40),
+    config: { kind: "none" },
+    gate: "passed",
+    checks: [],
+    builtin: { filesChanged: 1, additions: 1, deletions: 0, durationMs: 5 },
+    preview: { status: "none" },
+    logs: [],
+  };
+
+  /** t1a1 opened, selected and queued (its head's run passed its gate), and a clone of it to push from. */
+  async function queued() {
+    const ctx = await setup();
+    const { ada, clone, project, store } = ctx;
+    const ref = { task: 1, number: 1 };
+    await store(project.id).openAttempt(project, ada.actor, ref);
+    await store(project.id).selectAttempt(project, ada.actor, ref);
+    await store(project.id).scoring.drain();
+    const run = store(project.id).scoring.listRuns({ task: 1, attempt: 1 }).at(-1)!;
+    store(project.id).scoringFinished(run.id, { status: "done", result: passed });
+    expect(store(project.id).getMergeRequest(project, ada.actor, { task: 1 }).state).toBe("queued");
+    const dir = await clone("throng/t1a1.git", ada.token);
+    const dequeueUrl = `${ctx.server.origin}/api/projects/greg/throng/tasks/t1/merge-request/dequeue`;
+    return { ...ctx, dir, dequeueUrl };
+  }
+
+  it("prints nothing for an attempt without a merge request", async () => {
+    const { ada, clone, commit, env, project, store } = await setup();
+    await store(project.id).openAttempt(project, ada.actor, { task: 1, number: 1 });
+    const dir = await clone("throng/t1a1.git", ada.token);
+    await commit(dir, "fix");
+    const pushed = await tryGit(dir, env, "push", "origin", "HEAD:main");
+    expect(pushed.ok).toBe(true);
+    expect(pushed.stderr).not.toMatch(/merge request/);
+  });
+
+  it("prints a conflict dequeue with its file count once, and that the push needs review", async () => {
+    const { commit, dir, dequeueUrl, env, project, store } = await queued();
+    const details = conflictDetails(["a.ts", "b.ts", "c.ts"]);
+    store(project.id).dequeueMergeRequest(project, null, { task: 1, reason: "conflict", details });
+
+    const sha = await commit(dir, "fix");
+    const pushed = await tryGit(dir, env, "push", "origin", "HEAD:main");
+    expect(pushed.ok).toBe(true);
+    expect(pushed.stderr).toContain(`remote: merge request t1 dequeued (conflict): 3 files — ${dequeueUrl}`);
+    expect(pushed.stderr).toContain(`remote: merge request t1 needs review: new head ${sha}`);
+
+    await commit(dir, "more");
+    const again = await tryGit(dir, env, "push", "origin", "HEAD:main");
+    expect(again.ok).toBe(true);
+    expect(again.stderr).not.toMatch(/merge request/);
+  });
+
+  it("prints a dequeue without a file count when there is none, on a push that moves no head", async () => {
+    const { dir, dequeueUrl, env, project, store } = await queued();
+    store(project.id).dequeueMergeRequest(project, null, { task: 1, reason: "errored", details: ERRORED });
+
+    const pushed = await tryGit(dir, env, "push", "origin", "HEAD:refs/heads/copy");
+    expect(pushed.ok).toBe(true);
+    expect(pushed.stderr).toContain(`remote: merge request t1 dequeued (errored) — ${dequeueUrl}`);
+    expect(pushed.stderr).not.toMatch(/needs review/);
+
+    const again = await tryGit(dir, env, "push", "origin", "HEAD:refs/heads/copy2");
+    expect(again.ok).toBe(true);
+    expect(again.stderr).not.toMatch(/merge request/);
+  });
+
+  it("says a push to a queued merge request's source needs review, not that it was dequeued for it", async () => {
+    const { commit, dir, env } = await queued();
+    const sha = await commit(dir, "fix");
+    const pushed = await tryGit(dir, env, "push", "origin", "HEAD:main");
+    expect(pushed.ok).toBe(true);
+    expect(pushed.stderr).toContain(`remote: merge request t1 needs review: new head ${sha}`);
+    expect(pushed.stderr).not.toMatch(/dequeued/);
+
+    await commit(dir, "more");
+    const again = await tryGit(dir, env, "push", "origin", "HEAD:main");
+    expect(again.ok).toBe(true);
+    expect(again.stderr).not.toMatch(/merge request/);
   });
 });

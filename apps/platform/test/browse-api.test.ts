@@ -17,10 +17,10 @@ const now = () => new Date("2026-10-10T12:00:00.000Z");
 const REF_CACHE = `private, max-age=${REF_MAX_AGE_SECONDS}`;
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d]);
 
-async function setup() {
+async function setup(extra: Partial<Parameters<typeof apiRoutes>[0]> = {}) {
   const repos = new FakeRepos();
   const backends = testTaskBackends(repos, now);
-  const options = { verifierFor: () => verify, now, repos: () => repos, tasks: () => backends.backend };
+  const options = { verifierFor: () => verify, now, repos: () => repos, tasks: () => backends.backend, ...extra };
   const api = apiRoutes(options);
   const env = { DB: testDatabase(), ACCESS_TEAM_DOMAIN: "throng.cloudflareaccess.com", ACCESS_AUD: "aud" };
 
@@ -96,9 +96,9 @@ describe("ref resolution", () => {
     expect((await get(`${base}/commit/${work.hash}?attempt=nope`)).status).toBe(400);
   });
 
-  it("returns not_found for unknown refs, projects and empty repos", async () => {
+  it("returns notFound for unknown refs, projects and empty repos", async () => {
     const { repos, get, post, origin, base } = await setup();
-    const notFound = { error: { code: "not_found", message: expect.any(String) } };
+    const notFound = { error: { code: "notFound", message: expect.any(String) } };
     expect((await get(`${base}/tree/main`)).body).toEqual(notFound);
     expect((await get(`/projects/greg/nope/tree/main`)).status).toBe(404);
     expect((await get(`/projects/greg/nope/refs`)).status).toBe(404);
@@ -359,12 +359,81 @@ describe("GET /commits and /commit", () => {
   });
 });
 
+describe("GET /commit/{sha}/diff", () => {
+  it("answers the commit's diff as JSON, with totals", async () => {
+    const { repos, get, origin, base } = await setup();
+    const root = repos.commit(origin, { files: { "a.txt": "1\n", "b.txt": "b\n" } });
+    const head = repos.commit(origin, { files: { "a.txt": "2\n", "c.txt": "c\n" } });
+    const res = await get(`${base}/commit/${head.hash}/diff`);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      sha: head.hash,
+      parent: root.hash,
+      truncated: false,
+      totals: { files: 3, additions: 2, deletions: 2 },
+    });
+    const files = res.body!["files"] as Json[];
+    expect(files.map((f) => [f["path"], f["status"]])).toEqual([
+      ["a.txt", "modified"],
+      ["b.txt", "deleted"],
+      ["c.txt", "added"],
+    ]);
+    expect(files[0]!["patch"]).toContain("@@ -1 +1 @@\n-1\n+2\n");
+  });
+
+  it("answers the concatenated unified patch for Accept: text/x-diff", async () => {
+    const { repos, get, origin, base } = await setup();
+    repos.commit(origin, { files: { "a.txt": "1\n" } });
+    const head = repos.commit(origin, { files: { "a.txt": "2\n", "c.txt": "c\n" } });
+    const res = await get(`${base}/commit/${head.hash}/diff`, { Accept: "text/x-diff" });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toBe("text/x-diff; charset=utf-8");
+    const text = await res.res.text();
+    expect(text.startsWith("diff --git a/a.txt b/a.txt\n")).toBe(true);
+    expect(text).toContain("diff --git a/c.txt b/c.txt\nnew file mode 100644\n");
+  });
+
+  it("is immutable, finds attempt commits by ?attempt=, and 404s an unknown sha", async () => {
+    const { repos, get, post, id, origin, base } = await setup();
+    const head = repos.commit(origin, { files: { "a.txt": "a" } });
+    const res = await get(`${base}/commit/${head.hash}/diff`);
+    expect(res.headers.get("Cache-Control")).toBe(IMMUTABLE);
+    expect(res.headers.get("ETag")).toBe(`"${head.hash}"`);
+
+    await post(`${base}/tasks`, { title: "Work" });
+    await post(`${base}/tasks/t1/attempts`, { count: 1 });
+    const work = repos.commit(`${id}-t1a1`, { files: { "a.txt": "b" } });
+    expect((await get(`${base}/commit/${work.hash}/diff`)).status).toBe(404);
+    const found = await get(`${base}/commit/${work.hash}/diff?attempt=t1a1`);
+    expect(found.body).toMatchObject({ sha: work.hash, parent: head.hash, totals: { files: 1 } });
+    expect((await get(`${base}/commit/${head.treeHash}/diff`)).status).toBe(404);
+  });
+
+  it("serves a repeated diff from the diff cache", async () => {
+    const store = new Map<string, Response>();
+    const cache = {
+      match: async (key: Request) => store.get(key.url)?.clone(),
+      put: async (key: Request, res: Response) => void store.set(key.url, res.clone()),
+    };
+    const { repos, get, origin, base } = await setup({ diffCache: () => cache });
+    repos.commit(origin, { files: { "a.txt": "1\n" } });
+    const head = repos.commit(origin, { files: { "a.txt": "2\n" } });
+    const first = await get(`${base}/commit/${head.hash}/diff`);
+    expect(first.status).toBe(200);
+    const reads = repos.calls.length;
+    expect((await get(`${base}/commit/${head.hash}/diff`)).body).toEqual(first.body);
+    expect(repos.calls.slice(reads).map((c) => c.method)).not.toContain("readBlob");
+    expect(store.size).toBe(1);
+  });
+});
+
 describe("caching", () => {
   it("marks sha-addressed responses immutable", async () => {
     const { repos, get, origin, base } = await setup();
     const head = repos.commit(origin, { files: { "a.txt": "a" } });
     for (const path of [
       `/commit/${head.hash}`,
+      `/commit/${head.hash}/diff`,
       `/tree/${head.hash}`,
       `/blob/${head.hash}/a.txt`,
       `/raw/${head.hash}/a.txt`,
@@ -436,6 +505,7 @@ describe("the OpenAPI document", () => {
     expect(browse.toSorted()).toEqual([
       "/projects/{owner}/{project}/blob/{ref}/{path}",
       "/projects/{owner}/{project}/commit/{sha}",
+      "/projects/{owner}/{project}/commit/{sha}/diff",
       "/projects/{owner}/{project}/commits/{ref}",
       "/projects/{owner}/{project}/raw/{ref}/{path}",
       "/projects/{owner}/{project}/refs",

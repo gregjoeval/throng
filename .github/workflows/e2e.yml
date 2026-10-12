@@ -34,9 +34,10 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       # Selects `env.ci` in apps/platform/wrangler.jsonc for vite build and wrangler alike.
       CLOUDFLARE_ENV: ci
-      # Every project this run creates starts with this, so cleanup can find its repos. The trailing
-      # `p` keeps one run's prefix from being a prefix of another's.
-      E2E_PROJECT_PREFIX: ci${{ github.run_id }}r${{ github.run_attempt }}p
+      # Every project this run creates starts with this, so cleanup can find it. The Worker's e2e
+      # routes only accept ids starting with `e2e`. The trailing `p` keeps one run's prefix from being
+      # a prefix of another's.
+      E2E_PROJECT_PREFIX: e2eci${{ github.run_id }}r${{ github.run_attempt }}p
     defaults:
       run:
         working-directory: apps/platform
@@ -83,7 +84,7 @@ jobs:
           # A new Worker's workers.dev route, and a new SPIKE_TOKEN, can take a moment to go live.
           for _ in $(seq 60); do
             status=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $SPIKE_TOKEN" \
-              "$THRONG_URL/spike/repos?prefix=$E2E_PROJECT_PREFIX" || true)
+              "$THRONG_URL/e2e/repos?prefix=$E2E_PROJECT_PREFIX" || true)
             if [ "$status" = 200 ]; then exit 0; fi
             echo "throng-ci answered $status; waiting"
             sleep 5
@@ -97,6 +98,6 @@ jobs:
           # Word-split on purpose: one argument per scenario name.
           # shellcheck disable=SC2086
           pnpm e2e $SCENARIOS
-      - name: Delete this run's repos
+      - name: Delete everything this run made
         if: always() && env.THRONG_URL != ''
         run: pnpm e2e cleanup

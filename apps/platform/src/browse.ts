@@ -97,7 +97,7 @@ export interface CommitPage {
 export function browseService({ db, repos, backend }: BrowseDeps) {
   async function project(path: ProjectPath): Promise<ProjectContext> {
     const found = await resolveProject(db, path.owner, path.project);
-    if (found === null) throw new ServiceError("not_found", `no project ${path.owner}/${path.project}`);
+    if (found === null) throw new ServiceError("notFound", `no project ${path.owner}/${path.project}`);
     return { id: found.id, owner: found.owner.id };
   }
 
@@ -143,22 +143,22 @@ export function browseService({ db, repos, backend }: BrowseDeps) {
       if (await hasCommit(origin, sha)) return { repo: origin, sha, immutable: true };
       if (attempt !== undefined) {
         const parsed = parseAttemptRef(attempt);
-        if (parsed === null) throw new ServiceError("invalid_request", `not an attempt reference: ${attempt}`);
+        if (parsed === null) throw new ServiceError("invalidRequest", `not an attempt reference: ${attempt}`);
         const fork = forkRepo(ctx.id, attemptRef(parsed.task, parsed.number));
         if (await hasCommit(fork, sha)) return { repo: fork, sha, immutable: true };
       }
-      throw new ServiceError("not_found", `no commit ${sha}`);
+      throw new ServiceError("notFound", `no commit ${sha}`);
     }
     if (ref === "main") {
       const sha = await head(origin, "main");
-      if (sha === null) throw new ServiceError("not_found", "main has no commits yet");
+      if (sha === null) throw new ServiceError("notFound", "main has no commits yet");
       return { repo: origin, sha, immutable: false };
     }
     const parsed = parseAttemptRef(ref);
-    if (parsed === null) throw new ServiceError("not_found", `no ref ${ref}`);
+    if (parsed === null) throw new ServiceError("notFound", `no ref ${ref}`);
     const found = await store<StoredAttempt>(ctx, "getAttempt", actor, parsed);
     const at = await attemptHead(ctx, found);
-    if (at === null) throw new ServiceError("not_found", `${found.fork} has no commits`);
+    if (at === null) throw new ServiceError("notFound", `${found.fork} has no commits`);
     return { ...at, immutable: false };
   }
 
@@ -196,8 +196,8 @@ export function browseService({ db, repos, backend }: BrowseDeps) {
     /** A directory's entries, folders first and then by name. */
     async tree(at: Resolved, path: string): Promise<Entry[]> {
       const dir = await entryAt(at, path);
-      if (dir === null) throw new ServiceError("not_found", `no ${describe(path)} at ${at.sha}`);
-      if (dir.type !== "tree") throw new ServiceError("not_found", `${dir.path} is not a directory`);
+      if (dir === null) throw new ServiceError("notFound", `no ${describe(path)} at ${at.sha}`);
+      if (dir.type !== "tree") throw new ServiceError("notFound", `${dir.path} is not a directory`);
       const entries = (await repos.readTree(at.repo, dir.hash)) ?? [];
       return entries
         .map((e) => ({ ...e, path: join(dir.path, e.name) }))
@@ -227,18 +227,18 @@ export function browseService({ db, repos, backend }: BrowseDeps) {
 
     async commit(at: Resolved): Promise<CommitInfo> {
       const found = await repos.readCommit(at.repo, at.sha);
-      if (found === null) throw new ServiceError("not_found", `no commit ${at.sha}`);
+      if (found === null) throw new ServiceError("notFound", `no commit ${at.sha}`);
       return commitInfo(found);
     },
   };
 
   async function file(at: Resolved, path: string): Promise<{ entry: Entry; blob: Blob }> {
     const entry = await entryAt(at, path);
-    if (entry === null || entry.path === "") throw new ServiceError("not_found", `no ${describe(path)} at ${at.sha}`);
-    if (entry.type === "tree") throw new ServiceError("not_found", `${entry.path} is a directory`);
-    if (entry.type === "gitlink") throw new ServiceError("not_found", `${entry.path} is a submodule`);
+    if (entry === null || entry.path === "") throw new ServiceError("notFound", `no ${describe(path)} at ${at.sha}`);
+    if (entry.type === "tree") throw new ServiceError("notFound", `${entry.path} is a directory`);
+    if (entry.type === "gitlink") throw new ServiceError("notFound", `${entry.path} is a submodule`);
     const blob = await repos.readBlob(at.repo, entry.hash);
-    if (blob === null) throw new ServiceError("not_found", `no blob ${entry.hash}`);
+    if (blob === null) throw new ServiceError("notFound", `no blob ${entry.hash}`);
     return { entry, blob };
   }
 }

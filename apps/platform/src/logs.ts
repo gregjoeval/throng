@@ -41,9 +41,26 @@ export function logKey({ project, attempt, sha, run }: ScoringParams, name: stri
   return `${LOG_PREFIX}${project}/${attempt}/${sha}/${run}/${name}.log`;
 }
 
-/** The `not_found` for a log a run doesn't have: never stored, expired, or a name no log can have. */
+/**
+ * Where a landing's retest log is stored: `logs/<projectId>/<t42a3>/<head>/landing-<landingId>/<name>.log`,
+ * next to the head's scoring runs and under the same lifecycle rule.
+ */
+export function landingLogKey(
+  {
+    project,
+    task,
+    attempt,
+    head,
+    landing,
+  }: { project: string; task: number; attempt: number; head: string; landing: number },
+  name: string,
+): string {
+  return `${LOG_PREFIX}${project}/t${task}a${attempt}/${head}/landing-${landing}/${name}.log`;
+}
+
+/** The `notFound` for a log a run doesn't have: never stored, expired, or a name no log can have. */
 export function missingLog(run: number, name: string): ServiceError {
-  return new ServiceError("not_found", `run ${run} has no log ${name}`);
+  return new ServiceError("notFound", `run ${run} has no log ${name}`);
 }
 
 /** `readLogScript`'s exit code when the step wrote no log (it was skipped). */

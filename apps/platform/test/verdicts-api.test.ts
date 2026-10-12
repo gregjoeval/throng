@@ -4,6 +4,7 @@
 import { describe, expect, it } from "vitest";
 import type { AccessVerifier } from "../src/access.ts";
 import { apiRoutes } from "../src/api.ts";
+import { FORWARDED_EMAIL_HEADER } from "../src/forwarded.ts";
 import type { User } from "../src/users.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
@@ -20,19 +21,28 @@ async function setup() {
   clock = new Date("2026-10-10T12:00:00.000Z");
   const repos = new FakeRepos();
   const { backend, store, sql } = testTaskBackends(repos, now);
-  const api = apiRoutes({ verifierFor: () => verify, now, repos: () => repos, tasks: () => backend });
+  // Trusting throng-web's forwarded identity, as the service binding does.
+  const api = apiRoutes({
+    verifierFor: () => verify,
+    now,
+    repos: () => repos,
+    tasks: () => backend,
+    trustForwardedIdentity: true,
+  });
   const env = { DB: testDatabase(), ACCESS_TEAM_DOMAIN: "throng.cloudflareaccess.com", ACCESS_AUD: "aud" };
 
-  const call = async (method: string, path: string, bearer?: string, body?: unknown) => {
+  /** Calls as a bearer token, or as a web user by `{ web: email }`. */
+  const call = async (method: string, path: string, as?: string | { web: string }, body?: unknown) => {
     const headers: Record<string, string> = {};
-    if (bearer !== undefined) headers["Authorization"] = `Bearer ${bearer}`;
+    if (typeof as === "string") headers["Authorization"] = `Bearer ${as}`;
+    if (typeof as === "object") headers[FORWARDED_EMAIL_HEADER] = as.web;
     if (body !== undefined) headers["Content-Type"] = "application/json";
     const init = { method, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) };
     const res = await api.request(path, init, env);
     return { status: res.status, body: (await res.json()) as Json };
   };
   const tokenFor = async (email: string, agent?: string) => {
-    const headers = { "Cf-Access-Jwt-Assertion": `as:${email}`, "Content-Type": "application/json" };
+    const headers = { [FORWARDED_EMAIL_HEADER]: email, "Content-Type": "application/json" };
     const res = await api.request("/tokens", { method: "POST", headers, body: JSON.stringify({ agent }) }, env);
     return ((await res.json()) as Json)["token"] as string;
   };
@@ -68,8 +78,8 @@ async function setup() {
     );
     return after;
   };
-  const post = (bearer: string, body: unknown, attempt = "t1a1") =>
-    call("POST", `${base}/attempts/${attempt}/verdicts`, bearer, body);
+  const post = (as: string | { web: string }, body: unknown, attempt = "t1a1") =>
+    call("POST", `${base}/attempts/${attempt}/verdicts`, as, body);
   const list = async (attempt = "t1a1") => (await call("GET", `${base}/attempts/${attempt}/verdicts`, ada)).body;
   const journal = () =>
     sql(projectId)
@@ -185,6 +195,17 @@ describe("posting a verdict", () => {
     expect(
       (await call("POST", `${base}/attempts/t1a1/verdicts`, undefined, { recommendation: "merge", body: "ok" })).status,
     ).toBe(401);
+  });
+
+  it("takes and lists verdicts from the web as the signed-in user, refusing the author there too", async () => {
+    const { call, base, post, push } = await setup();
+    push(1, "one\n");
+    const posted = await post({ web: "bob@example.com" }, { recommendation: "merge", body: "LGTM" });
+    expect(posted.status).toBe(201);
+    expect(posted.body).toMatchObject({ reviewer: { handle: "bob" }, agent: null });
+    expect((await post({ web: "ada@example.com" }, { recommendation: "merge", body: "Mine" })).status).toBe(403);
+    const listed = await call("GET", `${base}/attempts/t1a1/verdicts`, { web: "greg@example.com" });
+    expect(listed.body["verdicts"]).toEqual([posted.body]);
   });
 
   it("takes a verdict on an open attempt, and on a merged one for the record", async () => {

@@ -1262,8 +1262,8 @@ export function apiRoutes(options: ApiOptions = {}) {
           "but the attempt's author, or their agents, may, while it is a draft, open or merged. Posting again for the same " +
           "head replaces your verdict; after a push, your verdict on the old head stays, superseded. Verdicts are advice: " +
           "they never change the gate, the score or the merge queue. Journals `verdictPosted`.",
-        security: bearerOnly,
-        middleware: [bearer] as const,
+        security: bearerOrWeb,
+        middleware: [browser] as const,
         request: { params: AttemptPathSchema, body: { required: true, ...json(PostVerdictSchema) } },
         responses: {
           201: { description: "The verdict as stored.", ...json(VerdictSchema) },

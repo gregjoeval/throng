@@ -247,14 +247,13 @@ describe("after each outcome", () => {
     expect(pushed.mergeRequest?.dequeue).toEqual({ reason: "conflict", files: 2 });
   });
 
-  for (const outcome of [
-    {
-      kind: "failedChecks" as const,
-      details: { checks: [{ name: "test", outcome: "failed" as const, log: "test" }] },
-    },
-    { kind: "errored" as const, details: { error: "land script exited 13", step: "land" } },
-  ]) {
-    it(`dequeues ${outcome.kind}, then starts the next landing`, async () => {
+  const outcomes: Extract<LandingOutcome, { kind: "failedChecks" | "errored" }>[] = [
+    { kind: "failedChecks", details: { checks: [{ name: "test", outcome: "failed", log: "test" }] } },
+    { kind: "errored", details: { error: "land script exited 13", step: "land" } },
+  ];
+  it.each(outcomes.map((outcome) => [outcome.kind, outcome] as const))(
+    "dequeues %s, then starts the next landing",
+    async (_kind, outcome) => {
       const { store, drain, queued, mr, landingWorkflow } = await setup();
       const t1 = await queued("First");
       await queued("Second");
@@ -266,8 +265,8 @@ describe("after each outcome", () => {
         last_dequeue: { reason: outcome.kind, details: outcome.details },
       });
       expect(landingWorkflow.created).toHaveLength(2);
-    });
-  }
+    },
+  );
 
   it("records a report in snake_case, from a Workflow started before ADR 0002, in camelCase", async () => {
     const { store, drain, queued, mr } = await setup();

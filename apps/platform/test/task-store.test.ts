@@ -325,18 +325,17 @@ describe("attempts", () => {
       obsolete: { restore: "closed" },
     };
 
-    for (const [from, allowed] of Object.entries(valid) as [AttemptState, Partial<Record<Move, AttemptState>>][]) {
-      for (const move of Object.keys(moves) as Move[]) {
-        const to = allowed[move];
-        const expected = to === undefined ? { error: "invalidState", state: from } : { error: null, state: to };
-        it(`${from} --${move}--> ${to ?? "invalidState"}`, async () => {
-          const { store } = setup();
-          await attemptIn(store, from);
-          const error = await errorCode(async () => moves[move](store));
-          expect({ error, state: store.getAttempt(PROJECT, ada, ref).state }).toEqual(expected);
-        });
-      }
-    }
+    const cases = (Object.entries(valid) as [AttemptState, Partial<Record<Move, AttemptState>>][]).flatMap(
+      ([from, allowed]) =>
+        (Object.keys(moves) as Move[]).map((move) => [from, move, allowed[move] ?? "invalidState"] as const),
+    );
+    it.each(cases)("%s --%s--> %s", async (from, move, to) => {
+      const { store } = setup();
+      await attemptIn(store, from);
+      const error = await errorCode(async () => moves[move](store));
+      const expected = to === "invalidState" ? { error: to, state: from } : { error: null, state: to };
+      expect({ error, state: store.getAttempt(PROJECT, ada, ref).state }).toEqual(expected);
+    });
   });
 
   it("journals every transition with the acting user and agent", async () => {

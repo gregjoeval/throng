@@ -6,7 +6,7 @@ import type { client } from "@/lib/api";
 /** `GET /api/me` for a human signed in through Access, typed from the platform's routes. */
 export const me: InferResponseType<typeof client.api.me.$get, 200> = {
   user: { id: "u1", handle: "ada", email: "ada@example.com", createdAt: "2026-10-10T12:00:00.000Z" },
-  agent: null,
+  alias: null,
   token: null,
 };
 

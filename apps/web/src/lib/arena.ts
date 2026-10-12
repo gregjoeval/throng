@@ -79,16 +79,19 @@ export function metricColumns(metrics: Metric[]): MetricColumn[] {
 const better = (order: Metric["order"], a: number, b: number) => (order === "asc" ? a < b : a > b);
 
 /**
- * Each column's best value among passing attempts, by column key. A column has none when fewer than
- * two passing attempts have a value for it, or when they all tie: then there's nothing to point out.
+ * Each column's best value among passing attempts, by column key, even when only one passes. A
+ * column has none when no passing attempt has a value for it, or when every attempt's value ties:
+ * then there's nothing to point out.
  */
 export function bestValues(attempts: ArenaAttempt[], columns: MetricColumn[]): Map<string, number> {
-  const passing = attempts.filter(isPassing);
   const best = new Map<string, number>();
   for (const column of columns) {
-    const values = passing.map(column.value).filter((v) => v !== null);
-    const [first, ...rest] = values;
-    if (first === undefined || rest.every((v) => v === first)) continue;
+    const all = attempts.map(column.value).filter((v) => v !== null);
+    const [first, ...rest] = attempts
+      .filter(isPassing)
+      .map(column.value)
+      .filter((v) => v !== null);
+    if (first === undefined || all.every((v) => v === all[0])) continue;
     best.set(
       column.key,
       rest.reduce((top, v) => (better(column.order, v, top) ? v : top), first),

@@ -386,6 +386,28 @@ describe("the arena's rail", () => {
     });
   });
 
+  it("marks a lone passing attempt's values beside failing ones, but not values every attempt ties on", async () => {
+    await openArena([scored(1, "passed", 80, 120, 3), scored(2, "failed", 99, 120, 1)], METRICS);
+    expect(cardMetrics("t1a1")).toEqual({
+      coverage: "80%*",
+      bundle_kb: "120 KB",
+      "Files changed": "3*",
+      "Lines added": "30*",
+    });
+    expect(cardMetrics("t1a2")).toEqual({
+      coverage: "99%",
+      bundle_kb: "120 KB",
+      "Files changed": "1",
+      "Lines added": "10",
+    });
+  });
+
+  it("marks nothing when every attempt ties", async () => {
+    await openArena([scored(1, "passed", 80, 120, 3), scored(2, "passed", 80, 120, 3)], METRICS);
+    for (const ref of ["t1a1", "t1a2"])
+      expect(Object.values(cardMetrics(ref)).some((v) => v.endsWith("*"))).toBeFalsy();
+  });
+
   it("tells a gate with no checks configured from one that passed, and shows scoring in progress", async () => {
     await openArena([
       arenaAttempt(1, 1, { status: "done", result: result({ config: { kind: "none" }, checks: [] }) }),

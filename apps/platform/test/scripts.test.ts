@@ -67,7 +67,7 @@ const check = (name: string, command: string, timeoutMs = 60_000, metrics: Plann
   timeoutMs,
   metrics,
 });
-const number = (name: string, from: string): PlannedMetric => ({ name, from, type: "number" });
+const number = (name: string, from: string): PlannedMetric => ({ name, from, rule: { type: "number" } });
 
 /** Pushes an attempt to the fork on top of the origin's main (adds 2 lines, deletes 2) and returns its head. */
 function attemptHead(): string {
@@ -261,6 +261,31 @@ metrics:
       "wrong-type": { value: null, note: "test.out.total.lines.pct: expected a number, got a string" },
       "bad-json": { value: null, note: "test.bad: bad.json is not valid JSON" },
       "too-large": { value: null, note: "test.big: big.json is over the parse guard of 32 MB" },
+    });
+  });
+
+  it("checks each value against its metric's type: booleans, strings and an enum's listed values", () => {
+    const head = attemptHead();
+    const json = { ok: true, flaky: "no", grade: "b", other: "z", url: "https://ci.example.test/1", n: 1 };
+    const metrics: PlannedMetric[] = [
+      { name: "ok", from: "test.out.ok", rule: { type: "boolean" } },
+      { name: "flaky", from: "test.out.flaky", rule: { type: "boolean" } },
+      { name: "grade", from: "test.out.grade", rule: { type: "enum", values: ["a", "b"] } },
+      { name: "other", from: "test.out.other", rule: { type: "enum", values: ["a", "b"] } },
+      { name: "url", from: "test.out.url", rule: { type: "string" } },
+      { name: "n", from: "test.out.n", rule: { type: "string" } },
+    ];
+    const command = `echo '${JSON.stringify(json)}' > "$THRONG_OUTPUT/out.json"`;
+    const raw = runScript<RawScore>(
+      scoreScript(fork, { sha: head, base: null }, plan({ checks: [check("test", command, 60_000, metrics)] })),
+    );
+    expect(at(raw.checks, 0).metrics).toEqual({
+      ok: { value: true },
+      flaky: { value: null, note: "test.out.flaky: expected a boolean, got a string" },
+      grade: { value: "b" },
+      other: { value: null, note: 'test.out.other: "z" is not one of its values: a, b' },
+      url: { value: "https://ci.example.test/1" },
+      n: { value: null, note: "test.out.n: expected a string, got a number" },
     });
   });
 });

@@ -5,8 +5,8 @@
 
 import { parseDocument } from "yaml";
 import { z } from "zod";
-import { METRIC_TYPES } from "./metric-values.ts";
-import type { MetricType } from "./metric-values.ts";
+import { METRIC_FORMATS, METRIC_TYPES } from "./metric-values.ts";
+import type { MetricFormat } from "./metric-values.ts";
 import { originRepo } from "./repos.ts";
 import type { Repos } from "./repos.ts";
 
@@ -23,15 +23,25 @@ const FROM = /^[^.]+\.[^./\\]+(\.[^.]+)+$/u;
 export const METRIC_ORDERS = ["asc", "desc"] as const;
 export type MetricOrder = (typeof METRIC_ORDERS)[number];
 
-export interface MetricConfig {
+/** A metric, with the fields its type has. */
+export type MetricConfig = {
   name: string;
   /** Where its value is read: `<check>.<file>.<path>`. */
   from: string;
-  type: MetricType;
-  unit: string | null;
-  /** Which way is better: `asc` when lower values are better, `desc` when higher are. */
-  order: MetricOrder;
-}
+} & (
+  | {
+      type: "number";
+      unit: string | null;
+      /** Which way is better: `asc` when lower values are better, `desc` when higher are. */
+      order: MetricOrder;
+    }
+  /** `order` is `desc` when true is better, `asc` when false is. */
+  | { type: "boolean"; order: MetricOrder }
+  /** Never ranks; `format` says only how it's shown. */
+  | { type: "string"; format: MetricFormat | null }
+  /** `values` are every value it may take, best first. */
+  | { type: "enum"; values: string[] }
+);
 
 export interface CheckConfig {
   name: string;
@@ -104,8 +114,56 @@ const MetricSchema = z.strictObject({
   }),
   unit: z.string({ error: "unit must be a string" }).optional(),
   order: z.enum(ORDER_ALIASES, { error: "order must be ascending, asc, descending or desc" }).optional(),
+  values: z.array(z.string({ error: "must be a string" }), { error: "values must be a list" }).optional(),
+  format: z.enum(METRIC_FORMATS, { error: `format must be ${oneOf(METRIC_FORMATS)}` }).optional(),
   target: z.never({ error: "target is reserved and not supported yet; remove it" }).optional(),
 });
+
+/** Rejects each field a metric sets that its type doesn't have, and an enum without its values. */
+function checkMetricFields(metric: z.infer<typeof MetricSchema>, at: number, ctx: z.RefinementCtx): void {
+  const problem = (path: (string | number)[], message: string) =>
+    ctx.addIssue({ code: "custom", path: ["metrics", at, ...path], message });
+  if (metric.unit !== undefined && metric.type !== "number") problem(["unit"], "unit is only for a number metric");
+  if (metric.format !== undefined && metric.type !== "string")
+    problem(["format"], "format is only for a string metric");
+  if (metric.order !== undefined && metric.type === "string") problem(["order"], "a string metric has no order");
+  if (metric.order !== undefined && metric.type === "enum") {
+    problem(["order"], "an enum metric's order is its values, best first");
+  }
+  if (metric.type !== "enum") {
+    if (metric.values !== undefined) problem(["values"], "values are only for an enum metric");
+    return;
+  }
+  if (metric.values === undefined || metric.values.length === 0) {
+    problem(["values"], "an enum metric needs its values, best first");
+    return;
+  }
+  const seen = new Set<string>();
+  metric.values.forEach((value, i) => {
+    if (seen.has(value)) problem(["values", i], `duplicate value ${value}`);
+    seen.add(value);
+  });
+}
+
+/** A parsed metric as stored, with its type's defaults: a number or boolean is `desc` (higher or true is better). */
+function metricConfig(metric: z.infer<typeof MetricSchema>): MetricConfig {
+  const fields = { name: metric.name, from: metric.from };
+  const order = metric.order === undefined ? "desc" : ORDERS[metric.order];
+  switch (metric.type) {
+    case "number": {
+      return { ...fields, type: "number", unit: metric.unit ?? null, order };
+    }
+    case "boolean": {
+      return { ...fields, type: "boolean", order };
+    }
+    case "string": {
+      return { ...fields, type: "string", format: metric.format ?? null };
+    }
+    case "enum": {
+      return { ...fields, type: "enum", values: metric.values ?? [] };
+    }
+  }
+}
 
 const TimeoutSchema = z
   .string({ error: "timeout must be a duration like 90s, 10m or 1h" })
@@ -181,6 +239,7 @@ const ConfigSchema = z
         ctx.addIssue({ code: "custom", path, message: `duplicate metric name ${metric.name}` });
       }
       metrics.add(metric.name);
+      checkMetricFields(metric, i, ctx);
       const check = metric.from.split(".")[0] ?? "";
       if (!checks.has(check)) {
         ctx.addIssue({ code: "custom", path: ["metrics", i, "from"], message: `no check is named ${check}` });
@@ -223,13 +282,7 @@ export function parseConfig(text: string | null): ConfigResult {
         required: check.required ?? true,
         timeoutMs: check.timeout ?? DEFAULT_CHECK_TIMEOUT_MS,
       })),
-      metrics: (config.metrics ?? []).map((metric) => ({
-        name: metric.name,
-        from: metric.from,
-        type: metric.type,
-        unit: metric.unit ?? null,
-        order: metric.order === undefined ? "desc" : ORDERS[metric.order],
-      })),
+      metrics: (config.metrics ?? []).map(metricConfig),
       preview: config.preview === undefined ? null : { command: config.preview.command ?? null },
       attempts: { limit: config.attempts?.limit ?? null },
     },

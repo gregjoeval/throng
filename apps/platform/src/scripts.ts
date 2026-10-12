@@ -167,10 +167,10 @@ const load = (name) => {
 };
 const loaded = new Map();
 const values = {};
-for (const { name, from, type } of JSON.parse(metrics)) {
+for (const { name, from, rule } of JSON.parse(metrics)) {
   const file = from.split(".")[1];
   if (!loaded.has(file)) loaded.set(file, load(file));
-  values[name] = ${metricValue.name}(from, type, loaded.get(file));
+  values[name] = ${metricValue.name}(from, rule, loaded.get(file));
 }
 process.stdout.write(JSON.stringify(values));
 NODE`;

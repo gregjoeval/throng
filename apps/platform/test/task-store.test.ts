@@ -240,6 +240,7 @@ describe("attempts", () => {
         closed_at: null,
         merged_sha: null,
         archived_sha: null,
+        forked_from: null,
         scoring: { status: "none", sha: null },
         merge_request: null,
         verdicts: { head: null, merge: 0, revise: 0, reject: 0 },
@@ -684,6 +685,75 @@ describe("archive", () => {
   });
 });
 
+describe("forking", () => {
+  const ORIGIN = "abc123-main";
+  const MAIN = "refs/heads/main";
+
+  /** A task whose attempt t1a1 has moved on from origin `main`. */
+  async function withSource() {
+    const s = setup();
+    s.repos.setRef(ORIGIN, MAIN, "base");
+    s.store.createTask(PROJECT, ada, { title: "a" });
+    await s.store.createAttempts(PROJECT, ada, { task: 1 });
+    s.repos.setRef("abc123-t1a1", MAIN, "work");
+    return s;
+  }
+
+  it("starts a new attempt at a current attempt's head and records where it came from", async () => {
+    const { store, repos } = await withSource();
+    const [forked] = await store.createAttempts(PROJECT, bob, { task: 1, from: { task: 1, number: 1 } });
+    expect(forked).toMatchObject({ fork: "t1a2", author: bob.user.id, state: "draft", forked_from: "t1a1" });
+    expect(repos.ref("abc123-t1a2", MAIN)).toBe("work");
+    // The source goes on alone: it doesn't follow its copy, and the copy doesn't follow it.
+    repos.setRef("abc123-t1a1", MAIN, "more work");
+    expect(repos.ref("abc123-t1a2", MAIN)).toBe("work");
+    expect(store.getAttempt(PROJECT, ada, { task: 1, number: 1 }).forked_from).toBeNull();
+  });
+
+  it("starts a new attempt at an archived attempt's head", async () => {
+    const { store, repos } = await withSource();
+    await store.closeAttempt(PROJECT, ada, { task: 1, number: 1 });
+    await store.obsoleteAttempt(PROJECT, owner, { task: 1, number: 1 });
+    const created = await store.createAttempts(PROJECT, ada, { task: 1, count: 2, from: { task: 1, number: 1 } });
+    expect(created.map((a) => [a.fork, a.forked_from])).toEqual([
+      ["t1a2", "t1a1"],
+      ["t1a3", "t1a1"],
+    ]);
+    expect(repos.ref("abc123-t1a2", MAIN)).toBe("work");
+    expect(repos.ref("abc123-t1a3", MAIN)).toBe("work");
+  });
+
+  it("refuses a source from another task, or one with no head left, and makes no fork", async () => {
+    const { store, repos } = await withSource();
+    store.createTask(PROJECT, ada, { title: "b" });
+    expect(await code(store.createAttempts(PROJECT, ada, { task: 2, from: { task: 1, number: 1 } }))).toBe(
+      "invalidRequest",
+    );
+    expect(await code(store.createAttempts(PROJECT, ada, { task: 1, from: { task: 1, number: 9 } }))).toBe("notFound");
+    repos.copyRef = async () => {
+      throw new Error("receive-pack refused");
+    };
+    // Its archive failed, so its head is nowhere a fork could be made from.
+    await store.closeAttempt(PROJECT, ada, { task: 1, number: 1 });
+    expect(await code(store.createAttempts(PROJECT, ada, { task: 1, from: { task: 1, number: 1 } }))).toBe(
+      "invalidState",
+    );
+    expect(await repos.list("abc123-t")).toEqual(["abc123-t1a1"]);
+  });
+
+  it("deletes the new forks and records nothing when the copy fails", async () => {
+    const { store, repos } = await withSource();
+    repos.copyRef = async () => {
+      throw new Error("upload-pack refused");
+    };
+    await expect(store.createAttempts(PROJECT, ada, { task: 1, from: { task: 1, number: 1 } })).rejects.toThrow(
+      "upload-pack refused",
+    );
+    expect(store.listAttempts(PROJECT, ada, { task: 1 }).map((a) => a.fork)).toEqual(["t1a1"]);
+    expect(await repos.list("abc123-t")).toEqual(["abc123-t1a1"]);
+  });
+});
+
 describe("migrate", () => {
   it("adds the actor columns to a journal from before tasks", () => {
     const sql = testSql();
@@ -694,6 +764,22 @@ describe("migrate", () => {
     const columns = sql.exec<{ name: string }>("PRAGMA table_info(journal)").map((c) => c.name);
     expect(columns).toEqual(["id", "at", "kind", "detail", "user_id", "agent", "task", "attempt"]);
     expect(sql.exec("SELECT kind FROM journal")).toEqual([{ kind: "duplicate" }]);
+  });
+
+  it("adds forked_from to an attempts table from before forking, leaving its attempts unforked", () => {
+    const sql = testSql();
+    sql.exec(`CREATE TABLE tasks (number INTEGER PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL,
+      creator TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, closed_at TEXT, closed_by TEXT,
+      attempt_limit INTEGER)`);
+    sql.exec(`CREATE TABLE attempts (task INTEGER NOT NULL REFERENCES tasks (number), number INTEGER NOT NULL,
+      author TEXT NOT NULL, state TEXT NOT NULL, branch TEXT, note TEXT NOT NULL, created_at TEXT NOT NULL,
+      closed_at TEXT, merged_sha TEXT, archived_sha TEXT, PRIMARY KEY (task, number))`);
+    sql.exec("INSERT INTO tasks VALUES (1, 'a', '', 'ada00001', 'open', '', NULL, NULL, NULL)");
+    sql.exec("INSERT INTO attempts VALUES (1, 1, 'ada00001', 'draft', NULL, '', '', NULL, NULL, NULL)");
+    migrate(sql);
+    migrate(sql);
+    const store = new TaskStore({ sql, repos: new FakeRepos() });
+    expect(store.getAttempt(PROJECT, ada, { task: 1, number: 1 }).forked_from).toBeNull();
   });
 
   it("moves values stored in snake_case to camelCase, and reads old JSON in camelCase", () => {

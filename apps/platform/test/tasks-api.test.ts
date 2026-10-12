@@ -151,6 +151,25 @@ describe("attempt routes", () => {
     expect((await call("GET", `${base}/attempts/t1`, bob)).status).toBe(400);
   });
 
+  it("forks an attempt of the same task, recording forkedFrom, and refuses one from another task", async () => {
+    const { call, ada, bob, repos, project, base } = await setup();
+    await call("POST", `${base}/tasks`, ada, { title: "a" });
+    await call("POST", `${base}/tasks`, ada, { title: "b" });
+    await call("POST", `${base}/tasks/t1/attempts`, ada);
+    const head = repos.commit(`${project["id"]}-t1a1`, { files: { "a.txt": "a\n" } }).hash;
+
+    const forked = await call("POST", `${base}/tasks/t1/attempts`, bob, { from: "t1a1" });
+    expect(forked.status).toBe(201);
+    expect(forked.body["attempts"]).toEqual([expect.objectContaining({ ref: "t1a2", forkedFrom: "t1a1" })]);
+    expect(repos.ref(`${project["id"]}-t1a2`, "refs/heads/main")).toBe(head);
+    expect((await call("GET", `${base}/attempts/t1a2`, bob)).body["forkedFrom"]).toBe("t1a1");
+
+    const other = await call("POST", `${base}/tasks/t2/attempts`, ada, { from: "t1a1" });
+    expect(other.status).toBe(400);
+    expect(other.body["error"]["code"]).toBe("invalidRequest");
+    expect((await call("POST", `${base}/tasks/t1/attempts`, ada, { from: "t1" })).status).toBe(400);
+  });
+
   it("fails a batch over the cap whole, with attemptLimit", async () => {
     const { call, ada, base } = await setup();
     await call("POST", `${base}/tasks`, ada, { title: "a", attemptLimit: 2 });

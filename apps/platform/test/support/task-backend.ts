@@ -1,4 +1,5 @@
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
+import type { LandingRunner } from "../../src/landing.ts";
 import type { Repos } from "../../src/repos.ts";
 import type { ScoringRunner } from "../../src/scoring.ts";
 import { runTaskMethod, TaskStore, type Sql } from "../../src/task-store.ts";
@@ -32,15 +33,16 @@ export function testSql(): Sql & { db: DatabaseSync } {
 /**
  * One `TaskStore` per project id, run in-process like the Durable Object would. Arguments and
  * results are structured-cloned, as RPC would, so nothing leaks across by reference. Pass a
- * `scoring` runner to let tests start runs with `store(id).scoring.drain()`.
+ * `scoring` runner to let tests start runs with `store(id).scoring.drain()`, and a `landing` one to
+ * let `store(id).drain(id)` start landings.
  */
-export function testTaskBackends(repos: Repos, now?: () => Date, scoring?: ScoringRunner) {
+export function testTaskBackends(repos: Repos, now?: () => Date, scoring?: ScoringRunner, landing?: LandingRunner) {
   const stores = new Map<string, { store: TaskStore; sql: ReturnType<typeof testSql> }>();
   const open = (projectId: string) => {
     let found = stores.get(projectId);
     if (found === undefined) {
       const sql = testSql();
-      found = { store: new TaskStore({ sql, repos, scoring, ...(now === undefined ? {} : { now }) }), sql };
+      found = { store: new TaskStore({ sql, repos, scoring, landing, ...(now === undefined ? {} : { now }) }), sql };
       stores.set(projectId, found);
     }
     return found;

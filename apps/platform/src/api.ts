@@ -9,6 +9,7 @@ import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import type { AccessBindings } from "./access.ts";
 import { bearerAuth, bearerOrAccess, bearerOrForwarded, type AuthEnv, type AuthOptions } from "./auth.ts";
 import { browseRoutes } from "./browse-api.ts";
+import { dequeueRoutes } from "./dequeue-api.ts";
 import { CONFIG_NAME, MAX_CHECK_TIMEOUT_MS, MAX_CONFIG_BYTES, parseConfig } from "./config.ts";
 import { errorBody, errorResponse, ServiceError } from "./errors.ts";
 import { FORWARDED_EMAIL_HEADER } from "./forwarded.ts";
@@ -1398,7 +1399,8 @@ export function apiRoutes(options: ApiOptions = {}) {
     .route(
       "/",
       browseRoutes({ auth: browser, repos: reposFor, tasks: backendFor, diffCache: options.diffCache ?? workersCache }),
-    );
+    )
+    .route("/", dequeueRoutes({ auth: browser, repos: reposFor, tasks: backendFor, logs: logsFor }));
 
   api.doc31("/openapi.json", { openapi: "3.1.0", info: { title: "Throng API", version: "0.0.0" } });
 

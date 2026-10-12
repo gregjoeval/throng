@@ -11,6 +11,7 @@ import type { ScoringParams, ScoringWorkflow } from "../src/scoring.ts";
 import { TaskStore, type AttemptInput, type ProjectContext } from "../src/task-store.ts";
 import type { Actor } from "../src/tokens.ts";
 import { FakeRepos } from "./fake-repos.ts";
+import { conflictFile } from "./support/conflicts.ts";
 import { testSql } from "./support/task-backend.ts";
 
 const PROJECT: ProjectContext = { id: "abc123", owner: "owner001" };
@@ -213,7 +214,8 @@ describe("after each outcome", () => {
       attempt: "t1a1",
       head: base.hash,
       main: "m".repeat(40),
-      files: [{ path: "a", type: "content" as const }],
+      base: base.hash,
+      files: [conflictFile("a", "content")],
     };
     await store.landingFinished(1, { kind: "conflict", details });
     await drain();
@@ -227,13 +229,10 @@ describe("after each outcome", () => {
     const { store, drain, queued, repos, base } = await setup();
     const t1 = await queued("First");
     await drain();
-    const files = [
-      { path: "a", type: "content" as const },
-      { path: "b", type: "add_add" as const },
-    ];
+    const files = [conflictFile("a", "content"), conflictFile("b", "add_add")];
     await store.landingFinished(1, {
       kind: "conflict",
-      details: { attempt: "t1a1", head: base.hash, main: base.hash, files },
+      details: { attempt: "t1a1", head: base.hash, main: base.hash, base: base.hash, files },
     });
     const after = repos.commit("abc123-t1a1", { files: { "README.md": "fixed\n" } }).hash;
     const pushed = store.recordPush(PROJECT, ada, {

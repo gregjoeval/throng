@@ -9,9 +9,9 @@
 import { archiveRef } from "./archive.ts";
 import { CONFIG_PATH, loadConfig, type ConfigResult } from "./config.ts";
 import { ServiceError, type ErrorCode } from "./errors.ts";
-import type { LandingOutcome, LandingParams, LandingRunner } from "./landing.ts";
+import type { FailedChecksDetails, LandingOutcome, LandingParams, LandingRunner } from "./landing.ts";
 import { Landings, type StoredLanding } from "./landings.ts";
-import { isLogName, logKey, missingLog } from "./logs.ts";
+import { isLogName, landingLogKey, logKey, missingLog } from "./logs.ts";
 import {
   MergeRequests,
   type Dequeue,
@@ -1159,6 +1159,26 @@ export class TaskStore {
     return mr;
   }
 
+  /**
+   * Where the log `name` of the retest that dequeued the task's merge request with `failed_checks`
+   * is stored. Anyone signed in may read it. `not_found` unless its latest dequeue is `failed_checks`
+   * with a stored log by that name.
+   */
+  dequeueLogKey(project: ProjectContext, actor: Actor, input: { task: number; name: string }): string {
+    const mr = this.getMergeRequest(project, actor, input);
+    const dequeue = mr.last_dequeue;
+    const missing = new ServiceError("not_found", `${taskRef(input.task)}'s last dequeue has no log ${input.name}`);
+    if (dequeue?.reason !== "failed_checks" || !isLogName(input.name)) throw missing;
+    const details = dequeue.details as FailedChecksDetails | undefined;
+    if (!details?.checks.some((check) => check.log === input.name)) throw missing;
+    const landing = this.landings.lastDequeued(mr.id);
+    if (landing === null) throw missing;
+    return landingLogKey(
+      { project: project.id, task: mr.task, attempt: mr.attempt, head: landing.head, landing: landing.id },
+      input.name,
+    );
+  }
+
   /** The project's merge queue: the landing merge request first, then the queued ones, first in first out. */
   mergeQueue(_project: ProjectContext, _actor: Actor): StoredMergeRequest[] {
     return this.mergeRequests.queue();
@@ -1914,6 +1934,7 @@ export const TASK_METHODS = [
   "approveMergeRequest",
   "cancelMergeRequest",
   "getMergeRequest",
+  "dequeueLogKey",
   "mergeQueue",
   "scoreNow",
   "rescore",

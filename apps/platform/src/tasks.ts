@@ -5,7 +5,10 @@
 import { ServiceError } from "./errors.ts";
 import { resolveProject } from "./projects.ts";
 import type { CheckResult, ScoringResult } from "./results.ts";
-import type { DequeueReason, StoredMergeRequest } from "./merge-requests.ts";
+import type { ConflictDetails, ConflictFile, ConflictHunk } from "./conflicts.ts";
+import type { ErroredDetails, FailedChecksDetails } from "./landing.ts";
+import type { Dequeue, DequeueReason, StoredMergeRequest } from "./merge-requests.ts";
+import { forkRepo, originRepo } from "./repos.ts";
 import { headAttemptRef, type AttemptScoring, type ScoringRequest, type StoredRun } from "./scoring.ts";
 import {
   attemptRef,
@@ -75,6 +78,35 @@ export interface MergeRequest {
   merged_at: string | null;
   created_at: string;
   created_by: ActorRef;
+}
+
+/** A conflict hunk as answers carry it: `startLine` as `start_line`. */
+export interface PublicConflictHunk extends Omit<ConflictHunk, "startLine"> {
+  start_line: number;
+}
+
+export interface PublicConflictFile extends Omit<ConflictFile, "hunks"> {
+  hunks?: PublicConflictHunk[];
+}
+
+export interface PublicConflictDetails extends Omit<ConflictDetails, "files"> {
+  files: PublicConflictFile[];
+}
+
+/** A merge request's latest dequeue with its details: null for a new push or a cancel. */
+export interface MergeRequestDequeue {
+  reason: DequeueReason;
+  at: string;
+  details: PublicConflictDetails | FailedChecksDetails | ErroredDetails | null;
+}
+
+/** A conflicting file of the latest dequeue, and the repos its blobs can be read from. */
+export interface DequeueFile {
+  file: ConflictFile;
+  /** The origin: it holds the base and `main` blobs, and the attempt's once its fork is archived. */
+  origin: string;
+  /** The source attempt's fork: it holds the base and attempt blobs while the attempt is active. */
+  fork: string;
 }
 
 /** One entry of a project's merge queue. */
@@ -378,6 +410,33 @@ export function taskService({ db, backend }: TaskServiceDeps) {
     /** The task's latest merge request. Any signed-in user may read it. */
     getMergeRequest: mergeRequestMove("getMergeRequest"),
 
+    /** The task's merge request's latest dequeue, with its details. Any signed-in user may read it. */
+    async getDequeue(actor: Actor, input: TaskPath): Promise<MergeRequestDequeue> {
+      return publicDequeue(
+        lastDequeue(await invoke("getMergeRequest", await project(input), actor, { task: taskNumber(input.task) })),
+      );
+    },
+
+    /** A conflicting file of the latest dequeue, which must be a `conflict` listing `path`. */
+    async getDequeueFile(actor: Actor, input: TaskPath & { path: string }): Promise<DequeueFile> {
+      const ctx = await project(input);
+      const mr = await invoke("getMergeRequest", ctx, actor, { task: taskNumber(input.task) });
+      const dequeue = lastDequeue(mr);
+      const file =
+        dequeue.reason === "conflict"
+          ? (dequeue.details as ConflictDetails).files.find((f) => f.path === input.path)
+          : undefined;
+      if (file === undefined) {
+        throw new ServiceError("not_found", `${taskRef(mr.task)}'s last dequeue has no conflict in ${input.path}`);
+      }
+      return { file, origin: originRepo(ctx.id), fork: forkRepo(ctx.id, attemptRef(mr.task, mr.attempt)) };
+    },
+
+    /** Where a log of the retest behind the latest `failed_checks` dequeue is stored. */
+    async dequeueLogKey(actor: Actor, input: TaskPath & { name: string }): Promise<string> {
+      return invoke("dequeueLogKey", await project(input), actor, { task: taskNumber(input.task), name: input.name });
+    },
+
     /** The project's merge queue, front first. Any signed-in user may read it. */
     async mergeQueue(actor: Actor, input: ProjectPath): Promise<MergeQueueEntry[]> {
       const queue = await invoke("mergeQueue", await project(input), actor);
@@ -460,6 +519,23 @@ function publicMergeRequest(mr: StoredMergeRequest, users: Map<string, string>):
     created_at: mr.created_at,
     created_by: actorRef(mr.created_by, users),
   };
+}
+
+function lastDequeue(mr: StoredMergeRequest): Dequeue {
+  if (mr.last_dequeue === null) throw new ServiceError("not_found", `${taskRef(mr.task)} has never been dequeued`);
+  return mr.last_dequeue;
+}
+
+function publicDequeue({ reason, at, details }: Dequeue): MergeRequestDequeue {
+  if (details === undefined) return { reason, at, details: null };
+  if (reason !== "conflict") return { reason, at, details: details as FailedChecksDetails | ErroredDetails };
+  const conflict = details as ConflictDetails;
+  const files = conflict.files.map(({ hunks, ...file }) =>
+    hunks === undefined
+      ? file
+      : { ...file, hunks: hunks.map(({ startLine, ...hunk }) => ({ start_line: startLine, ...hunk })) },
+  );
+  return { reason, at, details: { ...conflict, files } };
 }
 
 function publicScoring(request: ScoringRequest, users: Map<string, string>): ScoringAnswer {

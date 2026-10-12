@@ -64,6 +64,7 @@ describe("task routes", () => {
       closedAt: null,
       closedBy: null,
       attemptLimit: null,
+      taskBranch: null,
     });
     await call("POST", `${base}/tasks`, bob, { title: "Second", attemptLimit: 3 });
 
@@ -76,6 +77,21 @@ describe("task routes", () => {
     expect(edited.status).toBe(200);
     expect(edited.body).toMatchObject({ title: "Fix sign-in", body: "It *fails*.", attemptLimit: 4 });
     expect((await call("PATCH", `${base}/tasks/t1`, bob, { title: "x" })).status).toBe(403);
+  });
+
+  it("reports a task's task branch head, or null when it has none", async () => {
+    const { call, repos, ada, bob, base, project } = await setup();
+    const origin = `${project["id"]}-main`;
+    repos.commit(origin, { files: { "README.md": "hi\n" } });
+    await call("POST", `${base}/tasks`, ada, { title: "Fix login" });
+    await call("POST", `${base}/tasks`, ada, { title: "Second" });
+    const tests = repos.commit(origin, { branch: "tests", files: { "login.test.ts": "it()\n" } });
+    repos.setRef(origin, "refs/tasks/t1", tests.hash);
+
+    expect((await call("GET", `${base}/tasks/t1`, bob)).body["taskBranch"]).toEqual({ sha: tests.hash });
+    expect((await call("GET", `${base}/tasks/t2`, bob)).body["taskBranch"]).toBeNull();
+    const list = (await call("GET", `${base}/tasks`, bob)).body["tasks"];
+    expect(list.map((t: Json) => t["taskBranch"])).toEqual([{ sha: tests.hash }, null]);
   });
 
   it("runs the task transitions with their permissions", async () => {
@@ -149,6 +165,25 @@ describe("attempt routes", () => {
     expect((await call("GET", `${base}/attempts/t1a2`, bob)).body).toEqual(created.body["attempts"][1]);
     expect((await call("GET", `${base}/attempts/t1a9`, bob)).status).toBe(404);
     expect((await call("GET", `${base}/attempts/t1`, bob)).status).toBe(400);
+  });
+
+  it("forks an attempt of the same task, recording forkedFrom, and refuses one from another task", async () => {
+    const { call, ada, bob, repos, project, base } = await setup();
+    await call("POST", `${base}/tasks`, ada, { title: "a" });
+    await call("POST", `${base}/tasks`, ada, { title: "b" });
+    await call("POST", `${base}/tasks/t1/attempts`, ada);
+    const head = repos.commit(`${project["id"]}-t1a1`, { files: { "a.txt": "a\n" } }).hash;
+
+    const forked = await call("POST", `${base}/tasks/t1/attempts`, bob, { from: "t1a1" });
+    expect(forked.status).toBe(201);
+    expect(forked.body["attempts"]).toEqual([expect.objectContaining({ ref: "t1a2", forkedFrom: "t1a1" })]);
+    expect(repos.ref(`${project["id"]}-t1a2`, "refs/heads/main")).toBe(head);
+    expect((await call("GET", `${base}/attempts/t1a2`, bob)).body["forkedFrom"]).toBe("t1a1");
+
+    const other = await call("POST", `${base}/tasks/t2/attempts`, ada, { from: "t1a1" });
+    expect(other.status).toBe(400);
+    expect(other.body["error"]["code"]).toBe("invalidRequest");
+    expect((await call("POST", `${base}/tasks/t1/attempts`, ada, { from: "t1" })).status).toBe(400);
   });
 
   it("fails a batch over the cap whole, with attemptLimit", async () => {

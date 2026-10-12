@@ -40,7 +40,7 @@ import type {
   ScoringTrigger,
   StoredRun,
 } from "./scoring.ts";
-import { attemptRef, reservedTask, taskRef } from "./task-refs.ts";
+import { attemptRef, reservedTask, taskBranchRef, taskRef } from "./task-refs.ts";
 import type { Actor } from "./tokens.ts";
 import { Verdicts } from "./verdicts.ts";
 import type { StoredVerdict, VerdictRecommendation, VerdictSummary } from "./verdicts.ts";
@@ -97,6 +97,11 @@ export interface StoredAttempt {
   closed_at: string | null;
   merged_sha: string | null;
   archived_sha: string | null;
+  /**
+   * The attempt of the same task this one was copied from when it was started (`t42a1`), or null.
+   * Provenance only: it is never this attempt's base.
+   */
+  forked_from: string | null;
   /** Its current head's scoring status, for polling. */
   scoring: AttemptScoring;
   /** The latest merge request it is the source of, if any, for polling: its state and last dequeue reason. */
@@ -201,6 +206,8 @@ export interface CreateAttemptsInput {
   note?: string | undefined;
   /** The origin branch a push created this attempt from. Internal: the API doesn't take it. */
   branch?: string | undefined;
+  /** An attempt of the same task, current or archived, whose head each new attempt starts at. */
+  from?: AttemptInput | undefined;
 }
 
 export interface AttemptInput {
@@ -278,6 +285,8 @@ interface AttemptRow {
   closed_at: string | null;
   merged_sha: string | null;
   archived_sha: string | null;
+  /** The number of the attempt of the same task it was forked from. */
+  forked_from: number | null;
 }
 
 const SCHEMA = [
@@ -304,6 +313,7 @@ const SCHEMA = [
     closed_at TEXT,
     merged_sha TEXT,
     archived_sha TEXT,
+    forked_from INTEGER,
     PRIMARY KEY (task, number)
   )`,
   // Branch names are unique per project among active attempts.
@@ -331,16 +341,24 @@ const DROPPED_TABLES = ["deliveries", "checks", "pending"];
 /** Columns added to the spike's journal, so task and attempt events record who acted on what. */
 const JOURNAL_COLUMNS = ["user_id TEXT", "agent TEXT", "task INTEGER", "attempt INTEGER"];
 
+/** Columns added to attempts after their table was made: where a forked attempt was copied from. */
+const ATTEMPT_COLUMNS = ["forked_from INTEGER"];
+
 /**
- * Creates the store's tables, adds the journal's newer columns to a journal that predates them, and
- * drops the spike's tables.
+ * Creates the store's tables, adds the journal's and attempts' newer columns to tables that predate
+ * them, and drops the spike's tables.
  */
 export function migrate(sql: Sql): void {
   for (const statement of SCHEMA) sql.exec(statement);
   for (const table of DROPPED_TABLES) sql.exec(`DROP TABLE IF EXISTS ${table}`);
-  const columns = new Set(sql.exec<{ name: string }>("PRAGMA table_info(journal)").map((c) => c.name));
-  for (const column of JOURNAL_COLUMNS) {
-    if (!columns.has(column.split(" ")[0] ?? "")) sql.exec(`ALTER TABLE journal ADD COLUMN ${column}`);
+  addColumns(sql, "journal", JOURNAL_COLUMNS);
+  addColumns(sql, "attempts", ATTEMPT_COLUMNS);
+}
+
+function addColumns(sql: Sql, table: string, add: string[]): void {
+  const columns = new Set(sql.exec<{ name: string }>(`PRAGMA table_info(${table})`).map((c) => c.name));
+  for (const column of add) {
+    if (!columns.has(column.split(" ")[0] ?? "")) sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column}`);
   }
 }
 
@@ -540,6 +558,7 @@ export class TaskStore {
     if (!Number.isSafeInteger(count) || count < 1) throw new ServiceError("invalidRequest", "count must be at least 1");
     if (input.branch !== undefined) this.#checkBranch(input.task, input.branch, count);
     this.#expect(this.#task(input.task), ["open"], "add attempts to");
+    if (input.from !== undefined) this.#checkForkSource(input.task, input.from);
 
     const projectLimit = await this.#projectLimit(project);
 
@@ -564,20 +583,22 @@ export class TaskStore {
     try {
       await this.#fork(project, current.number, numbers);
       forked = true;
+      if (input.from !== undefined) await this.#seed(project, input.from, numbers);
       return this.#sql.transaction(() => {
         // The task may have been closed while the forks were made.
         this.#expect(this.#task(current.number), ["open"], "add attempts to");
         const at = this.#stamp();
         for (const number of numbers) {
           this.#sql.exec(
-            `INSERT INTO attempts (task, number, author, state, branch, note, created_at)
-             VALUES (?, ?, ?, 'draft', ?, ?, ?)`,
+            `INSERT INTO attempts (task, number, author, state, branch, note, created_at, forked_from)
+             VALUES (?, ?, ?, 'draft', ?, ?, ?, ?)`,
             current.number,
             number,
             actor.user.id,
             input.branch ?? null,
             input.note ?? "",
             at,
+            input.from?.number ?? null,
           );
           this.#journal(actor, "created", current.number, number);
         }
@@ -916,6 +937,20 @@ export class TaskStore {
     }
     mayAuthor(actor, current);
     return current;
+  }
+
+  /**
+   * Checks the actor may push task `task`'s task branch (`refs/tasks/t42` in the origin), so the git
+   * proxy may forward the push: the task exists and the actor's human is its creator or the project
+   * owner. The task branch may be pushed in any state.
+   */
+  authorizeTaskBranchPush(project: ProjectContext, actor: Actor, input: { task: number }): StoredTask {
+    const current = this.#task(input.task);
+    if (actor.user.id === project.owner || actor.user.id === current.creator) return current;
+    throw new ServiceError(
+      "forbidden",
+      `only ${taskRef(current.number)}'s creator or the project owner may push its task branch`,
+    );
   }
 
   /**
@@ -1885,10 +1920,70 @@ export class TaskStore {
       numbers.map((n) => this.#repos.fork(origin, forkRepo(project.id, attemptRef(task, n)))),
     );
     const failed = results.find((r): r is PromiseRejectedResult => r.status === "rejected");
-    if (failed === undefined) return;
-    const made = numbers.filter((_, i) => results[i]?.status === "fulfilled");
-    await this.#deleteForks(project, task, made);
-    throw failed.reason;
+    if (failed !== undefined) {
+      const made = numbers.filter((_, i) => results[i]?.status === "fulfilled");
+      await this.#deleteForks(project, task, made);
+      throw failed.reason;
+    }
+    try {
+      await Promise.all(numbers.map((n) => this.#startFromTaskBranch(project, task, n)));
+    } catch (error) {
+      await this.#deleteForks(project, task, numbers);
+      throw error;
+    }
+  }
+
+  /**
+   * Sets a new fork's `main` to its task's task branch head, so the attempt starts from it; the
+   * fork is left at the origin's `main` when the task has no task branch.
+   */
+  async #startFromTaskBranch(project: ProjectContext, task: number, number: number): Promise<void> {
+    await this.#untilReady(() =>
+      this.#repos.copyRef({
+        from: originRepo(project.id),
+        fromRef: taskBranchRef(task),
+        to: forkRepo(project.id, attemptRef(task, number)),
+        toRef: FORK_HEAD,
+      }),
+    );
+  }
+
+  /** A fork source is an attempt of the same task with a head to copy: its fork's, or its archive's. */
+  #checkForkSource(task: number, from: AttemptInput): StoredAttempt {
+    if (from.task !== task) {
+      throw new ServiceError(
+        "invalidRequest",
+        `${attemptRef(from.task, from.number)} isn't an attempt of ${taskRef(task)}`,
+      );
+    }
+    const source = this.#attempt(from);
+    if (!(ACTIVE as readonly AttemptState[]).includes(source.state) && source.archived_sha === null) {
+      throw invalidState(`${source.fork} has no archived head to fork`);
+    }
+    return source;
+  }
+
+  /**
+   * Points each new fork's `main` at the source attempt's head: its fork's `main` while it is
+   * active, else its archived head. The new forks are siblings: nothing ties them to the source after.
+   */
+  async #seed(project: ProjectContext, from: AttemptInput, numbers: number[]): Promise<void> {
+    // Read again: the source may have ended while the forks were made.
+    const source = this.#checkForkSource(from.task, from);
+    const head = (ACTIVE as readonly AttemptState[]).includes(source.state)
+      ? { from: forkRepo(project.id, source.fork), fromRef: FORK_HEAD }
+      : {
+          from: originRepo(project.id),
+          fromRef: archiveRef(source.fork),
+          expect: source.archived_sha ?? undefined,
+        };
+    await Promise.all(
+      numbers.map((n) =>
+        this.#untilReady(() =>
+          this.#repos.copyRef({ ...head, to: forkRepo(project.id, attemptRef(from.task, n)), toRef: FORK_HEAD }),
+        ),
+      ),
+    );
   }
 
   async #deleteForks(project: ProjectContext, task: number, numbers: number[]): Promise<void> {
@@ -2031,6 +2126,7 @@ export const TASK_METHODS = [
   "rescore",
   "runLogKey",
   "authorizePush",
+  "authorizeTaskBranchPush",
   "recordPush",
   "routeBranchPush",
   "completeBranchPush",
@@ -2117,6 +2213,7 @@ function toAttempt(row: AttemptRow): Omit<StoredAttempt, "scoring" | "merge_requ
     closed_at: row.closed_at,
     merged_sha: row.merged_sha,
     archived_sha: row.archived_sha,
+    forked_from: row.forked_from === null ? null : attemptRef(row.task, row.forked_from),
   };
 }
 

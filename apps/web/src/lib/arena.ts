@@ -9,13 +9,10 @@ export type TaskArena = InferResponseType<Tasks[":t"]["arena"]["$get"], 200>;
 export type Metric = TaskArena["metrics"][number];
 
 /**
- * One attempt as the arena reads it. `needsUpdate` and `forkedFrom` come with the task branch
- * (#203–#205); until the platform sends them they're absent, and nothing is shown for them.
+ * One attempt as the arena reads it. `needsUpdate` comes with the task branch following (#205); until
+ * the platform sends it, it's absent and nothing is shown for it.
  */
-export type ArenaAttempt = TaskArena["attempts"][number] & {
-  needsUpdate?: boolean;
-  forkedFrom?: string | null;
-};
+export type ArenaAttempt = TaskArena["attempts"][number] & { needsUpdate?: boolean };
 
 /**
  * An attempt's gate in its current result: `noChecks` when it passed with no checks configured,

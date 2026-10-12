@@ -119,6 +119,14 @@ const TaskSchema = z
       .int()
       .nullable()
       .openapi({ description: "Overrides the project's cap on active attempts; null to use the project's." }),
+    taskBranch: z
+      .object({ sha: z.string().openapi({ description: "The task branch's head." }) })
+      .nullable()
+      .openapi("TaskBranch", {
+        description:
+          "The task's task branch, `refs/tasks/t42` in the origin, which new attempts start from; null when it has none. " +
+          "The task creator or project owner pushes it with `git push throng HEAD:refs/tasks/t42`.",
+      }),
   })
   .openapi("Task");
 
@@ -164,6 +172,17 @@ const ListedTaskSchema = TaskSchema.extend({
     .openapi({ description: "Its latest merge request's state, or null when it has none." }),
 }).openapi("ListedTask");
 
+/** Where an attempt was copied from: provenance only, never its base. */
+const ForkedFromSchema = z
+  .string()
+  .optional()
+  .openapi({
+    description:
+      "The attempt of the same task this one was copied from when it was started. Absent when it wasn't. " +
+      "Provenance only: never its base.",
+    example: "t42a1",
+  });
+
 const AttemptSchema = z
   .object({
     ref: z.string().openapi({ description: "The attempt's reference.", example: "t42a3" }),
@@ -178,6 +197,7 @@ const AttemptSchema = z
     closedAt: z.string().nullable(),
     mergedSha: z.string().nullable(),
     archivedSha: z.string().nullable(),
+    forkedFrom: ForkedFromSchema,
     scoring: z
       .object({
         status: z.enum(ATTEMPT_SCORING_STATUSES),
@@ -350,6 +370,7 @@ const TaskArenaSchema = z
         ref: z.string().openapi({ example: "t42a3" }),
         state: z.enum(ATTEMPT_STATES),
         author: UserRefSchema,
+        forkedFrom: ForkedFromSchema,
         base: BaseSchema.nullable().openapi({
           description:
             "An active attempt's base at its current head (its fork's `main`), scored or not; diff it with " +
@@ -437,6 +458,15 @@ const CreateAttemptsSchema = z
   .object({
     count: z.number().int().min(1).max(100).optional().openapi({ description: "Attempts to create. Defaults to 1." }),
     note: z.string().max(65_536).optional().openapi({ description: "Markdown, set on every new attempt." }),
+    from: z
+      .string()
+      .optional()
+      .openapi({
+        description:
+          "An attempt of the same task, current or archived, whose head every new attempt starts at. Each records it " +
+          "as `forkedFrom`; its base is still the task branch or `main`, and it never follows the source.",
+        example: "t42a1",
+      }),
   })
   .openapi("CreateAttempts");
 

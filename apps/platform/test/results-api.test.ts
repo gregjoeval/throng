@@ -248,6 +248,21 @@ describe("the arena", () => {
     ]);
   });
 
+  it("shows where a forked attempt came from, and bases it on main, not on its source", async () => {
+    const { call, ada, repos, projectId, root, base, drafts, commit } = await setup();
+    await drafts(1);
+    const source = commit("t1a1", "one\n");
+    await call("POST", `${base}/tasks/t1/attempts`, ada, { from: "t1a1" });
+    commit("t1a1", "one more\n");
+    expect(repos.ref(`${projectId}-t1a2`, "refs/heads/main")).toBe(source);
+    const res = await call("GET", `${base}/tasks/t1/arena`, ada);
+    expect(res.body["attempts"].map((a: Json) => [a["ref"], a["base"], a["forkedFrom"]])).toEqual([
+      ["t1a1", { sha: root, on: "main" }, undefined],
+      ["t1a2", { sha: root, on: "main" }, "t1a1"],
+    ]);
+    expect("forkedFrom" in res.body["attempts"][0]).toBeFalsy();
+  });
+
   it("gives an ended attempt no base", async () => {
     const { call, greg, ada, base, drafts, commit } = await setup();
     await drafts(1);

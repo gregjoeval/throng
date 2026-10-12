@@ -2,14 +2,16 @@
 // Access does not sit in front of it: machine clients use Throng bearer tokens. Only `/me` and
 // `/tokens` also accept an Access session, so a human can mint their first token. Over the service
 // binding (see `app.ts`), those, the project routes and the read API (`browse-api.ts`) the browser
-// needs also take throng-web's forwarded identity. Handlers stay thin: they call services, which
-// throw `ServiceError`s that `onError` turns into the error shape.
+// needs also take throng-web's forwarded identity. Handlers stay thin: they call a service function
+// `(actor, input)`, which checks permissions itself (MCP tools call the same functions) and throws
+// `ServiceError`s that `onError` turns into the error shape.
 
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import type { AccessBindings } from "./access.ts";
 import { json, ProjectPathSchema } from "./api-shared.ts";
 import { bearerAuth, bearerOrAccess, bearerOrForwarded } from "./auth.ts";
 import type { AuthEnv, AuthOptions } from "./auth.ts";
+import { BASE_LINES } from "./base.ts";
 import { browseRoutes } from "./browse-api.ts";
 import { CONFIG_NAME, MAX_CHECK_TIMEOUT_MS, MAX_CONFIG_BYTES, METRIC_ORDERS, parseConfig } from "./config.ts";
 import { dequeueRoutes } from "./dequeue-api.ts";
@@ -26,9 +28,10 @@ import { ATTEMPT_SCORING_STATUSES, RUN_STATUSES, SCORING_TRIGGERS } from "./scor
 import { ATTEMPT_STATES, TASK_STATES } from "./task-store.ts";
 import { taskService } from "./tasks.ts";
 import type { TaskBackend } from "./tasks.ts";
-import { DEFAULT_TOKEN_TTL_SECONDS, listTokens, MAX_TOKEN_TTL_SECONDS, mintToken, revokeToken } from "./tokens.ts";
+import { DEFAULT_TOKEN_TTL_SECONDS, MAX_TOKEN_TTL_SECONDS, tokenService } from "./tokens.ts";
 import type { Token } from "./tokens.ts";
 import type { User } from "./users.ts";
+import { MAX_VERDICT_BODY, VERDICT_RECOMMENDATIONS } from "./verdicts.ts";
 
 const UserSchema = z
   .object({ id: z.string(), handle: z.string(), email: z.string(), createdAt: z.string() })
@@ -116,8 +119,85 @@ const TaskSchema = z
       .int()
       .nullable()
       .openapi({ description: "Overrides the project's cap on active attempts; null to use the project's." }),
+    taskBranch: z
+      .object({
+        sha: z.string().openapi({ description: "The task branch's head." }),
+        commits: z.number().int().openapi({
+          description: "How many of its commits `main` doesn't have yet: they land with the selected attempt.",
+        }),
+      })
+      .nullable()
+      .openapi("TaskBranch", {
+        description:
+          "The task's task branch, `refs/tasks/t42` in the origin, which new attempts start from; null when it has none. " +
+          "The task creator or project owner pushes it with `git push throng HEAD:refs/tasks/t42`.",
+      }),
   })
   .openapi("Task");
+
+const VerdictSummarySchema = z
+  .object({
+    head: z.string().nullable().openapi({ description: "The attempt's current head; null before any push." }),
+    merge: z.number().int(),
+    revise: z.number().int(),
+    reject: z.number().int(),
+  })
+  .openapi("VerdictSummary", {
+    description: "The verdicts on the attempt's current head, counted by recommendation. Superseded ones don't count.",
+  });
+
+const VerdictSchema = z
+  .object({
+    reviewer: UserRefSchema,
+    alias: z.string().nullable().openapi({ description: "The alias the reviewer posted under, if any." }),
+    head: z.string().openapi({ description: "The head it judges: the attempt's current head when it was posted." }),
+    recommendation: z.enum(VERDICT_RECOMMENDATIONS),
+    body: z.string().openapi({ description: "Markdown." }),
+    at: z.string().openapi({ description: "When it was posted, or last replaced." }),
+    superseded: z.boolean().openapi({ description: "Whether its head is no longer the attempt's current head." }),
+  })
+  .openapi("Verdict");
+
+const PostVerdictSchema = z
+  .object({
+    recommendation: z.enum(VERDICT_RECOMMENDATIONS),
+    body: z.string().max(MAX_VERDICT_BODY).openapi({ description: "Markdown, up to 64 KB." }),
+  })
+  .openapi("PostVerdict");
+
+const ListedTaskSchema = TaskSchema.extend({
+  attemptCount: z.number().int().openapi({ description: "Its attempts, obsolete ones left out.", example: 3 }),
+  bestGate: z.enum(GATES).nullable().openapi({
+    description:
+      "The best gate among those attempts' current results: `passed` beats `failed`. Null when none has a result.",
+  }),
+  mergeRequestState: z
+    .enum(MERGE_REQUEST_STATES)
+    .nullable()
+    .openapi({ description: "Its latest merge request's state, or null when it has none." }),
+}).openapi("ListedTask");
+
+/** Where an attempt was copied from: provenance only, never its base. */
+const AliasSchema = z.string().nullable().openapi({
+  description:
+    "The alias its author started it under (`claude`); null when they acted as themselves, or after a hand-off.",
+});
+
+const ForkedFromSchema = z
+  .string()
+  .optional()
+  .openapi({
+    description:
+      "The attempt of the same task this one was copied from when it was started. Absent when it wasn't. " +
+      "Provenance only: never its base.",
+    example: "t42a1",
+  });
+
+const NeedsUpdateSchema = z.boolean().openapi({
+  description:
+    "True while the task's task branch has moved and merging it into this active attempt conflicted. Nothing " +
+    "was written; its author merges the task branch (`refs/tasks/t42`) and pushes, which clears it.",
+});
 
 const AttemptSchema = z
   .object({
@@ -125,6 +205,7 @@ const AttemptSchema = z
     task: z.number().int().openapi({ example: 42 }),
     number: z.number().int().openapi({ description: "Per task, 1-based and never reused.", example: 3 }),
     author: UserRefSchema,
+    alias: AliasSchema,
     state: z.enum(ATTEMPT_STATES),
     fork: z.string().openapi({ description: "The logical fork name, kept for the attempt's life.", example: "t42a3" }),
     branch: z.string().nullable().openapi({ description: "The origin branch a push created it from." }),
@@ -133,6 +214,8 @@ const AttemptSchema = z
     closedAt: z.string().nullable(),
     mergedSha: z.string().nullable(),
     archivedSha: z.string().nullable(),
+    forkedFrom: ForkedFromSchema,
+    needsUpdate: NeedsUpdateSchema,
     scoring: z
       .object({
         status: z.enum(ATTEMPT_SCORING_STATUSES),
@@ -153,6 +236,7 @@ const AttemptSchema = z
           "The latest merge request this attempt is the source of, for polling: its state and why it last left the queue. " +
           "Null when it was never selected.",
       }),
+    verdicts: VerdictSummarySchema,
   })
   .openapi("Attempt");
 
@@ -186,9 +270,14 @@ const MetricsSchema = z.record(z.string(), z.number()).openapi({ example: { cove
 
 const ScoringResultSchema = z
   .object({
-    base: z.string().nullable().openapi({
-      description: "The merge-base of the head and `origin/main` at scoring time; null with no shared history.",
-    }),
+    base: z
+      .string()
+      .nullable()
+      .openapi({
+        description:
+          "The head's base at scoring time: its merge-base with the task branch, or with `origin/main` when the task has " +
+          "none; null with no shared history.",
+      }),
     config: z
       .discriminatedUnion("kind", [
         z.object({ kind: z.literal("none") }),
@@ -266,14 +355,48 @@ const ScoringStatusSchema = z
   })
   .openapi("ScoringStatus");
 
+const BaseSchema = z
+  .object({
+    sha: z.string().openapi({ description: "The base commit." }),
+    on: z.enum(BASE_LINES).openapi({
+      description: "`task` when it lies on the task's task branch, `main` when the task has none.",
+    }),
+  })
+  .openapi("Base", {
+    description: "Where an attempt's history meets its task branch, or `origin/main` when the task has none.",
+  });
+
+const ConfigNameSchema = z.string().regex(CONFIG_NAME);
+
+const MetricSchema = z
+  .object({
+    name: ConfigNameSchema.openapi({ example: "coverage" }),
+    unit: z.string().nullable().openapi({ example: "%" }),
+    order: z.enum(METRIC_ORDERS).openapi({ description: "`asc` when lower is better, `desc` when higher is." }),
+  })
+  .openapi("Metric");
+
 const TaskArenaSchema = z
   .object({
     task: z.string().openapi({ example: "t42" }),
+    metrics: z.array(MetricSchema).openapi({
+      description:
+        "Every metric the `.throng/config.yml` on `origin/main` declares, in check order; empty without a valid config.",
+    }),
     attempts: z.array(
       ScoringStatusSchema.extend({
         ref: z.string().openapi({ example: "t42a3" }),
         state: z.enum(ATTEMPT_STATES),
         author: UserRefSchema,
+        alias: AliasSchema,
+        forkedFrom: ForkedFromSchema,
+        needsUpdate: NeedsUpdateSchema,
+        base: BaseSchema.nullable().openapi({
+          description:
+            "An active attempt's base at its current head (its fork's `main`), scored or not; diff it with " +
+            "`compare/{base.sha}...{ref}`. Null for an ended attempt, a fork with no commits, or no shared history.",
+        }),
+        verdicts: VerdictSummarySchema,
       }).openapi("ArenaAttempt"),
     ),
   })
@@ -355,6 +478,15 @@ const CreateAttemptsSchema = z
   .object({
     count: z.number().int().min(1).max(100).optional().openapi({ description: "Attempts to create. Defaults to 1." }),
     note: z.string().max(65_536).optional().openapi({ description: "Markdown, set on every new attempt." }),
+    from: z
+      .string()
+      .optional()
+      .openapi({
+        description:
+          "An attempt of the same task, current or archived, whose head every new attempt starts at. Each records it " +
+          "as `forkedFrom`; its base is still the task branch or `main`, and it never follows the source.",
+        example: "t42a1",
+      }),
   })
   .openapi("CreateAttempts");
 
@@ -383,8 +515,6 @@ const RunLogPathSchema = RunPathSchema.extend({
   }),
 });
 
-const ConfigNameSchema = z.string().regex(CONFIG_NAME);
-
 const ConfigSchema = z
   .object({
     setup: z.array(z.string()).openapi({ description: "Commands run once, in order, before the checks." }),
@@ -402,15 +532,7 @@ const ConfigSchema = z
             .int()
             .max(MAX_CHECK_TIMEOUT_MS)
             .openapi({ description: "Defaults to 10 minutes.", example: 600_000 }),
-          metrics: z.array(
-            z.object({
-              name: ConfigNameSchema.openapi({ example: "coverage" }),
-              unit: z.string().nullable().openapi({ example: "%" }),
-              order: z
-                .enum(METRIC_ORDERS)
-                .openapi({ description: "`asc` when lower is better, `desc` when higher is." }),
-            }),
-          ),
+          metrics: z.array(MetricSchema),
         }),
       )
       .openapi({ description: "Run in order." }),
@@ -473,15 +595,16 @@ function noLogs(): LogStore {
 }
 
 type Bearer = ReturnType<typeof bearerAuth>;
+type Browser = ReturnType<typeof bearerOrForwarded>;
 
 const AUTHOR_ONLY = "Only the attempt's author, or their aliases, may.";
 const OWNER_ONLY = "Only the project owner may.";
 const TASK_MANAGERS = "Only the project owner or the task's creator may.";
 const RESCORERS = "Only the attempt's author (or their aliases), the task's creator or the project owner may.";
 
-/** A task transition route: `POST …/tasks/{t}/<verb>`. */
+/** A task transition route: `POST …/tasks/{t}/<verb>`, also open to throng-web. */
 function taskTransition<V extends string>(
-  bearer: Bearer,
+  browser: Browser,
   verb: V,
   operationId: string,
   summary: string,
@@ -494,8 +617,8 @@ function taskTransition<V extends string>(
     operationId,
     tags: ["Tasks"],
     summary,
-    security: bearerOnly,
-    middleware: [bearer] as const,
+    security: bearerOrWeb,
+    middleware: [browser] as const,
     request: { params: TaskPathSchema },
     responses: {
       200: { description: "The task after the transition.", ...json(TaskSchema) },
@@ -508,9 +631,9 @@ function taskTransition<V extends string>(
   });
 }
 
-/** A merge request action route: `POST …/tasks/{t}/merge-request/<verb>`. */
+/** A merge request action route: `POST …/tasks/{t}/merge-request/<verb>`, also open to throng-web. */
 function mergeRequestAction<V extends string>(
-  bearer: Bearer,
+  browser: Browser,
   verb: V,
   operationId: string,
   summary: string,
@@ -523,8 +646,8 @@ function mergeRequestAction<V extends string>(
     tags: ["Merge queue"],
     summary,
     description,
-    security: bearerOnly,
-    middleware: [bearer] as const,
+    security: bearerOrWeb,
+    middleware: [browser] as const,
     request: { params: TaskPathSchema },
     responses: {
       200: { description: "The merge request after the action.", ...json(MergeRequestSchema) },
@@ -553,8 +676,17 @@ interface AttemptAction<S extends z.ZodType> {
   ok: { description: string; schema: S };
 }
 
-/** An attempt action route: `POST …/attempts/{a}/<verb>`, bearer-only. */
-function attemptAction<V extends string, S extends z.ZodType>(bearer: Bearer, verb: V, action: AttemptAction<S>) {
+/**
+ * Who a route lets in, and the security its OpenAPI operation declares to match: bearer tokens only,
+ * or, with the `browser` middleware, throng-web's forwarded user too.
+ */
+interface RouteAuth {
+  middleware: Bearer | Browser;
+  security: Record<string, string[]>[];
+}
+
+/** An attempt action route: `POST …/attempts/{a}/<verb>`, under `auth`. */
+function attemptAction<V extends string, S extends z.ZodType>(auth: RouteAuth, verb: V, action: AttemptAction<S>) {
   return createRoute({
     method: "post",
     path: `/projects/{owner}/{project}/attempts/{a}/${verb}`,
@@ -562,8 +694,8 @@ function attemptAction<V extends string, S extends z.ZodType>(bearer: Bearer, ve
     tags: action.tags,
     summary: action.summary,
     ...(action.description === undefined ? {} : { description: action.description }),
-    security: bearerOnly,
-    middleware: [bearer] as const,
+    security: auth.security,
+    middleware: [auth.middleware] as const,
     request: { params: AttemptPathSchema },
     responses: {
       200: { description: action.ok.description, ...json(action.ok.schema) },
@@ -578,14 +710,14 @@ function attemptAction<V extends string, S extends z.ZodType>(bearer: Bearer, ve
 
 /** An attempt transition route: `POST …/attempts/{a}/<verb>`. */
 function attemptTransition<V extends string>(
-  bearer: Bearer,
+  auth: RouteAuth,
   verb: V,
   operationId: string,
   summary: string,
   forbidden: string,
   conflicts: string[],
 ) {
-  return attemptAction(bearer, verb, {
+  return attemptAction(auth, verb, {
     operationId,
     tags: ["Attempts"],
     summary,
@@ -595,9 +727,9 @@ function attemptTransition<V extends string>(
   });
 }
 
-/** A scoring request route: `POST …/attempts/{a}/<verb>`. */
+/** A scoring request route: `POST …/attempts/{a}/<verb>`, under `auth` (see `attemptAction`). */
 function scoringRoute<V extends string>(
-  bearer: Bearer,
+  auth: RouteAuth,
   verb: V,
   operationId: string,
   summary: string,
@@ -605,7 +737,7 @@ function scoringRoute<V extends string>(
   forbidden: string,
   conflict: string,
 ) {
-  return attemptAction(bearer, verb, {
+  return attemptAction(auth, verb, {
     operationId,
     tags: ["Scoring"],
     summary,
@@ -631,11 +763,14 @@ export function apiRoutes(options: ApiOptions = {}) {
   const auth = bearerOrAccess(options);
   const bearer = bearerAuth(options.now === undefined ? {} : { now: options.now });
   const browser = bearerOrForwarded(options);
+  const bearerRoute: RouteAuth = { middleware: bearer, security: bearerOnly };
+  const webRoute: RouteAuth = { middleware: browser, security: bearerOrWeb };
   const reposFor = options.repos ?? noRepos;
   const projects = (env: AccessBindings) => projectService({ db: env.DB, repos: reposFor(env) });
   const backendFor = options.tasks ?? noTasks;
   const logsFor = options.logs ?? noLogs;
-  const tasks = (env: AccessBindings) => taskService({ db: env.DB, backend: backendFor(env) });
+  const tasks = (env: AccessBindings) => taskService({ db: env.DB, repos: reposFor(env), backend: backendFor(env) });
+  const tokens = (env: AccessBindings) => tokenService({ db: env.DB, now });
   const taskPath = ({ t, ...rest }: z.infer<typeof TaskPathSchema>) => ({ ...rest, task: t });
   const attemptPath = ({ a, ...rest }: z.infer<typeof AttemptPathSchema>) => ({ ...rest, attempt: a });
 
@@ -710,27 +845,8 @@ export function apiRoutes(options: ApiOptions = {}) {
         },
       }),
       async (c) => {
-        const body = c.req.valid("json") ?? {};
-        const { actor, token: caller } = c.var;
-        if (actor.alias !== null && body.alias !== undefined && body.alias !== actor.alias) {
-          return c.json(errorBody("forbidden", "an alias's token can only mint tokens for that alias"), 403);
-        }
-        const at = now();
-        let ttlSeconds = body.expiresIn ?? DEFAULT_TOKEN_TTL_SECONDS;
-        if (caller !== null) {
-          // A token can't be used to extend itself: what it mints expires no later than it does.
-          const remaining = Math.floor((Date.parse(caller.expires_at) - at.getTime()) / 1000);
-          if (body.expiresIn === undefined) ttlSeconds = Math.min(ttlSeconds, remaining);
-          if (ttlSeconds > remaining || ttlSeconds < 1) {
-            return c.json(errorBody("invalidRequest", "a token can't mint a token that outlives it"), 400);
-          }
-        }
-        const { token, plaintext } = await mintToken(c.env.DB, {
-          userId: actor.user.id,
-          alias: actor.alias ?? body.alias ?? null,
-          ttlSeconds,
-          now: at,
-        });
+        const input = { ...c.req.valid("json"), via: c.var.token };
+        const { token, plaintext } = await tokens(c.env).mint(c.var.actor, input);
         return c.json({ ...publicToken(token), token: plaintext }, 201);
       },
     )
@@ -753,9 +869,8 @@ export function apiRoutes(options: ApiOptions = {}) {
         },
       }),
       async (c) => {
-        const { user, alias } = c.var.actor;
-        const tokens = await listTokens(c.env.DB, user.id, alias);
-        return c.json({ tokens: tokens.map(publicToken) }, 200);
+        const list = await tokens(c.env).list(c.var.actor);
+        return c.json({ tokens: list.map(publicToken) }, 200);
       },
     )
     .openapi(
@@ -775,17 +890,7 @@ export function apiRoutes(options: ApiOptions = {}) {
           404: errorResponse("The caller has no token with this id."),
         },
       }),
-      async (c) => {
-        const { user, alias } = c.var.actor;
-        const revoked = await revokeToken(c.env.DB, {
-          userId: user.id,
-          alias,
-          id: c.req.valid("param").id,
-          now: now(),
-        });
-        if (revoked === null) return c.json(errorBody("notFound", "no such token"), 404);
-        return c.json(publicToken(revoked), 200);
-      },
+      async (c) => c.json(publicToken(await tokens(c.env).revoke(c.var.actor, c.req.valid("param"))), 200),
     )
     .openapi(
       createRoute({
@@ -865,9 +970,9 @@ export function apiRoutes(options: ApiOptions = {}) {
         operationId: "createTask",
         tags: ["Tasks"],
         summary: "Create a task in a project",
-        description: "Any signed-in user may. The caller's user is its creator. The task starts open.",
-        security: bearerOnly,
-        middleware: [bearer] as const,
+        description: "Any signed-in user may. The caller's human is its creator. The task starts open.",
+        security: bearerOrWeb,
+        middleware: [browser] as const,
         request: { params: ProjectPathSchema, body: { required: true, ...json(CreateTaskSchema) } },
         responses: {
           201: { description: "The new task.", ...json(TaskSchema) },
@@ -889,11 +994,11 @@ export function apiRoutes(options: ApiOptions = {}) {
         tags: ["Tasks"],
         summary: "List a project's tasks",
         description: "Obsolete tasks are left out unless `state=obsolete` asks for them.",
-        security: bearerOnly,
-        middleware: [bearer] as const,
+        security: bearerOrWeb,
+        middleware: [browser] as const,
         request: { params: ProjectPathSchema, query: z.object({ state: z.enum(TASK_STATES).optional() }) },
         responses: {
-          200: { description: "The tasks, by number.", ...json(z.object({ tasks: z.array(TaskSchema) })) },
+          200: { description: "The tasks, by number.", ...json(z.object({ tasks: z.array(ListedTaskSchema) })) },
           400: errorResponse("The request is invalid."),
           401: unauthorizedBearer,
           404: errorResponse("No such project."),
@@ -911,8 +1016,8 @@ export function apiRoutes(options: ApiOptions = {}) {
         operationId: "getTask",
         tags: ["Tasks"],
         summary: "Get a task by its reference",
-        security: bearerOnly,
-        middleware: [bearer] as const,
+        security: bearerOrWeb,
+        middleware: [browser] as const,
         request: { params: TaskPathSchema },
         responses: {
           200: { description: "The task.", ...json(TaskSchema) },
@@ -949,25 +1054,25 @@ export function apiRoutes(options: ApiOptions = {}) {
       },
     )
     .openapi(
-      taskTransition(bearer, "close", "closeTask", "Close an open task, and its active attempts", TASK_MANAGERS, [
+      taskTransition(browser, "close", "closeTask", "Close an open task, and its active attempts", TASK_MANAGERS, [
         "the task isn't open.",
       ]),
       async (c) => c.json(await tasks(c.env).closeTask(c.var.actor, taskPath(c.req.valid("param"))), 200),
     )
     .openapi(
-      taskTransition(bearer, "reopen", "reopenTask", "Reopen a closed task", TASK_MANAGERS, [
+      taskTransition(browser, "reopen", "reopenTask", "Reopen a closed task", TASK_MANAGERS, [
         "the task isn't closed, or one of its attempts merged.",
       ]),
       async (c) => c.json(await tasks(c.env).reopenTask(c.var.actor, taskPath(c.req.valid("param"))), 200),
     )
     .openapi(
-      taskTransition(bearer, "obsolete", "obsoleteTask", "Make a task obsolete, and its active attempts", OWNER_ONLY, [
+      taskTransition(browser, "obsolete", "obsoleteTask", "Make a task obsolete, and its active attempts", OWNER_ONLY, [
         "the task is already obsolete.",
       ]),
       async (c) => c.json(await tasks(c.env).obsoleteTask(c.var.actor, taskPath(c.req.valid("param"))), 200),
     )
     .openapi(
-      taskTransition(bearer, "restore", "restoreTask", "Restore an obsolete task to closed", OWNER_ONLY, [
+      taskTransition(browser, "restore", "restoreTask", "Restore an obsolete task to closed", OWNER_ONLY, [
         "the task isn't obsolete.",
       ]),
       async (c) => c.json(await tasks(c.env).restoreTask(c.var.actor, taskPath(c.req.valid("param"))), 200),
@@ -1006,8 +1111,8 @@ export function apiRoutes(options: ApiOptions = {}) {
         tags: ["Attempts"],
         summary: "List a task's attempts",
         description: "Obsolete attempts are left out unless `state=obsolete` asks for them.",
-        security: bearerOnly,
-        middleware: [bearer] as const,
+        security: bearerOrWeb,
+        middleware: [browser] as const,
         request: { params: TaskPathSchema, query: z.object({ state: z.enum(ATTEMPT_STATES).optional() }) },
         responses: {
           200: { description: "The attempts, by number.", ...json(z.object({ attempts: z.array(AttemptSchema) })) },
@@ -1066,50 +1171,55 @@ export function apiRoutes(options: ApiOptions = {}) {
       },
     )
     .openapi(
-      attemptTransition(bearer, "open", "openAttempt", "Open a draft attempt for scoring and merging", AUTHOR_ONLY, [
-        "`invalidState`: the attempt isn't a draft.",
-      ]),
+      attemptTransition(
+        bearerRoute,
+        "open",
+        "openAttempt",
+        "Open a draft attempt for scoring and merging",
+        AUTHOR_ONLY,
+        ["`invalidState`: the attempt isn't a draft."],
+      ),
       async (c) => c.json(await tasks(c.env).openAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
-      attemptTransition(bearer, "draft", "draftAttempt", "Return an open attempt to draft", AUTHOR_ONLY, [
+      attemptTransition(bearerRoute, "draft", "draftAttempt", "Return an open attempt to draft", AUTHOR_ONLY, [
         "`invalidState`: the attempt isn't open.",
       ]),
       async (c) => c.json(await tasks(c.env).draftAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
-      attemptTransition(bearer, "close", "closeAttempt", "Close a draft or open attempt", AUTHOR_ONLY, [
+      attemptTransition(bearerRoute, "close", "closeAttempt", "Close a draft or open attempt", AUTHOR_ONLY, [
         "`invalidState`: the attempt isn't active.",
       ]),
       async (c) => c.json(await tasks(c.env).closeAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
-      attemptTransition(bearer, "reopen", "reopenAttempt", "Reopen a closed attempt as a draft", AUTHOR_ONLY, [
+      attemptTransition(webRoute, "reopen", "reopenAttempt", "Reopen a closed attempt as a draft", AUTHOR_ONLY, [
         "`invalidState`: the attempt isn't closed or its task isn't open;",
         "`attemptLimit`: the task is at its cap; `conflict`: another active attempt has its branch.",
       ]),
       async (c) => c.json(await tasks(c.env).reopenAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
-      attemptTransition(bearer, "obsolete", "obsoleteAttempt", "Make an attempt obsolete", OWNER_ONLY, [
+      attemptTransition(bearerRoute, "obsolete", "obsoleteAttempt", "Make an attempt obsolete", OWNER_ONLY, [
         "`invalidState`: the attempt is merged or already obsolete.",
       ]),
       async (c) => c.json(await tasks(c.env).obsoleteAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
-      attemptTransition(bearer, "restore", "restoreAttempt", "Restore an obsolete attempt to closed", OWNER_ONLY, [
+      attemptTransition(bearerRoute, "restore", "restoreAttempt", "Restore an obsolete attempt to closed", OWNER_ONLY, [
         "`invalidState`: the attempt isn't obsolete.",
       ]),
       async (c) => c.json(await tasks(c.env).restoreAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
       scoringRoute(
-        bearer,
+        webRoute,
         "score",
         "scoreAttempt",
         "Score a draft attempt's head now",
         "Drafts aren't scored on push; this queues a run for the head anyway. A head already queued, running " +
-          "or scored isn't queued again.",
+          "or scored isn't queued again. The arena's Score now button calls this too.",
         AUTHOR_ONLY,
         "the attempt isn't a draft",
       ),
@@ -1117,7 +1227,7 @@ export function apiRoutes(options: ApiOptions = {}) {
     )
     .openapi(
       scoringRoute(
-        bearer,
+        bearerRoute,
         "rescore",
         "rescoreAttempt",
         "Score an open attempt's head again",
@@ -1247,6 +1357,60 @@ export function apiRoutes(options: ApiOptions = {}) {
     )
     .openapi(
       createRoute({
+        method: "post",
+        path: "/projects/{owner}/{project}/attempts/{a}/verdicts",
+        operationId: "postVerdict",
+        tags: ["Verdicts"],
+        summary: "Post a verdict on an attempt's current head",
+        description:
+          "Recommends `merge`, `revise` or `reject` for the attempt's current head, with a markdown explanation. Anyone " +
+          "but the attempt's author, or their aliases, may, while it is a draft, open or merged. Posting again for the same " +
+          "head replaces your verdict; after a push, your verdict on the old head stays, superseded. Verdicts are advice: " +
+          "they never change the gate, the score or the merge queue. Journals `verdictPosted`.",
+        security: bearerOrWeb,
+        middleware: [browser] as const,
+        request: { params: AttemptPathSchema, body: { required: true, ...json(PostVerdictSchema) } },
+        responses: {
+          201: { description: "The verdict as stored.", ...json(VerdictSchema) },
+          400: errorResponse("The request is invalid: a bad reference or recommendation, or a body over 64 KB."),
+          401: unauthorizedBearer,
+          403: errorResponse("The attempt's author, or their aliases, can't post a verdict on it."),
+          404: errorResponse("No such project or attempt."),
+          409: errorResponse("`invalidState`: the attempt is closed or obsolete, or nothing has been pushed to it."),
+        },
+      }),
+      async (c) => {
+        const input = { ...attemptPath(c.req.valid("param")), ...c.req.valid("json") };
+        return c.json(await tasks(c.env).postVerdict(c.var.actor, input), 201);
+      },
+    )
+    .openapi(
+      createRoute({
+        method: "get",
+        path: "/projects/{owner}/{project}/attempts/{a}/verdicts",
+        operationId: "listVerdicts",
+        tags: ["Verdicts"],
+        summary: "List an attempt's verdicts",
+        description:
+          "Every reviewer's verdict on every head the attempt has had, oldest first. One per reviewer and head; " +
+          "`superseded` marks those on a head that is no longer current.",
+        security: bearerOrWeb,
+        middleware: [browser] as const,
+        request: { params: AttemptPathSchema },
+        responses: {
+          200: { description: "The verdicts, oldest first.", ...json(z.object({ verdicts: z.array(VerdictSchema) })) },
+          400: errorResponse("The attempt reference is invalid."),
+          401: unauthorizedBearer,
+          404: errorResponse("No such project or attempt."),
+        },
+      }),
+      async (c) => {
+        const verdicts = await tasks(c.env).listVerdicts(c.var.actor, attemptPath(c.req.valid("param")));
+        return c.json({ verdicts }, 200);
+      },
+    )
+    .openapi(
+      createRoute({
         method: "get",
         path: "/projects/{owner}/{project}/runs/{runId}/logs/{name}",
         operationId: "getRunLog",
@@ -1319,8 +1483,8 @@ export function apiRoutes(options: ApiOptions = {}) {
           "merge queue once the approved head's latest scoring run is done with a passing gate. A single-attempt task's " +
           "Merge button calls this too. The task's creator or the project owner (or their aliases) may; the creator may " +
           "select their own attempt. Journals `selected` and `approved`.",
-        security: bearerOnly,
-        middleware: [bearer] as const,
+        security: bearerOrWeb,
+        middleware: [browser] as const,
         request: { params: TaskPathSchema, body: { required: true, ...json(SelectionSchema) } },
         responses: {
           200: { description: "The new merge request.", ...json(MergeRequestSchema) },
@@ -1341,7 +1505,7 @@ export function apiRoutes(options: ApiOptions = {}) {
     )
     .openapi(
       mergeRequestAction(
-        bearer,
+        browser,
         "approve",
         "approveMergeRequest",
         "Approve the source attempt's current head",
@@ -1353,7 +1517,7 @@ export function apiRoutes(options: ApiOptions = {}) {
     )
     .openapi(
       mergeRequestAction(
-        bearer,
+        browser,
         "cancel",
         "cancelMergeRequest",
         "Cancel the task's open merge request",

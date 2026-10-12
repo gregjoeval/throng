@@ -8,6 +8,7 @@ import { THRONG_COMMITTER } from "./landing.ts";
 import { PREVIEW_LOG, setupLogName } from "./logs.ts";
 import { MAX_METRICS_BYTES, SETUP_TIMEOUT_MS } from "./results.ts";
 import type { ScorePlan } from "./results.ts";
+import { taskBranchRef } from "./task-refs.ts";
 
 export const RESULT_PREFIX = "THRONG_RESULT ";
 
@@ -42,19 +43,23 @@ fi`;
 }
 
 /**
- * Scores the attempt's head `sha`: fetches it from the fork and `main` from the origin, records the
- * merge base and the diff size against it, then runs the plan (see `runPlan`). The result is a
- * `RawScore`; `buildResult` turns it into the run's result.
+ * Scores the attempt's head `sha`: fetches it from the fork and records the diff size from `base`, the
+ * attempt's base as `attemptBase` derived it (an ancestor of the head, so the fork has it), or from
+ * the empty tree when it has none. Then it runs the plan (see `runPlan`). The result is a `RawScore`;
+ * `buildResult` turns it into the run's result.
  */
-export function scoreScript(forkRemote: string, originRemote: string, sha: string, plan: ScorePlan): string {
+export function scoreScript(
+  forkRemote: string,
+  { sha, base }: { sha: string; base: string | null },
+  plan: ScorePlan,
+): string {
   return `${PRELUDE}
 rm -rf score logs out && mkdir logs out && out="$PWD/out" && git init -q score && cd score
 git fetch -q ${quote(forkRemote)} '+refs/heads/*:refs/remotes/fork/*' || exit 10
-git fetch -q ${quote(originRemote)} '+refs/heads/main:refs/remotes/origin/main' || exit 12
 git checkout -q --detach ${quote(sha)} || exit 11
 now() { date +%s%3N; }
 t0=$(now)
-base=$(git merge-base HEAD refs/remotes/origin/main 2>/dev/null) || base=""
+base=${quote(base ?? "")}
 shortstat=$(git diff --shortstat "\${base:-$(git hash-object -t tree /dev/null)}" HEAD) || exit 15
 builtin_ms=$(( $(now) - t0 ))
 ${runPlan(plan)}
@@ -340,6 +345,68 @@ fi
 now=$(git ls-remote ${quote(originRemote)} refs/heads/main | cut -f 1) || exit 12
 [ "$now" = "$commit" ] && result "{\\"kind\\":\\"landed\\",\\"sha\\":\\"$commit\\"}"
 [ "$now" = ${quote(land.main)} ] && exit 13
+result '{"kind":"moved"}'
+`;
+}
+
+/** How following the task branch went: see `followScript`. */
+export type FollowResult =
+  | { kind: "merged"; before: string; head: string }
+  | { kind: "current"; head: string }
+  | { kind: "conflict"; head: string }
+  | { kind: "moved" }
+  | { kind: "stale" };
+
+export interface FollowPlan {
+  task: number;
+  /** The task branch head to merge in. */
+  taskHead: string;
+  message: string;
+  /** The merge commit's author and committer time, in Unix seconds; fixed so a rerun makes the same commit. */
+  committedAt: number;
+}
+
+/**
+ * Merges task head `taskHead` into an attempt's fork (ADR 0003), trusted: it holds fork write, so
+ * like the land step it runs no repository code. It reads the fork's `main` and the origin's task
+ * branch, which must still hold `taskHead` (else `stale`: the task branch was rewound, and a newer
+ * follow has it). A head that already contains the task head is `current`; one the task head
+ * contains is fast-forwarded to it; otherwise the two are merged with `git merge-tree`, a conflict
+ * writing nothing. The merge commit is authored and committed by Throng, and pushed with a lease on
+ * the head it read, so an author's push in between is never overwritten (`moved`). A rerun after
+ * a push that landed reports `current`.
+ */
+export function followScript(originRemote: string, forkRemote: string, plan: FollowPlan): string {
+  const date = `@${plan.committedAt} +0000`;
+  const taskHead = quote(plan.taskHead);
+  return `
+set -uo pipefail
+result() { printf '${RESULT_PREFIX}%s\\n' "$1"; exit 0; }
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+export GIT_AUTHOR_NAME=${quote(THRONG_COMMITTER.name)} GIT_AUTHOR_EMAIL=${quote(THRONG_COMMITTER.email)} GIT_AUTHOR_DATE=${quote(date)}
+export GIT_COMMITTER_NAME=${quote(THRONG_COMMITTER.name)} GIT_COMMITTER_EMAIL=${quote(THRONG_COMMITTER.email)} GIT_COMMITTER_DATE=${quote(date)}
+rm -rf follow message push.log && git init -q follow && cd follow
+git config core.hooksPath /dev/null
+printf '%s' ${quote(plan.message)} > ../message
+git fetch -q ${quote(forkRemote)} '+refs/heads/main:refs/remotes/fork/main' || exit 10
+git fetch -q ${quote(originRemote)} ${quote(`+${taskBranchRef(plan.task)}:refs/remotes/origin/task`)} || exit 12
+head=$(git rev-parse refs/remotes/fork/main) || exit 10
+git merge-base --is-ancestor ${taskHead} refs/remotes/origin/task 2> /dev/null || result '{"kind":"stale"}'
+git merge-base --is-ancestor ${taskHead} "$head" && result "{\\"kind\\":\\"current\\",\\"head\\":\\"$head\\"}"
+if git merge-base --is-ancestor "$head" ${taskHead}; then
+  commit=${taskHead}
+else
+  tree=$(git merge-tree --write-tree "$head" ${taskHead} | head -n 1)
+  code=\${PIPESTATUS[0]}
+  [ "$code" = 1 ] && result "{\\"kind\\":\\"conflict\\",\\"head\\":\\"$head\\"}"
+  [ "$code" = 0 ] || exit 13
+  commit=$(git commit-tree "$tree" -p "$head" -p ${taskHead} -F ../message) || exit 13
+fi
+merged="{\\"kind\\":\\"merged\\",\\"before\\":\\"$head\\",\\"head\\":\\"$commit\\"}"
+git push -q --force-with-lease=refs/heads/main:"$head" ${quote(forkRemote)} "$commit:refs/heads/main" 2> ../push.log && result "$merged"
+now=$(git ls-remote ${quote(forkRemote)} refs/heads/main | cut -f 1) || exit 10
+[ "$now" = "$commit" ] && result "$merged"
+[ "$now" = "$head" ] && exit 13
 result '{"kind":"moved"}'
 `;
 }

@@ -6,7 +6,8 @@
   "type": "module",
   "exports": {
     "./app": "./src/app.ts",
-    "./forwarded": "./src/forwarded.ts"
+    "./forwarded": "./src/forwarded.ts",
+    "./task-refs": "./src/task-refs.ts"
   },
   "scripts": {
     "dev": "vite dev",
@@ -27,7 +28,9 @@
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.63.1",
+    "@seriousme/openapi-schema-validator": "2.11.0",
     "@types/node": "^22.20.5",
+    "playwright": "1.63.0",
     "tsx": "^4.23.15",
     "vite": "8.3.2",
     "vitest": "4.1.11",

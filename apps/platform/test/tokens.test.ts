@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { authenticateToken, hashToken, listTokens, mintToken, revokeToken } from "../src/tokens.ts";
+import {
+  authenticateToken,
+  DEFAULT_TOKEN_TTL_SECONDS,
+  hashToken,
+  listTokens,
+  mintToken,
+  revokeToken,
+  tokenService,
+} from "../src/tokens.ts";
 import { userForEmail } from "../src/users.ts";
 import { testDatabase } from "./support/d1.ts";
 
@@ -57,5 +65,51 @@ describe("tokens", () => {
     expect((await listTokens(db, user.id, "claude")).map((t) => t.id)).toEqual([claude.token.id]);
     expect(await revokeToken(db, { userId: user.id, alias: "claude", id: human.token.id, now: NOW })).toBeNull();
     expect(await revokeToken(db, { userId: "someone", id: human.token.id, now: NOW })).toBeNull();
+  });
+});
+
+async function service() {
+  const { db, user } = await setup();
+  return { tokens: tokenService({ db, now: () => NOW }), user };
+}
+
+describe("the token service", () => {
+  it("mints for the user or one of their aliases, with a default lifetime", async () => {
+    const { tokens, user } = await service();
+    const human = await tokens.mint({ user, alias: null }, { via: null });
+    expect(human.token).toMatchObject({
+      user_id: user.id,
+      alias: null,
+      expires_at: at(DEFAULT_TOKEN_TTL_SECONDS).toISOString(),
+    });
+    const claude = await tokens.mint({ user, alias: null }, { alias: "claude", expiresIn: 60, via: null });
+    expect(claude.token).toMatchObject({ alias: "claude", expires_at: at(60).toISOString() });
+  });
+
+  it("lets an alias mint only for itself, never for its user or another alias", async () => {
+    const { tokens, user } = await service();
+    const claude = { user, alias: "claude" };
+    const { token: via } = await tokens.mint(claude, { via: null });
+    await expect(tokens.mint(claude, { alias: "codex", via })).rejects.toMatchObject({ code: "forbidden" });
+    expect((await tokens.mint(claude, { via })).token.alias).toBe("claude");
+  });
+
+  it("never mints a token that outlives the one minting it", async () => {
+    const { tokens, user } = await service();
+    const actor = { user, alias: null };
+    const { token: via } = await tokens.mint(actor, { expiresIn: 60, via: null });
+    expect((await tokens.mint(actor, { via })).token.expires_at).toBe(at(60).toISOString());
+    await expect(tokens.mint(actor, { expiresIn: 61, via })).rejects.toMatchObject({ code: "invalidRequest" });
+  });
+
+  it("lists and revokes only the actor's own tokens", async () => {
+    const { tokens, user } = await service();
+    const human = await tokens.mint({ user, alias: null }, { via: null });
+    const claude = await tokens.mint({ user, alias: "claude" }, { via: null });
+    expect((await tokens.list({ user, alias: "claude" })).map((t) => t.id)).toEqual([claude.token.id]);
+    await expect(tokens.revoke({ user, alias: "claude" }, { id: human.token.id })).rejects.toMatchObject({
+      code: "notFound",
+    });
+    expect((await tokens.revoke({ user, alias: null }, { id: human.token.id })).revoked_at).toBe(NOW.toISOString());
   });
 });

@@ -8,6 +8,8 @@ const at = { owner: "greg", project: "throng" };
 describe("buildPath and parsePath", () => {
   const cases: [ProjectLocation, string][] = [
     [{ ...at, view: "home" }, "/greg/throng"],
+    [{ ...at, view: "tasks" }, "/greg/throng/tasks"],
+    [{ ...at, view: "task", task: "t42" }, "/greg/throng/tasks/t42"],
     [{ ...at, view: "tree", ref: "main", path: "" }, "/greg/throng/tree/main"],
     [{ ...at, view: "tree", ref: "t42a3", path: "src/lib" }, "/greg/throng/tree/t42a3/src/lib"],
     [{ ...at, view: "blob", ref: "main", path: "docs/my notes.md" }, "/greg/throng/blob/main/docs/my%20notes.md"],
@@ -24,6 +26,11 @@ describe("buildPath and parsePath", () => {
       `/greg/throng/raw/${SHA}/img/logo%20%F0%9F%99%82.png?attempt=t42a3`,
     ],
     [{ ...at, view: "commits", ref: "main" }, "/greg/throng/commits/main"],
+    [{ ...at, view: "commits", ref: "main", offset: 50 }, "/greg/throng/commits/main?offset=50"],
+    [
+      { ...at, view: "commits", ref: SHA, attempt: "t42a3", offset: 100 },
+      `/greg/throng/commits/${SHA}?attempt=t42a3&offset=100`,
+    ],
     [{ ...at, view: "commit", sha: SHA }, `/greg/throng/commit/${SHA}`],
     [{ ...at, view: "commit", sha: SHA, attempt: "t42a3" }, `/greg/throng/commit/${SHA}?attempt=t42a3`],
   ];
@@ -51,6 +58,17 @@ describe("buildPath and parsePath", () => {
     ]) {
       expect(parsePath(path), path).toBeNull();
     }
+  });
+
+  it("drops a commit log offset that isn't a positive integer", () => {
+    for (const offset of ["0", "-50", "1.5", "x", ""]) {
+      expect(parsePath(`/greg/throng/commits/main?offset=${offset}`), offset).toEqual({
+        ...at,
+        view: "commits",
+        ref: "main",
+      });
+    }
+    expect(buildPath({ ...at, view: "commits", ref: "main", offset: 0 })).toBe("/greg/throng/commits/main");
   });
 
   it("treats a path's stray slashes as separators", () => {

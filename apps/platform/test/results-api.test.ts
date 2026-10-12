@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { AccessVerifier } from "../src/access.ts";
 import { apiRoutes } from "../src/api.ts";
 import type { ApiRoutes } from "../src/api.ts";
+import type { FollowParams } from "../src/follows.ts";
 import type { ScoringResult } from "../src/results.ts";
 import type { ScoringOutcome } from "../src/scoring.ts";
 import type { User } from "../src/users.ts";
@@ -41,7 +42,9 @@ async function setup() {
     },
     teardown: async () => {},
   };
-  const { backend, store } = testTaskBackends(repos, now, runner);
+  const followed: FollowParams[] = [];
+  const follow = { workflow: { create: async ({ params }: { params: FollowParams }) => followed.push(params) } };
+  const { backend, store } = testTaskBackends(repos, now, runner, undefined, follow);
   const api = apiRoutes({ verifierFor: () => verify, now, repos: () => repos, tasks: () => backend });
   const env = { DB: testDatabase(), ACCESS_TEAM_DOMAIN: "throng.cloudflareaccess.com", ACCESS_AUD: "aud" };
 
@@ -63,7 +66,7 @@ async function setup() {
   const ada = await tokenFor("ada@example.com");
   const bob = await tokenFor("bob@example.com");
   const projectId = (await call("POST", "/projects", greg, { handle: "throng" })).body["id"] as string;
-  repos.commit(`${projectId}-main`, { files: { "README.md": "hi\n" } });
+  const root = repos.commit(`${projectId}-main`, { files: { "README.md": "hi\n" } }).hash;
   const base = "/projects/greg/throng";
   const scoring = () => store(projectId).scoring;
 
@@ -95,7 +98,37 @@ async function setup() {
     expect(scoring().finish(id, outcome)).toBeTruthy();
   };
 
-  return { api, env, call, greg, ada, bob, base, drafts, commit, push, scoring, finish };
+  /** Marks ada's attempt needs update: the task branch moves and its follow conflicts. */
+  const conflict = async (task: number, attempt: number) => {
+    const tasks = store(projectId);
+    const project = { id: projectId, owner: "" };
+    const head = repos.commit(`${projectId}-main`, { files: { "test.txt": "t\n" }, branch: `tasks-t${task}` }).hash;
+    tasks.recordTaskBranchPush(project, me, { task, head });
+    await tasks.drain(projectId);
+    const started = followed.findLast((p) => p.task === task && p.attempt === attempt);
+    if (started === undefined) throw new Error(`no follow of t${task}a${attempt}`);
+    expect(tasks.claimFollowPush(started.follow)).toBeTruthy();
+    const before = repos.ref(`${projectId}-t${task}a${attempt}`, "refs/heads/main") ?? root;
+    expect(await tasks.followFinished(started.follow, { kind: "conflict", head: before })).toBeTruthy();
+  };
+  return {
+    api,
+    env,
+    repos,
+    projectId,
+    root,
+    call,
+    greg,
+    ada,
+    bob,
+    base,
+    drafts,
+    commit,
+    push,
+    scoring,
+    finish,
+    conflict,
+  };
 }
 
 describe("OpenAPI document", () => {
@@ -144,7 +177,7 @@ describe("OpenAPI document", () => {
 
 describe("the arena", () => {
   it("gives every attempt's current result in one call, whatever state its scoring is in", async () => {
-    const { call, ada, bob, base, drafts, commit, push, scoring, finish } = await setup();
+    const { call, ada, bob, root, base, drafts, commit, push, scoring, finish } = await setup();
     await drafts(4);
     const scored = commit("t1a1", "one\n");
     await call("POST", `${base}/attempts/t1a1/score`, ada);
@@ -165,8 +198,12 @@ describe("the arena", () => {
         ref: "t1a1",
         state: "draft",
         author: { id: expect.any(String), handle: "ada" },
+        alias: null,
         status: "done",
         sha: scored,
+        base: { sha: root, on: "main" },
+        needsUpdate: false,
+        verdicts: expect.anything(),
         result: {
           ...result(),
           run: 1,
@@ -174,10 +211,122 @@ describe("the arena", () => {
           metrics: { coverage: 81.5, bundle_kb: 120 },
         },
       },
-      { ref: "t1a2", state: "draft", author: expect.anything(), status: "running", sha: running },
-      { ref: "t1a3", state: "draft", author: expect.anything(), status: "none", sha: null },
-      { ref: "t1a4", state: "draft", author: expect.anything(), status: "none", sha: moved },
+      {
+        ref: "t1a2",
+        state: "draft",
+        author: expect.anything(),
+        alias: null,
+        verdicts: expect.anything(),
+        status: "running",
+        sha: running,
+        base: { sha: root, on: "main" },
+        needsUpdate: false,
+      },
+      {
+        ref: "t1a3",
+        state: "draft",
+        author: expect.anything(),
+        alias: null,
+        verdicts: expect.anything(),
+        status: "none",
+        sha: null,
+        base: { sha: root, on: "main" },
+        needsUpdate: false,
+      },
+      {
+        ref: "t1a4",
+        state: "draft",
+        author: expect.anything(),
+        alias: null,
+        verdicts: expect.anything(),
+        status: "none",
+        sha: moved,
+        base: { sha: root, on: "main" },
+        needsUpdate: false,
+      },
     ]);
+  });
+
+  it("derives each active attempt's base from its current head: the task branch when the task has one", async () => {
+    const { call, ada, repos, projectId, root, base, drafts, commit } = await setup();
+    await drafts(2);
+    commit("t1a1", "one\n");
+    const origin = `${projectId}-main`;
+    const tests = repos.commit(origin, {
+      files: { "README.md": "hi\n", "t.test": "x\n" },
+      branch: "task",
+      parents: [root],
+    });
+    repos.commit(origin, { files: { "README.md": "main moved\n" } });
+    repos.setRef(origin, "refs/tasks/t1", tests.hash);
+    repos.push(origin, `${projectId}-t1a2`, "refs/heads/main", tests.hash);
+    commit("t1a2", "two\n");
+
+    const res = await call("GET", `${base}/tasks/t1/arena`, ada);
+    expect(res.body["attempts"].map((a: Json) => [a["ref"], a["status"], a["base"]])).toEqual([
+      ["t1a1", "none", { sha: root, on: "task" }],
+      ["t1a2", "none", { sha: tests.hash, on: "task" }],
+    ]);
+  });
+
+  it("declares the metrics of the config on main, with their units and which way is better", async () => {
+    const { call, ada, repos, projectId, base, drafts } = await setup();
+    await drafts(1);
+    expect((await call("GET", `${base}/tasks/t1/arena`, ada)).body["metrics"]).toEqual([]);
+    const config = [
+      "checks:",
+      "  - name: test",
+      "    command: pnpm test",
+      "    metrics: [{ name: coverage, unit: '%', order: desc }]",
+      "  - name: bundle",
+      "    command: pnpm build",
+      "    metrics: [{ name: bundle_kb, order: asc }]",
+    ].join("\n");
+    repos.commit(`${projectId}-main`, { files: { "README.md": "hi\n", ".throng/config.yml": config } });
+    expect((await call("GET", `${base}/tasks/t1/arena`, ada)).body["metrics"]).toEqual([
+      { name: "coverage", unit: "%", order: "desc" },
+      { name: "bundle_kb", unit: null, order: "asc" },
+    ]);
+  });
+
+  it("shows where a forked attempt came from, and bases it on main, not on its source", async () => {
+    const { call, ada, repos, projectId, root, base, drafts, commit } = await setup();
+    await drafts(1);
+    const source = commit("t1a1", "one\n");
+    await call("POST", `${base}/tasks/t1/attempts`, ada, { from: "t1a1" });
+    commit("t1a1", "one more\n");
+    expect(repos.ref(`${projectId}-t1a2`, "refs/heads/main")).toBe(source);
+    const res = await call("GET", `${base}/tasks/t1/arena`, ada);
+    expect(res.body["attempts"].map((a: Json) => [a["ref"], a["base"], a["forkedFrom"]])).toEqual([
+      ["t1a1", { sha: root, on: "main" }, undefined],
+      ["t1a2", { sha: root, on: "main" }, "t1a1"],
+    ]);
+    expect("forkedFrom" in res.body["attempts"][0]).toBeFalsy();
+  });
+
+  it("says which attempts need update", async () => {
+    const { call, ada, base, drafts, conflict } = await setup();
+    await drafts(2);
+    expect(
+      (await call("GET", `${base}/tasks/t1/arena`, ada)).body["attempts"].map((a: Json) => a["needsUpdate"]),
+    ).toEqual([false, false]);
+    await conflict(1, 2);
+    const res = await call("GET", `${base}/tasks/t1/arena`, ada);
+    expect(res.body["attempts"].map((a: Json) => [a["ref"], a["needsUpdate"]])).toEqual([
+      ["t1a1", false],
+      ["t1a2", true],
+    ]);
+    const needsUpdate = async (ref: string) => (await call("GET", `${base}/attempts/${ref}`, ada)).body["needsUpdate"];
+    expect([await needsUpdate("t1a1"), await needsUpdate("t1a2")]).toEqual([false, true]);
+  });
+
+  it("gives an ended attempt no base", async () => {
+    const { call, greg, ada, base, drafts, commit } = await setup();
+    await drafts(1);
+    commit("t1a1", "one\n");
+    await call("POST", `${base}/attempts/t1a1/obsolete`, greg);
+    const res = await call("GET", `${base}/tasks/t1/arena`, ada);
+    expect(res.body["attempts"][0]).toMatchObject({ state: "obsolete", base: null });
   });
 
   it("keeps obsolete attempts in, with their state, so a UI can filter them", async () => {

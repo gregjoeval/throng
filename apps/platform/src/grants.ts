@@ -12,7 +12,7 @@ export interface GitGrant {
  * Each role runs in its own container. Intercepts are fixed when a container starts, so roles with
  * different grants need different containers.
  */
-export const SANDBOX_ROLES = ["score", "preview", "check", "land"] as const;
+export const SANDBOX_ROLES = ["score", "preview", "check", "land", "follow"] as const;
 export type SandboxRole = (typeof SANDBOX_ROLES)[number];
 /** The roles a scoring run's Workflow starts containers for: scoring, then its Preview. */
 export const SCORING_ROLES = ["score", "preview"] as const satisfies readonly SandboxRole[];
@@ -21,6 +21,8 @@ export const SCORING_ROLES = ["score", "preview"] as const satisfies readonly Sa
  * the trusted land step.
  */
 export const LANDING_ROLES = ["check", "land"] as const satisfies readonly SandboxRole[];
+/** The role a Follow Workflow starts a container for: the trusted merge of a task branch into a fork. */
+export const FOLLOW_ROLES = ["follow"] as const satisfies readonly SandboxRole[];
 
 /** Roles whose container runs the repository's own code (npm, its scripts, wrangler builds). */
 export const RUNS_REPO_CODE: Record<SandboxRole, boolean> = {
@@ -28,6 +30,7 @@ export const RUNS_REPO_CODE: Record<SandboxRole, boolean> = {
   preview: true,
   check: true,
   land: false,
+  follow: false,
 };
 
 /** Every grant a run's roles may get. Each is minted only for the step whose role needs it. */
@@ -35,6 +38,7 @@ export interface RunGrants {
   originRead: GitGrant;
   originWrite: GitGrant;
   forkRead: GitGrant;
+  forkWrite: GitGrant;
 }
 
 /** Which repo each grant is for, and with what access. */
@@ -42,14 +46,16 @@ export const GRANT_SOURCES: Record<keyof RunGrants, { repo: "origin" | "fork"; a
   originRead: { repo: "origin", access: "read" },
   originWrite: { repo: "origin", access: "write" },
   forkRead: { repo: "fork", access: "read" },
+  forkWrite: { repo: "fork", access: "write" },
 };
 
 /** The grants each role's container gets. */
 export const ROLE_GRANTS = {
-  score: ["originRead", "forkRead"],
+  score: ["forkRead"],
   preview: ["forkRead"],
   check: ["originRead", "forkRead"],
   land: ["originWrite", "forkRead"],
+  follow: ["originRead", "forkWrite"],
 } as const satisfies Record<SandboxRole, readonly (keyof RunGrants)[]>;
 
 /** The grants `role`'s container gets, by name. */

@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 import { archiveRef } from "../src/archive.ts";
 import { CONFIG_PATH, parseConfig } from "../src/config.ts";
 import { ServiceError } from "../src/errors.ts";
-import { parseAttemptRef, parseTaskRef, reservedTask } from "../src/task-refs.ts";
 import {
   attemptLimitFromConfig,
   BRANCH_PUSH_TTL_MS,
@@ -78,24 +77,6 @@ async function attemptIn(store: TaskStore, state: AttemptState): Promise<StoredA
   if (state === "obsolete") await store.obsoleteAttempt(PROJECT, owner, ref);
   return store.getAttempt(PROJECT, ada, ref);
 }
-
-describe("references", () => {
-  it("parses t42, 42 and t42a3", () => {
-    expect(parseTaskRef("t42")).toBe(42);
-    expect(parseTaskRef("42")).toBe(42);
-    expect(parseAttemptRef("t42a3")).toEqual({ task: 42, number: 3 });
-    for (const bad of ["t0", "0", "t", "t042", "t42a3", "x42", "-1", "t1.5", ""])
-      expect(parseTaskRef(bad), bad).toBeNull();
-    for (const bad of ["t42", "t42a0", "t0a1", "t42a", "t42b3", "t42a3x"]) expect(parseAttemptRef(bad), bad).toBeNull();
-    expect(parseTaskRef("9".repeat(20))).toBeNull();
-  });
-
-  it("reserves t<n>/ branches for task t<n>", () => {
-    expect(reservedTask("t42/fix-login")).toBe(42);
-    expect(reservedTask("t42/")).toBe(42);
-    for (const branch of ["t42", "fix/t42", "t0/x", "T42/x", "main"]) expect(reservedTask(branch), branch).toBeNull();
-  });
-});
 
 describe("attemptLimitFromConfig", () => {
   it("reads attempts.limit from a valid config, else the default", () => {
@@ -251,6 +232,7 @@ describe("attempts", () => {
         task: 1,
         number,
         author: ada.user.id,
+        alias: "claude",
         state: "draft",
         fork: `t1a${number}`,
         branch: null,
@@ -259,8 +241,11 @@ describe("attempts", () => {
         closed_at: null,
         merged_sha: null,
         archived_sha: null,
+        forked_from: null,
+        needs_update: false,
         scoring: { status: "none", sha: null },
         merge_request: null,
+        verdicts: { head: null, merge: 0, revise: 0, reject: 0 },
       })),
     );
     expect(await repos.get("abc123-t1a1")).toMatchObject({ parent: "abc123-main" });
@@ -702,6 +687,75 @@ describe("archive", () => {
   });
 });
 
+describe("forking", () => {
+  const ORIGIN = "abc123-main";
+  const MAIN = "refs/heads/main";
+
+  /** A task whose attempt t1a1 has moved on from origin `main`. */
+  async function withSource() {
+    const s = setup();
+    s.repos.setRef(ORIGIN, MAIN, "base");
+    s.store.createTask(PROJECT, ada, { title: "a" });
+    await s.store.createAttempts(PROJECT, ada, { task: 1 });
+    s.repos.setRef("abc123-t1a1", MAIN, "work");
+    return s;
+  }
+
+  it("starts a new attempt at a current attempt's head and records where it came from", async () => {
+    const { store, repos } = await withSource();
+    const [forked] = await store.createAttempts(PROJECT, bob, { task: 1, from: { task: 1, number: 1 } });
+    expect(forked).toMatchObject({ fork: "t1a2", author: bob.user.id, state: "draft", forked_from: "t1a1" });
+    expect(repos.ref("abc123-t1a2", MAIN)).toBe("work");
+    // The source goes on alone: it doesn't follow its copy, and the copy doesn't follow it.
+    repos.setRef("abc123-t1a1", MAIN, "more work");
+    expect(repos.ref("abc123-t1a2", MAIN)).toBe("work");
+    expect(store.getAttempt(PROJECT, ada, { task: 1, number: 1 }).forked_from).toBeNull();
+  });
+
+  it("starts a new attempt at an archived attempt's head", async () => {
+    const { store, repos } = await withSource();
+    await store.closeAttempt(PROJECT, ada, { task: 1, number: 1 });
+    await store.obsoleteAttempt(PROJECT, owner, { task: 1, number: 1 });
+    const created = await store.createAttempts(PROJECT, ada, { task: 1, count: 2, from: { task: 1, number: 1 } });
+    expect(created.map((a) => [a.fork, a.forked_from])).toEqual([
+      ["t1a2", "t1a1"],
+      ["t1a3", "t1a1"],
+    ]);
+    expect(repos.ref("abc123-t1a2", MAIN)).toBe("work");
+    expect(repos.ref("abc123-t1a3", MAIN)).toBe("work");
+  });
+
+  it("refuses a source from another task, or one with no head left, and makes no fork", async () => {
+    const { store, repos } = await withSource();
+    store.createTask(PROJECT, ada, { title: "b" });
+    expect(await code(store.createAttempts(PROJECT, ada, { task: 2, from: { task: 1, number: 1 } }))).toBe(
+      "invalidRequest",
+    );
+    expect(await code(store.createAttempts(PROJECT, ada, { task: 1, from: { task: 1, number: 9 } }))).toBe("notFound");
+    repos.copyRef = async () => {
+      throw new Error("receive-pack refused");
+    };
+    // Its archive failed, so its head is nowhere a fork could be made from.
+    await store.closeAttempt(PROJECT, ada, { task: 1, number: 1 });
+    expect(await code(store.createAttempts(PROJECT, ada, { task: 1, from: { task: 1, number: 1 } }))).toBe(
+      "invalidState",
+    );
+    expect(await repos.list("abc123-t")).toEqual(["abc123-t1a1"]);
+  });
+
+  it("deletes the new forks and records nothing when the copy fails", async () => {
+    const { store, repos } = await withSource();
+    repos.copyRef = async () => {
+      throw new Error("upload-pack refused");
+    };
+    await expect(store.createAttempts(PROJECT, ada, { task: 1, from: { task: 1, number: 1 } })).rejects.toThrow(
+      "upload-pack refused",
+    );
+    expect(store.listAttempts(PROJECT, ada, { task: 1 }).map((a) => a.fork)).toEqual(["t1a1"]);
+    expect(await repos.list("abc123-t")).toEqual(["abc123-t1a1"]);
+  });
+});
+
 describe("migrate", () => {
   it("adds the actor columns to a journal from before tasks", () => {
     const sql = testSql();
@@ -712,6 +766,51 @@ describe("migrate", () => {
     const columns = sql.exec<{ name: string }>("PRAGMA table_info(journal)").map((c) => c.name);
     expect(columns).toEqual(["id", "at", "kind", "detail", "user_id", "alias", "task", "attempt"]);
     expect(sql.exec("SELECT kind FROM journal")).toEqual([{ kind: "duplicate" }]);
+  });
+
+  it("adds forked_from to an attempts table from before forking, leaving its attempts unforked", () => {
+    const sql = testSql();
+    sql.exec(`CREATE TABLE tasks (number INTEGER PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL,
+      creator TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, closed_at TEXT, closed_by TEXT,
+      attempt_limit INTEGER)`);
+    sql.exec(`CREATE TABLE attempts (task INTEGER NOT NULL REFERENCES tasks (number), number INTEGER NOT NULL,
+      author TEXT NOT NULL, state TEXT NOT NULL, branch TEXT, note TEXT NOT NULL, created_at TEXT NOT NULL,
+      closed_at TEXT, merged_sha TEXT, archived_sha TEXT, PRIMARY KEY (task, number))`);
+    sql.exec("INSERT INTO tasks VALUES (1, 'a', '', 'ada00001', 'open', '', NULL, NULL, NULL)");
+    sql.exec("INSERT INTO attempts VALUES (1, 1, 'ada00001', 'draft', NULL, '', '', NULL, NULL, NULL)");
+    migrate(sql);
+    migrate(sql);
+    const store = new TaskStore({ sql, repos: new FakeRepos() });
+    expect(store.getAttempt(PROJECT, ada, { task: 1, number: 1 }).forked_from).toBeNull();
+  });
+
+  it("adds alias to attempts from before it, taking each from its created entry (in a journal still naming it agent) unless handed off since", () => {
+    const sql = testSql();
+    sql.exec(`CREATE TABLE tasks (number INTEGER PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL,
+      creator TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, closed_at TEXT, closed_by TEXT,
+      attempt_limit INTEGER)`);
+    sql.exec(`CREATE TABLE attempts (task INTEGER NOT NULL REFERENCES tasks (number), number INTEGER NOT NULL,
+      author TEXT NOT NULL, state TEXT NOT NULL, branch TEXT, note TEXT NOT NULL, created_at TEXT NOT NULL,
+      closed_at TEXT, merged_sha TEXT, archived_sha TEXT, forked_from INTEGER, needs_update TEXT,
+      followed_head TEXT, PRIMARY KEY (task, number))`);
+    sql.exec(`CREATE TABLE journal (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, kind TEXT NOT NULL,
+      detail TEXT NOT NULL, user_id TEXT, agent TEXT, task INTEGER, attempt INTEGER)`);
+    sql.exec("INSERT INTO tasks VALUES (1, 'a', '', 'ada00001', 'open', '', NULL, NULL, NULL)");
+    for (const n of [1, 2, 3]) {
+      sql.exec(
+        `INSERT INTO attempts VALUES (1, ${n}, 'ada00001', 'draft', NULL, '', '', NULL, NULL, NULL, NULL, NULL, NULL)`,
+      );
+    }
+    sql.exec(`INSERT INTO journal (at, kind, detail, user_id, agent, task, attempt) VALUES
+      (0, 'created', '{}', 'ada00001', 'claude', 1, 1),
+      (0, 'created', '{}', 'ada00001', NULL, 1, 2),
+      (0, 'created', '{}', 'bob00001', 'claude', 1, 3),
+      (1, 'handedOff', '{}', 'bob00001', 'claude', 1, 3)`);
+    migrate(sql);
+    migrate(sql);
+    const store = new TaskStore({ sql, repos: new FakeRepos() });
+    const alias = (number: number) => store.getAttempt(PROJECT, ada, { task: 1, number }).alias;
+    expect([alias(1), alias(2), alias(3)]).toEqual(["claude", null, null]);
   });
 
   it("moves values stored in snake_case to camelCase, and reads old JSON in camelCase", () => {
@@ -858,6 +957,11 @@ describe("migrate", () => {
          approved_at, created_at, created_by_user, created_by_agent)
          VALUES (1, 1, 'pending', 'a', 'ada', 'claude', 't', 't', 'ada', 'codex')`,
     );
+    sql.exec(`CREATE TABLE verdicts (
+      task INTEGER NOT NULL, attempt INTEGER NOT NULL, head TEXT NOT NULL, reviewer TEXT NOT NULL, agent TEXT,
+      recommendation TEXT NOT NULL, body TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY (task, attempt, head, reviewer)
+    )`);
+    sql.exec("INSERT INTO verdicts VALUES (1, 1, 'a', 'bob', 'claude', 'merge', '', 't')");
     const repos = new FakeRepos();
     expect(new TaskStore({ sql, repos })).toBeDefined();
     expect(new TaskStore({ sql, repos })).toBeDefined();
@@ -866,7 +970,8 @@ describe("migrate", () => {
     expect(sql.exec("SELECT approved_by_alias, created_by_alias FROM merge_requests")).toEqual([
       { approved_by_alias: "claude", created_by_alias: "codex" },
     ]);
-    for (const table of ["journal", "scoring_runs", "merge_requests"]) {
+    expect(sql.exec("SELECT reviewer, alias FROM verdicts")).toEqual([{ reviewer: "bob", alias: "claude" }]);
+    for (const table of ["journal", "scoring_runs", "merge_requests", "verdicts"]) {
       const columns = sql.exec<{ name: string }>(`PRAGMA table_info(${table})`).map((c) => c.name);
       expect(columns.filter((c) => c.includes("agent"))).toEqual([]);
     }

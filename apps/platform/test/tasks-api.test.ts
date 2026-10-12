@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { AccessVerifier } from "../src/access.ts";
 import { apiRoutes } from "../src/api.ts";
+import { webApp } from "../src/app.ts";
+import { FORWARDED_EMAIL_HEADER } from "../src/forwarded.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
 import { at } from "./support/defined.ts";
@@ -19,7 +21,10 @@ async function setup() {
     workflow: { create: async () => ({}), get: async () => ({ terminate: async () => {} }) },
     teardown: async () => {},
   });
-  const api = apiRoutes({ verifierFor: () => verify, now, repos: () => repos, tasks: () => backend });
+  const options = { verifierFor: () => verify, now, repos: () => repos, tasks: () => backend };
+  const api = apiRoutes(options);
+  // throng-web's binding, over the same database and backend.
+  const web = webApp(options);
   const env = { DB: testDatabase(), ACCESS_TEAM_DOMAIN: "throng.cloudflareaccess.com", ACCESS_AUD: "aud" };
 
   const call = async (method: string, path: string, bearer?: string, body?: unknown) => {
@@ -28,6 +33,14 @@ async function setup() {
     if (body !== undefined) headers["Content-Type"] = "application/json";
     const init = { method, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) };
     const res = await api.request(path, init, env);
+    return { status: res.status, body: (await res.json()) as Json };
+  };
+  /** A request through throng-web's binding, as the signed-in user with `email`. */
+  const callAs = async (method: string, path: string, email: string, body?: unknown) => {
+    const headers: Record<string, string> = { [FORWARDED_EMAIL_HEADER]: email };
+    if (body !== undefined) headers["Content-Type"] = "application/json";
+    const init = { method, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) };
+    const res = await web.request(`/api${path}`, init, env);
     return { status: res.status, body: (await res.json()) as Json };
   };
   /** A bearer token for the user with `email`, under `alias` if given. */
@@ -43,7 +56,7 @@ async function setup() {
   const bob = await tokenFor("bob@example.com");
   const project = (await call("POST", "/projects", greg, { handle: "throng" })).body;
   const base = "/projects/greg/throng";
-  return { call, repos, store, greg, ada, adaClaude, bob, project, base };
+  return { call, callAs, repos, store, greg, ada, adaClaude, bob, project, base };
 }
 
 describe("task routes", () => {
@@ -62,6 +75,7 @@ describe("task routes", () => {
       closedAt: null,
       closedBy: null,
       attemptLimit: null,
+      taskBranch: null,
     });
     await call("POST", `${base}/tasks`, bob, { title: "Second", attemptLimit: 3 });
 
@@ -74,6 +88,21 @@ describe("task routes", () => {
     expect(edited.status).toBe(200);
     expect(edited.body).toMatchObject({ title: "Fix sign-in", body: "It *fails*.", attemptLimit: 4 });
     expect((await call("PATCH", `${base}/tasks/t1`, bob, { title: "x" })).status).toBe(403);
+  });
+
+  it("reports a task's task branch head, or null when it has none", async () => {
+    const { call, repos, ada, bob, base, project } = await setup();
+    const origin = `${project["id"]}-main`;
+    repos.commit(origin, { files: { "README.md": "hi\n" } });
+    await call("POST", `${base}/tasks`, ada, { title: "Fix login" });
+    await call("POST", `${base}/tasks`, ada, { title: "Second" });
+    const tests = repos.commit(origin, { branch: "tests", files: { "login.test.ts": "it()\n" } });
+    repos.setRef(origin, "refs/tasks/t1", tests.hash);
+
+    expect((await call("GET", `${base}/tasks/t1`, bob)).body["taskBranch"]).toEqual({ sha: tests.hash, commits: 1 });
+    expect((await call("GET", `${base}/tasks/t2`, bob)).body["taskBranch"]).toBeNull();
+    const list = (await call("GET", `${base}/tasks`, bob)).body["tasks"];
+    expect(list.map((t: Json) => t["taskBranch"])).toEqual([{ sha: tests.hash, commits: 1 }, null]);
   });
 
   it("runs the task transitions with their permissions", async () => {
@@ -125,6 +154,7 @@ describe("attempt routes", () => {
         task: 1,
         number: n,
         author: { id: expect.any(String), handle: "ada" },
+        alias: "claude",
         state: "draft",
         fork: `t1a${n}`,
         branch: null,
@@ -133,8 +163,10 @@ describe("attempt routes", () => {
         closedAt: null,
         mergedSha: null,
         archivedSha: null,
+        needsUpdate: false,
         scoring: { status: "none", sha: null },
         mergeRequest: null,
+        verdicts: { head: null, merge: 0, revise: 0, reject: 0 },
       })),
     );
     expect(await repos.list(`${project["id"]}-t`)).toEqual([`${project["id"]}-t1a1`, `${project["id"]}-t1a2`]);
@@ -146,6 +178,25 @@ describe("attempt routes", () => {
     expect((await call("GET", `${base}/attempts/t1a2`, bob)).body).toEqual(created.body["attempts"][1]);
     expect((await call("GET", `${base}/attempts/t1a9`, bob)).status).toBe(404);
     expect((await call("GET", `${base}/attempts/t1`, bob)).status).toBe(400);
+  });
+
+  it("forks an attempt of the same task, recording forkedFrom, and refuses one from another task", async () => {
+    const { call, ada, bob, repos, project, base } = await setup();
+    await call("POST", `${base}/tasks`, ada, { title: "a" });
+    await call("POST", `${base}/tasks`, ada, { title: "b" });
+    await call("POST", `${base}/tasks/t1/attempts`, ada);
+    const head = repos.commit(`${project["id"]}-t1a1`, { files: { "a.txt": "a\n" } }).hash;
+
+    const forked = await call("POST", `${base}/tasks/t1/attempts`, bob, { from: "t1a1" });
+    expect(forked.status).toBe(201);
+    expect(forked.body["attempts"]).toEqual([expect.objectContaining({ ref: "t1a2", forkedFrom: "t1a1" })]);
+    expect(repos.ref(`${project["id"]}-t1a2`, "refs/heads/main")).toBe(head);
+    expect((await call("GET", `${base}/attempts/t1a2`, bob)).body["forkedFrom"]).toBe("t1a1");
+
+    const other = await call("POST", `${base}/tasks/t2/attempts`, ada, { from: "t1a1" });
+    expect(other.status).toBe(400);
+    expect(other.body["error"]["code"]).toBe("invalidRequest");
+    expect((await call("POST", `${base}/tasks/t1/attempts`, ada, { from: "t1" })).status).toBe(400);
   });
 
   it("fails a batch over the cap whole, with attemptLimit", async () => {
@@ -320,6 +371,31 @@ describe("merge request routes", () => {
     expect([after.status, after.body["error"]["code"]]).toEqual([409, "invalidState"]);
   });
 
+  it("selects, approves and cancels for the signed-in web user, only if they created the task or own the project", async () => {
+    const env = await setup();
+    const { callAs, base } = env;
+    await twoAttempts(env);
+    const select = (email: string) => callAs("POST", `${base}/tasks/t1/selection`, email, { attempt: "t1a1" });
+    expect((await select("bob@example.com")).status).toBe(403);
+    expect((await select("ada@example.com")).body).toMatchObject({ state: "pending", approvedBy: { handle: "ada" } });
+    const act = (verb: string, email: string) => callAs("POST", `${base}/tasks/t1/merge-request/${verb}`, email);
+    expect((await act("approve", "bob@example.com")).status).toBe(403);
+    expect((await act("approve", "greg@example.com")).body["state"]).toBe("pending");
+    expect((await act("cancel", "bob@example.com")).status).toBe(403);
+    expect((await act("cancel", "ada@example.com")).body["state"]).toBe("cancelled");
+  });
+
+  it("reopens a closed attempt for its author signed in on the web, and no one else", async () => {
+    const env = await setup();
+    const { call, callAs, ada, base } = env;
+    await twoAttempts(env);
+    await call("POST", `${base}/tasks/t1/selection`, ada, { attempt: "t1a1" });
+    await call("POST", `${base}/tasks/t1/merge-request/cancel`, ada);
+    const reopen = (email: string) => callAs("POST", `${base}/attempts/t1a2/reopen`, email);
+    expect((await reopen("ada@example.com")).status).toBe(403);
+    expect((await reopen("bob@example.com")).body["state"]).toBe("draft");
+  });
+
   it("lists the project's merge queue, front first", async () => {
     const env = await setup();
     const { call, store, ada, bob, project, base } = env;
@@ -346,5 +422,89 @@ describe("merge request routes", () => {
     expect((await call("GET", `${base}/merge-queue`, bob)).body).toEqual({
       queue: [{ position: 1, task: "t1", attempt: "t1a2", state: "queued" }],
     });
+  });
+});
+
+describe("the task list's summaries", () => {
+  type Env = Awaited<ReturnType<typeof setup>>;
+
+  /** Finishes the latest run of t1's attempt `attempt` with `gate`. */
+  async function finish(env: Env, attempt: number, gate: "passed" | "failed") {
+    const tasks = env.store(env.project["id"]);
+    await tasks.scoring.drain();
+    const run = at(tasks.scoring.listRuns({ task: 1, attempt }), -1);
+    tasks.scoringFinished(run.id, {
+      status: "done",
+      result: {
+        base: null,
+        config: { kind: "none" },
+        gate,
+        checks: [],
+        builtin: { filesChanged: 0, additions: 0, deletions: 0, durationMs: 1 },
+        preview: { status: "none" },
+        logs: [],
+      },
+    });
+  }
+
+  const summary = async ({ call, bob, base }: Env) => {
+    const [task] = (await call("GET", `${base}/tasks`, bob)).body["tasks"] as Json[];
+    const { attemptCount, bestGate, mergeRequestState } = task as Json;
+    return { attemptCount, bestGate, mergeRequestState };
+  };
+
+  it("counts attempts and gives the best gate and the merge request's state, so the list is one call", async () => {
+    const env = await setup();
+    await twoAttempts(env);
+    expect(await summary(env)).toEqual({ attemptCount: 2, bestGate: null, mergeRequestState: null });
+    await finish(env, 1, "failed");
+    expect(await summary(env)).toMatchObject({ bestGate: "failed" });
+    await finish(env, 2, "passed");
+    expect(await summary(env)).toMatchObject({ bestGate: "passed" });
+    await env.call("POST", `${env.base}/tasks/t1/selection`, env.ada, { attempt: "t1a2" });
+    expect(await summary(env)).toEqual({ attemptCount: 2, bestGate: "passed", mergeRequestState: "queued" });
+  });
+
+  it("leaves obsolete attempts out of the count", async () => {
+    const env = await setup();
+    await twoAttempts(env);
+    await env.call("POST", `${env.base}/attempts/t1a1/obsolete`, env.greg);
+    expect(await summary(env)).toMatchObject({ attemptCount: 1 });
+  });
+});
+
+describe("over throng-web's service binding", () => {
+  it("lists, creates, reads, closes and obsoletes tasks, and lists attempts, as the forwarded user", async () => {
+    const repos = new FakeRepos();
+    const { backend } = testTaskBackends(repos, now);
+    const web = webApp({ verifierFor: () => verify, now, repos: () => repos, tasks: () => backend });
+    const env = { DB: testDatabase(), ACCESS_TEAM_DOMAIN: "throng.cloudflareaccess.com", ACCESS_AUD: "aud" };
+    const call = async (method: string, path: string, body?: unknown) => {
+      const headers: Record<string, string> = { [FORWARDED_EMAIL_HEADER]: "ada@example.com" };
+      if (body !== undefined) headers["Content-Type"] = "application/json";
+      const init = { method, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) };
+      const res = await web.request(`/api${path}`, init, env);
+      return { status: res.status, body: (await res.json()) as Json };
+    };
+    await call("POST", "/projects", { handle: "throng" });
+    const base = "/projects/ada/throng";
+    expect((await call("POST", `${base}/tasks`, { title: "a" })).status).toBe(201);
+    await call("POST", `${base}/tasks`, { title: "b" });
+    expect((await call("GET", `${base}/tasks`)).body["tasks"]).toHaveLength(2);
+    expect((await call("GET", `${base}/tasks/t1`)).body["title"]).toBe("a");
+    expect((await call("GET", `${base}/tasks/t1/attempts`)).body).toEqual({ attempts: [] });
+    expect((await call("POST", `${base}/tasks/t1/close`)).body["state"]).toBe("closed");
+    expect((await call("POST", `${base}/tasks/t2/obsolete`)).body["state"]).toBe("obsolete");
+  });
+
+  it("scores the forwarded user's own draft now", async () => {
+    const { call, callAs, ada, base, repos, project } = await setup();
+    repos.commit(`${project["id"]}-main`, { files: { "README.md": "hi\n" } });
+    await call("POST", `${base}/tasks`, ada, { title: "a" });
+    await call("POST", `${base}/tasks/t1/attempts`, ada);
+    expect((await callAs("POST", `${base}/attempts/t1a1/score`, "bob@example.com")).status).toBe(403);
+    const scored = await callAs("POST", `${base}/attempts/t1a1/score`, "ada@example.com");
+    expect(scored.status).toBe(200);
+    expect(scored.body).toMatchObject({ queued: true, run: { ref: "t1a1", trigger: "scoreNow", alias: null } });
   });
 });

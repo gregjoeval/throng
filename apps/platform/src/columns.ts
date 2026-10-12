@@ -8,12 +8,17 @@ function columnNames(sql: Sql, table: string): Set<string> {
   return new Set(sql.exec<{ name: string }>(`PRAGMA table_info(${table})`).map((c) => c.name));
 }
 
-/** Adds each of `columns` (`name TYPE`) that `table` lacks. */
-export function addColumns(sql: Sql, table: string, columns: readonly string[]): void {
+/** Adds each of `columns` (`name TYPE`) that `table` lacks, and returns the names of those it added. */
+export function addColumns(sql: Sql, table: string, columns: readonly string[]): string[] {
   const names = columnNames(sql, table);
+  const added: string[] = [];
   for (const column of columns) {
-    if (!names.has(column.split(" ")[0] ?? "")) sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column}`);
+    const name = column.split(" ")[0] ?? "";
+    if (names.has(name)) continue;
+    sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column}`);
+    added.push(name);
   }
+  return added;
 }
 
 /** Renames each `[from, to]` column that `table` still has under its old name. */

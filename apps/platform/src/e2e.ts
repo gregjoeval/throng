@@ -18,6 +18,8 @@ import type { Database, User } from "./users.ts";
 
 /** The e2e suite's user. `.invalid` never resolves, so nothing is ever sent to it. */
 export const E2E_EMAIL = "e2e@throng.invalid";
+/** A second e2e user, for what the first can't do to its own attempts: posting a verdict, say. */
+export const E2E_REVIEWER_EMAIL = "e2e-reviewer@throng.invalid";
 /** Every e2e project id starts with this; a run adds its own prefix after it. */
 export const E2E_PROJECT_PREFIX = "e2e";
 /** Long enough for a whole e2e run. */
@@ -28,9 +30,13 @@ const FORK_READY_TIMEOUT_MS = 60_000;
 /** R2 deletes at most this many keys per call. */
 const R2_DELETE_BATCH = 1000;
 
-/** Mints a Throng token for the e2e user, creating the user on first use. */
-export async function e2eToken(db: Database, now: Date): Promise<{ token: string; id: string; user: User }> {
-  const user = await userForEmail(db, E2E_EMAIL);
+/** Mints a Throng token for the e2e user (or another, by `email`), creating the user on first use. */
+export async function e2eToken(
+  db: Database,
+  now: Date,
+  email = E2E_EMAIL,
+): Promise<{ token: string; id: string; user: User }> {
+  const user = await userForEmail(db, email);
   const { plaintext, token } = await mintToken(db, {
     userId: user.id,
     alias: null,
@@ -163,18 +169,27 @@ export function e2eRoutes<E extends object>(deps: E2eDeps<E>) {
     await next();
   });
 
-  /** A Throng token for the e2e user, for the product API (`/api`) and the git proxy (`/git`). */
+  /**
+   * A Throng token for the e2e user, for the product API (`/api`) and the git proxy (`/git`). With
+   * `?as=reviewer`, one for the second e2e user instead.
+   */
   app.post("/token", async (c) => {
-    const { token, id, user } = await e2eToken(deps.db(c.env), new Date());
+    const as = c.req.query("as");
+    if (as !== undefined && as !== "reviewer") return c.json({ error: `no e2e user ${as}` }, 400);
+    const email = as === "reviewer" ? E2E_REVIEWER_EMAIL : E2E_EMAIL;
+    const { token, id, user } = await e2eToken(deps.db(c.env), new Date(), email);
     return c.json({ token, id, user: { id: user.id, handle: user.handle } });
   });
 
-  /** Revokes one of the e2e user's tokens: the run's own, when it ends. */
+  /** Revokes one of the e2e users' tokens: the run's own, when it ends. */
   app.delete("/tokens/:id", async (c) => {
     const db = deps.db(c.env);
-    const user = await userForEmail(db, E2E_EMAIL);
-    const revoked = await revokeToken(db, { userId: user.id, id: c.req.param("id"), now: new Date() });
-    return revoked === null ? c.json({ error: "no such token" }, 404) : c.json({ revoked: revoked.id });
+    for (const email of [E2E_EMAIL, E2E_REVIEWER_EMAIL]) {
+      const user = await userForEmail(db, email);
+      const revoked = await revokeToken(db, { userId: user.id, id: c.req.param("id"), now: new Date() });
+      if (revoked !== null) return c.json({ revoked: revoked.id });
+    }
+    return c.json({ error: "no such token" }, 404);
   });
 
   /**

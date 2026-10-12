@@ -20,21 +20,34 @@ export function previewPathAllowed(path: string, { accountId, workerName }: Prev
   );
 }
 
+/**
+ * A project's own Worker, `p<projectId>`, per the fork-naming decision. Every Preview of the project's
+ * attempts deploys under it, so projects never share a Worker's Previews, limits or settings.
+ */
+export function previewWorkerName(project: string): string {
+  return `p${project}`;
+}
+
+/** The Preview deploy grant for one project: its own Worker, never another project's. */
+export function previewGrant(accountId: string, project: string): PreviewGrant {
+  return { accountId, workerName: previewWorkerName(project) };
+}
+
 /** A DNS label's limit; a Preview's host label is `<previewName>-<workerName>`. */
 export const MAX_LABEL = 63;
 const HASH_LENGTH = 8;
 
 /**
- * A Preview's name, per the fork-naming decision: `<forkName>-p<projectId>`, e.g. `t42a3-pabc123`.
- * When the host label (`<name>-<workerName>`) would pass 63 characters, the name keeps its start
- * plus a short hash of the full name, so distinct attempts keep distinct Previews.
+ * A Preview's name: the attempt's fork name (`t42a3`), so under the project's Worker its host label
+ * is `<forkName>-p<projectId>`, per the fork-naming decision. When that label would pass 63
+ * characters, the name keeps the fork name's start plus a short hash of it, so distinct attempts keep
+ * distinct Previews.
  */
-export function previewName({ project, attempt }: { project: string; attempt: string }, workerName: string): string {
-  const full = `${attempt}-p${project}`;
-  const room = MAX_LABEL - workerName.length - 1;
-  if (full.length <= room) return full;
-  const start = full.slice(0, Math.max(0, room - HASH_LENGTH - 1)).replace(/-+$/u, "");
-  return `${start}-${hash(full)}`;
+export function previewName({ project, attempt }: { project: string; attempt: string }): string {
+  const room = MAX_LABEL - previewWorkerName(project).length - 1;
+  if (attempt.length <= room) return attempt;
+  const start = attempt.slice(0, Math.max(0, room - HASH_LENGTH - 1)).replace(/-+$/u, "");
+  return `${start}-${hash(attempt)}`;
 }
 
 /** FNV-1a, as 8 base-36 characters: short, stable and synchronous. Not for anything secret. */

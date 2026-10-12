@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { previewName, previewPathAllowed } from "../src/preview.ts";
+import { MAX_LABEL, previewGrant, previewName, previewPathAllowed } from "../src/preview.ts";
 
 const grant = { accountId: "acct", workerName: "fixture" };
 
@@ -19,26 +19,31 @@ describe("previewPathAllowed", () => {
   });
 });
 
+describe("previewGrant", () => {
+  it("names the project's own Worker, p<projectId>", () => {
+    expect(previewGrant("acct", "abc123")).toEqual({ accountId: "acct", workerName: "pabc123" });
+  });
+});
+
 describe("previewName", () => {
-  it("names a Preview after the attempt fork and the project: <forkName>-p<projectId>", () => {
-    expect(previewName({ project: "abc123", attempt: "t42a3" }, "fixture")).toBe("t42a3-pabc123");
+  it("names a Preview after the attempt fork, so its host label is <forkName>-p<projectId>", () => {
+    const name = previewName({ project: "abc123", attempt: "t42a3" });
+    expect(name).toBe("t42a3");
+    expect(`${name}-${previewGrant("acct", "abc123").workerName}`).toBe("t42a3-pabc123");
   });
 
   it("shortens a name whose host label would pass 63 characters, keeping its start and a hash of it", () => {
-    const worker = "throng-fixture-worker";
-    const long = { project: "p".repeat(40), attempt: "t42a3" };
-    const name = previewName(long, worker);
-    expect(`${name}-${worker}`).toHaveLength(63);
-    expect(name).toMatch(/^t42a3-pppp+-[a-z0-9]{8}$/u);
-    expect(previewName(long, worker)).toBe(name);
-    expect(previewName({ ...long, attempt: "t42a4" }, worker)).not.toBe(name);
-    expect(previewName({ project: "p".repeat(40), attempt: "t1a1" }, worker)).not.toBe(
-      previewName({ project: `${"p".repeat(39)}q`, attempt: "t1a1" }, worker),
-    );
+    const project = "p".repeat(40);
+    const attempt = "t1234567a12345678901234";
+    const name = previewName({ project, attempt });
+    expect(`${name}-p${project}`).toHaveLength(MAX_LABEL);
+    expect(name).toMatch(/^t1234567a123-[a-z0-9]{8}$/u);
+    expect(previewName({ project, attempt })).toBe(name);
+    expect(previewName({ project, attempt: "t1234567a12345678901235" })).not.toBe(name);
   });
 
   it("keeps a name that fits exactly", () => {
-    const worker = "w".repeat(63 - "t1a1-pabcdef".length - 1);
-    expect(previewName({ project: "abcdef", attempt: "t1a1" }, worker)).toBe("t1a1-pabcdef");
+    const project = "a".repeat(MAX_LABEL - "t1a1-p".length);
+    expect(previewName({ project, attempt: "t1a1" })).toBe("t1a1");
   });
 });

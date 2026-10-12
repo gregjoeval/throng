@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parseConfig } from "../src/config.ts";
+import { previewGrant, previewName } from "../src/preview.ts";
 import { buildResult, MAX_OUTPUT_BYTES, scorePlan } from "../src/results.ts";
 import type { PlannedMetric, RawScore, ScorePlan } from "../src/results.ts";
 import { parseResult, previewScript, scoreScript } from "../src/scripts.ts";
@@ -342,7 +343,7 @@ function fakeWrangler(behaviour: "deploys" | "fails"): string {
   const bin = mkdtempSync(join(root, "bin-"));
   const body =
     behaviour === "deploys"
-      ? `echo '{"preview":{"urls":["https://t1a1-pabc123-fixture.acct.workers.dev"]}}'`
+      ? `echo '{"preview":{"urls":["https://t1a1-pabc123.acct.workers.dev"]}}'`
       : `echo 'deploy refused' >&2; exit 1`;
   writeFileSync(
     join(bin, "wrangler"),
@@ -372,7 +373,11 @@ const previewLog = (sandbox: string) =>
 const wranglerCall = (sandbox: string) => execFileSync("cat", [join(sandbox, "wrangler-call")], { encoding: "utf8" });
 
 describe("previewScript", () => {
-  const target = { accountId: "acct", workerName: "fixture", previewName: "t1a1-pabc123" };
+  // The project abc123's attempt t1a1, under the project's own Worker.
+  const target = {
+    ...previewGrant("acct", "abc123"),
+    previewName: previewName({ project: "abc123", attempt: "t1a1" }),
+  };
 
   it("builds with preview.command, then deploys the head as the named Preview and reports its URL", () => {
     const head = attemptHead();
@@ -380,9 +385,9 @@ describe("previewScript", () => {
       previewScript(fork, head, { ...target, command: "cat b.txt > built" }),
       fakeWrangler("deploys"),
     );
-    expect(result).toEqual({ ok: true, url: "https://t1a1-pabc123-fixture.acct.workers.dev" });
+    expect(result).toEqual({ ok: true, url: "https://t1a1-pabc123.acct.workers.dev" });
     expect(wranglerCall(sandbox)).toBe(
-      "preview --worker-name fixture --name t1a1-pabc123 --json\nadded-by-worker\nacct\nattempt\nline two\n",
+      "preview --worker-name pabc123 --name t1a1 --json\nadded-by-worker\nacct\nattempt\nline two\n",
     );
   });
 

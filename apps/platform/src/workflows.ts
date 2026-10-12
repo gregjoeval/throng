@@ -8,7 +8,8 @@ import { GRANT_SOURCES, ROLE_GRANTS, sandboxName, SCORING_ROLES } from "./grants
 import type { RoleGrants, RunGrants, SandboxRole } from "./grants";
 import { LOG_CONTENT_TYPE, logKey, logNames, MISSING_LOG_EXIT, PREVIEW_LOG, readLogScript, withNotes } from "./logs";
 import { roleAccess } from "./network";
-import { previewName } from "./preview";
+import { previewGrant, previewName } from "./preview";
+import { previewWorkersFor } from "./preview-workers";
 import { forkRepo, originRepo } from "./repos";
 import { buildResult, previewPlan, scorePlan, scoreTimeoutMs, withPreview } from "./results";
 import type { PreviewPlan, RawScore, ScorePlan, ScoringResult } from "./results";
@@ -126,7 +127,8 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
   }
 
   /**
-   * Deploys the head as a Worker Preview from the preview container, which holds the Preview deploy
+   * Deploys the head as a Worker Preview under the project's own Worker (`p<projectId>`, created here
+   * if the project predates it) from the preview container, which holds that Worker's Preview deploy
    * grant and only a read grant on the fork, and stores its log. `deployed` is null when it gave no
    * result, and the error when the step kept failing on infrastructure; then whatever log the
    * container wrote is still stored. A failed Preview is recorded on the result and never changes the gate.
@@ -138,14 +140,16 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
     { command, allow }: PreviewPlan,
     step: WorkflowStep,
   ): Promise<{ deployed: PreviewScriptResult | null | { error: string }; durationMs: number; logs: string[] }> {
-    const workerName = this.env.PREVIEW_WORKER;
-    const name = previewName(params, workerName);
+    const { accountId, workerName } = previewGrant(this.env.CF_ACCOUNT_ID, params.project);
+    const name = previewName(params);
     try {
       const { run, durationMs, logs } = await step.do(
         "preview",
         { retries: STEP_RETRIES, timeout: PREVIEW_STEP_TIMEOUT_MS },
         async () => {
           const started = Date.now();
+          // Projects made before their Worker was created with them get it here.
+          await previewWorkersFor(this.env).ensure(params.project);
           const deploy = await runInSandbox(
             this.env,
             instanceId,
@@ -153,7 +157,7 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
             "preview",
             (g) =>
               previewScript(g.forkRead.remote, params.sha, {
-                accountId: this.env.CF_ACCOUNT_ID,
+                accountId,
                 workerName,
                 previewName: name,
                 command,
@@ -215,7 +219,7 @@ export async function runInSandbox<R extends SandboxRole>(
     // Only the preview container gets the Preview deploy grant; the trusted land container never
     // reaches the registry.
     access: roleAccess(role, grants, {
-      preview: { accountId: env.CF_ACCOUNT_ID, workerName: env.PREVIEW_WORKER },
+      preview: previewGrant(env.CF_ACCOUNT_ID, repos.project),
       allow,
     }),
     ...(timeoutMs === undefined ? {} : { timeoutMs }),

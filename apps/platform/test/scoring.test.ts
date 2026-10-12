@@ -424,6 +424,19 @@ describe("rescoring on a task edit", () => {
     expect(runs(draft)).toEqual([]);
   });
 
+  it("rescores each open attempt's head when the task's checks change", async () => {
+    const { store, runs, open } = await scored();
+    const smoke = { name: "smoke", command: "./smoke.sh" };
+    await store.editTask(PROJECT, ada, { task: 1, checks: [smoke], metrics: [lines("smoke.report.lines")] });
+    await store.scoring.drain();
+    store.scoring.finish(at(runs(open), -1).id, done());
+    await store.editTask(PROJECT, ada, { task: 1, checks: [{ ...smoke, required: false }] });
+
+    expect(runs(open).map((r) => r.trigger)).toEqual(["open", "rescore", "rescore"]);
+    expect(await code(store.editTask(PROJECT, ada, { task: 1, checks: [] }))).toBe("invalidRequest");
+    expect(runs(open)).toHaveLength(3);
+  });
+
   it("queues nothing when a save leaves the metrics as they were", async () => {
     const { store, runs, open } = await scored();
     await store.editTask(PROJECT, ada, { task: 1, metrics: [lines()] });

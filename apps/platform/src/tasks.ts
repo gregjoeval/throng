@@ -16,7 +16,7 @@ import type { Repos } from "./repos.ts";
 import type { Gate, ScoringResult } from "./results.ts";
 import { headAttemptRef } from "./scoring.ts";
 import type { AttemptScoring, ScoringRequest, StoredRun } from "./scoring.ts";
-import { NO_TASK_DEFINITIONS, taskDefinitionsFrom } from "./task-definitions.ts";
+import { NO_TASK_DEFINITIONS, taskDefinitionsFrom, withTask } from "./task-definitions.ts";
 import type { TaskDefinitions, TaskDefinitionsInput } from "./task-definitions.ts";
 import { attemptRef, parseAttemptRef, parseTaskRef, taskRef } from "./task-refs.ts";
 import type {
@@ -229,7 +229,10 @@ export interface ArenaAttempt extends ScoringStatus, AttemptStanding {
 /** A task's arena: the current result of every attempt in it. */
 export interface TaskArena {
   task: string;
-  /** Every metric the config on `origin/main` declares, in its order; none without a valid config. */
+  /**
+   * Every metric a run of the task's attempts would read: the config on `origin/main`'s, then the
+   * task's, each with its `source`; none when they don't merge into a valid config.
+   */
   metrics: MetricConfig[];
   attempts: ArenaAttempt[];
 }
@@ -448,7 +451,7 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
     async taskArena(actor: Actor, input: TaskPath): Promise<TaskArena> {
       const number = taskNumber(input.task);
       const ctx = await project(input);
-      const list = await invoke("taskArena", ctx, actor, { task: number });
+      const { definitions, attempts: list } = await invoke("taskArena", ctx, actor, { task: number });
       const [users, bases, config] = await Promise.all([
         handles(
           db,
@@ -457,9 +460,10 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
         Promise.all(list.map(({ fork, state }) => (isActive(state) ? currentBase(repos, ctx.id, fork) : null))),
         loadConfig(repos, ctx.id),
       ]);
+      const merged = withTask(config, definitions);
       return {
         task: taskRef(number),
-        metrics: config.kind === "valid" ? config.config.metrics : [],
+        metrics: merged.kind === "valid" ? merged.config.metrics : [],
         attempts: list.map(({ scoring, fork, state, author, alias, verdicts, forked_from, needs_update }, i) => ({
           ref: fork,
           state,

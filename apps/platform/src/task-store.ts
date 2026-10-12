@@ -746,17 +746,24 @@ export class TaskStore {
     return this.#scoringDetail(this.#attempt(input));
   }
 
-  /** The task's arena: every attempt, obsolete ones included, by number, with its scoring and current result. */
+  /**
+   * The task's arena: what the task defines over the project's config, and every attempt, obsolete
+   * ones included, by number, with its scoring and current result.
+   */
   taskArena(
     _project: ProjectContext,
     _actor: Actor,
     input: { task: number },
-  ): (Omit<StoredAttempt, "scoring"> & { scoring: AttemptScoringDetail })[] {
-    this.#task(input.task);
-    return this.#sql
+  ): {
+    definitions: TaskDefinitions;
+    attempts: (Omit<StoredAttempt, "scoring"> & { scoring: AttemptScoringDetail })[];
+  } {
+    const { definitions } = this.#task(input.task);
+    const attempts = this.#sql
       .exec<AttemptRow>("SELECT * FROM attempts WHERE task = ? ORDER BY number", input.task)
       .map((row) => this.#toAttempt(row))
       .map((a) => ({ ...a, scoring: this.#scoringDetail(a) }));
+    return { definitions, attempts };
   }
 
   /** The attempt's scoring status, with the run holding its current result. */

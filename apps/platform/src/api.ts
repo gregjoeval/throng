@@ -515,7 +515,8 @@ const TaskArenaSchema = z
     task: z.string().openapi({ example: "t42" }),
     metrics: z.array(MetricSchema).openapi({
       description:
-        "Every metric the `.throng/config.yml` on `origin/main` declares, in order; empty without a valid config.",
+        "Every metric the task's attempts are scored on: those the `.throng/config.yml` on `origin/main` declares, " +
+        "then the task's own, in order, each with its `source`; empty when they don't merge into a valid config.",
     }),
     attempts: z.array(
       ScoringStatusSchema.extend({

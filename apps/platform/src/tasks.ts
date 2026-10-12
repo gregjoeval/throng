@@ -268,21 +268,18 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
   }
 
   /**
-   * The checks and metrics a request gave, checked with `current`'s for those it left out against the
-   * project's config on `main`; nothing when it gave neither. Saving them is still up to the store's
-   * permission check.
+   * A new task's checks and metrics as a request gave them, checked against the project's config on
+   * `main`; none when it gave neither. Anyone may create a task; an edit's are checked by the store,
+   * after who may edit.
    */
   async function taskDefinitions(
     ctx: ProjectContext,
     input: { checks?: unknown; metrics?: unknown },
-    current: () => Promise<TaskDefinitions>,
-  ): Promise<{ checks?: CheckConfig[]; metrics?: MetricConfig[] }> {
-    if (input.checks === undefined && input.metrics === undefined) return {};
-    const [definitions, config] = await Promise.all([current(), loadConfig(repos, ctx.id)]);
-    const checked = taskDefinitionsFrom(input, definitions, config);
+  ): Promise<TaskDefinitions> {
+    if (input.checks === undefined && input.metrics === undefined) return NO_TASK_DEFINITIONS;
+    const checked = taskDefinitionsFrom(input, NO_TASK_DEFINITIONS, await loadConfig(repos, ctx.id));
     if ("error" in checked) throw new ServiceError("invalidRequest", checked.error);
-    const { checks, metrics } = checked.definitions;
-    return { ...(input.checks === undefined ? {} : { checks }), ...(input.metrics === undefined ? {} : { metrics }) };
+    return checked.definitions;
   }
 
   /** Renders tasks of project `ctx`, each with its task branch read from the origin. */
@@ -351,7 +348,7 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
     ): Promise<Task> {
       const { title, body, attemptLimit } = input;
       const ctx = await project(input);
-      const definitions = await taskDefinitions(ctx, input, () => Promise.resolve(NO_TASK_DEFINITIONS));
+      const definitions = await taskDefinitions(ctx, input);
       return one(await invoke("createTask", ctx, actor, { title, body, attemptLimit, ...definitions }), tasks(ctx));
     },
 
@@ -386,9 +383,9 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
     ): Promise<Task> {
       const { title, body, attemptLimit } = input;
       const ctx = await project(input);
-      const task = taskNumber(input.task);
-      const current = async () => (await invoke("getTask", ctx, actor, { task })).definitions;
-      const edit = { task, title, body, attemptLimit, ...(await taskDefinitions(ctx, input, current)) };
+      // The store checks the checks and metrics itself, once it has checked who may edit the task.
+      const { checks, metrics } = input;
+      const edit = { task: taskNumber(input.task), title, body, attemptLimit, checks, metrics };
       return one(await invoke("editTask", ctx, actor, edit), tasks(ctx));
     },
 

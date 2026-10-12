@@ -203,6 +203,14 @@ describe("task metrics", () => {
     expect((await edit(ada)).status).toBe(200);
   });
 
+  it("refuses someone else's edit as forbidden, whatever metrics it gives", async () => {
+    const { call, ada, bob, base } = await withConfig();
+    await call("POST", `${base}/tasks`, ada, { title: "a" });
+    const edited = await call("PATCH", `${base}/tasks/t1`, bob, { metrics: [{ ...LINES, from: "lint.errors" }] });
+    expect(edited.status).toBe(403);
+    expect(edited.body["error"]).toMatchObject({ code: "forbidden" });
+  });
+
   it.each([
     ["an invalid shape", { ...LINES, order: "up" }, /^metrics\[0\]\.order: order must be/u],
     [

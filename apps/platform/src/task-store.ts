@@ -44,7 +44,7 @@ import type {
   ScoringTrigger,
   StoredRun,
 } from "./scoring.ts";
-import { defines, NO_TASK_DEFINITIONS } from "./task-definitions.ts";
+import { NO_TASK_DEFINITIONS, taskDefinitionsFrom } from "./task-definitions.ts";
 import type { TaskDefinitions } from "./task-definitions.ts";
 import { attemptRef, reservedTask, taskBranchRef, taskRef } from "./task-refs.ts";
 import type { Actor } from "./tokens.ts";
@@ -224,10 +224,10 @@ export interface EditTaskInput {
   title?: string | undefined;
   body?: string | undefined;
   attemptLimit?: number | null | undefined;
-  /** Replaces the task's checks; already checked against the project's config (`taskDefinitionsFrom`). */
-  checks?: CheckConfig[] | undefined;
-  /** Replaces the task's metrics; already checked against the project's config (`taskDefinitionsFrom`). */
-  metrics?: MetricConfig[] | undefined;
+  /** Replaces the task's checks, as a request gave them; checked against the project's config. */
+  checks?: unknown;
+  /** Replaces the task's metrics, as a request gave them; checked against the project's config. */
+  metrics?: unknown;
 }
 
 export interface CreateAttemptsInput {
@@ -537,23 +537,41 @@ export class TaskStore {
     };
   }
 
-  /** Edits a task's title, body, attempt limit, checks or metrics. The project owner or the task's creator may. */
-  editTask(project: ProjectContext, actor: Actor, input: EditTaskInput): StoredTask {
+  /**
+   * Edits a task's title, body, attempt limit, checks or metrics. The project owner or the task's
+   * creator may; who may is checked before the checks and metrics are. Changed definitions rescore
+   * each open attempt's head, so every attempt is measured the same way; drafts are left alone.
+   */
+  async editTask(project: ProjectContext, actor: Actor, input: EditTaskInput): Promise<StoredTask> {
+    this.#mayEditTask(project, actor, this.#task(input.task));
+    const defining = input.checks !== undefined || input.metrics !== undefined;
+    const config = defining ? await loadConfig(this.#repos, project.id) : null;
+
+    // From here to the update nothing awaits; the task is read again, as the check above awaited,
+    // and the checks and metrics it leaves out are taken from what's stored now.
     const current = this.#task(input.task);
-    this.#mayManageTask(project, actor, current);
-    if (current.state === "obsolete") throw invalidState(`${taskRef(current.number)} is obsolete`);
+    this.#mayEditTask(project, actor, current);
+    const definitions = storedDefinitions(
+      config === null ? current.definitions : taskDefinitions(input, current.definitions, config),
+    );
     this.#sql.exec(
       "UPDATE tasks SET title = ?, body = ?, attempt_limit = ?, definitions = ? WHERE number = ?",
       input.title ?? current.title,
       input.body ?? current.body,
       input.attemptLimit === undefined ? current.attempt_limit : input.attemptLimit,
-      storedDefinitions({
-        checks: input.checks ?? current.definitions.checks,
-        metrics: input.metrics ?? current.definitions.metrics,
-      }),
+      definitions,
       current.number,
     );
+    if (definitions !== storedDefinitions(current.definitions)) {
+      const open = this.#activeAttempts(current.number).filter((a) => a.state === "open");
+      await Promise.all(open.map((attempt) => this.#scoreHead(project, actor, attempt, "rescore")));
+    }
     return this.#task(current.number);
+  }
+
+  #mayEditTask(project: ProjectContext, actor: Actor, current: StoredTask): void {
+    this.#mayManageTask(project, actor, current);
+    if (current.state === "obsolete") throw invalidState(`${taskRef(current.number)} is obsolete`);
   }
 
   /**
@@ -2534,7 +2552,22 @@ function toTask(row: TaskRow): StoredTask {
 
 /** A task's definitions as stored: null for none. */
 function storedDefinitions(definitions: TaskDefinitions): string | null {
-  return defines(definitions) ? JSON.stringify(definitions) : null;
+  const none = Object.values(definitions).every((list: unknown[]) => list.length === 0);
+  return none ? null : JSON.stringify(definitions);
+}
+
+/**
+ * A task's definitions after an edit: the checks and metrics it gave, with `current`'s for those it
+ * left out, checked against the project's config on `main`.
+ */
+function taskDefinitions(
+  input: { checks?: unknown; metrics?: unknown },
+  current: TaskDefinitions,
+  config: ConfigResult,
+): TaskDefinitions {
+  const checked = taskDefinitionsFrom(input, current, config);
+  if ("error" in checked) throw new ServiceError("invalidRequest", checked.error);
+  return checked.definitions;
 }
 
 function toAttempt(row: AttemptRow): Omit<StoredAttempt, "scoring" | "merge_request" | "verdicts"> {

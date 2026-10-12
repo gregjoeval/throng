@@ -395,6 +395,68 @@ describe("the scoring queue", () => {
   });
 });
 
+/** A task metric named `lines`, as a request gives it. */
+const lines = (from = "test.coverage.lines") => ({ name: "lines", from, type: "number" });
+
+describe("rescoring on a task edit", () => {
+  const CONFIG = ["checks:", "  - name: test", "    command: pnpm test", ""].join("\n");
+
+  /** A task by ada over a config with a `test` check: its first attempt open and scored, its second a draft. */
+  async function scored() {
+    const env = setup();
+    env.repos.writeFile(ORIGIN, "main", ".throng/config.yml", CONFIG);
+    const [open, draft] = await env.drafts(2);
+    if (open === undefined || draft === undefined) throw new Error("two drafts expected");
+    await env.store.openAttempt(PROJECT, ada, open);
+    await env.store.scoring.drain();
+    env.store.scoring.finish(at(env.runs(open), 0).id, done());
+    return { ...env, open, draft };
+  }
+
+  it("rescores each open attempt's head when the task's metrics change, and leaves drafts alone", async () => {
+    const { store, runs, base, open, draft } = await scored();
+    await store.editTask(PROJECT, ada, { task: 1, metrics: [lines()] });
+
+    expect(runs(open)).toMatchObject([
+      { trigger: "open", status: "done" },
+      { trigger: "rescore", status: "queued", sha: base.hash, user_id: ada.user.id },
+    ]);
+    expect(runs(draft)).toEqual([]);
+  });
+
+  it("queues nothing when a save leaves the metrics as they were", async () => {
+    const { store, runs, open } = await scored();
+    await store.editTask(PROJECT, ada, { task: 1, metrics: [lines()] });
+    await store.scoring.drain();
+    store.scoring.finish(at(runs(open), -1).id, done());
+
+    await store.editTask(PROJECT, ada, { task: 1, title: "Renamed" });
+    await store.editTask(PROJECT, ada, { task: 1, metrics: [lines()] });
+    expect(runs(open)).toHaveLength(2);
+  });
+
+  it("coalesces repeated edits with the rescore already queued", async () => {
+    const { store, runs, open } = await scored();
+    await store.editTask(PROJECT, ada, { task: 1, metrics: [lines()] });
+    await store.editTask(PROJECT, ada, { task: 1, metrics: [lines("test.coverage.total")] });
+    await store.editTask(PROJECT, ada, { task: 1, metrics: [] });
+
+    expect(runs(open).map((r) => [r.trigger, r.status])).toEqual([
+      ["open", "done"],
+      ["rescore", "queued"],
+    ]);
+  });
+
+  it("refuses someone who may not manage the task before checking their metrics", async () => {
+    const { store, runs, open } = await scored();
+    expect(await code(store.editTask(PROJECT, bob, { task: 1, metrics: [lines("lint.errors")] }))).toBe("forbidden");
+    expect(await code(store.editTask(PROJECT, ada, { task: 1, metrics: [lines("lint.errors")] }))).toBe(
+      "invalidRequest",
+    );
+    expect(runs(open)).toHaveLength(1);
+  });
+});
+
 describe("results", () => {
   it("stores a done run's result and journals scored with its gate and a summary of the config's checks", async () => {
     const { store, runs, draft, journal } = setup();

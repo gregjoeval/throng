@@ -144,18 +144,20 @@ describe("tasks", () => {
     expect(store.listTasks(PROJECT, bob, { state: "closed" }).map((t) => t.number)).toEqual([3]);
   });
 
-  it("edits title, body and attempt limit, keeping what isn't given", () => {
+  it("edits title, body and attempt limit, keeping what isn't given", async () => {
     const { store } = setup();
     store.createTask(PROJECT, ada, { title: "a", body: "b", attemptLimit: 3 });
-    expect(store.editTask(PROJECT, ada, { task: 1, title: "A" })).toMatchObject({
+    expect(await store.editTask(PROJECT, ada, { task: 1, title: "A" })).toMatchObject({
       title: "A",
       body: "b",
       attempt_limit: 3,
     });
-    expect(store.editTask(PROJECT, owner, { task: 1, attemptLimit: null })).toMatchObject({ attempt_limit: null });
+    expect(await store.editTask(PROJECT, owner, { task: 1, attemptLimit: null })).toMatchObject({
+      attempt_limit: null,
+    });
   });
 
-  it("gives a scoring run a task's definitions, and none for an attempt with no task row", () => {
+  it("gives a scoring run a task's definitions, and none for an attempt with no task row", async () => {
     const { store } = setup();
     const lines = {
       name: "lines",
@@ -167,9 +169,9 @@ describe("tasks", () => {
     } as const;
     store.createTask(PROJECT, ada, { title: "a", metrics: [lines] });
     expect(store.taskDefinitions(1)).toEqual({ checks: [], metrics: [lines] });
-    store.editTask(PROJECT, ada, { task: 1, title: "A" });
+    await store.editTask(PROJECT, ada, { task: 1, title: "A" });
     expect(store.taskDefinitions(1)).toEqual({ checks: [], metrics: [lines] });
-    store.editTask(PROJECT, ada, { task: 1, metrics: [] });
+    await store.editTask(PROJECT, ada, { task: 1, metrics: [] });
     expect(store.taskDefinitions(1)).toEqual({ checks: [], metrics: [] });
     expect(store.taskDefinitions(7)).toEqual({ checks: [], metrics: [] });
   });
@@ -694,7 +696,7 @@ describe("archive", () => {
 
   it("holds the cap while a reopen's fork is made", async () => {
     const { store, repos } = await withWork();
-    store.editTask(PROJECT, ada, { task: 1, attemptLimit: 1 });
+    await store.editTask(PROJECT, ada, { task: 1, attemptLimit: 1 });
     await store.closeAttempt(PROJECT, ada, t1a1);
     const fork = repos.fork.bind(repos);
     let racing: Promise<unknown> | undefined;

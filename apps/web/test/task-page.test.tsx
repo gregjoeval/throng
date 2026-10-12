@@ -2,7 +2,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
 import type { Attempt, ListedTask } from "@/lib/tasks";
-import { renderApp } from "./render";
+import { renderApp } from "./app";
 import { attempt, bob, me, server, serveTasks, task } from "./server";
 
 const SHA = "c0ffee".padEnd(40, "0");

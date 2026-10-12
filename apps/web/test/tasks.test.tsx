@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
-import { renderApp } from "./render";
+import { renderApp } from "./app";
 import { server, serveTasks, task } from "./server";
 
 const views = () => screen.getByRole("navigation", { name: "Project views" });

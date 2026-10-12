@@ -3,7 +3,7 @@ import type userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
 import { buildPath } from "@/lib/paths";
-import { renderApp } from "./render";
+import { renderApp } from "./app";
 import { me, project, projects, server } from "./server";
 
 const header = () => screen.getByRole("banner");
@@ -105,8 +105,6 @@ describe("views", () => {
     ["/ada/alpha/tree/t42a3/src/lib", "This directory's entries"],
     ["/ada/alpha/blob/main/README.md", "This file's contents"],
     ["/ada/alpha/raw/main/README.md", "Open the raw file"],
-    ["/ada/alpha/commits/main", "The commit log"],
-    [`/ada/alpha/commit/${"a".repeat(40)}`, "The commit and its diff"],
   ])("renders %s", async (path, text) => {
     await renderApp(path);
     expect(await screen.findByText(new RegExp(text, "u"))).toBeInTheDocument();

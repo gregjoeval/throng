@@ -5,8 +5,10 @@
 // Caching: what a sha addresses never changes, so those responses are immutable. A response
 // addressed by `main` or an attempt resolves the ref first, sends a short max-age and an ETag of
 // the resolved sha, and answers a matching `If-None-Match` with 304 before reading anything else.
+// A compare does the same with both sides: immutable when both are shas, its ETag both shas.
 
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
+import type { RouteConfig } from "@hono/zod-openapi";
 import type { Context } from "hono";
 import type { AccessBindings } from "./access.ts";
 import {
@@ -21,7 +23,7 @@ import {
 import type { AuthEnv, bearerOrForwarded } from "./auth.ts";
 import { browseService, DEFAULT_COMMITS_PAGE, MAX_COMMITS_PAGE, MAX_TEXT_BYTES, SHA } from "./browse.ts";
 import type { BrowseService, Resolved } from "./browse.ts";
-import { DIFF_CAPS, diffCommit, unifiedPatch } from "./diff.ts";
+import { DIFF_CAPS, diffCommit, diffCommits, unifiedPatch } from "./diff.ts";
 import type { DiffCache } from "./diff.ts";
 import { errorBody, errorResponse, ServiceError } from "./errors.ts";
 import { TREE_ENTRY_TYPES } from "./repos.ts";
@@ -162,6 +164,30 @@ const PageQuerySchema = z.object({
     .default(DEFAULT_COMMITS_PAGE)
     .openapi({ description: `Defaults to ${DEFAULT_COMMITS_PAGE}, at most ${MAX_COMMITS_PAGE}.` }),
 });
+
+const CompareParamSchema = ProjectPathSchema.extend({
+  from: z.string().openapi({ description: "The old side: a ref or sha, as `{ref}` takes.", example: "main" }),
+  to: z.string().openapi({ description: "The new side: a ref or sha, as `{ref}` takes.", example: "t42a3" }),
+});
+
+/** Hono can't take two parameters in one segment, so the route matches the range whole and splits it. */
+const RANGE = "{range{[0-9A-Za-z]+\\.\\.\\.[0-9A-Za-z]+}}";
+
+const RangeParamSchema = ProjectPathSchema.extend({ range: z.string() });
+
+const SideSchema = z.object(ResolvedSchema);
+
+const CompareSchema = z
+  .object({
+    from: SideSchema,
+    to: SideSchema,
+    oldTree: z.string().openapi({ description: "`from`'s tree." }),
+    newTree: z.string().openapi({ description: "`to`'s tree." }),
+    files: CommitDiffSchema.shape.files,
+    totals: CommitDiffSchema.shape.totals,
+    truncated: CommitDiffSchema.shape.truncated,
+  })
+  .openapi("Compare");
 
 const security: Record<string, string[]>[] = [{ bearer: [] }, { access: [] }];
 
@@ -401,6 +427,54 @@ export function browseRoutes({ auth, repos, tasks, diffCache }: BrowseOptions) {
           () => diff,
         ) as never;
       },
+    )
+    .openapi(
+      compareRoute(
+        api,
+        createRoute({
+          method: "get",
+          path: "/projects/{owner}/{project}/compare/{from}...{to}",
+          operationId: "compareCommits",
+          summary: "Get the diff from one ref's tree to another's",
+          description:
+            "Compares the two trees directly, not from a merge base: whatever differs between them " +
+            "is in the diff, whichever side made the change. Each side resolves as `{ref}` does, and " +
+            "`?attempt=` serves both. Same shape, flags, caps and `text/x-diff` answer as the commit diff. " +
+            "Immutable when both sides are shas; otherwise the ETag is both resolved shas.",
+          tags: ["Browse"],
+          security,
+          middleware: [auth] as const,
+          request: { params: CompareParamSchema, query: AttemptQuerySchema },
+          responses: {
+            200: { description: "The diff.", content: diffContent(CompareSchema) },
+            ...refErrors,
+          },
+        }),
+      ),
+      async (c) => {
+        const { range, ...project } = c.req.valid("param");
+        const { attempt } = c.req.valid("query");
+        const [fromRef = "", toRef = ""] = range.split("...");
+        const service = browse(c.env);
+        const [from, to] = await Promise.all(
+          [fromRef, toRef].map((ref) => service.resolve(c.var.actor, { ...project, ref, attempt })),
+        );
+        if (from === undefined || to === undefined) throw new Error("a compare resolves two sides");
+        const both = { tag: `"${from.sha}...${to.sha}"`, immutable: from.immutable && to.immutable };
+        if (matches(c.req.header("If-None-Match"), both.tag)) {
+          cacheHeaders(c, both);
+          return c.body(null, 304) as never;
+        }
+        const diff = await diffCommits(repos(c.env), from, to, { cache: diffCache(c.env) });
+        if (diff === null) throw new ServiceError("notFound", `no commit ${from.sha} or ${to.sha}`);
+        cacheHeaders(c, both);
+        const { from: _from, to: _to, ...rest } = diff;
+        return diffResponse(
+          c,
+          () => unifiedPatch(diff),
+          () => ({ from: { ref: fromRef, sha: from.sha }, to: { ref: toRef, sha: to.sha }, ...rest }),
+        ) as never;
+      },
     );
 }
 
@@ -422,9 +496,37 @@ async function resolved(
 
 /** Sets a successful read's cache headers. Only then: a 404 for a sha may stop being one. */
 function cacheFor(c: Context, at: Resolved): void {
-  c.header("ETag", etag(at));
-  c.header("Cache-Control", at.immutable ? IMMUTABLE : REF_CACHE);
+  cacheHeaders(c, { tag: etag(at), immutable: at.immutable });
 }
+
+function cacheHeaders(c: Context, { tag, immutable }: { tag: string; immutable: boolean }): void {
+  c.header("ETag", tag);
+  c.header("Cache-Control", immutable ? IMMUTABLE : REF_CACHE);
+}
+
+/**
+ * Documents the compare route at `{from}...{to}` and returns the config to route instead, hidden
+ * from the document: the range as one `{range}` parameter.
+ */
+function compareRoute<R extends { path: string; request: { params: typeof CompareParamSchema } }>(
+  api: Pick<OpenAPIHono, "openAPIRegistry">,
+  config: R,
+): RangeRoute<R> {
+  const { middleware: _middleware, ...documented } = config as R & RouteConfig;
+  api.openAPIRegistry.registerPath(documented as RouteConfig);
+  const routed = {
+    ...config,
+    path: config.path.replace("{from}...{to}", RANGE),
+    request: { ...config.request, params: RangeParamSchema },
+    hide: true,
+  };
+  return routed as unknown as RangeRoute<R>;
+}
+
+type RangeRoute<R extends { request: object }> = Omit<R, "request"> & {
+  request: Omit<R["request"], "params"> & { params: typeof RangeParamSchema };
+  hide: true;
+};
 
 function etag(at: Resolved): string {
   return `"${at.sha}"`;

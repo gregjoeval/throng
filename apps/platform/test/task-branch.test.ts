@@ -123,3 +123,44 @@ describe("pushing a task branch", () => {
     expect(missing.stderr).toMatch(/\[remote rejected\] HEAD -> refs\/tasks\/t9 \(no task t9\)/u);
   });
 });
+
+describe("starting attempts on a task with a task branch", () => {
+  it("starts new attempts' forks from the task head, and from main when there is none", async () => {
+    const { ada, bob, clone, commit, push, host, fork, tasks, project, mainSha } = await setup();
+    await tasks.createAttempts(project, bob.actor, { task: 1 });
+    expect(await host.head(fork("t1a1"))).toBe(mainSha);
+
+    const dir = await clone(ada.token);
+    const tests = await commit(dir, "Add login tests");
+    expect((await push(dir, "refs/tasks/t1")).ok).toBeTruthy();
+    await tasks.createAttempts(project, bob.actor, { task: 1, count: 2 });
+    expect(await host.head(fork("t1a2"))).toBe(tests);
+    expect(await host.head(fork("t1a3"))).toBe(tests);
+    expect(await host.head(fork("t1a1"))).toBe(mainSha);
+  });
+
+  it("starts a push-to-create attempt from the task head, and names the task branch in the notice", async () => {
+    const { ada, bob, env, clone, commit, push, host, fork, tasks, project } = await setup();
+    const dir = await clone(ada.token);
+    const tests = await commit(dir, "Add login tests");
+    expect((await push(dir, "refs/tasks/t1")).ok).toBeTruthy();
+
+    const mine = await clone(bob.token);
+    await git(mine, env, "fetch", "-q", "origin", "refs/tasks/t1");
+    await git(mine, env, "reset", "-q", "--hard", "FETCH_HEAD");
+    const fix = await commit(mine, "Fix login");
+    const pushed = await push(mine, "refs/heads/t1/bob");
+    expect(pushed.stderr).not.toMatch(/rejected|error/u);
+    expect(pushed.ok).toBeTruthy();
+    expect(pushed.stderr).toMatch(
+      new RegExp(`remote: t1 has a task branch at ${tests}; fetch refs/tasks/t1 first and build on it\\.`, "u"),
+    );
+    expect(await host.head(fork("t1a1"))).toBe(fix);
+    expect(tasks.getAttempt(project, bob.actor, { task: 1, number: 1 })).toMatchObject({ state: "open" });
+
+    // A new task made by push-to-create has no task branch to name.
+    const other = await clone(bob.token);
+    await commit(other, "Add search");
+    expect((await push(other, "refs/heads/search")).stderr).not.toMatch(/task branch/u);
+  });
+});

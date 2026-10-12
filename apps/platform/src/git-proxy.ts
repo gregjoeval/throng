@@ -15,6 +15,7 @@ import type { Context } from "hono";
 import type { AccessBindings } from "./access.ts";
 import { gitAuth } from "./auth.ts";
 import type { AuthEnv, AuthOptions } from "./auth.ts";
+import { taskBranchHead } from "./base.ts";
 import { ServiceError } from "./errors.ts";
 import {
   commandList,
@@ -337,7 +338,12 @@ async function pushToCreate(
       if (done.ok) {
         pending = false;
         const made = done.value as { task: StoredTask; attempt: StoredAttempt; scoring: ScoringRequest };
-        messages = [...createdLines(c, made.task, made.attempt, branch, route.newTask), ...scoringLines(made)];
+        const taskBranch = route.newTask ? null : await taskBranchHead(upstream.repos, project.id, attempt.task);
+        messages = [
+          ...createdLines(c, made.task, made.attempt, branch, route.newTask),
+          ...taskBranchLines(attempt.task, taskBranch),
+          ...scoringLines(made),
+        ];
       } else {
         await abandon();
         report = refuse(report, done.message);
@@ -387,6 +393,16 @@ async function forkReady(repos: Repos, name: string): Promise<void> {
 function refuse(report: PushReport, reason: string): PushReport {
   const line = `ng ${MAIN} ${reason.replace(/\s+/gu, " ").trim()}`;
   return { ...report, lines: report.lines.map((l) => (l === `ok ${MAIN}` ? line : l)) };
+}
+
+/**
+ * The `remote:` line naming the task branch a new attempt started from, so its author fetches it
+ * and builds on it: their push replaced the fork's `main`, which began at the task head.
+ */
+function taskBranchLines(task: number, head: { sha: string } | null): string[] {
+  if (head === null) return [];
+  const ref = taskRef(task);
+  return [`${ref} has a task branch at ${head.sha}; fetch ${taskBranchRef(task)} first and build on it.`];
 }
 
 /** The `remote:` line for a push that queued scoring of an attempt's head, if it did. */

@@ -312,7 +312,7 @@ describe("task checks", () => {
     [
       "a task metric named like it",
       { checks: [SMOKE], metrics: [{ ...SMOKED, name: "smoke" }] },
-      /^metrics\[0\]\.name: smoke is also the name of one of the task's checks$/u,
+      /^metrics\[0\]\.name: metric name smoke is also a check's name$/u,
     ],
   ])("are rejected with what is wrong: %s", async (_label, fields, message) => {
     const { call, ada, base } = await withConfig();

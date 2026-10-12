@@ -12,11 +12,12 @@ import {
   CheckSchema,
   CONFIG_PATH,
   describeIssue,
+  describePath,
   metricConfig,
   MetricSchema,
+  nameProblems,
 } from "./config.ts";
 import type { CheckConfig, Config, ConfigResult, MetricConfig } from "./config.ts";
-import { parseFrom } from "./metric-values.ts";
 
 export interface TaskDefinitions {
   /** Run after the project's checks, in order. */
@@ -32,18 +33,7 @@ const TaskSchema = z
     checks: z.array(CheckSchema, { error: "checks must be a list" }).optional(),
     metrics: z.array(MetricSchema, { error: "metrics must be a list" }).optional(),
   })
-  .superRefine(({ checks, metrics }, ctx) => {
-    const duplicates = (list: { name: string }[] | undefined, what: "check" | "metric") => {
-      const names = new Set<string>();
-      list?.forEach(({ name }, i) => {
-        if (names.has(name)) {
-          ctx.addIssue({ code: "custom", path: [`${what}s`, i, "name"], message: `duplicate ${what} name ${name}` });
-        }
-        names.add(name);
-      });
-    };
-    duplicates(checks, "check");
-    duplicates(metrics, "metric");
+  .superRefine(({ metrics }, ctx) => {
     metrics?.forEach((metric, i) => checkMetricFields(metric, i, ctx));
   });
 
@@ -101,29 +91,9 @@ export function withTask(project: ConfigResult, task: TaskDefinitions): ConfigRe
 }
 
 /**
- * Each task name the project's config already uses, each task metric named like one of the task's
- * checks, and each task metric read from a check neither layer defines.
+ * Each name rule the task's checks and metrics break over the project's config (`nameProblems`), one
+ * line each: `metrics[0].from: no check is named lint`.
  */
 function clashes(project: Config | null, task: TaskDefinitions): string[] {
-  const checks = new Set(project?.checks.map((check) => check.name));
-  const metrics = new Set(project?.metrics.map((metric) => metric.name));
-  const taskChecks = new Set(task.checks.map((check) => check.name));
-  const projectClash = (name: string, path: string): string[] => {
-    if (checks.has(name)) return [`${path}: ${name} is also a check's name in ${CONFIG_PATH}`];
-    if (metrics.has(name)) return [`${path}: ${name} is also a metric's name in ${CONFIG_PATH}`];
-    return [];
-  };
-  return [
-    ...task.checks.flatMap((check, i) => projectClash(check.name, `checks[${i}].name`)),
-    ...task.metrics.flatMap((metric, i) => {
-      const path = `metrics[${i}].name`;
-      const problems = projectClash(metric.name, path);
-      if (problems.length === 0 && taskChecks.has(metric.name)) {
-        problems.push(`${path}: ${metric.name} is also the name of one of the task's checks`);
-      }
-      const { check } = parseFrom(metric.from);
-      if (!checks.has(check) && !taskChecks.has(check)) problems.push(`metrics[${i}].from: no check is named ${check}`);
-      return problems;
-    }),
-  ];
+  return nameProblems(task, project).map(({ path, message }) => `${describePath(path)}: ${message}`);
 }

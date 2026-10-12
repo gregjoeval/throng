@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { deliver, projectionService } from "../src/projection.ts";
+import { myListings } from "../src/my-listings.ts";
+import { deliver, MAX_PROJECTION_RETRY_MS, PROJECTION_BATCH, PROJECTION_RETRY_MS } from "../src/projection.ts";
 import { TaskStore } from "../src/task-store.ts";
 import type { ProjectContext } from "../src/task-store.ts";
 import type { Actor } from "../src/tokens.ts";
@@ -39,9 +40,15 @@ async function setup() {
   const store = new TaskStore({ sql, repos, now: () => new Date("2026-10-10T12:00:00.000Z") });
   const db = testDatabase();
   await seed(db);
-  const listings = projectionService({ db });
+  const listings = myListings({ db });
   return { repos, sql, store, db, listings };
 }
+
+const down: Database = {
+  prepare: () => {
+    throw new Error("D1 is down");
+  },
+};
 
 describe("the D1 projection of tasks and attempts", () => {
   it("shows a published task to its creator and a published attempt to its author", async () => {
@@ -52,10 +59,15 @@ describe("the D1 projection of tasks and attempts", () => {
 
     expect(await listings.tasks(ada, {})).toEqual([]);
     expect(store.projection.hasChanges()).toBeTruthy();
-    await store.projection.publish(db, PROJECT.id);
+    expect(await store.projection.publish(db, PROJECT.id)).toBeNull();
     expect(store.projection.hasChanges()).toBeFalsy();
 
-    const project = { id: PROJECT.id, handle: "throng", owner: { id: owner.user.id, handle: owner.user.handle } };
+    const project = {
+      id: PROJECT.id,
+      handle: "throng",
+      owner: { id: owner.user.id, handle: owner.user.handle },
+      createdAt: expect.any(String),
+    };
     expect(await listings.tasks(ada, {})).toEqual([
       {
         project,
@@ -108,24 +120,45 @@ describe("the D1 projection of tasks and attempts", () => {
     expect((await listings.attempts(ada, {})).map((a) => [a.ref, a.state])).toEqual([["t1a1", "closed"]]);
 
     // The late acknowledgement of the first batch still leaves the later changes pending.
-    await store.projection.publish(db, PROJECT.id);
+    expect(await store.projection.publish(db, PROJECT.id)).toBeNull();
     expect(store.projection.pending(PROJECT.id)).toBeNull();
     expect((await listings.attempts(ada, {})).map((a) => [a.ref, a.state])).toEqual([["t1a1", "closed"]]);
   });
 
-  it("keeps changes pending when a delivery fails, and delivers them on the next publish", async () => {
+  it("keeps changes pending when a delivery fails, backing off until one lands", async () => {
     const { store, db, listings } = await setup();
     store.createTask(PROJECT, ada, { title: "Fix login" });
-    const down: Database = {
-      prepare: () => {
-        throw new Error("D1 is down");
-      },
-    };
-    await expect(store.projection.publish(down, PROJECT.id)).rejects.toThrow("D1 is down");
 
-    expect(await store.projection.publish(db, PROJECT.id)).toBeTruthy();
+    expect(await store.projection.publish(down, PROJECT.id)).toBe(PROJECTION_RETRY_MS);
+    expect(await store.projection.publish(down, PROJECT.id)).toBe(2 * PROJECTION_RETRY_MS);
+    for (let i = 0; i < 10; i++) await store.projection.publish(down, PROJECT.id);
+    expect(await store.projection.publish(down, PROJECT.id)).toBe(MAX_PROJECTION_RETRY_MS);
+    expect(store.projection.hasChanges()).toBeTruthy();
+
+    expect(await store.projection.publish(db, PROJECT.id)).toBeNull();
     expect((await listings.tasks(ada, {})).map((t) => t.ref)).toEqual(["t1"]);
-    expect(await store.projection.publish(db, PROJECT.id)).toBeFalsy();
+    // A success resets the back-off.
+    store.createTask(PROJECT, ada, { title: "Second" });
+    expect(await store.projection.publish(down, PROJECT.id)).toBe(PROJECTION_RETRY_MS);
+  });
+
+  it("delivers a large backlog in batches, each task before its attempts", async () => {
+    const { store, db, listings } = await setup();
+    const tasks = PROJECTION_BATCH;
+    for (let i = 0; i < tasks; i++) {
+      const task = store.createTask(PROJECT, ada, { title: `Task ${i + 1}` });
+      await store.createAttempts(PROJECT, ada, { task: task.number });
+    }
+
+    expect(await store.projection.publish(db, PROJECT.id)).toBe(0);
+    // Every attempt listed so far has its task: the listing joins them.
+    const halfway = await listings.attempts(ada, {});
+    expect(halfway.length).toBeGreaterThan(0);
+    expect(halfway.length).toBeLessThan(tasks);
+    expect(await store.projection.publish(db, PROJECT.id)).toBeNull();
+
+    expect(await listings.tasks(ada, {})).toHaveLength(tasks);
+    expect(await listings.attempts(ada, {})).toHaveLength(tasks);
   });
 
   it("leaves obsolete tasks and attempts out unless asked for", async () => {

@@ -12,8 +12,6 @@ import type { ProjectContext, Sql, TaskOutcome } from "./task-store";
 
 /** Where the project's id is kept, for alarms, which carry no call that names it. */
 const PROJECT_KEY = "project";
-/** How long a failed publish to the D1 projection waits before it is tried again. */
-const PROJECTION_RETRY_MS = 60_000;
 
 export interface JournalEntry {
   id: number;
@@ -143,17 +141,12 @@ export class ProjectCoordinator extends DurableObject<Env> {
     );
   }
 
-  /** Publishes changed tasks and attempts to the D1 projection; a failure tries again later. */
+  /** Publishes changed tasks and attempts to the D1 projection, setting itself again while some remain or after a failure. */
   override async alarm(): Promise<void> {
     const project = this.ctx.storage.kv.get<string>(PROJECT_KEY);
     if (project === undefined) return;
-    try {
-      // Changes made while a publish awaited D1 go out in the next one.
-      while (await this.#tasks.projection.publish(this.env.DB, project));
-    } catch (error) {
-      console.error({ event: "project.projection_failed", project, error: String(error) });
-      await this.ctx.storage.setAlarm(Date.now() + PROJECTION_RETRY_MS);
-    }
+    const next = await this.#tasks.projection.publish(this.env.DB, project);
+    if (next !== null) await this.ctx.storage.setAlarm(Date.now() + next);
   }
 
   /** E2e cleanup only: deletes all of this project's storage, so nothing of an e2e run is left. */
@@ -183,7 +176,8 @@ export class ProjectCoordinator extends DurableObject<Env> {
     } catch (error) {
       console.error({ event: "project.drain_failed", error: String(error) });
     }
-    if (this.#project !== null && this.#tasks.projection.hasChanges()) {
+    // An alarm already set (say, a retry backing off) publishes these changes too.
+    if (this.#project !== null && this.#tasks.projection.hasChanges() && (await this.ctx.storage.getAlarm()) === null) {
       await this.ctx.storage.setAlarm(Date.now());
     }
   }

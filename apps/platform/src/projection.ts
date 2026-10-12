@@ -7,11 +7,19 @@
 // rows, upserts them into D1, then removes the outbox rows it covered. Each row carries its latest
 // outbox id as its version, and D1 only replaces a row with a newer version, so deliveries that
 // arrive late, twice or out of order leave the newest one standing.
+//
+// A delivery covers at most `PROJECTION_BATCH` changes, so a large backfill goes out over several
+// deliveries instead of one past a Worker's subrequest limit. Read by `my-listings.ts`.
 
-import { attemptRef, taskRef } from "./task-refs.ts";
 import type { AttemptState, Sql, TaskState } from "./task-store.ts";
-import type { Actor } from "./tokens.ts";
 import type { Database } from "./users.ts";
+
+/** The most outbox rows one delivery covers: one D1 statement each, at most. */
+export const PROJECTION_BATCH = 50;
+/** How long the first retry after a failed delivery waits; each further failure doubles it. */
+export const PROJECTION_RETRY_MS = 60_000;
+/** The longest a retry waits. */
+export const MAX_PROJECTION_RETRY_MS = 60 * 60_000;
 
 const SCHEMA = [
   // AUTOINCREMENT keeps ids rising after rows are removed, so they can serve as versions.
@@ -56,7 +64,10 @@ export interface StoredProjectedAttempt {
   version: number;
 }
 
-/** One delivery: snapshots of every row changed since the last acknowledged one, up to outbox id `through`. */
+/**
+ * One delivery: snapshots of the rows changed up to outbox id `through`, each versioned by its latest
+ * change, which may be past `through`.
+ */
 export interface ProjectionBatch {
   through: number;
   tasks: StoredProjectedTask[];
@@ -76,13 +87,17 @@ export function migrateProjection(sql: Sql): void {
   sql.exec("INSERT INTO projection_outbox (task, attempt) SELECT task, number FROM attempts ORDER BY task, number");
 }
 
-/** A project Durable Object's side of the projection: what to publish, and publishing it. */
+/**
+ * A project Durable Object's side of the projection: what to publish, and publishing it. Expects
+ * `migrateProjection` to have run on its SQLite.
+ */
 export class Projection {
   readonly #sql: Sql;
+  /** Failed deliveries in a row, which space out the retries. In memory: an evicted object starts over. */
+  #failures = 0;
 
   constructor({ sql }: { sql: Sql }) {
     this.#sql = sql;
-    migrateProjection(sql);
   }
 
   /** Whether any change is still to be published. */
@@ -90,20 +105,30 @@ export class Projection {
     return this.#sql.exec("SELECT 1 FROM projection_outbox LIMIT 1").length > 0;
   }
 
-  /** A snapshot of every row changed since the last acknowledged batch, or null when nothing has. */
-  pending(project: string): ProjectionBatch | null {
-    const through = this.#sql.exec<{ id: number | null }>("SELECT MAX(id) AS id FROM projection_outbox")[0]?.id;
+  /**
+   * A snapshot of the rows behind the oldest `limit` changes not yet acknowledged, or null when there
+   * are none. Each row is read as it is now and versioned by its latest change, so a row's state and
+   * version always match. A task's creation queues before its attempts', so it is delivered first.
+   */
+  pending(project: string, limit = PROJECTION_BATCH): ProjectionBatch | null {
+    const through = this.#sql.exec<{ id: number | null }>(
+      "SELECT MAX(id) AS id FROM (SELECT id FROM projection_outbox ORDER BY id LIMIT ?)",
+      limit,
+    )[0]?.id;
     if (through === undefined || through === null) return null;
     const tasks = this.#sql.exec<Omit<StoredProjectedTask, "project_id">>(
       `SELECT t.number, t.title, t.creator AS creator_id, t.state, t.created_at, t.closed_at, MAX(o.id) AS version
        FROM projection_outbox o JOIN tasks t ON t.number = o.task
-       WHERE o.attempt IS NULL AND o.id <= ? GROUP BY t.number ORDER BY t.number`,
+       WHERE o.attempt IS NULL
+         AND t.number IN (SELECT task FROM projection_outbox WHERE attempt IS NULL AND id <= ?)
+       GROUP BY t.number ORDER BY t.number`,
       through,
     );
     const attempts = this.#sql.exec<Omit<StoredProjectedAttempt, "project_id">>(
       `SELECT a.task, a.number, a.author AS author_id, a.state, a.created_at, a.closed_at, MAX(o.id) AS version
        FROM projection_outbox o JOIN attempts a ON a.task = o.task AND a.number = o.attempt
-       WHERE o.id <= ? GROUP BY a.task, a.number ORDER BY a.task, a.number`,
+       WHERE (a.task, a.number) IN (SELECT task, attempt FROM projection_outbox WHERE id <= ?)
+       GROUP BY a.task, a.number ORDER BY a.task, a.number`,
       through,
     );
     return {
@@ -119,15 +144,23 @@ export class Projection {
   }
 
   /**
-   * Delivers everything pending to D1 and acknowledges it. A failed delivery throws and keeps the
-   * changes pending, so the next publish delivers them again. False when nothing was pending.
+   * Delivers the oldest pending changes to D1 and acknowledges them. Answers how many milliseconds
+   * to wait before publishing again: 0 while changes remain, a growing back-off after a failed
+   * delivery (whose changes stay pending), and null once nothing is left.
    */
-  async publish(db: Database, project: string): Promise<boolean> {
+  async publish(db: Database, project: string): Promise<number | null> {
     const batch = this.pending(project);
-    if (batch === null) return false;
-    await deliver(db, batch);
+    if (batch === null) return null;
+    try {
+      await deliver(db, batch);
+    } catch (error) {
+      this.#failures++;
+      console.error({ event: "projection.failed", project, failures: this.#failures, error: String(error) });
+      return Math.min(PROJECTION_RETRY_MS * 2 ** (this.#failures - 1), MAX_PROJECTION_RETRY_MS);
+    }
+    this.#failures = 0;
     this.acknowledge(batch);
-    return true;
+    return this.hasChanges() ? 0 : null;
   }
 }
 
@@ -166,137 +199,4 @@ export async function deliver(db: Database, batch: ProjectionBatch): Promise<voi
         .all(),
     ),
   );
-}
-
-// ---------------------------------------------------------------------------------------------
-// Listings, read from D1
-
-interface UserRef {
-  id: string;
-  handle: string;
-}
-
-/** The project a listed task or attempt belongs to, addressed as `owner/project` by handles. */
-export interface ListedProject {
-  id: string;
-  handle: string;
-  owner: UserRef;
-}
-
-/** A task in a listing across projects. */
-export interface MyTask {
-  project: ListedProject;
-  ref: string;
-  number: number;
-  title: string;
-  state: TaskState;
-  creator: UserRef;
-  createdAt: string;
-  closedAt: string | null;
-}
-
-/** An attempt in a listing across projects. */
-export interface MyAttempt {
-  project: ListedProject;
-  ref: string;
-  task: { ref: string; number: number; title: string };
-  number: number;
-  state: AttemptState;
-  author: UserRef;
-  createdAt: string;
-  closedAt: string | null;
-}
-
-interface ProjectColumns {
-  project_id: string;
-  project_handle: string;
-  owner_id: string;
-  owner_handle: string;
-}
-
-interface TaskListingRow extends ProjectColumns, Omit<StoredProjectedTask, "version"> {
-  creator_handle: string;
-}
-
-interface AttemptListingRow extends ProjectColumns, Omit<StoredProjectedAttempt, "version"> {
-  task_title: string;
-  author_handle: string;
-}
-
-const PROJECT_COLUMNS = "p.id AS project_id, p.handle AS project_handle, o.id AS owner_id, o.handle AS owner_handle";
-
-function listedProject(row: ProjectColumns): ListedProject {
-  return { id: row.project_id, handle: row.project_handle, owner: { id: row.owner_id, handle: row.owner_handle } };
-}
-
-/**
- * The caller's tasks and attempts across every project, from the projection: they trail the
- * projects' Durable Objects by a moment. Obsolete ones are left out unless `state` asks for them.
- */
-export function projectionService({ db }: { db: Database }) {
-  return {
-    /** The tasks the caller's user created, newest first. */
-    async tasks(actor: Actor, input: { state?: TaskState | undefined }): Promise<MyTask[]> {
-      const { results } = await db
-        .prepare(
-          `SELECT t.*, ${PROJECT_COLUMNS}, c.handle AS creator_handle
-           FROM projected_tasks t
-           JOIN projects p ON p.id = t.project_id
-           JOIN users o ON o.id = p.owner_id
-           JOIN users c ON c.id = t.creator_id
-           WHERE t.creator_id = ? AND ${stateFilter("t", input.state)}
-           ORDER BY t.created_at DESC, p.id, t.number DESC`,
-        )
-        .bind(actor.user.id, ...stateValue(input.state))
-        .all<TaskListingRow>();
-      return results.map((row) => ({
-        project: listedProject(row),
-        ref: taskRef(row.number),
-        number: row.number,
-        title: row.title,
-        state: row.state,
-        creator: { id: row.creator_id, handle: row.creator_handle },
-        createdAt: row.created_at,
-        closedAt: row.closed_at,
-      }));
-    },
-
-    /** The attempts the caller's user authors, newest first. */
-    async attempts(actor: Actor, input: { state?: AttemptState | undefined }): Promise<MyAttempt[]> {
-      const { results } = await db
-        .prepare(
-          `SELECT a.*, ${PROJECT_COLUMNS}, t.title AS task_title, u.handle AS author_handle
-           FROM projected_attempts a
-           JOIN projected_tasks t ON t.project_id = a.project_id AND t.number = a.task
-           JOIN projects p ON p.id = a.project_id
-           JOIN users o ON o.id = p.owner_id
-           JOIN users u ON u.id = a.author_id
-           WHERE a.author_id = ? AND ${stateFilter("a", input.state)}
-           ORDER BY a.created_at DESC, p.id, a.task DESC, a.number DESC`,
-        )
-        .bind(actor.user.id, ...stateValue(input.state))
-        .all<AttemptListingRow>();
-      return results.map((row) => ({
-        project: listedProject(row),
-        ref: attemptRef(row.task, row.number),
-        task: { ref: taskRef(row.task), number: row.task, title: row.task_title },
-        number: row.number,
-        state: row.state,
-        author: { id: row.author_id, handle: row.author_handle },
-        createdAt: row.created_at,
-        closedAt: row.closed_at,
-      }));
-    },
-  };
-}
-
-export type ProjectionService = ReturnType<typeof projectionService>;
-
-/** Obsolete rows are left out of a listing unless its `state` asks for them. */
-function stateFilter(table: string, state: string | undefined): string {
-  return state === undefined ? `${table}.state != 'obsolete'` : `${table}.state = ?`;
-}
-
-function stateValue(state: string | undefined): string[] {
-  return state === undefined ? [] : [state];
 }

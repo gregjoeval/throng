@@ -30,7 +30,7 @@ import type {
   StoredMergeRequest,
 } from "./merge-requests.ts";
 import { isZeroId } from "./pkt-line.ts";
-import { Projection } from "./projection.ts";
+import { migrateProjection, Projection } from "./projection.ts";
 import { forkRepo, originRepo } from "./repos.ts";
 import type { Repos } from "./repos.ts";
 import { GATES } from "./results.ts";
@@ -448,6 +448,7 @@ export class TaskStore {
     this.#landing = landing;
     this.#follow = follow;
     migrate(sql);
+    migrateProjection(sql);
     this.projection = new Projection({ sql });
     this.landings = new Landings({ sql, now });
     this.follows = new Follows({ sql, now });

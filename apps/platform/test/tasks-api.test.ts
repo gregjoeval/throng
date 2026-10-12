@@ -64,6 +64,7 @@ describe("task routes", () => {
       closedAt: null,
       closedBy: null,
       attemptLimit: null,
+      taskBranch: null,
     });
     await call("POST", `${base}/tasks`, bob, { title: "Second", attemptLimit: 3 });
 
@@ -76,6 +77,21 @@ describe("task routes", () => {
     expect(edited.status).toBe(200);
     expect(edited.body).toMatchObject({ title: "Fix sign-in", body: "It *fails*.", attemptLimit: 4 });
     expect((await call("PATCH", `${base}/tasks/t1`, bob, { title: "x" })).status).toBe(403);
+  });
+
+  it("reports a task's task branch head, or null when it has none", async () => {
+    const { call, repos, ada, bob, base, project } = await setup();
+    const origin = `${project["id"]}-main`;
+    repos.commit(origin, { files: { "README.md": "hi\n" } });
+    await call("POST", `${base}/tasks`, ada, { title: "Fix login" });
+    await call("POST", `${base}/tasks`, ada, { title: "Second" });
+    const tests = repos.commit(origin, { branch: "tests", files: { "login.test.ts": "it()\n" } });
+    repos.setRef(origin, "refs/tasks/t1", tests.hash);
+
+    expect((await call("GET", `${base}/tasks/t1`, bob)).body["taskBranch"]).toEqual({ sha: tests.hash });
+    expect((await call("GET", `${base}/tasks/t2`, bob)).body["taskBranch"]).toBeNull();
+    const list = (await call("GET", `${base}/tasks`, bob)).body["tasks"];
+    expect(list.map((t: Json) => t["taskBranch"])).toEqual([{ sha: tests.hash }, null]);
   });
 
   it("runs the task transitions with their permissions", async () => {

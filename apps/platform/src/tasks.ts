@@ -2,7 +2,7 @@
 // machine in the project's Durable Object (`task-store.ts`), where the permission checks sit next
 // to the state they guard. Answers carry users as `{id, handle}`, resolved from D1 at read time.
 
-import { currentBase } from "./base.ts";
+import { currentBase, taskBranchHead } from "./base.ts";
 import type { Base } from "./base.ts";
 import type { ConflictDetails, ConflictFile } from "./conflicts.ts";
 import { ServiceError } from "./errors.ts";
@@ -64,6 +64,12 @@ export interface Task {
   closedAt: string | null;
   closedBy: UserRef | null;
   attemptLimit: number | null;
+  /** The head of its task branch (`refs/tasks/t42` in the origin), or null when it has none. */
+  taskBranch: TaskBranch | null;
+}
+
+export interface TaskBranch {
+  sha: string;
 }
 
 /** A task as the task list shows it, with what its row summarises. */
@@ -244,12 +250,16 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
     return outcome.value as StoreResult<K>;
   }
 
-  const tasks = async (list: StoredTask[]) => {
-    const users = await handles(
-      db,
-      list.flatMap((t) => [t.creator, t.closed_by]),
-    );
-    return list.map((t) => publicTask(t, users));
+  /** Renders tasks of project `ctx`, each with its task branch read from the origin. */
+  const tasks = (ctx: ProjectContext) => async (list: StoredTask[]) => {
+    const [users, branches] = await Promise.all([
+      handles(
+        db,
+        list.flatMap((t) => [t.creator, t.closed_by]),
+      ),
+      Promise.all(list.map((t) => taskBranchHead(repos, ctx.id, t.number))),
+    ]);
+    return list.map((t, i) => publicTask(t, users, branches[i] ?? null));
   };
   const attempts = async (list: StoredAttempt[]) => {
     const users = await handles(
@@ -262,8 +272,10 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
   /** A task transition: resolves the project and task reference, then runs `method`. */
   const taskMove =
     (method: "closeTask" | "reopenTask" | "obsoleteTask" | "restoreTask") =>
-    async (actor: Actor, input: TaskPath): Promise<Task> =>
-      one(await invoke(method, await project(input), actor, { task: taskNumber(input.task) }), tasks);
+    async (actor: Actor, input: TaskPath): Promise<Task> => {
+      const ctx = await project(input);
+      return one(await invoke(method, ctx, actor, { task: taskNumber(input.task) }), tasks(ctx));
+    };
 
   /** An attempt transition: resolves the project and attempt reference, then runs `method`. */
   const attemptMove =
@@ -297,17 +309,20 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
       input: ProjectPath & { title: string; body?: string | undefined; attemptLimit?: number | null | undefined },
     ): Promise<Task> {
       const { title, body, attemptLimit } = input;
-      return one(await invoke("createTask", await project(input), actor, { title, body, attemptLimit }), tasks);
+      const ctx = await project(input);
+      return one(await invoke("createTask", ctx, actor, { title, body, attemptLimit }), tasks(ctx));
     },
 
     async getTask(actor: Actor, input: TaskPath): Promise<Task> {
-      return one(await invoke("getTask", await project(input), actor, { task: taskNumber(input.task) }), tasks);
+      const ctx = await project(input);
+      return one(await invoke("getTask", ctx, actor, { task: taskNumber(input.task) }), tasks(ctx));
     },
 
     /** The project's tasks; obsolete ones only when `state` is `obsolete`. */
     async listTasks(actor: Actor, input: ProjectPath & { state?: TaskState | undefined }): Promise<ListedTask[]> {
-      const list = await invoke("listTasks", await project(input), actor, { state: input.state });
-      const shown = await tasks(list);
+      const ctx = await project(input);
+      const list = await invoke("listTasks", ctx, actor, { state: input.state });
+      const shown = await tasks(ctx)(list);
       return list.map((t, i) => ({
         ...(shown[i] as Task),
         attemptCount: t.attempt_count,
@@ -327,7 +342,8 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
     ): Promise<Task> {
       const { title, body, attemptLimit } = input;
       const edit = { task: taskNumber(input.task), title, body, attemptLimit };
-      return one(await invoke("editTask", await project(input), actor, edit), tasks);
+      const ctx = await project(input);
+      return one(await invoke("editTask", ctx, actor, edit), tasks(ctx));
     },
 
     closeTask: taskMove("closeTask"),
@@ -560,7 +576,7 @@ function userRef(id: string, users: Map<string, string>): UserRef {
   return { id, handle: users.get(id) ?? id };
 }
 
-function publicTask(t: StoredTask, users: Map<string, string>): Task {
+function publicTask(t: StoredTask, users: Map<string, string>, taskBranch: TaskBranch | null): Task {
   return {
     ref: taskRef(t.number),
     number: t.number,
@@ -572,6 +588,7 @@ function publicTask(t: StoredTask, users: Map<string, string>): Task {
     closedAt: t.closed_at,
     closedBy: t.closed_by === null ? null : userRef(t.closed_by, users),
     attemptLimit: t.attempt_limit,
+    taskBranch,
   };
 }
 

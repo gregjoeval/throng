@@ -103,6 +103,30 @@ describe("the directory view", () => {
     await waitFor(() => expect(path()).toBe(`/ada/alpha/blob/${sha}/src/index.ts?attempt=t42a3`));
   });
 
+  it("marks a file the platform didn't size, as it doesn't past a big directory's first files", async () => {
+    serveRepo({ main: FILES });
+    const entry = { name: "a.ts", path: "src/a.ts", type: "blob", mode: "100644", hash: "d".repeat(40), size: null };
+    server.use(
+      http.get("*/api/projects/:owner/:project/tree/main/src", () =>
+        HttpResponse.json({ ref: "main", sha: "a".repeat(40), path: "src", entries: [entry] }),
+      ),
+    );
+    await renderApp("/ada/alpha/tree/main/src");
+    expect(rowNames(await entriesList())).toEqual([["a.ts", "—"]]);
+  });
+
+  it("says so when a directory is empty", async () => {
+    serveRepo({ main: FILES });
+    server.use(
+      http.get("*/api/projects/:owner/:project/tree/main/src", () =>
+        HttpResponse.json({ ref: "main", sha: "a".repeat(40), path: "src", entries: [] }),
+      ),
+    );
+    await renderApp("/ada/alpha/tree/main/src");
+    expect(await screen.findByText("This folder is empty")).toBeInTheDocument();
+    expect(screen.queryByRole("table", { name: "Files" })).toBeNull();
+  });
+
   it("shows notFound for a missing directory", async () => {
     serveRepo({ main: FILES });
     await renderApp("/ada/alpha/tree/main/nope");

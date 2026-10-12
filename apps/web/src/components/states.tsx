@@ -22,12 +22,12 @@ export function EmptyState({ title, children }: { title: string; children?: Reac
 }
 
 const TITLES: Record<string, { title: string; icon: typeof CircleAlertIcon }> = {
-  not_found: { title: "Not found", icon: FileQuestionIcon },
+  notFound: { title: "Not found", icon: FileQuestionIcon },
   forbidden: { title: "Forbidden", icon: LockIcon },
   unauthorized: { title: "Signed out", icon: LockIcon },
 };
 
-/** A failed platform call, or a route that doesn't exist (`code: "not_found"`). */
+/** A failed platform call, or a route that doesn't exist (`code: "notFound"`). */
 export function ErrorState({ error }: { error: unknown }) {
   const { code, message } = apiError(error);
   const { title, icon: Icon } = TITLES[code] ?? { title: "Something went wrong", icon: CircleAlertIcon };
@@ -42,5 +42,5 @@ export function ErrorState({ error }: { error: unknown }) {
 
 /** What the router shows for a URL no route matches. */
 export function NotFound() {
-  return <ErrorState error={{ code: "not_found", message: "There's nothing at this address." }} />;
+  return <ErrorState error={{ code: "notFound", message: "There's nothing at this address." }} />;
 }

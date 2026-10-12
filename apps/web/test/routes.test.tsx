@@ -156,7 +156,7 @@ describe("views", () => {
 });
 
 describe("error states", () => {
-  it("shows not_found for an unknown project", async () => {
+  it("shows notFound for an unknown project", async () => {
     await renderApp("/ada/nothing/tree/main");
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("Not found");
@@ -175,7 +175,7 @@ describe("error states", () => {
     expect(alert).toHaveTextContent("not yours");
   });
 
-  it("shows not_found inside the shell for a URL no route matches", async () => {
+  it("shows notFound inside the shell for a URL no route matches", async () => {
     await renderApp("/ada/alpha/settings/main");
     expect(await screen.findByRole("alert")).toHaveTextContent("Not found");
     expect(header()).toBeInTheDocument();

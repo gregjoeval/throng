@@ -1,4 +1,4 @@
-export const CONFLICT_TYPES = ["content", "modify_delete", "add_add", "rename"] as const;
+export const CONFLICT_TYPES = ["content", "modifyDelete", "addAdd", "rename"] as const;
 export type ConflictType = (typeof CONFLICT_TYPES)[number];
 
 /** One value per side of a merge: the merge base, `main`, and the attempt's approved head. Null where the side has no file. */
@@ -59,12 +59,12 @@ export interface MergeTree {
 
 /**
  * How the conflict check re-merged one content conflict's blobs: `merged` with the zdiff3 output (the
- * lines outside the conflicts may be blanked), `too_large` when the output was over its transport
+ * lines outside the conflicts may be blanked), `tooLarge` when the output was over its transport
  * limit, `failed` when `git merge-file` couldn't merge them (binary blobs).
  */
 export type Remerge =
   | { path: string; status: "merged"; output: string }
-  | { path: string; status: "too_large" }
+  | { path: string; status: "tooLarge" }
   | { path: string; status: "failed" };
 
 /** Hunk byte caps, counting each line's UTF-8 bytes plus its newline. */
@@ -125,8 +125,8 @@ export function parseMergeTree(output: string): MergeTree {
 function conflictType(kind: string, text: string): ConflictType | null {
   if (!kind.startsWith("CONFLICT")) return null;
   if (kind.includes("rename")) return "rename";
-  if (kind.includes("modify/delete")) return "modify_delete";
-  if (text.startsWith("CONFLICT (add/add)")) return "add_add";
+  if (kind.includes("modify/delete")) return "modifyDelete";
+  if (text.startsWith("CONFLICT (add/add)")) return "addAdd";
   return "content";
 }
 
@@ -186,7 +186,7 @@ export function conflictFiles(
   return files.map((file) => {
     const remerge = file.type === "content" ? byPath.get(file.path) : undefined;
     if (remerge === undefined || remerge.status === "failed") return { ...file, truncated: false };
-    if (remerge.status === "too_large") return { ...file, truncated: true };
+    if (remerge.status === "tooLarge") return { ...file, truncated: true };
     const hunks = parseZdiff3(remerge.output);
     const bytes = hunkBytes(hunks);
     if (bytes > caps.fileBytes || total + bytes > caps.totalBytes) return { ...file, truncated: true };

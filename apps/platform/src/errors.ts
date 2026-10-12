@@ -3,12 +3,12 @@
 import { z } from "@hono/zod-openapi";
 
 export const ERROR_CODES = [
-  "invalid_request",
+  "invalidRequest",
   "unauthorized",
   "forbidden",
-  "not_found",
-  "invalid_state",
-  "attempt_limit",
+  "notFound",
+  "invalidState",
+  "attemptLimit",
   "conflict",
   "internal",
 ] as const;
@@ -18,7 +18,7 @@ export type ErrorCode = (typeof ERROR_CODES)[number];
 export const ErrorSchema = z
   .object({
     error: z.object({
-      code: z.enum(ERROR_CODES).openapi({ example: "not_found" }),
+      code: z.enum(ERROR_CODES).openapi({ example: "notFound" }),
       message: z.string().openapi({ example: "no such token" }),
     }),
   })
@@ -31,12 +31,12 @@ export function errorBody(code: ErrorCode, message: string): ErrorBody {
 }
 
 const STATUS: Record<ErrorCode, 400 | 401 | 403 | 404 | 409 | 500> = {
-  invalid_request: 400,
+  invalidRequest: 400,
   unauthorized: 401,
   forbidden: 403,
-  not_found: 404,
-  invalid_state: 409,
-  attempt_limit: 409,
+  notFound: 404,
+  invalidState: 409,
+  attemptLimit: 409,
   conflict: 409,
   internal: 500,
 };

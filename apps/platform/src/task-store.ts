@@ -11,6 +11,7 @@ import { CONFIG_PATH, loadConfig, type ConfigResult } from "./config.ts";
 import { ServiceError, type ErrorCode } from "./errors.ts";
 import type { LandingOutcome, LandingParams, LandingRunner } from "./landing.ts";
 import { Landings, type StoredLanding } from "./landings.ts";
+import { migrateValues, normaliseLandingOutcome } from "./casing.ts";
 import { isLogName, landingLogKey, logKey, missingLog } from "./logs.ts";
 import {
   dequeueCause,
@@ -117,12 +118,12 @@ export interface ProjectContext {
 export type TaskEvent =
   | "created"
   | "opened"
-  | "returned_to_draft"
+  | "returnedToDraft"
   | "closed"
   | "reopened"
-  | "handed_off"
+  | "handedOff"
   | "merged"
-  | "made_obsolete"
+  | "madeObsolete"
   | "restored"
   | "pushed";
 
@@ -167,7 +168,7 @@ export function attemptRef(task: number, number: number): string {
 /** What `recordPush` did: the scoring it queued, and what to tell the pusher of their merge request. */
 export interface PushRecord {
   scoring: ScoringRequest | null;
-  merge_request: PushNotice | null;
+  mergeRequest: PushNotice | null;
 }
 
 /** The merge request news a push to its source attempt carries back to the pusher. */
@@ -175,8 +176,8 @@ export interface PushNotice {
   task: number;
   /** A dequeue not yet reported, with its conflict file count when known. */
   dequeue: { reason: DequeueReason; files: number | null } | null;
-  /** The new head, when this push moved the merge request to `needs_review`. */
-  needs_review: string | null;
+  /** The new head, when this push moved the merge request to `needsReview`. */
+  needsReview: string | null;
 }
 
 /** How many files a dequeue's details name (a conflict's), or null when they name none. */
@@ -209,14 +210,14 @@ function safeNumber(digits: string | undefined): number | null {
 export interface CreateTaskInput {
   title: string;
   body?: string | undefined;
-  attempt_limit?: number | null | undefined;
+  attemptLimit?: number | null | undefined;
 }
 
 export interface EditTaskInput {
   task: number;
   title?: string | undefined;
   body?: string | undefined;
-  attempt_limit?: number | null | undefined;
+  attemptLimit?: number | null | undefined;
 }
 
 export interface CreateAttemptsInput {
@@ -238,7 +239,7 @@ export interface AttemptInput {
  */
 export type BranchRoute =
   | { kind: "attempt"; attempt: StoredAttempt }
-  | { kind: "create"; task: number; number: number; new_task: boolean };
+  | { kind: "create"; task: number; number: number; newTask: boolean };
 
 export interface CompleteBranchPushInput extends AttemptInput {
   /** The commit the push left on the fork's `main`. */
@@ -398,8 +399,9 @@ export class TaskStore {
       sql,
       now,
       journal: (actor, kind, mr, detail) =>
-        this.#journal(actor, kind, mr.task, mr.attempt, { merge_request: taskRef(mr.task), ...detail }),
+        this.#journal(actor, kind, mr.task, mr.attempt, { mergeRequest: taskRef(mr.task), ...detail }),
     });
+    migrateValues(sql);
   }
 
   // --- tasks -----------------------------------------------------------------------------------
@@ -416,7 +418,7 @@ export class TaskStore {
         input.body ?? "",
         actor.user.id,
         this.#stamp(),
-        input.attempt_limit ?? null,
+        input.attemptLimit ?? null,
       );
       this.#journal(actor, "created", number, null);
       return this.#task(number);
@@ -445,7 +447,7 @@ export class TaskStore {
       "UPDATE tasks SET title = ?, body = ?, attempt_limit = ? WHERE number = ?",
       input.title ?? current.title,
       input.body ?? current.body,
-      input.attempt_limit === undefined ? current.attempt_limit : input.attempt_limit,
+      input.attemptLimit === undefined ? current.attempt_limit : input.attemptLimit,
       current.number,
     );
     return this.#task(current.number);
@@ -532,8 +534,7 @@ export class TaskStore {
    */
   async createAttempts(project: ProjectContext, actor: Actor, input: CreateAttemptsInput): Promise<StoredAttempt[]> {
     const count = input.count ?? 1;
-    if (!Number.isSafeInteger(count) || count < 1)
-      throw new ServiceError("invalid_request", "count must be at least 1");
+    if (!Number.isSafeInteger(count) || count < 1) throw new ServiceError("invalidRequest", "count must be at least 1");
     if (input.branch !== undefined) this.#checkBranch(input.task, input.branch, count);
     this.#expect(this.#task(input.task), ["open"], "add attempts to");
 
@@ -548,7 +549,7 @@ export class TaskStore {
     const active = this.#activeAttempts(current.number).length + reserved + this.#branchPushes(current.number);
     if (active + count > limit) {
       throw new ServiceError(
-        "attempt_limit",
+        "attemptLimit",
         `${taskRef(current.number)} has ${active} of ${limit} active attempts; ${count} more would exceed it`,
       );
     }
@@ -646,7 +647,7 @@ export class TaskStore {
   /** One scoring run of the project, by id. */
   getScoringRun(_project: ProjectContext, _actor: Actor, input: { run: number }): StoredRun {
     const run = this.scoring.getRun(input.run);
-    if (run === null) throw new ServiceError("not_found", `no run ${input.run}`);
+    if (run === null) throw new ServiceError("notFound", `no run ${input.run}`);
     return run;
   }
 
@@ -692,7 +693,7 @@ export class TaskStore {
     const current = this.#attempt(input);
     mayAuthor(actor, current);
     this.#expect(current, ["draft"], "score now");
-    return this.#requireHead(await this.#scoreHead(project, actor, current, "score_now"), current);
+    return this.#requireHead(await this.#scoreHead(project, actor, current, "scoreNow"), current);
   }
 
   /**
@@ -711,7 +712,7 @@ export class TaskStore {
 
   /**
    * Where a run's log named `name` is stored in R2. Anyone signed in may read a run's logs. An
-   * unknown run, or a name no log can have, is `not_found`; whether the log itself exists is R2's.
+   * unknown run, or a name no log can have, is `notFound`; whether the log itself exists is R2's.
    */
   runLogKey(project: ProjectContext, actor: Actor, input: { run: number; name: string }): string {
     const run = this.getScoringRun(project, actor, input);
@@ -722,7 +723,7 @@ export class TaskStore {
   /** open → draft: takes the attempt back out of consideration. Only its author may. */
   draftAttempt(_project: ProjectContext, actor: Actor, input: AttemptInput): StoredAttempt {
     return this.#sql.transaction(() => {
-      const drafted = this.#authorMoves(actor, input, ["open"], "draft", "returned_to_draft");
+      const drafted = this.#authorMoves(actor, input, ["open"], "draft", "returnedToDraft");
       this.scoring.cancelAttempt(scoredAttempt(drafted), "returned to draft");
       return drafted;
     });
@@ -756,7 +757,7 @@ export class TaskStore {
     const reserved = this.#reserved.get(parent.number) ?? 0;
     const active = this.#activeAttempts(parent.number).length + reserved + this.#branchPushes(parent.number);
     if (active + 1 > limit) {
-      throw new ServiceError("attempt_limit", `${taskRef(parent.number)} has ${active} of ${limit} active attempts`);
+      throw new ServiceError("attemptLimit", `${taskRef(parent.number)} has ${active} of ${limit} active attempts`);
     }
     this.#checkReopenBranch(current);
     this.#reserved.set(parent.number, reserved + 1);
@@ -827,7 +828,7 @@ export class TaskStore {
     mayAuthor(actor, current);
     this.#expect(current, ACTIVE, "hand off");
     if (input.to === current.author) {
-      throw new ServiceError("invalid_request", `${current.fork} is already theirs: hand it to another user`);
+      throw new ServiceError("invalidRequest", `${current.fork} is already theirs: hand it to another user`);
     }
     return this.#sql.transaction(() => {
       this.#sql.exec(
@@ -836,7 +837,7 @@ export class TaskStore {
         current.task,
         current.number,
       );
-      this.#journal(actor, "handed_off", current.task, current.number, { from: current.author, to: input.to });
+      this.#journal(actor, "handedOff", current.task, current.number, { from: current.author, to: input.to });
       return this.#attempt(current);
     });
   }
@@ -885,30 +886,30 @@ export class TaskStore {
     return this.#sql.transaction(() => {
       const head = this.#recordPushed(actor, current, input.updates);
       const needsReview = head !== null && this.#pushedToSource(actor, current, head);
-      const merge_request = this.#pushNotice(current, needsReview ? head : null);
-      if (head === null) return { scoring: null, merge_request };
+      const mergeRequest = this.#pushNotice(current, needsReview ? head : null);
+      if (head === null) return { scoring: null, mergeRequest };
       // A draft isn't scored, but its old result no longer describes its head.
       if (current.state !== "open") {
         this.scoring.moveHead({ ...scoredAttempt(current), sha: head });
-        return { scoring: null, merge_request };
+        return { scoring: null, mergeRequest };
       }
-      return { scoring: this.#request(project, actor, current, head, "push"), merge_request };
+      return { scoring: this.#request(project, actor, current, head, "push"), mergeRequest };
     });
   }
 
   /**
    * What a push to the attempt has to tell its pusher about the merge request it is the source of:
    * a dequeue they haven't been told of (marked told), and the new head if this push moved it to
-   * `needs_review`. A `new_push` dequeue is this push's own doing, which `needs_review` already says.
+   * `needsReview`. A `newPush` dequeue is this push's own doing, which `needsReview` already says.
    */
   #pushNotice(attempt: StoredAttempt, needsReview: string | null): PushNotice | null {
     const mr = this.mergeRequests.forAttempt(attempt.task, attempt.number);
     if (mr === null) return null;
     const unseen = this.mergeRequests.takeUnseenDequeue(mr);
     const dequeue =
-      unseen === null || unseen.reason === "new_push" ? null : { reason: unseen.reason, files: fileCount(unseen) };
+      unseen === null || unseen.reason === "newPush" ? null : { reason: unseen.reason, files: fileCount(unseen) };
     if (dequeue === null && needsReview === null) return null;
-    return { task: mr.task, dequeue, needs_review: needsReview };
+    return { task: mr.task, dequeue, needsReview };
   }
 
   // --- push-to-create --------------------------------------------------------------------------
@@ -957,7 +958,7 @@ export class TaskStore {
     if (reserved !== null) {
       const [row] = this.#sql.exec<TaskRow>("SELECT * FROM tasks WHERE number = ?", reserved);
       if (row === undefined) {
-        throw new ServiceError("not_found", `branch ${branch} is for ${taskRef(reserved)}, which doesn't exist`);
+        throw new ServiceError("notFound", `branch ${branch} is for ${taskRef(reserved)}, which doesn't exist`);
       }
       const current = toTask(row);
       this.#expect(current, ["open"], "add attempts to");
@@ -970,7 +971,7 @@ export class TaskStore {
         (this.#reserved.get(current.number) ?? 0) +
         this.#branchPushes(current.number);
       if (count + 1 > limit) {
-        throw new ServiceError("attempt_limit", `${taskRef(current.number)} has ${count} of ${limit} active attempts`);
+        throw new ServiceError("attemptLimit", `${taskRef(current.number)} has ${count} of ${limit} active attempts`);
       }
       task = current.number;
     }
@@ -987,7 +988,7 @@ export class TaskStore {
         task === null ? 1 : 0,
         this.#now().getTime(),
       );
-      return { kind: "create", task: number, number: attempt, new_task: task === null } as const;
+      return { kind: "create", task: number, number: attempt, newTask: task === null } as const;
     });
     try {
       await this.#fork(project, route.task, [route.number]);
@@ -1117,7 +1118,7 @@ export class TaskStore {
   }
 
   /**
-   * Approves the source attempt's current head: `needs_review` → `pending`. From `pending` it
+   * Approves the source attempt's current head: `needsReview` → `pending`. From `pending` it
    * re-approves the same head, which lets a merge request held after a dequeue (an `errored` one,
    * say) requeue. Either way the gate is checked again. The task's creator or the project owner may.
    */
@@ -1129,7 +1130,7 @@ export class TaskStore {
     const task = this.#task(input.task);
     this.#mayManageTask(project, actor, task);
     const mr = this.#openMergeRequest(task.number);
-    this.#expectMergeRequest(mr, ["pending", "needs_review"], "approve");
+    this.#expectMergeRequest(mr, ["pending", "needsReview"], "approve");
     const head =
       mr.state === "pending" ? mr.approved_head : await this.#currentHead(project, this.#attempt(sourceOf(mr)));
     return this.#sql.transaction(() => {
@@ -1156,20 +1157,20 @@ export class TaskStore {
   getMergeRequest(_project: ProjectContext, _actor: Actor, input: { task: number }): StoredMergeRequest {
     this.#task(input.task);
     const mr = this.mergeRequests.latest(input.task);
-    if (mr === null) throw new ServiceError("not_found", `${taskRef(input.task)} has no merge request`);
+    if (mr === null) throw new ServiceError("notFound", `${taskRef(input.task)} has no merge request`);
     return mr;
   }
 
   /**
-   * Where the log `name` of the retest that dequeued the task's merge request with `failed_checks`
-   * is stored. Anyone signed in may read it. `not_found` unless its latest dequeue is `failed_checks`
+   * Where the log `name` of the retest that dequeued the task's merge request with `failedChecks`
+   * is stored. Anyone signed in may read it. `notFound` unless its latest dequeue is `failedChecks`
    * with a stored log by that name.
    */
   dequeueLogKey(project: ProjectContext, actor: Actor, input: { task: number; name: string }): string {
     const mr = this.getMergeRequest(project, actor, input);
     const dequeue = mr.last_dequeue;
-    const missing = new ServiceError("not_found", `${taskRef(input.task)}'s last dequeue has no log ${input.name}`);
-    if (dequeue?.reason !== "failed_checks" || !isLogName(input.name)) throw missing;
+    const missing = new ServiceError("notFound", `${taskRef(input.task)}'s last dequeue has no log ${input.name}`);
+    if (dequeue?.reason !== "failedChecks" || !isLogName(input.name)) throw missing;
     if (!dequeue.details.checks.some((check) => check.log === input.name)) throw missing;
     const landing = this.landings.lastDequeued(mr.id);
     if (landing === null) throw missing;
@@ -1213,7 +1214,7 @@ export class TaskStore {
 
   /**
    * For the merge queue: takes a queued or landing merge request out of the queue for `conflict`,
-   * `failed_checks` or `errored`, back to `pending` with its approval kept. It requeues only on a
+   * `failedChecks` or `errored`, back to `pending` with its approval kept. It requeues only on a
    * new approval, or after a push and its approval.
    */
   dequeueMergeRequest(
@@ -1288,19 +1289,21 @@ export class TaskStore {
 
   /**
    * Records how a landing ended, from its Workflow's report: `landed` merges the merge request (its
-   * source attempt merged, its task closed, its fork archived) and journals `main_advanced`; any
+   * source attempt merged, its task closed, its fork archived) and journals `mainAdvanced`; any
    * other outcome dequeues it with that reason and its details, back to `pending`, or to
-   * `needs_review` if its source moved while it was pushing. A report from a landing that was stopped,
+   * `needsReview` if its source moved while it was pushing. A report from a landing that was stopped,
    * or already reported, is discarded. Returns whether it was recorded. The caller drains afterwards,
    * which starts the next landing.
    *
    * An `errored` landing that claimed its push may have pushed anyway (its result lost after the
    * push, say). When `main`'s head is its merge commit it is recorded as landed, so its merge request
-   * never returns to `pending` and lands twice. A landing's merge and its `main_advanced` are
+   * never returns to `pending` and lands twice. A landing's merge and its `mainAdvanced` are
    * recorded in one transaction before the source is archived, so a report retried after an
    * interrupted archive finds the landing already recorded.
    */
-  async landingFinished(landing: number, outcome: LandingOutcome): Promise<boolean> {
+  async landingFinished(landing: number, reported: LandingOutcome): Promise<boolean> {
+    // A Workflow started before values were camelCase may still report `failedChecks`.
+    const outcome = normaliseLandingOutcome(reported);
     let current = this.#reportable(landing);
     if (current === null) return false;
     let sha = outcome.kind === "landed" ? outcome.sha : null;
@@ -1315,7 +1318,7 @@ export class TaskStore {
       const { source } = this.#sql.transaction(() => {
         const landed = this.#landRows(null, { task, sha: landedSha });
         this.landings.move(landing, "landed");
-        this.#journal(null, "main_advanced", task, attempt, { merge_request: taskRef(task), head, sha: landedSha });
+        this.#journal(null, "mainAdvanced", task, attempt, { mergeRequest: taskRef(task), head, sha: landedSha });
         return landed;
       });
       await this.#archive({ id: project, owner: "" }, [source]);
@@ -1327,7 +1330,7 @@ export class TaskStore {
       const mr = this.#openMergeRequest(task);
       const source = this.#attempt(sourceOf(mr));
       const moved = this.scoring.statusFor(scoredAttempt(source)).sha !== mr.approved_head;
-      this.mergeRequests.dequeue(null, mr, dequeueCause(outcome), moved ? "needs_review" : "pending");
+      this.mergeRequests.dequeue(null, mr, dequeueCause(outcome), moved ? "needsReview" : "pending");
     });
     return true;
   }
@@ -1457,7 +1460,7 @@ export class TaskStore {
 
   #task(number: number): StoredTask {
     const [row] = this.#sql.exec<TaskRow>("SELECT * FROM tasks WHERE number = ?", number);
-    if (row === undefined) throw new ServiceError("not_found", `no task ${taskRef(number)}`);
+    if (row === undefined) throw new ServiceError("notFound", `no task ${taskRef(number)}`);
     return toTask(row);
   }
 
@@ -1504,18 +1507,18 @@ export class TaskStore {
 
   /**
    * A push moved the attempt's head: if it is an open merge request's source, that needs a new
-   * approval. True when this moved the merge request to `needs_review`.
+   * approval. True when this moved the merge request to `needsReview`.
    */
   #pushedToSource(actor: Actor, attempt: StoredAttempt, head: string): boolean {
     const mr = this.mergeRequests.open(attempt.task);
-    if (mr === null || mr.attempt !== attempt.number || mr.state === "needs_review") return false;
+    if (mr === null || mr.attempt !== attempt.number || mr.state === "needsReview") return false;
     if (head === mr.approved_head) return false;
     // A landing pushing to main lands the approved head; the compare-and-swap on main decides.
     if (this.#pushing(mr)) return false;
     if (mr.state === "queued" || mr.state === "landing") {
-      this.mergeRequests.dequeue(actor, mr, { reason: "new_push" }, "needs_review");
+      this.mergeRequests.dequeue(actor, mr, { reason: "newPush" }, "needsReview");
     } else {
-      this.mergeRequests.move(actor, mr, "needs_review", { head });
+      this.mergeRequests.move(actor, mr, "needsReview", { head });
     }
     return true;
   }
@@ -1563,7 +1566,7 @@ export class TaskStore {
 
   #attempt({ task, number }: AttemptInput): StoredAttempt {
     const [row] = this.#sql.exec<AttemptRow>("SELECT * FROM attempts WHERE task = ? AND number = ?", task, number);
-    if (row === undefined) throw new ServiceError("not_found", `no attempt ${attemptRef(task, number)}`);
+    if (row === undefined) throw new ServiceError("notFound", `no attempt ${attemptRef(task, number)}`);
     return this.#toAttempt(row);
   }
 
@@ -1609,7 +1612,7 @@ export class TaskStore {
     let head: string | null = null;
     for (const { ref, before, after } of updates) {
       if (ref === FORK_HEAD && !isZeroId(after)) head = after;
-      this.#journal(actor, "pushed", attempt.task, attempt.number, { git_ref: ref, before, after });
+      this.#journal(actor, "pushed", attempt.task, attempt.number, { gitRef: ref, before, after });
     }
     return head;
   }
@@ -1689,7 +1692,7 @@ export class TaskStore {
       actor?.user.id ?? null,
       number,
     );
-    this.#journal(actor, to === "closed" ? "closed" : "made_obsolete", number, null);
+    this.#journal(actor, to === "closed" ? "closed" : "madeObsolete", number, null);
   }
 
   /**
@@ -1704,7 +1707,7 @@ export class TaskStore {
       current.task,
       current.number,
     );
-    this.#journal(actor, to === "closed" ? "closed" : "made_obsolete", current.task, current.number);
+    this.#journal(actor, to === "closed" ? "closed" : "madeObsolete", current.task, current.number);
     this.scoring.cancelAttempt(scoredAttempt(current), `attempt ${to}`);
     const mr = this.mergeRequests.open(current.task);
     if (mr !== null && mr.attempt === current.number) this.#cancel(actor, mr);
@@ -1811,7 +1814,7 @@ export class TaskStore {
 
   /** A branch can carry only one attempt, and a `t<n>/` branch only an attempt on `t<n>`. */
   #checkBranch(task: number, branch: string, count: number): void {
-    if (count !== 1) throw new ServiceError("invalid_request", "a branch carries exactly one attempt");
+    if (count !== 1) throw new ServiceError("invalidRequest", "a branch carries exactly one attempt");
     const reserved = reservedTask(branch);
     if (reserved !== null && reserved !== task) {
       throw new ServiceError("conflict", `branch ${branch} is reserved for ${taskRef(reserved)}`);
@@ -1919,7 +1922,7 @@ export class TaskStore {
 
   #journal(
     actor: Actor | null,
-    kind: TaskEvent | MergeRequestEvent | "main_advanced",
+    kind: TaskEvent | MergeRequestEvent | "mainAdvanced",
     task: number,
     attempt: number | null,
     extra: Record<string, unknown> = {},
@@ -1997,7 +2000,7 @@ export type TaskOutcome = { ok: true; value: unknown } | { ok: false; code: Erro
 /** Runs one store method and captures its result or `ServiceError` as a `TaskOutcome`. */
 export async function runTaskMethod(store: TaskStore, method: string, args: unknown[]): Promise<TaskOutcome> {
   if (!(TASK_METHODS as readonly string[]).includes(method)) {
-    return { ok: false, code: "invalid_request", message: `no task method ${method}` };
+    return { ok: false, code: "invalidRequest", message: `no task method ${method}` };
   }
   try {
     const fn = store[method as TaskMethod] as (...a: unknown[]) => unknown;
@@ -2083,5 +2086,5 @@ function sourceOf(mr: StoredMergeRequest): AttemptInput {
 }
 
 function invalidState(message: string): ServiceError {
-  return new ServiceError("invalid_state", message);
+  return new ServiceError("invalidState", message);
 }

@@ -7,8 +7,8 @@
 // the merge request lands as a two-parent merge commit with the Throng trailers; both attempts are
 // archived under `refs/attempts/`), conflict (two tasks' attempts edit the same line: the first
 // lands, the second is dequeued with reason `conflict` and the expected hunk; its author merges main
-// and pushes, which moves it to `needs_review`; approved again, it lands), needsreview (a push to a
-// queued or landing merge request's source dequeues it with `new_push` to `needs_review`, and it
+// and pushes, which moves it to `needsReview`; approved again, it lands), needsreview (a push to a
+// queued or landing merge request's source dequeues it with `newPush` to `needsReview`, and it
 // doesn't requeue on its own once the new head passes).
 //
 // Scoring scenarios, through the e2e routes (`/e2e/*`): metrics (a passing project whose checks report metrics), failing (a required check fails the gate),
@@ -124,21 +124,21 @@ interface RealProject {
 interface Attempt {
   ref: string;
   state: string;
-  archived_sha: string | null;
-  merge_request: { state: string; last_dequeue: { reason: string } | null } | null;
+  archivedSha: string | null;
+  mergeRequest: { state: string; lastDequeue: { reason: string } | null } | null;
 }
 
 interface MergeRequest {
   task: string;
   attempt: string;
-  state: "pending" | "queued" | "landing" | "needs_review" | "merged" | "cancelled";
-  approved_head: string;
-  last_dequeue: { reason: string; at: string } | null;
-  merge_sha: string | null;
+  state: "pending" | "queued" | "landing" | "needsReview" | "merged" | "cancelled";
+  approvedHead: string;
+  lastDequeue: { reason: string; at: string } | null;
+  mergeSha: string | null;
 }
 
 interface ConflictHunk {
-  start_line: number;
+  startLine: number;
   base: string[];
   main: string[];
   attempt: string[];
@@ -160,7 +160,7 @@ interface ApiResult {
   config: { kind: string };
   gate: "passed" | "failed";
   checks: { name: string; outcome: string }[];
-  builtin: { files_changed: number; additions: number; deletions: number };
+  builtin: { filesChanged: number; additions: number; deletions: number };
 }
 
 interface ScoringStatus {
@@ -238,22 +238,22 @@ async function zeroconfig(): Promise<void> {
   const { result } = scoring;
   assert(result.config.kind === "none", `expected no config, got ${JSON.stringify(result.config)}`);
   assert(result.gate === "passed" && result.checks.length === 0, "expected a passing gate with no checks");
-  const { files_changed, additions, deletions } = result.builtin;
+  const { filesChanged, additions, deletions } = result.builtin;
   assert(
-    files_changed === 1 && additions === 1 && deletions === 1,
+    filesChanged === 1 && additions === 1 && deletions === 1,
     `unexpected diff size ${JSON.stringify(result.builtin)}`,
   );
 
   const selected = await throng<MergeRequest>(p, "POST", `/tasks/${t1}/selection`, { attempt: a1 });
   timeline.mark("t1a1 selected");
-  assert(selected.approved_head === head, `approved ${selected.approved_head}, expected ${head}`);
+  assert(selected.approvedHead === head, `approved ${selected.approvedHead}, expected ${head}`);
   const sibling = await throng<Attempt>(p, "GET", `/attempts/${a2}`);
   assert(sibling.state === "closed", `selecting ${a1} left ${a2} ${sibling.state}`);
 
   const merged = await mergeRequestUntil(p, t1, (mr) => mr.state === "merged");
   timeline.mark("t1 merged");
-  const mainSha = merged.merge_sha;
-  assert(mainSha !== null, "a merged merge request has no merge_sha");
+  const mainSha = merged.mergeSha;
+  assert(mainSha !== null, "a merged merge request has no mergeSha");
   const onMain = await api<{ sha: string }>("GET", `/e2e/repos/${originRepo(p.project)}/head`);
   assert(onMain.sha === mainSha, `main is ${onMain.sha}, expected the merge commit ${mainSha}`);
 
@@ -287,7 +287,7 @@ async function zeroconfig(): Promise<void> {
 /**
  * Two tasks' attempts, forked from the same main, edit the same line. t1a1 lands; t2a1 is dequeued
  * with reason `conflict` and the expected hunk. Its author merges main and pushes, which moves it to
- * `needs_review`; approved again, it lands.
+ * `needsReview`; approved again, it lands.
  */
 async function conflict(): Promise<void> {
   const timeline = new Timeline();
@@ -310,18 +310,18 @@ async function conflict(): Promise<void> {
   await throng(p, "POST", `/tasks/${t1}/selection`, { attempt: a1 });
   const landed = await mergeRequestUntil(p, t1, (mr) => mr.state === "merged");
   timeline.mark("t1 merged");
-  const mainSha = landed.merge_sha!;
+  const mainSha = landed.mergeSha!;
 
   await throng(p, "POST", `/tasks/${t2}/selection`, { attempt: a2 });
   timeline.mark("t2a1 selected");
-  const dequeued = await mergeRequestUntil(p, t2, (mr) => mr.last_dequeue !== null);
+  const dequeued = await mergeRequestUntil(p, t2, (mr) => mr.lastDequeue !== null);
   timeline.mark("t2 dequeued");
   assert(
-    dequeued.last_dequeue?.reason === "conflict" && dequeued.state === "pending",
-    `expected a conflict dequeue to pending, got ${dequeued.state} ${JSON.stringify(dequeued.last_dequeue)}`,
+    dequeued.lastDequeue?.reason === "conflict" && dequeued.state === "pending",
+    `expected a conflict dequeue to pending, got ${dequeued.state} ${JSON.stringify(dequeued.lastDequeue)}`,
   );
   const attempt = await throng<Attempt>(p, "GET", `/attempts/${a2}`);
-  assert(attempt.merge_request?.last_dequeue?.reason === "conflict", "the attempt doesn't show the conflict");
+  assert(attempt.mergeRequest?.lastDequeue?.reason === "conflict", "the attempt doesn't show the conflict");
 
   const { reason, details } = await throng<Dequeue>(p, "GET", `/tasks/${t2}/merge-request/dequeue`);
   assert(reason === "conflict" && details !== null, `unexpected dequeue ${reason}`);
@@ -337,7 +337,7 @@ async function conflict(): Promise<void> {
       hunks: [
         {
           // The fixture's line 2: line 1 is a comment.
-          start_line: 2,
+          startLine: 2,
           base: ['export const GREETING = "hello";'],
           main: ['export const GREETING = "hello from a1";'],
           attempt: ['export const GREETING = "hello from a2";'],
@@ -369,23 +369,23 @@ async function conflict(): Promise<void> {
   );
   timeline.mark("t2a1 merged main and pushed");
   const review = await mergeRequestUntil(p, t2, (mr) => mr.state !== "pending");
-  assert(review.state === "needs_review", `expected needs_review after the push, got ${review.state}`);
+  assert(review.state === "needsReview", `expected needsReview after the push, got ${review.state}`);
 
   const approved = await throng<MergeRequest>(p, "POST", `/tasks/${t2}/merge-request/approve`);
-  assert(approved.approved_head === resolved, `approved ${approved.approved_head}, expected ${resolved}`);
+  assert(approved.approvedHead === resolved, `approved ${approved.approvedHead}, expected ${resolved}`);
   timeline.mark("t2 approved");
   const merged = await mergeRequestUntil(p, t2, (mr) => mr.state === "merged");
   timeline.mark("t2 merged");
-  const commit = await readCommit(p, merged.merge_sha!);
+  const commit = await readCommit(p, merged.mergeSha!);
   assert(
     JSON.stringify(commit.parents) === JSON.stringify([mainSha, resolved]),
     `expected parents [t1's merge, t2a1's head], got ${JSON.stringify(commit.parents)}`,
   );
-  const greeting = await git(p.work, "show", `${merged.merge_sha}:src/greeting.js`);
+  const greeting = await git(p.work, "show", `${merged.mergeSha}:src/greeting.js`);
   assert(greeting.includes("hello from a1 and a2"), "main does not contain the resolution");
 
   const journal = await settle(p.project);
-  assert(journal.filter((e) => e.kind === "main_advanced").length === 2, "expected exactly two landings");
+  assert(journal.filter((e) => e.kind === "mainAdvanced").length === 2, "expected exactly two landings");
   await assertArchived(p, a1, first);
   await assertArchived(p, a2, resolved);
   report(timeline, journal);
@@ -393,8 +393,8 @@ async function conflict(): Promise<void> {
 }
 
 /**
- * A push to a queued or landing merge request's source dequeues it with `new_push` to
- * `needs_review`, and it stays there once the new head passes: only an approval requeues it. A slow
+ * A push to a queued or landing merge request's source dequeues it with `newPush` to
+ * `needsReview`, and it stays there once the new head passes: only an approval requeues it. A slow
  * required check keeps the landing in its retest long enough to push.
  */
 async function needsreview(): Promise<void> {
@@ -421,14 +421,14 @@ async function needsreview(): Promise<void> {
   const next = await editAndPush(p, a1, "src/greeting.js", (s) => s.replace("from a1", "from a1, again"), "a1: again");
   timeline.mark("pushed while in the queue");
 
-  const dequeued = await mergeRequestUntil(p, t1, (mr) => mr.last_dequeue !== null);
+  const dequeued = await mergeRequestUntil(p, t1, (mr) => mr.lastDequeue !== null);
   assert(
-    dequeued.last_dequeue?.reason === "new_push" && dequeued.state === "needs_review",
-    `expected a new_push dequeue to needs_review, got ${dequeued.state} ${JSON.stringify(dequeued.last_dequeue)}`,
+    dequeued.lastDequeue?.reason === "newPush" && dequeued.state === "needsReview",
+    `expected a newPush dequeue to needsReview, got ${dequeued.state} ${JSON.stringify(dequeued.lastDequeue)}`,
   );
-  assert(dequeued.approved_head === head, "the push changed the approved head");
+  assert(dequeued.approvedHead === head, "the push changed the approved head");
   const { details } = await throng<Dequeue>(p, "GET", `/tasks/${t1}/merge-request/dequeue`);
-  assert(details === null, `a new_push dequeue has no details, got ${JSON.stringify(details)}`);
+  assert(details === null, `a newPush dequeue has no details, got ${JSON.stringify(details)}`);
 
   // The new head passes too, and still nothing requeues it.
   const rescored = await scoredHead(p, a1, next);
@@ -436,12 +436,12 @@ async function needsreview(): Promise<void> {
   timeline.mark("new head scored");
   const journal = await settle(p.project);
   const after = await throng<MergeRequest>(p, "GET", `/tasks/${t1}/merge-request`);
-  assert(after.state === "needs_review", `the merge request requeued on its own: ${after.state}`);
+  assert(after.state === "needsReview", `the merge request requeued on its own: ${after.state}`);
   const queue = await throng<{ queue: unknown[] }>(p, "GET", "/merge-queue");
   assert(queue.queue.length === 0, `the merge queue isn't empty: ${JSON.stringify(queue.queue)}`);
   const onMain = await api<{ sha: string }>("GET", `/e2e/repos/${originRepo(p.project)}/head`);
   assert(onMain.sha === fixture, `main moved to ${onMain.sha}`);
-  assert(!journal.some((e) => e.kind === "main_advanced"), "something landed");
+  assert(!journal.some((e) => e.kind === "mainAdvanced"), "something landed");
   report(timeline, journal);
   await cleanUp(p.project, p.work);
 }
@@ -592,7 +592,7 @@ async function coalesce(): Promise<void> {
   const first = await commitAndPush(work, fork, "src/greeting.js", (s) => s.replace('"hello"', '"hi"'), "a1: first");
   timeline.mark("first push");
   // Wait until the first check is running, so the second push has something to cancel.
-  await waitFor(project, (e) => e.kind === "scoring_started" && e.detail.sha === first);
+  await waitFor(project, (e) => e.kind === "scoringStarted" && e.detail.sha === first);
   timeline.mark("first check started");
   const second = await commitAndPush(
     work,
@@ -606,9 +606,9 @@ async function coalesce(): Promise<void> {
   await scored(project, second);
   const journal = await settle(project);
   assert(!journal.some((e) => e.kind === "scored" && e.detail.sha === first), "the superseded sha was scored");
-  assert(!journal.some((e) => e.kind === "main_advanced" && e.detail.head === first), "the superseded sha landed");
+  assert(!journal.some((e) => e.kind === "mainAdvanced" && e.detail.head === first), "the superseded sha landed");
   assert(
-    journal.some((e) => e.kind === "scoring_cancelled" && e.detail.sha === first),
+    journal.some((e) => e.kind === "scoringCancelled" && e.detail.sha === first),
     "the first run was not cancelled",
   );
   report(timeline, journal);
@@ -727,7 +727,7 @@ async function refs(): Promise<void> {
   const bMain = (await git(b.work, "rev-parse", "HEAD")).trim();
   const copied = await api<{ sha: string | null }>(
     "POST",
-    `/e2e/repos/${originRepo(b.project)}/copy-ref?from_ref=refs/heads/main&to=${originRepo(a.project)}&to_ref=${archiveRef("t1a1")}`,
+    `/e2e/repos/${originRepo(b.project)}/copy-ref?fromRef=refs/heads/main&to=${originRepo(a.project)}&toRef=${archiveRef("t1a1")}`,
   );
   timeline.mark("worker archived b's main into a");
   assert(copied.sha === bMain, `copy-ref returned ${copied.sha}, expected ${bMain}`);
@@ -746,7 +746,7 @@ async function refs(): Promise<void> {
   // And back out of an archive ref into another repo, as reopening an attempt does.
   const restored = await api<{ sha: string | null }>(
     "POST",
-    `/e2e/repos/${originRepo(a.project)}/copy-ref?from_ref=${raw}&to=${originRepo(b.project)}&to_ref=${archiveRef("t9a9")}`,
+    `/e2e/repos/${originRepo(a.project)}/copy-ref?fromRef=${raw}&to=${originRepo(b.project)}&toRef=${archiveRef("t9a9")}`,
   );
   timeline.mark("worker restored a's archive into b");
   assert(restored.sha === archived, `copy-ref returned ${restored.sha}, expected ${archived}`);
@@ -755,7 +755,7 @@ async function refs(): Promise<void> {
   // Archive pushes are internal: neither project queued any scoring.
   for (const project of [a.project, b.project]) {
     const kinds = new Set((await settle(project, 5_000)).map((e) => e.kind));
-    assert(!kinds.has("scoring_queued"), `${project} queued scoring on an archive push`);
+    assert(!kinds.has("scoringQueued"), `${project} queued scoring on an archive push`);
   }
   timeline.print();
   await cleanUp(a.project, a.work);
@@ -826,7 +826,7 @@ async function commitAndPush(
 function report(timeline: Timeline, journal: JournalEntry[]): void {
   console.log("timeline:");
   timeline.print();
-  const cancelled = journal.filter((e) => e.kind === "scoring_cancelled");
+  const cancelled = journal.filter((e) => e.kind === "scoringCancelled");
   console.log(`cancelled runs: ${cancelled.length}`);
   for (const d of cancelled) console.log(`  ${JSON.stringify(d.detail)}`);
 }
@@ -835,7 +835,7 @@ function report(timeline: Timeline, journal: JournalEntry[]): void {
 async function scored(project: string, sha: string): Promise<Run> {
   const event = await waitFor(
     project,
-    (e) => (e.kind === "scored" || e.kind === "scoring_errored") && e.detail.sha === sha,
+    (e) => (e.kind === "scored" || e.kind === "scoringErrored") && e.detail.sha === sha,
   );
   const found = await api<Run>("GET", `/e2e/projects/${project}/runs/${String(event.detail.run)}`);
   const { result } = found;
@@ -955,7 +955,7 @@ async function mergeRequestUntil(
   let last = "";
   return poll(`${task}'s merge request`, async () => {
     const mr = await throng<MergeRequest>(p, "GET", `/tasks/${task}/merge-request`);
-    const seen = `${mr.state} ${JSON.stringify(mr.last_dequeue)}`;
+    const seen = `${mr.state} ${JSON.stringify(mr.lastDequeue)}`;
     if (seen !== last) console.log(`  ${task}: ${seen}`);
     last = seen;
     if (done(mr)) return mr;
@@ -971,7 +971,7 @@ async function mergeRequestUntil(
 async function assertArchived(p: RealProject, attempt: string, sha: string): Promise<void> {
   const archived = await poll(`${attempt}'s archive`, async () => {
     const a = await throng<Attempt>(p, "GET", `/attempts/${attempt}`);
-    return a.archived_sha;
+    return a.archivedSha;
   });
   assert(archived === sha, `${attempt} archived ${archived}, expected ${sha}`);
   const ref = archiveRef(attempt);

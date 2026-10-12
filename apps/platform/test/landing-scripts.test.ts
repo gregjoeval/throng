@@ -176,7 +176,7 @@ describe("conflictCheckScript", () => {
     git(work, "push", "-q", origin, "main");
 
     const result = run<ConflictCheckResult>(conflictCheckScript(origin, fork, head));
-    expect(parseMergeTree(result.output).files.map((f) => f.type)).toEqual(["modify_delete", "content"]);
+    expect(parseMergeTree(result.output).files.map((f) => f.type)).toEqual(["modifyDelete", "content"]);
     expect(result.remerges).toEqual([
       {
         path: "long.txt",
@@ -190,8 +190,8 @@ describe("conflictCheckScript", () => {
     const { head } = diverged("a.txt", "one\nmine\nthree\n", "a.txt", "one\ntheirs\nthree\n");
     const tiny = (fileBytes: number, totalBytes: number) =>
       run<ConflictCheckResult>(conflictCheckScript(origin, fork, head, { fileBytes, totalBytes })).remerges;
-    expect(tiny(10, 1000)).toEqual([{ path: "a.txt", status: "too_large" }]);
-    expect(tiny(1000, 10)).toEqual([{ path: "a.txt", status: "too_large" }]);
+    expect(tiny(10, 1000)).toEqual([{ path: "a.txt", status: "tooLarge" }]);
+    expect(tiny(1000, 10)).toEqual([{ path: "a.txt", status: "tooLarge" }]);
     expect(tiny(1000, 1000)).toMatchObject([{ path: "a.txt", status: "merged" }]);
   });
 

@@ -149,7 +149,7 @@ function greetingConflict({ base, head, main }: { base: string; head: string; ma
       },
       {
         path: "src/gone.js",
-        type: "modify_delete",
+        type: "modifyDelete",
         blobs: { base: blobSha("x\n"), main: null, attempt: blobSha("y\n") },
         modes: { base: "100644", main: null, attempt: "100644" },
         truncated: false,
@@ -159,7 +159,7 @@ function greetingConflict({ base, head, main }: { base: string; head: string; ma
 }
 
 describe("GET …/tasks/{t}/merge-request/dequeue", () => {
-  it("serves a conflict's details in snake_case, hunks and blobs included", async () => {
+  it("serves a conflict's details in camelCase, hunks and blobs included", async () => {
     const env = await setup();
     const { call, finish, bob, base, head, main, p } = env;
     expect((await call("GET", `${p}/tasks/t1/merge-request/dequeue`, bob)).status).toBe(404);
@@ -188,7 +188,7 @@ describe("GET …/tasks/{t}/merge-request/dequeue", () => {
             truncated: false,
             hunks: [
               {
-                start_line: 1,
+                startLine: 1,
                 base: ['export const GREETING = "hello";'],
                 main: ['export const GREETING = "hello from a1";'],
                 attempt: ['export const GREETING = "hello from a2";'],
@@ -197,7 +197,7 @@ describe("GET …/tasks/{t}/merge-request/dequeue", () => {
           },
           {
             path: "src/gone.js",
-            type: "modify_delete",
+            type: "modifyDelete",
             blobs: { base: blobSha("x\n"), main: null, attempt: blobSha("y\n") },
             modes: { base: "100644", main: null, attempt: "100644" },
             truncated: false,
@@ -211,9 +211,9 @@ describe("GET …/tasks/{t}/merge-request/dequeue", () => {
     const env = await setup();
     const { call, finish, bob, p } = env;
     const details = { checks: [{ name: "test", outcome: "failed", log: "test" }] };
-    await finish({ kind: "failed_checks", details: details as never });
+    await finish({ kind: "failedChecks", details: details as never });
     expect((await call("GET", `${p}/tasks/t1/merge-request/dequeue`, bob)).body).toEqual({
-      reason: "failed_checks",
+      reason: "failedChecks",
       at: expect.any(String),
       details,
     });
@@ -222,7 +222,7 @@ describe("GET …/tasks/{t}/merge-request/dequeue", () => {
   it("is 404 for a task with no merge request, and 400 for a bad reference", async () => {
     const { call, ada, p } = await setup();
     await call("POST", `${p}/tasks`, ada, { title: "other" });
-    expect((await call("GET", `${p}/tasks/t2/merge-request/dequeue`, ada)).body["error"]["code"]).toBe("not_found");
+    expect((await call("GET", `${p}/tasks/t2/merge-request/dequeue`, ada)).body["error"]["code"]).toBe("notFound");
     expect((await call("GET", `${p}/tasks/x/merge-request/dequeue`, ada)).status).toBe(400);
     expect((await call("GET", `${p}/tasks/t1/merge-request/dequeue`)).status).toBe(401);
   });
@@ -239,10 +239,10 @@ describe("GET …/tasks/{t}/merge-request/dequeue/files/{path}/diff", () => {
     expect(toMain.body).toMatchObject({
       path: "src/greeting.js",
       status: "modified",
-      old_mode: "100644",
-      new_mode: "100644",
-      old_hash: blobSha(greeting("hello")),
-      new_hash: blobSha(greeting("hello from a1")),
+      oldMode: "100644",
+      newMode: "100644",
+      oldHash: blobSha(greeting("hello")),
+      newHash: blobSha(greeting("hello from a1")),
       additions: 1,
       deletions: 1,
       flags: [],
@@ -277,8 +277,8 @@ describe("GET …/tasks/{t}/merge-request/dequeue/files/{path}/diff", () => {
     expect(res.body).toMatchObject({
       path: "src/gone.js",
       status: "deleted",
-      old_hash: blobSha("x\n"),
-      new_hash: null,
+      oldHash: blobSha("x\n"),
+      newHash: null,
     });
     const toAttempt = await call("GET", `${p}/tasks/t1/merge-request/dequeue/files/src/gone.js/diff?side=attempt`, bob);
     expect(toAttempt.body).toMatchObject({ status: "modified", additions: 1, deletions: 1 });
@@ -291,7 +291,7 @@ describe("GET …/tasks/{t}/merge-request/dequeue/files/{path}/diff", () => {
       call("GET", `${p}/tasks/t1/merge-request/dequeue/files/${path}/diff?side=${side}`, bob);
     expect((await diff("src/greeting.js")).status).toBe(404);
     await finish({ kind: "conflict", details: greetingConflict(env) });
-    expect((await diff("src/other.js")).body["error"]["code"]).toBe("not_found");
+    expect((await diff("src/other.js")).body["error"]["code"]).toBe("notFound");
     expect((await diff("src/greeting.js", "base")).status).toBe(400);
   });
 });
@@ -301,7 +301,7 @@ describe("GET …/tasks/{t}/merge-request/dequeue/logs/{name}", () => {
     const env = await setup();
     const { request, logs, finish, bob, id, head, p } = env;
     logs.objects.set(`logs/${id}/t1a1/${head}/landing-1/test.log`, "1 failed\n");
-    await finish({ kind: "failed_checks", details: { checks: [{ name: "test", outcome: "failed", log: "test" }] } });
+    await finish({ kind: "failedChecks", details: { checks: [{ name: "test", outcome: "failed", log: "test" }] } });
 
     const res = await request(`${p}/tasks/t1/merge-request/dequeue/logs/test`, bob);
     expect(res.status).toBe(200);
@@ -314,8 +314,8 @@ describe("GET …/tasks/{t}/merge-request/dequeue/logs/{name}", () => {
     const { request, finish, bob, p } = env;
     expect((await request(`${p}/tasks/t1/merge-request/dequeue/logs/test`, bob)).status).toBe(404);
     await finish({
-      kind: "failed_checks",
-      details: { checks: [{ name: "lint", outcome: "timed_out", log: null }] },
+      kind: "failedChecks",
+      details: { checks: [{ name: "lint", outcome: "timedOut", log: null }] },
     });
     for (const name of ["lint", "test", "..%2Fx"]) {
       expect((await request(`${p}/tasks/t1/merge-request/dequeue/logs/${name}`, bob)).status, name).toBe(404);

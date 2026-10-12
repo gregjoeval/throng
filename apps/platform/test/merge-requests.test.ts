@@ -66,7 +66,7 @@ async function setup() {
     );
   const mrEvents = () =>
     journal()
-      .filter((e) => e["merge_request"] !== undefined)
+      .filter((e) => e["mergeRequest"] !== undefined)
       .map((e) => e.kind);
 
   const task = store.createTask(PROJECT, cat, { title: "Fix it" });
@@ -193,14 +193,14 @@ describe("selection permissions and requirements", () => {
 
   it("requires an open attempt on an open task with no open merge request", async () => {
     const { store, ref1, ref2, open } = await setup();
-    expect(await code(store.selectAttempt(PROJECT, cat, ref1))).toBe("invalid_state");
+    expect(await code(store.selectAttempt(PROJECT, cat, ref1))).toBe("invalidState");
     await open(ref1);
     await open(ref2);
     await store.selectAttempt(PROJECT, cat, ref1);
-    expect(await code(store.selectAttempt(PROJECT, cat, ref1))).toBe("invalid_state");
+    expect(await code(store.selectAttempt(PROJECT, cat, ref1))).toBe("invalidState");
     expect(store.hasOpenMergeRequest(PROJECT, cat, { task: 1 })).toBe(true);
-    expect(await code(store.createAttempts(PROJECT, bob, { task: 1 }))).toBe("invalid_state");
-    expect(await code(store.reopenAttempt(PROJECT, bob, ref2))).toBe("invalid_state");
+    expect(await code(store.createAttempts(PROJECT, bob, { task: 1 }))).toBe("invalidState");
+    expect(await code(store.reopenAttempt(PROJECT, bob, ref2))).toBe("invalidState");
   });
 
   it("lets the task creator select their own attempt", async () => {
@@ -242,12 +242,12 @@ describe("approve and cancel", () => {
     await open(ref1);
     await store.selectAttempt(PROJECT, cat, ref1);
     const head = push(ref1);
-    expect(mr()).toMatchObject({ state: "needs_review" });
+    expect(mr()).toMatchObject({ state: "needsReview" });
     const approved = await store.approveMergeRequest(PROJECT, owner, { task: 1 });
     expect(approved).toMatchObject({ state: "pending", approved_head: head, approved_by: { user: owner.user.id } });
     await score(ref1);
     expect(mr().state).toBe("queued");
-    expect(mrEvents()).toEqual(["selected", "approved", "needs_review", "approved", "queued"]);
+    expect(mrEvents()).toEqual(["selected", "approved", "needsReview", "approved", "queued"]);
   });
 
   it("refuses to approve a queued, landing or closed merge request", async () => {
@@ -255,20 +255,20 @@ describe("approve and cancel", () => {
     await open(ref1);
     await score(ref1);
     await store.selectAttempt(PROJECT, cat, ref1);
-    expect(await code(store.approveMergeRequest(PROJECT, cat, { task: 1 }))).toBe("invalid_state");
+    expect(await code(store.approveMergeRequest(PROJECT, cat, { task: 1 }))).toBe("invalidState");
     store.startLanding(PROJECT, null);
-    expect(await code(store.approveMergeRequest(PROJECT, cat, { task: 1 }))).toBe("invalid_state");
+    expect(await code(store.approveMergeRequest(PROJECT, cat, { task: 1 }))).toBe("invalidState");
     store.cancelMergeRequest(PROJECT, cat, { task: 1 });
-    expect(await code(store.approveMergeRequest(PROJECT, cat, { task: 1 }))).toBe("invalid_state");
-    expect(await code(() => store.cancelMergeRequest(PROJECT, cat, { task: 1 }))).toBe("invalid_state");
+    expect(await code(store.approveMergeRequest(PROJECT, cat, { task: 1 }))).toBe("invalidState");
+    expect(await code(() => store.cancelMergeRequest(PROJECT, cat, { task: 1 }))).toBe("invalidState");
   });
 
-  for (const from of ["pending", "needs_review", "queued", "landing"] as const) {
+  for (const from of ["pending", "needsReview", "queued", "landing"] as const) {
     it(`cancels from ${from}`, async () => {
       const { store, ref1, open, score, push, mr, mrEvents } = await setup();
       await open(ref1);
       await store.selectAttempt(PROJECT, cat, ref1);
-      if (from === "needs_review") push(ref1);
+      if (from === "needsReview") push(ref1);
       if (from === "queued" || from === "landing") await score(ref1);
       if (from === "landing") store.startLanding(PROJECT, null);
       expect(mr().state).toBe(from);
@@ -310,13 +310,11 @@ describe("a push to the source attempt", () => {
       expect(mr().state).toBe(from);
       push(ref1);
       const inQueue = from !== "pending";
-      const lastDequeue = inQueue ? { reason: "new_push" } : null;
-      expect(mr()).toMatchObject({ state: "needs_review", position: null, last_dequeue: lastDequeue });
-      expect(mrEvents().slice(-2)).toEqual(
-        inQueue ? ["dequeued", "needs_review"] : [expect.any(String), "needs_review"],
-      );
+      const lastDequeue = inQueue ? { reason: "newPush" } : null;
+      expect(mr()).toMatchObject({ state: "needsReview", position: null, last_dequeue: lastDequeue });
+      expect(mrEvents().slice(-2)).toEqual(inQueue ? ["dequeued", "needsReview"] : [expect.any(String), "needsReview"]);
       expect(store.getAttempt(PROJECT, cat, ref1).merge_request).toEqual({
-        state: "needs_review",
+        state: "needsReview",
         last_dequeue: lastDequeue,
       });
     });
@@ -332,7 +330,7 @@ describe("a push to the source attempt", () => {
     await score(ref1);
     push(ref1);
     await score(ref1);
-    expect(mr().state).toBe("needs_review");
+    expect(mr().state).toBe("needsReview");
     expect(mrEvents()).toHaveLength(events);
   });
 
@@ -409,7 +407,7 @@ describe("the queue", () => {
 });
 
 describe("dequeue", () => {
-  for (const reason of ["conflict", "failed_checks", "errored"] as const) {
+  for (const reason of ["conflict", "failedChecks", "errored"] as const) {
     it(`returns to pending after ${reason}, keeping the approval, and doesn't requeue on its own`, async () => {
       const { store, ref1, open, score, mr, mrEvents, base } = await setup();
       await open(ref1);
@@ -419,7 +417,7 @@ describe("dequeue", () => {
       const cause =
         reason === "conflict"
           ? { reason, details: conflictDetails(["README.md"]) }
-          : reason === "failed_checks"
+          : reason === "failedChecks"
             ? { reason, details: { checks: [{ name: "test", outcome: "failed" as const, log: "test" }] } }
             : { reason, details: ERRORED };
       store.dequeueMergeRequest(PROJECT, null, { task: 1, ...cause });
@@ -453,7 +451,7 @@ describe("dequeue", () => {
     await store.selectAttempt(PROJECT, cat, ref1);
     store.dequeueMergeRequest(PROJECT, null, { task: 1, reason: "conflict", details: conflictDetails(["README.md"]) });
     push(ref1);
-    expect(mr()).toMatchObject({ state: "needs_review", last_dequeue: { reason: "conflict" } });
+    expect(mr()).toMatchObject({ state: "needsReview", last_dequeue: { reason: "conflict" } });
     await store.approveMergeRequest(PROJECT, cat, { task: 1 });
     await score(ref1);
     expect(mr().state).toBe("queued");
@@ -469,7 +467,7 @@ describe("dequeue", () => {
         reason: "conflict",
         details: conflictDetails(["README.md"]),
       });
-    expect(await code(dequeue)).toBe("invalid_state");
+    expect(await code(dequeue)).toBe("invalidState");
   });
 });
 
@@ -480,7 +478,7 @@ describe("landing", () => {
     await open(ref1);
     await score(ref1);
     await store.selectAttempt(PROJECT, cat, ref1);
-    expect(await code(store.landMergeRequest(PROJECT, null, { task: 1, sha }))).toBe("invalid_state");
+    expect(await code(store.landMergeRequest(PROJECT, null, { task: 1, sha }))).toBe("invalidState");
     store.startLanding(PROJECT, null);
     await store.landMergeRequest(PROJECT, null, { task: 1, sha });
     expect(mr()).toMatchObject({ state: "merged", merge_sha: sha, merged_at: expect.any(String), position: null });
@@ -497,7 +495,7 @@ describe("landing", () => {
 describe("reads", () => {
   it("answers not_found for a task with no merge request, and shows none on its attempts", async () => {
     const { store, ref1 } = await setup();
-    expect(await code(() => store.getMergeRequest(PROJECT, cat, { task: 1 }))).toBe("not_found");
+    expect(await code(() => store.getMergeRequest(PROJECT, cat, { task: 1 }))).toBe("notFound");
     expect(store.getAttempt(PROJECT, cat, ref1).merge_request).toBeNull();
     expect(store.mergeQueue(PROJECT, cat)).toEqual([]);
   });

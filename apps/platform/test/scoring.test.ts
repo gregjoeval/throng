@@ -175,10 +175,10 @@ describe("scoring triggers", () => {
     expect(await code(store.scoreNow(PROJECT, bob, ref!))).toBe("forbidden");
 
     const request = queued(await store.scoreNow(PROJECT, adaAgent, ref!));
-    expect(request.run).toMatchObject({ sha: base.hash, trigger: "score_now", agent: "claude" });
+    expect(request.run).toMatchObject({ sha: base.hash, trigger: "scoreNow", agent: "claude" });
 
     await store.openAttempt(PROJECT, ada, ref!);
-    expect(await code(store.scoreNow(PROJECT, ada, ref!))).toBe("invalid_state");
+    expect(await code(store.scoreNow(PROJECT, ada, ref!))).toBe("invalidState");
     expect(runs(ref!)).toHaveLength(1);
   });
 
@@ -187,7 +187,7 @@ describe("scoring triggers", () => {
     const task = store.createTask(PROJECT, cat, { title: "Cat's task" });
     const [made] = await store.createAttempts(PROJECT, ada, { task: task.number });
     const ref = { task: made!.task, number: made!.number };
-    expect(await code(store.rescore(PROJECT, ada, ref))).toBe("invalid_state");
+    expect(await code(store.rescore(PROJECT, ada, ref))).toBe("invalidState");
 
     await store.openAttempt(PROJECT, ada, ref);
     expect(await code(store.rescore(PROJECT, bob, ref))).toBe("forbidden");
@@ -207,7 +207,7 @@ describe("scoring triggers", () => {
     const task = store.createTask(PROJECT, ada, { title: "Empty" });
     const [made] = await store.createAttempts(PROJECT, ada, { task: task.number });
     const ref = { task: made!.task, number: made!.number };
-    expect(await code(store.scoreNow(PROJECT, ada, ref))).toBe("invalid_state");
+    expect(await code(store.scoreNow(PROJECT, ada, ref))).toBe("invalidState");
     expect((await store.openAttempt(PROJECT, ada, ref)).state).toBe("open");
     expect(store.scoring.listRuns({ task: ref.task, attempt: ref.number })).toEqual([]);
   });
@@ -273,7 +273,7 @@ describe("the scoring queue", () => {
       [running!.sha, "cancelled"],
       [head, "running"],
     ]);
-    expect(journal().find((e) => e.kind === "scoring_cancelled")).toMatchObject({ run: 1, superseded_by: head });
+    expect(journal().find((e) => e.kind === "scoringCancelled")).toMatchObject({ run: 1, superseded_by: head });
 
     // A late report from the cancelled run is discarded, and a second drain stops nothing more.
     expect(store.scoring.finish(running!.id, done())).toBe(false);
@@ -338,7 +338,7 @@ describe("the scoring queue", () => {
     workflow.failNext = true;
     await store.scoring.drain();
     expect(runs(ref!)).toMatchObject([{ status: "errored" }]);
-    expect(journal().find((e) => e.kind === "scoring_errored")).toMatchObject({
+    expect(journal().find((e) => e.kind === "scoringErrored")).toMatchObject({
       error: expect.stringMatching(/unavailable/),
     });
   });
@@ -378,7 +378,7 @@ describe("the scoring queue", () => {
     expect(workflow.terminated).toHaveLength(3);
     expect(
       journal()
-        .filter((e) => e.kind === "scoring_cancelled")
+        .filter((e) => e.kind === "scoringCancelled")
         .map((e) => e.reason),
     ).toEqual(["returned to draft", "attempt closed", "attempt obsolete", "attempt merged"]);
   });
@@ -434,7 +434,7 @@ describe("results", () => {
     store.scoring.finish(runs(ref!)[0]!.id, errored());
     expect(runs(ref!)[0]).toMatchObject({ status: "errored", error: "sandbox lost", result: null });
     expect(store.getAttempt(PROJECT, ada, ref!).scoring.status).toBe("errored");
-    expect(journal().find((e) => e.kind === "scoring_errored")).toMatchObject({ error: "sandbox lost" });
+    expect(journal().find((e) => e.kind === "scoringErrored")).toMatchObject({ error: "sandbox lost" });
   });
 
   it("marks results for older heads superseded, and keeps them for history", async () => {

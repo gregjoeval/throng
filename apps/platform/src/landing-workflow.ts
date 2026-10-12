@@ -47,7 +47,7 @@ const NOTHING_RUN: RawScore = { base: null, shortstat: "", builtinMs: 0, setupFa
  *    records the tree, `main`'s sha and the merged tree's `.throng/config.yml`.
  * 2. Retest, in the same container, only when the merged tree's config has required checks: setup
  *    and the required checks on the merged tree, with the scoring runner, outbound policy and logs. A
- *    required check not passing, or an invalid config, ends it `failed_checks`. Reading the merged
+ *    required check not passing, or an invalid config, ends it `failedChecks`. Reading the merged
  *    tree's config rather than `main`'s lets a merge request that fixes a broken config land.
  * 3. Land, in the trusted `land` container (origin write, fork read, no repository code). The `check`
  *    container is destroyed first, so the landing's one Sandbox slot holds one container. It first
@@ -149,7 +149,7 @@ export class LandingWorkflow extends WorkflowEntrypoint<Env, LandingParams> {
               );
               return { result: built, logs: stored };
             });
-      if (result.gate !== "passed") return { kind: "failed_checks", details: failedChecks(result, logs) };
+      if (result.gate !== "passed") return { kind: "failedChecks", details: failedChecks(result, logs) };
     }
 
     // The landing holds one Sandbox slot: the `check` container goes before the `land` one starts.

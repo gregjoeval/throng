@@ -96,9 +96,9 @@ describe("ref resolution", () => {
     expect((await get(`${base}/commit/${work.hash}?attempt=nope`)).status).toBe(400);
   });
 
-  it("returns not_found for unknown refs, projects and empty repos", async () => {
+  it("returns notFound for unknown refs, projects and empty repos", async () => {
     const { repos, get, post, origin, base } = await setup();
-    const notFound = { error: { code: "not_found", message: expect.any(String) } };
+    const notFound = { error: { code: "notFound", message: expect.any(String) } };
     expect((await get(`${base}/tree/main`)).body).toEqual(notFound);
     expect((await get(`/projects/greg/nope/tree/main`)).status).toBe(404);
     expect((await get(`/projects/greg/nope/refs`)).status).toBe(404);

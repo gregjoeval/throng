@@ -20,7 +20,7 @@ export interface Project {
   id: string;
   handle: string;
   owner: { id: string; handle: string };
-  created_at: string;
+  createdAt: string;
 }
 
 export interface ProjectDeps {
@@ -56,7 +56,7 @@ function project(row: ProjectRow): Project {
     id: row.id,
     handle: row.handle,
     owner: { id: row.owner_id, handle: row.owner_handle },
-    created_at: row.created_at,
+    createdAt: row.created_at,
   };
 }
 
@@ -81,7 +81,7 @@ export function projectService({ db, repos, newId = randomProjectId }: ProjectDe
      */
     async create(actor: Actor, input: { handle: string }): Promise<Project> {
       const owner = actor.user;
-      if (!isProjectHandle(input.handle)) throw new ServiceError("invalid_request", `invalid project handle`);
+      if (!isProjectHandle(input.handle)) throw new ServiceError("invalidRequest", `invalid project handle`);
       if ((await resolveProject(db, owner.handle, input.handle)) !== null) throw duplicate(owner.handle, input.handle);
 
       const id = await createOrigin(db, repos, newId);
@@ -121,7 +121,7 @@ export function projectService({ db, repos, newId = randomProjectId }: ProjectDe
     /** The project at `owner/project`. Any signed-in actor may read any project in P0. */
     async get(_actor: Actor, input: { owner: string; project: string }): Promise<Project> {
       const found = await resolveProject(db, input.owner, input.project);
-      if (found === null) throw new ServiceError("not_found", `no project ${input.owner}/${input.project}`);
+      if (found === null) throw new ServiceError("notFound", `no project ${input.owner}/${input.project}`);
       return found;
     },
   };

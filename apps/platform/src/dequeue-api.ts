@@ -1,20 +1,12 @@
 // The routes for a merge request's latest dequeue, under `/api/projects/{owner}/{project}/tasks/{t}/
 // merge-request/dequeue`: its details, each conflicting file's display diffs, and the logs of the
-// retest behind a `failed_checks` dequeue. Mounted by `api.ts`. Like the other merge request reads,
+// retest behind a `failedChecks` dequeue. Mounted by `api.ts`. Like the other merge request reads,
 // they take a bearer token or throng-web's forwarded identity.
 
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import type { AccessBindings } from "./access.ts";
 import type { AuthEnv, bearerOrForwarded } from "./auth.ts";
-import {
-  diffContent,
-  diffResponse,
-  FileDiffSchema,
-  ProjectPathSchema,
-  publicFileDiff,
-  TAIL,
-  tailedRoutes,
-} from "./api-shared.ts";
+import { diffContent, diffResponse, FileDiffSchema, ProjectPathSchema, TAIL, tailedRoutes } from "./api-shared.ts";
 import { CONFLICT_CAPS, CONFLICT_TYPES } from "./conflicts.ts";
 import { diffFile, type FileSide } from "./diff.ts";
 import { errorBody, errorResponse, ServiceError } from "./errors.ts";
@@ -42,7 +34,7 @@ const SidesSchema = (description: string) =>
 
 const ConflictHunkSchema = z
   .object({
-    start_line: z.number().int().openapi({
+    startLine: z.number().int().openapi({
       description: "The 1-based line in the base where the hunk starts (or goes, when it has no base lines).",
     }),
     base: z.array(z.string()).openapi({ description: "The base's lines, without line endings." }),
@@ -112,7 +104,7 @@ const DequeueSchema = z
     at: z.string(),
     details: z.union([ConflictDetailsSchema, FailedChecksDetailsSchema, ErroredDetailsSchema]).nullable().openapi({
       description:
-        "By reason: `conflict`, `failed_checks` and `errored` have theirs; `new_push` and `cancelled` have none.",
+        "By reason: `conflict`, `failedChecks` and `errored` have theirs; `newPush` and `cancelled` have none.",
     }),
   })
   .openapi("MergeRequestDequeue");
@@ -133,7 +125,7 @@ export function dequeueRoutes({ auth, repos, tasks, logs }: DequeueOptions) {
 
   const api = new OpenAPIHono<AuthEnv>({
     defaultHook: (result, c) => {
-      if (!result.success) return c.json(errorBody("invalid_request", z.prettifyError(result.error)), 400);
+      if (!result.success) return c.json(errorBody("invalidRequest", z.prettifyError(result.error)), 400);
       return undefined;
     },
   });
@@ -201,7 +193,7 @@ export function dequeueRoutes({ auth, repos, tasks, logs }: DequeueOptions) {
         const old = sideOf("base");
         const next = sideOf(side);
         if (old === null && next === null)
-          throw new ServiceError("not_found", `neither the base nor ${side} has ${path}`);
+          throw new ServiceError("notFound", `neither the base nor ${side} has ${path}`);
         const diff = (repo: string) => diffFile(repos(c.env), repo, old, next);
         // The attempt's blob is in its fork while the attempt is active, and in origin once it's archived.
         const file =
@@ -209,7 +201,7 @@ export function dequeueRoutes({ auth, repos, tasks, logs }: DequeueOptions) {
         return diffResponse(
           c,
           () => file.patch ?? "",
-          () => publicFileDiff(file),
+          () => file,
         ) as never;
       },
     )
@@ -221,8 +213,8 @@ export function dequeueRoutes({ auth, repos, tasks, logs }: DequeueOptions) {
         tags: ["Merge queue"],
         summary: "Stream a log of the retest behind a failed checks dequeue",
         description:
-          "For a latest dequeue with reason `failed_checks`: the log a failing check's `log` names, from the " +
-          "landing's retest. Logs expire like scoring runs' do; an expired log is `not_found`.",
+          "For a latest dequeue with reason `failedChecks`: the log a failing check's `log` names, from the " +
+          "landing's retest. Logs expire like scoring runs' do; an expired log is `notFound`.",
         security,
         middleware: [auth] as const,
         request: { params: TaskPathSchema.extend({ name: z.string().openapi({ example: "test" }) }) },
@@ -236,7 +228,7 @@ export function dequeueRoutes({ auth, repos, tasks, logs }: DequeueOptions) {
         const { name, ...params } = c.req.valid("param");
         const key = await service(c.env).dequeueLogKey(c.var.actor, { ...taskPath(params), name });
         const log = await logs(c.env).get(key);
-        if (log === null) throw new ServiceError("not_found", `the log ${name} has expired`);
+        if (log === null) throw new ServiceError("notFound", `the log ${name} has expired`);
         return c.body(log.body, 200, { "Content-Type": LOG_CONTENT_TYPE }) as never;
       },
     );

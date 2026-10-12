@@ -14,6 +14,7 @@
 // `request` only writes rows, so it can sit inside the store's transactions. Starting and stopping
 // Workflows is I/O, done by `drain`, which the Durable Object runs after every store call.
 
+import { normaliseResult } from "./casing.ts";
 import { forkRepo } from "./repos.ts";
 import type { ScoringResult } from "./results.ts";
 import { attemptRef, type Sql } from "./task-store.ts";
@@ -22,7 +23,7 @@ import type { Actor } from "./tokens.ts";
 /** Most Sandbox-holding runs (scoring runs and the landing) one project may have running at once. */
 export const SCORING_CAP = 3;
 
-export const SCORING_TRIGGERS = ["open", "push", "score_now", "rescore"] as const;
+export const SCORING_TRIGGERS = ["open", "push", "scoreNow", "rescore"] as const;
 export const RUN_STATUSES = ["queued", "running", "done", "cancelled", "errored"] as const;
 export type ScoringTrigger = (typeof SCORING_TRIGGERS)[number];
 export type RunStatus = (typeof RUN_STATUSES)[number];
@@ -291,7 +292,7 @@ export class ScoringQueue {
       const instanceId = `${forkRepo(input.project, headAttemptRef(row))}-${input.sha.slice(0, 12)}-${row.id}`;
       this.#sql.exec("UPDATE scoring_runs SET instance_id = ? WHERE id = ?", instanceId, row.id);
       const run = toRun({ ...row, instance_id: instanceId });
-      this.#journal("scoring_queued", run, { trigger: input.trigger });
+      this.#journal("scoringQueued", run, { trigger: input.trigger });
       return { queued: true, run };
     });
   }
@@ -358,7 +359,7 @@ export class ScoringQueue {
         .map(toRun);
       for (const run of rows) {
         this.#sql.exec("UPDATE scoring_runs SET status = 'running', started_at = ? WHERE id = ?", this.#ms(), run.id);
-        this.#journal("scoring_started", run, { instance_id: run.instance_id });
+        this.#journal("scoringStarted", run, { instanceId: run.instance_id });
       }
       return rows;
     });
@@ -400,7 +401,7 @@ export class ScoringQueue {
           at,
           id,
         );
-        this.#journal("scoring_errored", run, { error: outcome.error });
+        this.#journal("scoringErrored", run, { error: outcome.error });
       }
       return true;
     });
@@ -434,7 +435,7 @@ export class ScoringQueue {
         this.#ms(),
         run.id,
       );
-      this.#journal("scoring_errored", run, { error: String(cause) });
+      this.#journal("scoringErrored", run, { error: String(cause) });
       return;
     }
     // A newer head may have cancelled the run while its Workflow was being created.
@@ -458,7 +459,7 @@ export class ScoringQueue {
 
   #cancel(run: StoredRun, detail: Record<string, unknown>): void {
     this.#sql.exec("UPDATE scoring_runs SET status = 'cancelled', finished_at = ? WHERE id = ?", this.#ms(), run.id);
-    this.#journal("scoring_cancelled", run, detail);
+    this.#journal("scoringCancelled", run, detail);
   }
 
   #journal(kind: string, run: StoredRun, extra: Record<string, unknown>): void {
@@ -494,7 +495,7 @@ function toRun(row: RunRow): StoredRun {
 /** A stored result; one stored before runs kept logs has none. */
 function storedResult(json: string): ScoringResult {
   const result = JSON.parse(json) as Omit<ScoringResult, "logs"> & { logs?: string[] };
-  return { ...result, logs: result.logs ?? [] };
+  return normaliseResult({ ...result, logs: result.logs ?? [] });
 }
 
 /** A result in a few words for the journal: `no checks configured`, `2 passed, 1 failed`, `config invalid`. */

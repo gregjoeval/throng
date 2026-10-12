@@ -10,18 +10,19 @@
 
 import type { ConflictDetails } from "./conflicts.ts";
 import type { ErroredDetails, FailedChecksDetails, LandingOutcome } from "./landing.ts";
+import { normaliseDequeue } from "./casing.ts";
 import type { Sql } from "./task-store.ts";
 import type { Actor } from "./tokens.ts";
 
-export const MERGE_REQUEST_STATES = ["pending", "queued", "landing", "needs_review", "merged", "cancelled"] as const;
+export const MERGE_REQUEST_STATES = ["pending", "queued", "landing", "needsReview", "merged", "cancelled"] as const;
 export type MergeRequestState = (typeof MERGE_REQUEST_STATES)[number];
 
 /** States a merge request is open in; a task has at most one open merge request. */
-export const OPEN_MERGE_REQUEST_STATES = ["pending", "queued", "landing", "needs_review"] as const;
+export const OPEN_MERGE_REQUEST_STATES = ["pending", "queued", "landing", "needsReview"] as const;
 /** States in the merge queue. */
 const IN_QUEUE = ["queued", "landing"] as const;
 
-export const DEQUEUE_REASONS = ["conflict", "failed_checks", "new_push", "cancelled", "errored"] as const;
+export const DEQUEUE_REASONS = ["conflict", "failedChecks", "newPush", "cancelled", "errored"] as const;
 export type DequeueReason = (typeof DEQUEUE_REASONS)[number];
 
 /** The journal events of a merge request, as the spec names them. */
@@ -31,7 +32,7 @@ export type MergeRequestEvent =
   | "queued"
   | "landing"
   | "dequeued"
-  | "needs_review"
+  | "needsReview"
   | "merged"
   | "cancelled";
 
@@ -47,9 +48,9 @@ export interface ActedBy {
  */
 export type DequeueCause =
   | { reason: "conflict"; details: ConflictDetails }
-  | { reason: "failed_checks"; details: FailedChecksDetails }
+  | { reason: "failedChecks"; details: FailedChecksDetails }
   | { reason: "errored"; details: ErroredDetails }
-  | { reason: "new_push" }
+  | { reason: "newPush" }
   | { reason: "cancelled" };
 
 /** A merge request's last dequeue: its cause, and when. */
@@ -60,8 +61,8 @@ export function dequeueCause(outcome: Exclude<LandingOutcome, { kind: "landed" }
   switch (outcome.kind) {
     case "conflict":
       return { reason: "conflict", details: outcome.details };
-    case "failed_checks":
-      return { reason: "failed_checks", details: outcome.details };
+    case "failedChecks":
+      return { reason: "failedChecks", details: outcome.details };
     case "errored":
       return { reason: "errored", details: outcome.details };
   }
@@ -131,7 +132,7 @@ const SCHEMA = [
   )`,
   // One open merge request per task.
   `CREATE UNIQUE INDEX IF NOT EXISTS merge_requests_open_task ON merge_requests (task)
-    WHERE state IN ('pending', 'queued', 'landing', 'needs_review')`,
+    WHERE state IN ('pending', 'queued', 'landing', 'needsReview')`,
 ];
 
 export interface MergeRequestsDeps {
@@ -144,6 +145,11 @@ export interface MergeRequestsDeps {
     mr: StoredMergeRequest,
     detail: Record<string, unknown>,
   ) => void;
+}
+
+/** A stored dequeue, read in camelCase whenever it was stored. */
+function storedDequeue(json: string): Dequeue {
+  return normaliseDequeue(JSON.parse(json) as Dequeue);
 }
 
 const sqlList = (states: readonly string[]) => states.map((s) => `'${s}'`).join(", ");
@@ -160,6 +166,11 @@ export class MergeRequests {
     this.#sql = sql;
     this.#now = now;
     this.#journal = journal;
+    // The open-task index from before states were camelCase lists `needsReview`: rebuild it.
+    const [index] = sql.exec<{ sql: string }>(
+      "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'merge_requests_open_task'",
+    );
+    if (index?.sql.includes("needs_review") === true) sql.exec("DROP INDEX merge_requests_open_task");
     for (const statement of SCHEMA) sql.exec(statement);
   }
 
@@ -204,7 +215,7 @@ export class MergeRequests {
        RETURNING last_dequeue`,
       mr.id,
     );
-    return row === undefined ? null : (JSON.parse(row.last_dequeue) as Dequeue);
+    return row === undefined ? null : storedDequeue(row.last_dequeue);
   }
 
   /** The merge queue: landing first, then queued, first in first out. */
@@ -270,13 +281,13 @@ export class MergeRequests {
   /**
    * Takes a queued or landing merge request out of the queue for `cause`, recording it as
    * `last_dequeue`, and moves it to `to`: `pending` (held) for conflict, failed checks and errors,
-   * `needs_review` for a new push, `cancelled` for a cancel.
+   * `needsReview` for a new push, `cancelled` for a cancel.
    */
   dequeue(
     actor: Actor | null,
     mr: StoredMergeRequest,
     cause: DequeueCause,
-    to: "pending" | "needs_review" | "cancelled",
+    to: "pending" | "needsReview" | "cancelled",
   ): StoredMergeRequest {
     const { reason } = cause;
     const dequeue: Dequeue = { ...cause, at: this.#stamp() };
@@ -296,7 +307,7 @@ export class MergeRequests {
   move(
     actor: Actor | null,
     mr: StoredMergeRequest,
-    to: "needs_review" | "cancelled",
+    to: "needsReview" | "cancelled",
     detail: Record<string, unknown> = {},
   ) {
     this.#sql.exec("UPDATE merge_requests SET state = ?, queued_at = NULL, held = 0 WHERE id = ?", to, mr.id);
@@ -344,7 +355,7 @@ export class MergeRequests {
       approved_at: row.approved_at,
       queued_at: row.queued_at,
       position: place,
-      last_dequeue: row.last_dequeue === null ? null : (JSON.parse(row.last_dequeue) as Dequeue),
+      last_dequeue: row.last_dequeue === null ? null : storedDequeue(row.last_dequeue),
       merge_sha: row.merge_sha,
       merged_at: row.merged_at,
       created_at: row.created_at,

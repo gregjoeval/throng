@@ -174,7 +174,7 @@ export function browseRoutes({ auth, repos, tasks, diffCache }: BrowseOptions) {
 
   const api = new OpenAPIHono<AuthEnv>({
     defaultHook: (result, c) => {
-      if (!result.success) return c.json(errorBody("invalid_request", z.prettifyError(result.error)), 400);
+      if (!result.success) return c.json(errorBody("invalidRequest", z.prettifyError(result.error)), 400);
       return undefined;
     },
   });
@@ -390,7 +390,7 @@ export function browseRoutes({ auth, repos, tasks, diffCache }: BrowseOptions) {
         const at = await resolved(c, browse(c.env), c.var.actor, { ...params, ref: sha, ...c.req.valid("query") });
         if (at instanceof Response) return at;
         const diff = await diffCommit(repos(c.env), at.repo, at.sha, { cache: diffCache(c.env) });
-        if (diff === null) throw new ServiceError("not_found", `no commit ${at.sha}`);
+        if (diff === null) throw new ServiceError("notFound", `no commit ${at.sha}`);
         cacheFor(c, at);
         return diffResponse(
           c,

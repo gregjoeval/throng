@@ -80,18 +80,18 @@ export interface LandingParams {
 /** A required check that didn't pass on the merged tree, and the name of its stored log, if any. */
 export interface FailedCheck {
   name: string;
-  outcome: "failed" | "timed_out" | "skipped";
+  outcome: "failed" | "timedOut" | "skipped";
   log: string | null;
 }
 
-/** What `lastDequeue.details` holds for `failed_checks`. */
+/** What `last_dequeue.details` holds for `failedChecks`. */
 export interface FailedChecksDetails {
   checks: FailedCheck[];
   /** The config's errors, when the merged tree's config is invalid. */
   error?: string;
 }
 
-/** What `lastDequeue.details` holds for `errored`: the step that kept failing, and its last error. */
+/** What `last_dequeue.details` holds for `errored`: the step that kept failing, and its last error. */
 export interface ErroredDetails {
   step: string;
   error: string;
@@ -101,7 +101,7 @@ export interface ErroredDetails {
 export type LandingOutcome =
   | { kind: "landed"; sha: string }
   | { kind: "conflict"; details: ConflictDetails }
-  | { kind: "failed_checks"; details: FailedChecksDetails }
+  | { kind: "failedChecks"; details: FailedChecksDetails }
   | { kind: "errored"; details: ErroredDetails };
 
 /**

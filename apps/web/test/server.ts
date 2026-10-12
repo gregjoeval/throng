@@ -5,7 +5,7 @@ import type { client } from "@/lib/api";
 
 /** `GET /api/me` for a human signed in through Access, typed from the platform's routes. */
 export const me: InferResponseType<typeof client.api.me.$get, 200> = {
-  user: { id: "u1", handle: "ada", email: "ada@example.com", created_at: "2026-10-10T12:00:00.000Z" },
+  user: { id: "u1", handle: "ada", email: "ada@example.com", createdAt: "2026-10-10T12:00:00.000Z" },
   agent: null,
   token: null,
 };
@@ -14,14 +14,14 @@ type Project = InferResponseType<typeof client.api.projects.$get, 200>["projects
 
 /** A project owned by `ada`, as the platform returns it. */
 export function project(handle: string, owner = me.user): Project {
-  return { id: `id-${handle}`, handle, owner: { id: owner.id, handle: owner.handle }, created_at: me.user.created_at };
+  return { id: `id-${handle}`, handle, owner: { id: owner.id, handle: owner.handle }, createdAt: me.user.createdAt };
 }
 
 /** `ada`'s projects in the default handlers. */
 export const projects: Project[] = [project("alpha"), project("beta")];
 
 export const notFound = (message: string) =>
-  HttpResponse.json({ error: { code: "not_found", message } }, { status: 404 });
+  HttpResponse.json({ error: { code: "notFound", message } }, { status: 404 });
 
 /** Default platform API handlers; override per test with `server.use(...)`. */
 export const handlers = [

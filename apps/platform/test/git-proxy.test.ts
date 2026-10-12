@@ -139,7 +139,7 @@ describe("git proxy", () => {
 
     expect(journal()).toHaveLength(1);
     expect(journal()[0]).toMatchObject({ kind: "pushed", user_id: ada.user.id, task: 1, attempt: 1 });
-    expect(JSON.parse(journal()[0]!.detail)).toEqual({ ref: "t1a1", git_ref: "refs/heads/main", before, after: sha });
+    expect(JSON.parse(journal()[0]!.detail)).toEqual({ ref: "t1a1", gitRef: "refs/heads/main", before, after: sha });
     // A draft isn't scored on push.
     expect(pushed.stderr).not.toMatch(/scoring/);
   });

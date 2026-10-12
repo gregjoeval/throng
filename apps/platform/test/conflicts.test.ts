@@ -63,7 +63,7 @@ describe("parseMergeTree", () => {
       files: [
         {
           path: "del.txt",
-          type: "modify_delete",
+          type: "modifyDelete",
           blobs: blobs(B("1"), null, B("3")),
           modes: blobs("100644", null, "100644"),
         },
@@ -75,7 +75,7 @@ describe("parseMergeTree", () => {
         },
         {
           path: "new.txt",
-          type: "add_add",
+          type: "addAdd",
           blobs: blobs(null, B("d"), B("e")),
           modes: blobs(null, "100644", "100644"),
         },
@@ -200,7 +200,7 @@ describe("conflictFiles", () => {
     const files = conflictFiles(
       parsed,
       [
-        { path: "g.js", status: "too_large" },
+        { path: "g.js", status: "tooLarge" },
         { path: "new.txt", status: "failed" },
       ],
       caps,

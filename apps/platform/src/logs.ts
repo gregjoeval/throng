@@ -58,9 +58,9 @@ export function landingLogKey(
   return `${LOG_PREFIX}${project}/t${task}a${attempt}/${head}/landing-${landing}/${name}.log`;
 }
 
-/** The `not_found` for a log a run doesn't have: never stored, expired, or a name no log can have. */
+/** The `notFound` for a log a run doesn't have: never stored, expired, or a name no log can have. */
 export function missingLog(run: number, name: string): ServiceError {
-  return new ServiceError("not_found", `run ${run} has no log ${name}`);
+  return new ServiceError("notFound", `run ${run} has no log ${name}`);
 }
 
 /** `readLogScript`'s exit code when the step wrote no log (it was skipped). */

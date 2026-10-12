@@ -42,7 +42,7 @@ describe("projectService.create", () => {
       id: expect.stringMatching(/^[a-z0-9]{6}$/),
       handle: "throng",
       owner: { id: ada.user.id, handle: "ada" },
-      created_at: expect.any(String),
+      createdAt: expect.any(String),
     });
     expect(repos.calls).toEqual([{ method: "create", args: [`${project.id}-main`, { defaultBranch: "main" }] }]);
     expect(await repos.get(`${project.id}-main`)).toMatchObject({ defaultBranch: "main", parent: null });
@@ -67,7 +67,7 @@ describe("projectService.create", () => {
   it("rejects invalid handles", async () => {
     const { greg, service } = await setup();
     for (const handle of ["", "Throng", "a--b", "-a", "a-", "a.git", "a/b", "x".repeat(41)]) {
-      expect((await failure(service.create(greg, { handle }))).code, handle).toBe("invalid_request");
+      expect((await failure(service.create(greg, { handle }))).code, handle).toBe("invalidRequest");
     }
   });
 
@@ -121,7 +121,7 @@ describe("projectService.get and resolveProject", () => {
       ["ada", "throng"],
     ] as const) {
       expect(await resolveProject(db, owner, project)).toBeNull();
-      expect((await failure(service.get(greg, { owner, project }))).code).toBe("not_found");
+      expect((await failure(service.get(greg, { owner, project }))).code).toBe("notFound");
     }
   });
 });

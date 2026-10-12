@@ -112,7 +112,7 @@ export function gitRoutes(options: GitProxyOptions) {
           ? null
           : await call(backend, "authorizePush", [target.project, c.var.actor, target.attempt]);
       if (target.endpoint === "info/refs") {
-        if (claim !== null) return text(claim.code === "not_found" ? 404 : 403, `Push rejected: ${claim.message}`);
+        if (claim !== null) return text(claim.code === "notFound" ? 404 : 403, `Push rejected: ${claim.message}`);
       } else {
         const read = await readCommands(c);
         if (read instanceof Response) return read;
@@ -318,7 +318,7 @@ async function pushToCreate(
       if (done.ok) {
         pending = false;
         const made = done.value as { task: StoredTask; attempt: StoredAttempt; scoring: ScoringRequest };
-        messages = [...createdLines(c, made.task, made.attempt, branch, route.new_task), ...scoringLines(made)];
+        messages = [...createdLines(c, made.task, made.attempt, branch, route.newTask), ...scoringLines(made)];
       } else {
         await abandon();
         report = refuse(report, done.message);
@@ -379,7 +379,7 @@ function scoringLines({ scoring }: { scoring: ScoringRequest | null }): string[]
 
 /** The `remote:` lines for a push recorded on an attempt's fork: scoring, then its merge request's news. */
 function recordLines(c: GitContext, record: PushRecord): string[] {
-  return [...scoringLines(record), ...mergeRequestLines(c, record.merge_request)];
+  return [...scoringLines(record), ...mergeRequestLines(c, record.mergeRequest)];
 }
 
 /** The `remote:` lines telling the pusher their merge request was dequeued, or now needs review. */
@@ -394,7 +394,7 @@ function mergeRequestLines(c: GitContext, notice: PushNotice | null): string[] {
       `${mr} dequeued (${reason})${count} — ${projectApi(c)}/tasks/${taskRef(notice.task)}/merge-request/dequeue`,
     );
   }
-  if (notice.needs_review !== null) lines.push(`${mr} needs review: new head ${notice.needs_review}`);
+  if (notice.needsReview !== null) lines.push(`${mr} needs review: new head ${notice.needsReview}`);
   return lines;
 }
 /** The `remote:` lines for a push that made an attempt. */

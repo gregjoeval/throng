@@ -36,7 +36,7 @@ function storeSetup() {
   const sql = testSql();
   const store = new TaskStore({ sql, repos, now: () => new Date("2026-10-10T12:00:00.000Z") });
   const journal = () =>
-    sql.db.prepare("SELECT kind, user_id, agent, task, attempt, detail FROM journal WHERE kind = 'handed_off'").all();
+    sql.db.prepare("SELECT kind, user_id, agent, task, attempt, detail FROM journal WHERE kind = 'handedOff'").all();
   return { store, journal };
 }
 
@@ -72,7 +72,7 @@ describe("handOffAttempt", () => {
     expect(store.getAttempt(PROJECT, bobUser, ref).author).toBe(bobUser.user.id);
     expect(journal()).toEqual([
       {
-        kind: "handed_off",
+        kind: "handedOff",
         user_id: adaUser.user.id,
         agent: "claude",
         task: 1,
@@ -109,7 +109,7 @@ describe("handOffAttempt", () => {
   it.each(["closed", "merged", "obsolete"] as const)("refuses a %s attempt", async (state) => {
     const { store, journal } = storeSetup();
     const ref = await attemptIn(store, state);
-    expect(code(() => store.handOffAttempt(PROJECT, adaUser, { ...ref, to: bobUser.user.id }))).toBe("invalid_state");
+    expect(code(() => store.handOffAttempt(PROJECT, adaUser, { ...ref, to: bobUser.user.id }))).toBe("invalidState");
     expect(journal()).toEqual([]);
   });
 
@@ -117,7 +117,7 @@ describe("handOffAttempt", () => {
     const { store } = storeSetup();
     const ref = await attemptIn(store, "open");
     expect(code(() => store.handOffAttempt(PROJECT, claudeOfAda, { ...ref, to: adaUser.user.id }))).toBe(
-      "invalid_request",
+      "invalidRequest",
     );
   });
 });
@@ -237,11 +237,11 @@ describe("hand-off through the API and the git proxy", () => {
 
     const unknown = await handOff(ada.token, "nobody");
     expect(unknown.status).toBe(404);
-    expect(unknown.body["error"]).toEqual({ code: "not_found", message: "no user nobody" });
+    expect(unknown.body["error"]).toEqual({ code: "notFound", message: "no user nobody" });
 
     const self = await handOff(ada.token, "ada");
     expect(self.status).toBe(400);
-    expect(self.body["error"]["code"]).toBe("invalid_request");
+    expect(self.body["error"]["code"]).toBe("invalidRequest");
 
     expect((await handOff(ada.token, "")).status).toBe(400);
     expect((await handOff(ada.token, "bob", "t1")).status).toBe(400);
@@ -250,6 +250,6 @@ describe("hand-off through the API and the git proxy", () => {
     store(project.id).closeAttempt(project, ada.actor, { task: 1, number: 1 });
     const closed = await handOff(ada.token, "bob");
     expect(closed.status).toBe(409);
-    expect(closed.body["error"]).toEqual({ code: "invalid_state", message: "can't hand off t1a1: it is closed" });
+    expect(closed.body["error"]).toEqual({ code: "invalidState", message: "can't hand off t1a1: it is closed" });
   });
 });

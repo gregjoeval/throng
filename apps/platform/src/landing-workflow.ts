@@ -14,13 +14,16 @@ import type { ConflictCheckResult, LandResult, MergePlan } from "./scripts";
 import { attemptRef } from "./task-refs";
 import { runInSandbox, STEP_RETRIES, storeLogs } from "./workflows";
 
-/** A step that kept failing on infrastructure; the landing ends `errored` naming it. */
+/**
+ * A step that kept failing on infrastructure; the landing ends `errored` naming it. Wraps the error
+ * the step threw as its `cause`, and takes its message from it.
+ */
 class StepFailed extends Error {
   constructor(
     readonly step: string,
     cause: unknown,
   ) {
-    super(String(cause).slice(0, 2000));
+    super(String(cause).slice(0, 2000), { cause });
   }
 }
 
@@ -61,6 +64,7 @@ export class LandingWorkflow extends WorkflowEntrypoint<Env, LandingParams> {
     try {
       outcome = await this.#land(instanceId, params, step);
     } catch (error) {
+      // A step's failure arrives already wrapped; anything else failed the landing itself.
       const failed = error instanceof StepFailed ? error : new StepFailed("landing", error);
       outcome = { kind: "errored", details: { step: failed.step, error: failed.message } };
     }

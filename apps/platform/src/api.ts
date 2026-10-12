@@ -380,7 +380,10 @@ const ScoringSchema = z
 
 const metricFields = {
   source: z.enum(SOURCES).openapi({ description: "Who defined it: Throng, the project's config or the task." }),
-  note: z.string().optional().openapi({ description: "Why its value is null." }),
+  note: z.string().optional().openapi({
+    description:
+      "Why its value is null; on a value, what to know about it, such as that an older result was converted.",
+  }),
 };
 
 const MetricResultSchema = z

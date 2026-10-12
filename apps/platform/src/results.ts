@@ -37,7 +37,7 @@ export interface CheckResult {
 
 interface MetricFields {
   source: Source;
-  /** Why the value is null. */
+  /** Why the value is null; on a value, what to know about it, such as that it came from an older result. */
   note?: string;
 }
 
@@ -387,6 +387,9 @@ function flatten(scored: ScoredCheck[]): Pick<ScoringResult, "checks" | "metrics
   };
 }
 
+/** The note on each metric `upgradeResult` converts: its order is a guess. */
+const LEGACY_METRIC_NOTE = "converted from an older result, which didn't record its order or unit";
+
 /**
  * A result as runs stored it before Throng's own work became checks: `builtin` held the diff's size,
  * `preview` the Preview's status, each check its reported metrics, and an invalid config a synthetic
@@ -404,23 +407,34 @@ export interface LegacyResult extends Pick<ScoringResult, "base" | "config" | "g
 
 /**
  * A stored result in the current shape. A legacy one becomes `_diff`, its checks with their metrics
- * as project numbers (the order a config gives a number by default, since no order was stored), and
- * `_preview`; its synthetic `config` check is dropped, as `config` already holds the error.
+ * as project numbers, and `_preview`; its synthetic `config` check is dropped, as `config` already
+ * holds the error. No order or unit was stored, so each number takes a config's default order
+ * (higher is better) with a note saying so. A metric named like a check is dropped, as the check's
+ * outcome metric holds that name now, with a note on that check.
  */
 export function upgradeResult(stored: ScoringResult | LegacyResult): ScoringResult {
   if (!("builtin" in stored)) return stored;
   const { builtin, preview } = stored;
-  const checks = stored.checks
-    .filter((check) => check.error === undefined)
-    .map(({ metrics, error: _error, ...check }): ScoredCheck => ({
-      check: { ...check, source: "project" },
-      metrics: Object.fromEntries(
-        Object.entries(metrics).map(([name, value]): [string, MetricResult] => [
+  const legacyChecks = stored.checks.filter((check) => check.error === undefined);
+  const names = new Set(legacyChecks.map((check) => check.name));
+  const dropped = new Map<string, string[]>();
+  for (const { name: check, metrics } of legacyChecks) {
+    for (const name of Object.keys(metrics).filter((metric) => names.has(metric))) {
+      const note = `dropped metric ${name}, read from ${check} in an older result: its name is this check's`;
+      dropped.set(name, [...(dropped.get(name) ?? []), note]);
+    }
+  }
+  const checks = legacyChecks.map(({ metrics, error: _error, ...check }): ScoredCheck => ({
+    check: { ...check, source: "project", notes: [...check.notes, ...(dropped.get(check.name) ?? [])] },
+    metrics: Object.fromEntries(
+      Object.entries(metrics)
+        .filter(([name]) => !names.has(name))
+        .map(([name, value]): [string, MetricResult] => [
           name,
-          { source: "project", type: "number", value, order: "desc" },
+          { source: "project", type: "number", value, order: "desc", note: LEGACY_METRIC_NOTE },
         ]),
-      ),
-    }));
+    ),
+  }));
   let deployed: ScoredCheck;
   if (preview.status === "ready") deployed = previewScored("passed", 0, [], preview.url);
   else if (preview.status === "errored") deployed = previewScored("errored", 0, [preview.error], null);

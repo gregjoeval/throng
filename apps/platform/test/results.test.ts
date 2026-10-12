@@ -553,13 +553,31 @@ describe("upgradeResult", () => {
         "_diff.additions": { source: "platform", type: "number", value: 10, order: "asc" },
         "_diff.deletions": { source: "platform", type: "number", value: 4, order: "asc" },
         test: { source: "project", type: "enum", value: "passed", values: OUTCOMES },
-        coverage: { source: "project", type: "number", value: 92, order: "desc" },
+        coverage: {
+          source: "project",
+          type: "number",
+          value: 92,
+          order: "desc",
+          note: "converted from an older result, which didn't record its order or unit",
+        },
         bundle: { source: "project", type: "enum", value: "timedOut", values: OUTCOMES },
         _preview: { source: "platform", type: "enum", value: "passed", values: OUTCOMES },
         "_preview.url": { source: "platform", type: "string", format: "url", value: "https://x.workers.dev" },
       },
       logs: ["test", "preview.deploy"],
     });
+  });
+
+  it("keeps a check's outcome metric over an older metric of the same name, saying it dropped it", () => {
+    const checks = legacy().checks.map((check) =>
+      check.name === "test" ? { ...check, metrics: { coverage: 92, bundle: 5 } } : check,
+    );
+    const result = upgradeResult(legacy({ checks }));
+    expect(result.metrics.bundle).toEqual({ source: "project", type: "enum", value: "timedOut", values: OUTCOMES });
+    expect(result.checks.find((check) => check.name === "bundle")?.notes).toEqual([
+      "metric bundle_kb was not reported",
+      "dropped metric bundle, read from test in an older result: its name is this check's",
+    ]);
   });
 
   it("reads each stored Preview status as a _preview outcome", () => {

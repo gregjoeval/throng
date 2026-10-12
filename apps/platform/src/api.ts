@@ -119,6 +119,20 @@ const UserRefSchema = z.object({ id: z.string(), handle: z.string().openapi({ ex
 
 const ConfigNameSchema = z.string().regex(CONFIG_NAME);
 
+/** Who defined a declared check or metric. */
+const ConfigLayerSchema = z
+  .enum(CONFIG_LAYERS)
+  .openapi({ description: "Who defined it: the project's config, or the task." });
+
+/** The fields only some metric types have, described once for a declared metric and a metric result. */
+const METRIC_TYPE_FIELDS = {
+  numberOrder: z.enum(METRIC_ORDERS).openapi({ description: "`asc` when lower is better, `desc` when higher is." }),
+  booleanOrder: z.enum(METRIC_ORDERS).openapi({ description: "`desc` when true is better, `asc` when false is." }),
+  unit: z.string().openapi({ example: "%" }),
+  format: z.enum(METRIC_FORMATS).openapi({ description: "`url`: shown as a link." }),
+  values: z.array(z.string()).openapi({ description: "Every value it may take, best first." }),
+};
+
 const configMetricFields = {
   name: ConfigNameSchema.openapi({ example: "coverage" }),
   from: z.string().openapi({
@@ -127,7 +141,7 @@ const configMetricFields = {
       "object keys and array indexes.",
     example: "test.coverage-summary.total.lines.pct",
   }),
-  source: z.enum(CONFIG_LAYERS).openapi({ description: "Who defined it: the project's config, or the task." }),
+  source: ConfigLayerSchema,
 };
 
 const MetricSchema = z
@@ -135,23 +149,23 @@ const MetricSchema = z
     z.object({
       ...configMetricFields,
       type: z.literal("number"),
-      unit: z.string().nullable().openapi({ example: "%" }),
-      order: z.enum(METRIC_ORDERS).openapi({ description: "`asc` when lower is better, `desc` when higher is." }),
+      unit: METRIC_TYPE_FIELDS.unit.nullable(),
+      order: METRIC_TYPE_FIELDS.numberOrder,
     }),
     z.object({
       ...configMetricFields,
       type: z.literal("boolean"),
-      order: z.enum(METRIC_ORDERS).openapi({ description: "`desc` when true is better, `asc` when false is." }),
+      order: METRIC_TYPE_FIELDS.booleanOrder,
     }),
     z.object({
       ...configMetricFields,
       type: z.literal("string"),
-      format: z.enum(METRIC_FORMATS).nullable().openapi({ description: "`url`: shown as a link." }),
+      format: METRIC_TYPE_FIELDS.format.nullable(),
     }),
     z.object({
       ...configMetricFields,
       type: z.literal("enum"),
-      values: z.array(z.string()).openapi({ description: "Every value it may take, best first." }),
+      values: METRIC_TYPE_FIELDS.values,
     }),
   ])
   .openapi("Metric", {
@@ -170,7 +184,7 @@ const ConfigCheckSchema = z
       .int()
       .max(MAX_CHECK_TIMEOUT_MS)
       .openapi({ description: "Defaults to 10 minutes.", example: 600_000 }),
-    source: z.enum(CONFIG_LAYERS).openapi({ description: "Who defined it: the project's config, or the task." }),
+    source: ConfigLayerSchema,
   })
   .openapi("Check", { description: "A check the config declares: a command whose exit code is its outcome." });
 
@@ -375,26 +389,26 @@ const MetricResultSchema = z
       ...metricFields,
       type: z.literal("number"),
       value: z.number().nullable(),
-      order: z.enum(METRIC_ORDERS).openapi({ description: "`asc` when lower is better, `desc` when higher is." }),
-      unit: z.string().optional().openapi({ example: "%" }),
+      order: METRIC_TYPE_FIELDS.numberOrder,
+      unit: METRIC_TYPE_FIELDS.unit.optional(),
     }),
     z.object({
       ...metricFields,
       type: z.literal("boolean"),
       value: z.boolean().nullable(),
-      order: z.enum(METRIC_ORDERS).openapi({ description: "`desc` when true is better, `asc` when false is." }),
+      order: METRIC_TYPE_FIELDS.booleanOrder,
     }),
     z.object({
       ...metricFields,
       type: z.literal("string"),
       value: z.string().nullable(),
-      format: z.enum(METRIC_FORMATS).optional().openapi({ description: "`url`: shown as a link." }),
+      format: METRIC_TYPE_FIELDS.format.optional(),
     }),
     z.object({
       ...metricFields,
       type: z.literal("enum"),
       value: z.string().nullable(),
-      values: z.array(z.string()).openapi({ description: "Every value it may take, best first." }),
+      values: METRIC_TYPE_FIELDS.values,
     }),
   ])
   .openapi("MetricResult", { description: "One typed value in a run's score; null when it couldn't be measured." });

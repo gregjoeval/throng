@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { DIFF_CAPS, DIFF_VERSION, diffCommit, diffFile, unifiedPatch } from "../src/diff.ts";
+import { DIFF_CAPS, DIFF_VERSION, diffCommit, diffCommits, diffFile, unifiedPatch } from "../src/diff.ts";
 import type { DiffCache, DiffCaps } from "../src/diff.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { at, defined } from "./support/defined.ts";
 
 const REPO = "p1-main";
+const FORK = "p1-t1a1";
 
 /** Two commits on one repo, the second's diff read back. */
 async function twoCommits(before: Parameters<FakeRepos["commit"]>[1]["files"], after: typeof before) {
@@ -364,5 +365,111 @@ describe("diffFile", () => {
     );
     expect(moved.status).toBe("renamed");
     expect(moved.patch).toMatch(/^diff --git a\/a.txt b\/b.txt\nrename from a.txt\nrename to b.txt\nindex /u);
+  });
+});
+
+describe("diffCommits", () => {
+  it("diffs a base against a head several commits on, as one change", async () => {
+    const repos = new FakeRepos();
+    await repos.create(REPO);
+    const base = repos.commit(REPO, { files: { "a.txt": "1\n", "b.txt": "b\n" } });
+    repos.commit(REPO, { files: { "a.txt": "2\n", "b.txt": "b\n" } });
+    const head = repos.commit(REPO, { files: { "a.txt": "3\n", "c.txt": "c\n" } });
+
+    const diff = defined(
+      await diffCommits(repos, { repo: REPO, sha: base.hash }, { repo: REPO, sha: head.hash }),
+      "a diff",
+    );
+    expect(diff).toMatchObject({
+      from: base.hash,
+      to: head.hash,
+      oldTree: base.treeHash,
+      newTree: head.treeHash,
+      truncated: false,
+      totals: { files: 3, additions: 2, deletions: 2 },
+    });
+    expect(diff.files.map((f) => [f.path, f.status])).toEqual([
+      ["a.txt", "modified"],
+      ["b.txt", "deleted"],
+      ["c.txt", "added"],
+    ]);
+    expect(at(diff.files, 0).patch).toContain("@@ -1 +1 @@\n-1\n+3\n");
+  });
+
+  it("diffs main against a fork's head, reading each side from its own repo", async () => {
+    const repos = new FakeRepos();
+    await repos.create(REPO);
+    repos.commit(REPO, { files: { "a.txt": "a\n", "m.txt": "m\n" } });
+    await repos.fork(REPO, FORK);
+    const head = repos.commit(FORK, { files: { "a.txt": "attempt\n", "m.txt": "m\n" } });
+    // Unrelated work lands on main after the fork, so the fork has none of its objects.
+    const main = repos.commit(REPO, { files: { "a.txt": "a\n", "m.txt": "main moved\n" } });
+    expect(await repos.readCommit(FORK, main.hash)).toBeNull();
+
+    const diff = defined(await diffCommits(repos, { repo: REPO, sha: main.hash }, { repo: FORK, sha: head.hash }));
+    // Two trees, compared as they are: main's own change shows up undone on the head's side.
+    expect(diff.files.map((f) => [f.path, f.additions, f.deletions])).toEqual([
+      ["a.txt", 1, 1],
+      ["m.txt", 1, 1],
+    ]);
+    expect(at(diff.files, 0).patch).toContain("-a\n+attempt\n");
+    expect(at(diff.files, 1).patch).toContain("-main moved\n+m\n");
+  });
+
+  it("is empty for two commits with the same tree", async () => {
+    const repos = new FakeRepos();
+    await repos.create(REPO);
+    const one = repos.commit(REPO, { files: { "a.txt": "a\n" }, message: "one" });
+    const two = repos.commit(REPO, { files: { "a.txt": "a\n" }, message: "two" });
+    const diff = await diffCommits(repos, { repo: REPO, sha: one.hash }, { repo: REPO, sha: two.hash });
+    expect(diff).toEqual({
+      from: one.hash,
+      to: two.hash,
+      oldTree: one.treeHash,
+      newTree: one.treeHash,
+      files: [],
+      totals: { files: 0, additions: 0, deletions: 0 },
+      truncated: false,
+    });
+  });
+
+  it("is null when either commit is missing", async () => {
+    const repos = new FakeRepos();
+    await repos.create(REPO);
+    const one = repos.commit(REPO, { files: { "a.txt": "a\n" } });
+    const missing = { repo: REPO, sha: "a".repeat(40) };
+    expect(await diffCommits(repos, missing, { repo: REPO, sha: one.hash })).toBeNull();
+    expect(await diffCommits(repos, { repo: REPO, sha: one.hash }, missing)).toBeNull();
+  });
+
+  it("applies the caps", async () => {
+    const repos = new FakeRepos();
+    await repos.create(REPO);
+    const from = repos.commit(REPO, { files: { ...numbered(4, "a\n"), "big.txt": `${"x".repeat(50)}\n` } });
+    const to = repos.commit(REPO, { files: { ...numbered(4, "b\n"), "big.txt": "small\n" } });
+    const limits = caps({ maxFiles: 4, maxPatchedFiles: 2, maxBlobBytes: 40 });
+    const diff = defined(
+      await diffCommits(repos, { repo: REPO, sha: from.hash }, { repo: REPO, sha: to.hash }, { caps: limits }),
+    );
+    expect(diff.truncated).toBeTruthy();
+    expect(diff.files.map((f) => [f.path, f.flags, f.patch !== undefined])).toEqual([
+      ["big.txt", ["tooLarge"], false],
+      ["f00.txt", [], true],
+      ["f01.txt", ["truncated"], false],
+      ["f02.txt", ["truncated"], false],
+    ]);
+  });
+
+  it("shares the commit diff's cache entry for the same tree pair", async () => {
+    const { repos, parent, child } = await twoCommits({ "a.txt": "1\n" }, { "a.txt": "2\n" });
+    const cache = new MemoryCache();
+    const commit = defined(await diffCommit(repos, REPO, child.hash, { cache }));
+    const reads = repos.calls.length;
+    const compared = defined(
+      await diffCommits(repos, { repo: REPO, sha: parent.hash }, { repo: REPO, sha: child.hash }, { cache }),
+    );
+    expect(compared.files).toEqual(commit.files);
+    expect(cache.entries.size).toBe(1);
+    expect(repos.calls.slice(reads).map((c) => c.method)).toEqual(["readCommit", "readCommit"]);
   });
 });

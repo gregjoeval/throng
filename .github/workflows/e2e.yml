@@ -1,7 +1,7 @@
 name: E2E
 
-# Runs the e2e scenarios against real Artifacts: deploys the platform's `ci` environment (the
-# `throng-ci` Worker) and runs `pnpm e2e` against it. Manual only, from the Actions tab; see
+# Runs the e2e scenarios against real Artifacts: deploys the `ci` environments (the `throng-ci`
+# and `throng-web-ci` Workers) and runs `pnpm e2e` against them. Manual only, from the Actions tab; see
 # apps/platform/README.md for the setup it needs.
 on:
   workflow_dispatch:
@@ -90,6 +90,31 @@ jobs:
             sleep 5
           done
           echo "::error::$THRONG_URL never accepted this run's SPIKE_TOKEN"
+          exit 1
+      # The arena scenario drives throng-web in a browser. Its `ci` environment binds to throng-ci.
+      - name: Deploy throng-web-ci
+        working-directory: apps/web
+        run: |
+          pnpm exec vite build
+          env -u CLOUDFLARE_ENV pnpm exec wrangler deploy --config dist/server/wrangler.json | tee "$RUNNER_TEMP/deploy-web.log"
+          url=$(grep -oE 'https://throng-web-ci\.[a-z0-9-]+\.workers\.dev' "$RUNNER_TEMP/deploy-web.log" | head -n 1)
+          if [ -z "$url" ]; then
+            echo "::error::No workers.dev URL for throng-web-ci in the deploy output"
+            exit 1
+          fi
+          echo "THRONG_WEB_URL=$url" >> "$GITHUB_ENV"
+      - name: Install Playwright's Chromium
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Wait for throng-web-ci
+        run: |
+          # The scenario loads pages without an Access session, so a redirect to sign in never ends.
+          for _ in $(seq 60); do
+            status=$(curl -s -o /dev/null -w '%{http_code}' "$THRONG_WEB_URL/" || true)
+            if [ "$status" = 200 ]; then exit 0; fi
+            echo "throng-web-ci answered $status; waiting"
+            sleep 5
+          done
+          echo "::error::$THRONG_WEB_URL never answered 200; is it behind Cloudflare Access?"
           exit 1
       - name: Run the e2e suite
         env:

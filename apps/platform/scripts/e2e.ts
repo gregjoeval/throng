@@ -11,6 +11,10 @@
 // queued or landing merge request's source dequeues it with `newPush` to `needsReview`, and it
 // doesn't requeue on its own once the new head passes).
 //
+// The arena scenario, arena, drives throng-web in Playwright's Chromium (THRONG_WEB_URL; see
+// `e2e-browser.ts`): two scored attempts load as lanes against their base, by file lines up their
+// files, and selecting one there lands its merge request and closes the task.
+//
 // Scoring scenarios, through the e2e routes (`/e2e/*`): metrics (a passing project whose checks report metrics), failing (a required check fails the gate),
 // invalid (an invalid config fails the gate with a config entry), preview (a passing gate deploys a
 // Worker Preview built with `preview.command`, and its URL serves it), coalesce (two quick pushes; the first
@@ -32,6 +36,8 @@ import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { ARCHIVE_REF_PREFIX, archiveRef } from "../src/archive.ts";
 import { originRepo } from "../src/repos.ts";
+import { openBrowser } from "./e2e-browser.ts";
+import type { BrowserSession } from "./e2e-browser.ts";
 import { basicAuthHeader, parseCommit } from "./e2e-git.ts";
 import type { Commit } from "./e2e-git.ts";
 
@@ -174,6 +180,7 @@ const scenarios: Record<string, () => Promise<void>> = {
   zeroconfig,
   conflict,
   needsreview,
+  arena,
   metrics,
   failing,
   invalid,
@@ -442,6 +449,117 @@ async function needsreview(): Promise<void> {
   assert(!journal.some((e) => e.kind === "mainAdvanced"), "something landed");
   report(timeline, journal);
   await cleanUp(p.project, p.work);
+}
+
+/**
+ * The arena in a browser, as the e2e user (the task's creator and the project's owner). t1a1 edits
+ * src/greeting.js; t1a2 edits it and src/index.js. With both scored, the task page shows both lanes,
+ * each compared against its base (main, as the task has no branch). By file lines up the two files,
+ * and t1a1 left src/index.js alone. Selecting t1a1 in its lane lands the merge request, and the page
+ * turns into the closed task's summary naming the merge commit.
+ */
+async function arena(): Promise<void> {
+  const web = requireEnv("THRONG_WEB_URL").replace(/\/$/u, "");
+  const timeline = new Timeline();
+  const p = await setUpRealProject(timeline);
+  const fixture = (await git(p.work, "rev-parse", "HEAD")).trim();
+  const [t1, a1, a2] = ["t1", "t1a1", "t1a2"];
+  await createTask(p, t1, "Greet from the arena");
+  await createAttempts(p, t1, [a1, a2], timeline);
+
+  const head1 = await editAndPush(p, a1, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
+  await git(p.work, "checkout", "-q", "--detach", fixture);
+  const index = join(p.work, "src/index.js");
+  await writeFile(index, (await readFile(index, "utf8")).replace('?? "world"', '?? "arena"'));
+  const head2 = await editAndPush(p, a2, "src/greeting.js", (s) => s.replace('"hello"', '"hi from a2"'), "a2");
+  const heads = { [a1]: head1, [a2]: head2 };
+  for (const attempt of [a1, a2]) await throng(p, "POST", `/attempts/${attempt}/open`);
+  timeline.mark("both pushed and opened");
+  for (const [attempt, head] of Object.entries(heads)) {
+    const { result } = await scoredHead(p, attempt, head);
+    assert(result.gate === "passed", `expected ${attempt}'s gate to pass: ${JSON.stringify(result.checks)}`);
+  }
+  timeline.mark("both scored");
+
+  const session = await openBrowser({ web, platform: baseUrl, token: p.token });
+  try {
+    const { page } = session;
+    page.setDefaultTimeout(60_000);
+    const response = await page.goto(`${web}/${p.owner}/${p.project}/tasks/${t1}`);
+    assert(
+      new URL(page.url()).origin === new URL(web).origin && response?.ok() === true,
+      `the task page answered ${response?.status() ?? "nothing"} at ${page.url()}; is throng-web behind Access?`,
+    );
+
+    // Both lanes, each with its own files, compared against its base.
+    const lanes = page.getByRole("region", { name: "Lanes" });
+    const changed = { [a1]: ["src/greeting.js"], [a2]: ["src/greeting.js", "src/index.js"] };
+    for (const [attempt, files] of Object.entries(changed)) {
+      const lane = lanes.getByRole("region", { name: `Lane ${attempt}` });
+      for (const file of files) await lane.getByRole("region", { name: file, exact: true }).waitFor();
+    }
+    timeline.mark("arena loaded both lanes");
+    for (const [attempt, head] of Object.entries(heads)) {
+      const compare = `/api/projects/${p.owner}/${p.project}/compare/${fixture}...${head}?attempt=${attempt}`;
+      const compares = session.apiRequests.filter((r) => r.includes("/compare/"));
+      assert(compares.includes(compare), `${attempt}'s lane wasn't compared against its base: ${compares.join(", ")}`);
+    }
+
+    // By file: one row per file, by path, each saying how many lanes changed it.
+    await page.getByText("By file", { exact: true }).click();
+    const greetingRow = lanes.getByRole("region", { name: "File src/greeting.js" });
+    const indexRow = lanes.getByRole("region", { name: "File src/index.js" });
+    await greetingRow.getByText("changed by 2 of 2").waitFor();
+    await indexRow.getByText("changed by 1 of 2").waitFor();
+    await indexRow.getByRole("group", { name: a1 }).getByText(`${a1} left this file alone.`).waitFor();
+    const rows = await lanes
+      .getByRole("region", { name: /^File /u })
+      .evaluateAll((sections) => sections.map((s) => s.getAttribute("aria-label")));
+    assert(
+      JSON.stringify(rows) === JSON.stringify(["File src/greeting.js", "File src/index.js"]),
+      `unexpected by-file rows ${JSON.stringify(rows)}`,
+    );
+    timeline.mark("by file lined up");
+
+    // Select t1a1 from its lane, and confirm.
+    await lanes
+      .getByRole("region", { name: `Lane ${a1}` })
+      .getByRole("button", { name: "Select", exact: true })
+      .click();
+    const confirm = page.getByRole("group", { name: "Confirm selection" });
+    await confirm.getByText(`Select ${a1}? The other 1 attempt will be closed and archived.`).waitFor();
+    await confirm.getByRole("button", { name: `Select ${a1}`, exact: true }).click();
+    await page.getByTestId("merge-request-view").waitFor();
+    timeline.mark("t1a1 selected in the arena");
+
+    // Landing closes the task, and the page polls its way to the closed summary.
+    const summary = page.getByText(new RegExp(`^${a1} was merged in [0-9a-f]{7}\\.$`, "u"));
+    await summary.waitFor({ timeout: CHECK_TIMEOUT_MS });
+    timeline.mark("page shows t1 closed");
+    const mainSha = await mergedSha(p, t1);
+    const shown = await summary.getByRole("link").textContent();
+    assert(shown === mainSha.slice(0, 7), `the page names merge commit ${shown}, expected ${mainSha.slice(0, 7)}`);
+    const state = await page.locator('[data-slot="task-state"]').textContent();
+    assert(state === "Closed", `the page shows ${t1} as ${state}`);
+  } catch (error) {
+    await describePage(session);
+    throw error;
+  } finally {
+    await session.close();
+  }
+
+  const sibling = await throng<Attempt>(p, "GET", `/attempts/${a2}`);
+  assert(sibling.state === "closed", `selecting ${a1} left ${a2} ${sibling.state}`);
+  await finish(p.project, p.work, timeline);
+}
+
+/** Prints where a failed browser scenario's page was and what it said. */
+async function describePage({ page }: BrowserSession): Promise<void> {
+  const text = await page
+    .locator("body")
+    .innerText({ timeout: 5000 })
+    .catch((error: unknown) => `(unreadable: ${String(error)})`);
+  console.error(`page at ${page.url()}:\n${text}`);
 }
 
 /** A passing project whose checks report metrics: declared ones are kept, the rest noted. */

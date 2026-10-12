@@ -94,9 +94,13 @@ const ListedEntrySchema = EntrySchema.extend({
 }).openapi("ListedTreeEntry");
 
 const TreeQuerySchema = AttemptQuerySchema.extend({
-  sizes: z.enum(["true", "false"]).optional().openapi({
-    description: "`true` adds each file's size. Each costs a blob read, so leave it off when sizes aren't shown.",
-  }),
+  sizes: z
+    .enum(["true", "false"])
+    .optional()
+    .transform((sizes) => sizes === "true")
+    .openapi({
+      description: "`true` adds each file's size. Each costs a blob read, so leave it off when sizes aren't shown.",
+    }),
 });
 
 const TreeSchema = z
@@ -480,10 +484,10 @@ export function browseRoutes({ auth, repos, tasks, diffCache }: BrowseOptions) {
     );
 }
 
-/** A directory's entries, with each file's size when `sizes` is `"true"`. */
-async function listing(browse: BrowseService, at: Resolved, path: string, sizes: "true" | "false" | undefined) {
+/** A directory's entries, with each file's size when `sizes` asks for them. */
+async function listing(browse: BrowseService, at: Resolved, path: string, sizes: boolean) {
   const entries = await browse.tree(at, path);
-  return sizes === "true" ? browse.sized(at, entries) : entries;
+  return sizes ? browse.sized(at, entries) : entries;
 }
 
 /**

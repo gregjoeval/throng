@@ -480,16 +480,16 @@ export function browseRoutes({ auth, repos, tasks, diffCache }: BrowseOptions) {
     );
 }
 
-/**
- * Resolves the ref. When `If-None-Match` already names the resolved sha, returns the 304 to send
- * instead, so nothing else is read.
- */
 /** A directory's entries, with each file's size when `sizes` is `"true"`. */
 async function listing(browse: BrowseService, at: Resolved, path: string, sizes: "true" | "false" | undefined) {
   const entries = await browse.tree(at, path);
   return sizes === "true" ? browse.sized(at, entries) : entries;
 }
 
+/**
+ * Resolves the ref. When `If-None-Match` already names the resolved sha, returns the 304 to send
+ * instead, so nothing else is read.
+ */
 async function resolved(
   c: Context,
   browse: BrowseService,

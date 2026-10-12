@@ -95,6 +95,24 @@ class Timeline {
   }
 }
 
+/** A check in a run's result: Throng's own (`_diff`, `_preview`) are `platform`, the config's `project`. */
+interface Check {
+  name: string;
+  source: "platform" | "project" | "task";
+  required: boolean;
+  outcome: string;
+  durationMs: number;
+  notes: string[];
+}
+
+/** One metric in a run's result, as far as the scenarios read it. */
+interface Metric {
+  source: "platform" | "project" | "task";
+  type: "number" | "string" | "enum";
+  value: number | string | null;
+  note?: string;
+}
+
 /** What a run reports, as far as the scenarios read it (see `src/results.ts`). */
 interface Run {
   id: number;
@@ -104,17 +122,19 @@ interface Run {
     base: string | null;
     config: { kind: string; error?: string };
     gate: "passed" | "failed";
-    checks: { name: string; required: boolean; outcome: string; metrics: Record<string, number>; notes: string[] }[];
-    builtin: { filesChanged: number; additions: number; deletions: number; durationMs: number };
+    checks: Check[];
+    metrics: Record<string, Metric>;
     logs: string[];
-    preview:
-      | { status: "none" }
-      | { status: "ready"; url: string }
-      | { status: "failed" }
-      | { status: "errored"; error: string };
   } | null;
   error: string | null;
 }
+
+/** The checks a project's config defined, without Throng's own. */
+const configChecks = (result: { checks: Check[] }) => result.checks.filter((c) => c.source !== "platform");
+
+/** `_diff`'s files changed, lines added and lines deleted. */
+const diffSize = (result: { metrics: Record<string, Metric> }) =>
+  ["filesChanged", "additions", "deletions"].map((key) => result.metrics[`_diff.${key}`]?.value ?? null);
 
 /** A project driven through the product API as the e2e user (see `setUpRealProject`). */
 interface RealProject {
@@ -166,8 +186,8 @@ interface Dequeue {
 interface ApiResult {
   config: { kind: string };
   gate: "passed" | "failed";
-  checks: { name: string; outcome: string }[];
-  builtin: { filesChanged: number; additions: number; deletions: number };
+  checks: Check[];
+  metrics: Record<string, Metric>;
 }
 
 interface ScoringStatus {
@@ -245,12 +265,12 @@ async function zeroconfig(): Promise<void> {
   const scoring = await scoredHead(p, a1, head);
   const { result } = scoring;
   assert(result.config.kind === "none", `expected no config, got ${JSON.stringify(result.config)}`);
-  assert(result.gate === "passed" && result.checks.length === 0, "expected a passing gate with no checks");
-  const { filesChanged, additions, deletions } = result.builtin;
+  assert(result.gate === "passed" && configChecks(result).length === 0, "expected a passing gate with no checks");
   assert(
-    filesChanged === 1 && additions === 1 && deletions === 1,
-    `unexpected diff size ${JSON.stringify(result.builtin)}`,
+    JSON.stringify(result.checks.map((c) => [c.name, c.outcome])) === '[["_diff","passed"],["_preview","skipped"]]',
+    `expected only Throng's own checks, _preview skipped: ${JSON.stringify(result.checks)}`,
   );
+  assert(diffSize(result).join() === "1,1,1", `unexpected diff size ${JSON.stringify(diffSize(result))}`);
 
   const selected = await throng<MergeRequest>(p, "POST", `/tasks/${t1}/selection`, { attempt: a1 });
   timeline.mark("t1a1 selected");
@@ -586,12 +606,20 @@ writeFileSync(process.env.THRONG_METRICS, JSON.stringify({ coverage: 87.5, stray
 
   const result = await scored(project, sha);
   assert(result.gate === "passed", `expected the gate to pass: ${JSON.stringify(result.checks)}`);
-  const [test, coverage] = result.checks;
+  const [test, coverage] = configChecks(result);
   assert(
     test?.outcome === "passed" && coverage?.outcome === "passed",
     `unexpected outcomes ${JSON.stringify(result.checks)}`,
   );
-  assert(coverage.metrics.coverage === 87.5, `coverage not recorded: ${JSON.stringify(coverage.metrics)}`);
+  const reported = result.metrics["coverage"];
+  assert(
+    reported?.source === "project" && reported.type === "number" && reported.value === 87.5,
+    `coverage not recorded as a project number: ${JSON.stringify(reported)}`,
+  );
+  assert(
+    result.metrics["test"]?.type === "enum" && result.metrics["test"].value === "passed",
+    `expected test's outcome metric: ${JSON.stringify(result.metrics["test"])}`,
+  );
   assert(
     coverage.notes.some((n) => n.includes("stray")),
     "the undeclared metric was not noted",
@@ -622,13 +650,15 @@ async function failing(): Promise<void> {
   const result = await scored(project, sha);
   assert(result.gate === "failed", "expected the gate to fail");
   assert(
-    result.checks.map((c) => c.outcome).join() === "failed,passed",
+    configChecks(result)
+      .map((c) => c.outcome)
+      .join() === "failed,passed",
     `expected failed then passed, got ${JSON.stringify(result.checks)}`,
   );
   await finish(project, work, timeline);
 }
 
-/** An invalid config fails the gate with a single `config` entry, and runs no checks. */
+/** An invalid config fails the gate with its error on `config`, and runs only Throng's `_diff`. */
 async function invalid(): Promise<void> {
   const timeline = new Timeline();
   const { project, work } = await setUpProject(timeline, {
@@ -644,10 +674,15 @@ async function invalid(): Promise<void> {
   const result = await scored(project, sha);
   assert(result.config.kind === "invalid" && result.gate === "failed", `expected an invalid config to fail the gate`);
   assert(
-    result.checks.length === 1 && result.checks[0]?.name === "config",
-    `expected one config entry, got ${JSON.stringify(result.checks)}`,
+    result.config.error?.includes("checks[0].name") === true,
+    `expected the config's error, got ${JSON.stringify(result.config)}`,
   );
-  assert(result.builtin.filesChanged === 1, "the built-in metrics were not recorded");
+  assert(configChecks(result).length === 0, `expected no config checks, got ${JSON.stringify(result.checks)}`);
+  assert(
+    result.checks.find((c) => c.name === "_preview")?.notes.join() === "skipped: the config is invalid",
+    `expected _preview skipped for the invalid config: ${JSON.stringify(result.checks)}`,
+  );
+  assert(diffSize(result)[0] === 1, `_diff was not recorded: ${JSON.stringify(result.metrics)}`);
   await finish(project, work, timeline);
 }
 
@@ -670,16 +705,25 @@ async function preview(): Promise<void> {
   const result = await scored(project, sha);
   timeline.mark("scored");
   assert(result.gate === "passed", `expected the gate to pass: ${JSON.stringify(result.checks)}`);
-  const deployed = result.preview;
-  assert(deployed.status === "ready", `expected a ready Preview, got ${JSON.stringify(deployed)}`);
+  const check = result.checks.find((c) => c.name === "_preview");
   assert(
-    new URL(deployed.url).hostname.startsWith(`t1a1-p${project}-`),
-    `the Preview is not named after the fork and project: ${deployed.url}`,
+    check?.source === "platform" && check.outcome === "passed" && result.metrics["_preview"]?.value === "passed",
+    `expected _preview to pass, got ${JSON.stringify(check)}`,
+  );
+  const deployed = result.metrics["_preview.url"];
+  assert(
+    deployed?.type === "string" && typeof deployed.value === "string",
+    `expected _preview.url, got ${JSON.stringify(deployed)}`,
+  );
+  const previewUrl = deployed.value;
+  assert(
+    new URL(previewUrl).hostname.startsWith(`t1a1-p${project}-`),
+    `the Preview is not named after the fork and project: ${previewUrl}`,
   );
   assert(result.logs.includes("preview.deploy"), `expected the Preview's log stored: ${JSON.stringify(result.logs)}`);
 
   // A new Preview's hostname can take a moment to answer.
-  const url = `${deployed.url}?name=e2e`;
+  const url = `${previewUrl}?name=e2e`;
   const deadline = Date.now() + 2 * 60 * 1000;
   let last = "";
   while (Date.now() < deadline) {

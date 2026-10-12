@@ -5,7 +5,8 @@
 // - a head that is already queued or running isn't queued again, and one with a `done` run isn't
 //   either, unless the request is a rescore;
 // - a newer head for an attempt cancels its queued or running run, so newest head wins;
-// - at most `SCORING_CAP` runs are running per project; the rest wait, oldest first.
+// - at most `SCORING_CAP` runs are running per project, less the slot the merge queue's landing
+//   holds (it counts toward the cap and goes first); the rest wait, oldest first.
 //
 // It also tracks each attempt's head, moved by every push and scoring request, so a result for an
 // older head is superseded and the attempt's `scoring` status is about its current head.
@@ -18,7 +19,7 @@ import type { ScoringResult } from "./results.ts";
 import { attemptRef, type Sql } from "./task-store.ts";
 import type { Actor } from "./tokens.ts";
 
-/** Most scoring runs one project may have running (each holds a Sandbox) at once. */
+/** Most Sandbox-holding runs (scoring runs and the landing) one project may have running at once. */
 export const SCORING_CAP = 3;
 
 export const SCORING_TRIGGERS = ["open", "push", "score_now", "rescore"] as const;
@@ -159,6 +160,8 @@ export interface ScoringQueueDeps {
   /** Starts and stops runs; without one, runs stay queued. */
   runner?: ScoringRunner | null | undefined;
   now?: () => Date;
+  /** Sandbox slots under the cap held for something else (the merge queue's landing), so runs don't take them. */
+  reserved?: () => number;
 }
 
 /** One project's scoring runs, and the queue that starts them. */
@@ -166,11 +169,13 @@ export class ScoringQueue {
   readonly #sql: Sql;
   readonly #runner: ScoringRunner | null;
   readonly #now: () => Date;
+  readonly #reserved: () => number;
 
-  constructor({ sql, runner = null, now = () => new Date() }: ScoringQueueDeps) {
+  constructor({ sql, runner = null, now = () => new Date(), reserved = () => 0 }: ScoringQueueDeps) {
     this.#sql = sql;
     this.#runner = runner;
     this.#now = now;
+    this.#reserved = reserved;
     for (const statement of SCHEMA) sql.exec(statement);
     const columns = new Set(sql.exec<{ name: string }>("PRAGMA table_info(scoring_runs)").map((c) => c.name));
     for (const column of RUN_COLUMNS) {
@@ -308,6 +313,14 @@ export class ScoringQueue {
     });
   }
 
+  /** How many runs are running, each holding a Sandbox slot. */
+  running(): number {
+    const [{ n } = { n: 0 }] = this.#sql.exec<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM scoring_runs WHERE status = 'running'",
+    );
+    return n;
+  }
+
   /** The newest run id for the attempt, or 0; what a request's `readSince` compares against. */
   latestRunId({ task, attempt }: ScoredAttempt): number {
     const [row] = this.#sql.exec<{ id: number | null }>(
@@ -338,10 +351,7 @@ export class ScoringQueue {
     await Promise.all(stopping.map((run) => this.#stop(runner, run)));
 
     const starting = this.#sql.transaction(() => {
-      const [{ n } = { n: 0 }] = this.#sql.exec<{ n: number }>(
-        "SELECT COUNT(*) AS n FROM scoring_runs WHERE status = 'running'",
-      );
-      const free = SCORING_CAP - n;
+      const free = SCORING_CAP - this.running() - this.#reserved();
       if (free <= 0) return [];
       const rows = this.#sql
         .exec<RunRow>("SELECT * FROM scoring_runs WHERE status = 'queued' ORDER BY id LIMIT ?", free)

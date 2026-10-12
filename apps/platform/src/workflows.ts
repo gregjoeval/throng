@@ -27,36 +27,15 @@ import {
 } from "./results";
 import type { RunResult } from "./sandbox";
 import type { ScoringOutcome, ScoringParams } from "./scoring";
-import {
-  landScript,
-  parseResult,
-  PREVIEW_BUILD_TIMEOUT_MS,
-  previewScript,
-  retestScript,
-  scoreScript,
-  type FailureStage,
-  type LandResult,
-  type PreviewScriptResult,
-  type RetestResult,
-} from "./scripts";
+import { parseResult, PREVIEW_BUILD_TIMEOUT_MS, previewScript, scoreScript, type PreviewScriptResult } from "./scripts";
 
 const TOKEN_TTL_SECONDS = 30 * 60;
 /** The preview step: fetching, installing and the build step at its timeout, then the deploy. */
 const PREVIEW_STEP_TIMEOUT_MS = PREVIEW_BUILD_TIMEOUT_MS + 10 * 60 * 1000;
 /** Each step's retries after its first try, for infrastructure errors; then the run ends `errored`. */
-const STEP_RETRIES = { limit: 2, delay: "5 seconds", backoff: "constant" } as const;
+export const STEP_RETRIES = { limit: 2, delay: "5 seconds", backoff: "constant" } as const;
 /** What a container may reach while its logs are read: nothing. It is already running by then. */
 const NO_ACCESS = { grants: [], preview: null, npmRegistry: false, allow: [] };
-/** Re-test and land rounds before giving up on a main that keeps moving. */
-const LAND_ROUNDS = 3;
-
-/** How the spike's landing ended, journaled after the run's result. */
-export type LandOutcome =
-  | { kind: "landed"; mainSha: string }
-  | { kind: "failed"; stage: FailureStage | "rebase-test"; output: string }
-  | { kind: "bounced"; files: string[]; diff: string }
-  | { kind: "error"; message: string };
-
 /**
  * One scoring run: scores an attempt's head in a Sandbox and reports the result to the project's
  * Durable Object. The config is read from the origin's `main`, so an attempt can't change its own
@@ -64,10 +43,6 @@ export type LandOutcome =
  *
  * When the config has a `preview` section and the gate passed, the head is then deployed as a Worker
  * Preview from a separate container (see `#preview`); a failed Preview never changes the gate.
- *
- * Until the merge queue takes them over, a head whose gate passed is then rebased onto main,
- * re-tested and landed, as the spike did. Landing runs before the result is reported, so a newer
- * push still cancels it.
  *
  * Each setup step's, check's and Preview's log is copied to R2 (`logs.ts`) within the step that
  * wrote it, while its container still runs, so the result names the logs that were stored.
@@ -98,15 +73,6 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
       outcome = { status: "errored", error: String(cause).slice(0, 4000) };
     }
 
-    let landed: LandOutcome | null = null;
-    if (outcome.status === "done" && outcome.result.gate === "passed") {
-      try {
-        landed = await this.#land(instanceId, params, step);
-      } catch (cause) {
-        landed = { kind: "error", message: String(cause).slice(0, 4000) };
-      }
-    }
-
     await step.do("teardown", async () => {
       await Promise.all(
         SCORING_ROLES.map((role) => this.env.SANDBOX.getByName(sandboxName(instanceId, role)).destroy()),
@@ -115,9 +81,6 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
     await step.do("report", async () => {
       const project = this.env.PROJECT.getByName(params.project);
       await project.scoringFinished(params.run, outcome);
-      const detail = { attempt: params.attempt, head: params.sha };
-      if (landed?.kind === "landed") await project.note("main_advanced", { ...detail, sha: landed.mainSha });
-      else if (landed !== null) await project.note("land_failed", { ...detail, landed });
     });
     return outcome;
   }
@@ -130,7 +93,8 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
     plan: ScorePlan,
     timeoutMs: number,
   ): Promise<ScoringResult> {
-    const run = await this.#run(
+    const run = await runInSandbox(
+      this.env,
       instanceId,
       params,
       "score",
@@ -143,39 +107,14 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
     }
     const result = buildResult(config, raw);
     const notes = new Map(result.checks.map((check) => [check.name, check.notes]));
-    const logs = await this.#storeLogs(instanceId, params, "score", logNames(plan), notes);
+    const logs = await storeLogs(
+      this.env,
+      sandboxName(instanceId, "score"),
+      logNames(plan),
+      (log) => logKey(params, log),
+      notes,
+    );
     return { ...result, logs };
-  }
-
-  /**
-   * Copies the role's container's logs to R2, truncated over `MAX_LOG_BYTES`, with each log's
-   * `notes` appended (see `withNotes`), and returns the names stored. A step that never ran wrote no
-   * log, unless it has notes; a log that fails to copy is left out rather than failing the run.
-   */
-  async #storeLogs(
-    instanceId: string,
-    params: ScoringParams,
-    role: SandboxRole,
-    names: string[],
-    notes: ReadonlyMap<string, string[]> = new Map(),
-  ): Promise<string[]> {
-    const sandbox = this.env.SANDBOX.getByName(sandboxName(instanceId, role));
-    const stored: string[] = [];
-    for (const name of names) {
-      try {
-        const read = await sandbox.run(readLogScript(name), { access: NO_ACCESS });
-        if (read.exitCode !== 0 && read.exitCode !== MISSING_LOG_EXIT) {
-          throw new Error(`exit ${read.exitCode}: ${read.stderr.slice(-500)}`);
-        }
-        const log = withNotes(read.exitCode === MISSING_LOG_EXIT ? null : read.stdout, notes.get(name) ?? []);
-        if (log === null) continue;
-        await this.env.LOGS.put(logKey(params, name), log, { httpMetadata: { contentType: LOG_CONTENT_TYPE } });
-        stored.push(name);
-      } catch (cause) {
-        console.error({ event: "scoring.log_not_stored", run: params.run, name, error: String(cause) });
-      }
-    }
-    return stored;
   }
 
   /**
@@ -197,7 +136,8 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
         "preview",
         { retries: STEP_RETRIES, timeout: PREVIEW_STEP_TIMEOUT_MS },
         async () => {
-          const deploy = await this.#run(
+          const deploy = await runInSandbox(
+            this.env,
             instanceId,
             params,
             "preview",
@@ -210,7 +150,12 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
               }),
             { allow, timeoutMs: PREVIEW_STEP_TIMEOUT_MS },
           );
-          return { run: deploy, logs: await this.#storeLogs(instanceId, params, "preview", [PREVIEW_LOG]) };
+          return {
+            run: deploy,
+            logs: await storeLogs(this.env, sandboxName(instanceId, "preview"), [PREVIEW_LOG], (log) =>
+              logKey(params, log),
+            ),
+          };
         },
       );
       const deployed = parseResult<PreviewScriptResult>(run.stdout);
@@ -226,101 +171,98 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
       // A lost Sandbox can't give its log back either; that still mustn't end the run.
       const logs = await step
         .do("preview logs", { retries: STEP_RETRIES }, () =>
-          this.#storeLogs(instanceId, params, "preview", [PREVIEW_LOG]),
+          storeLogs(this.env, sandboxName(instanceId, "preview"), [PREVIEW_LOG], (log) => logKey(params, log)),
         )
         .catch(() => []);
       return { deployed: { error }, logs };
     }
   }
-
-  /** The spike's landing: rebase onto main, re-test, and push, retrying while main moves underneath. */
-  async #land(instanceId: string, params: ScoringParams, step: WorkflowStep): Promise<LandOutcome> {
-    const landStep = { retries: STEP_RETRIES, timeout: "10 minutes" } as const;
-    for (let round = 1; round <= LAND_ROUNDS; round++) {
-      const retest = await step.do(`retest ${round}`, landStep, () =>
-        this.#run(instanceId, params, "retest", (g) =>
-          retestScript(g.originRead.remote, g.forkRead.remote, params.sha),
-        ),
-      );
-      const retested = parseResult<RetestResult>(retest.stdout);
-      if (retested === null) return scriptError("retest", retest);
-      if (retested.kind === "bounced") return retested;
-      if (retested.kind === "failed") {
-        const stage = retested.stage === "install" ? "install" : "rebase-test";
-        return { kind: "failed", stage, output: retested.output };
-      }
-
-      const land = await step.do(`land ${round}`, landStep, () =>
-        this.#run(instanceId, params, "land", (g) =>
-          landScript(g.originWrite.remote, g.forkRead.remote, params.sha, retested),
-        ),
-      );
-      const result = parseResult<LandResult>(land.stdout);
-      if (result === null) return scriptError("land", land);
-      if (result.kind === "landed") return { kind: "landed", mainSha: result.mainSha };
-      if (result.kind === "mismatch") {
-        return {
-          kind: "error",
-          message: `land produced tree ${result.tree}, but retest tested ${retested.tree}; refusing to push`,
-        };
-      }
-    }
-    return { kind: "error", message: `main kept moving; gave up after ${LAND_ROUNDS} rounds` };
-  }
-
-  /**
-   * Runs a script in the role's own container with only that role's grants. They're minted here, in
-   * the step, so a retry never holds a stale one.
-   */
-  async #run<R extends SandboxRole>(
-    instanceId: string,
-    params: ScoringParams,
-    role: R,
-    script: (grants: RoleGrants<R>) => string,
-    { allow = [], timeoutMs }: { allow?: string[]; timeoutMs?: number } = {},
-  ): Promise<RunResult> {
-    const grants = (await this.#grants(params, ROLE_GRANTS[role])) as RoleGrants<R>;
-    const sandbox = this.env.SANDBOX.getByName(sandboxName(instanceId, role));
-    const result = await sandbox.run(script(grants), {
-      // Only the preview container gets the Preview deploy grant; the trusted land container never
-      // reaches the registry.
-      access: roleAccess(role, grants, {
-        preview: { accountId: this.env.CF_ACCOUNT_ID, workerName: this.env.PREVIEW_WORKER },
-        allow,
-      }),
-      ...(timeoutMs === undefined ? {} : { timeoutMs }),
-    });
-    // Exit codes 10+ are infrastructure failures (fetch, checkout, diff); throw so the step retries.
-    if (result.exitCode >= 10) {
-      throw new Error(`${role} script exited ${result.exitCode}: ${result.stderr.slice(-2000)}`);
-    }
-    return result;
-  }
-
-  /** Mints the named grants for the run's origin and fork. */
-  async #grants<K extends keyof RunGrants>(
-    { project, attempt }: ScoringParams,
-    names: readonly K[],
-  ): Promise<Pick<RunGrants, K>> {
-    const repos = reposFor(this.env);
-    const repoNames = { origin: originRepo(project), fork: forkRepo(project, attempt) };
-    const minted = await Promise.all(
-      names.map(async (name) => {
-        const { repo, access } = GRANT_SOURCES[name];
-        const [info, token] = await Promise.all([
-          repos.get(repoNames[repo]),
-          repos.mintToken(repoNames[repo], access, TOKEN_TTL_SECONDS),
-        ]);
-        return [name, { remote: info.remote, token: token.token, access }] as const;
-      }),
-    );
-    return Object.fromEntries(minted) as Pick<RunGrants, K>;
-  }
 }
 
-function scriptError(stage: string, result: RunResult): LandOutcome {
-  return {
-    kind: "error",
-    message: `${stage} script gave no result (exit ${result.exitCode}): ${result.stderr.slice(-2000)}`,
-  };
+/** The repos a run's grants are for: the project's origin and one attempt's fork (`t42a3`). */
+export interface RunRepos {
+  project: string;
+  attempt: string;
+}
+
+/**
+ * Runs a script in the role's own container with only that role's grants. They're minted here, in
+ * the step, so a retry never holds a stale one. Exit codes 10 and up are infrastructure failures
+ * (fetch, checkout, merge); they throw so the step retries.
+ */
+export async function runInSandbox<R extends SandboxRole>(
+  env: Env,
+  instanceId: string,
+  repos: RunRepos,
+  role: R,
+  script: (grants: RoleGrants<R>) => string,
+  { allow = [], timeoutMs }: { allow?: string[]; timeoutMs?: number } = {},
+): Promise<RunResult> {
+  const grants = (await mintGrants(env, repos, ROLE_GRANTS[role])) as RoleGrants<R>;
+  const sandbox = env.SANDBOX.getByName(sandboxName(instanceId, role));
+  const result = await sandbox.run(script(grants), {
+    // Only the preview container gets the Preview deploy grant; the trusted land container never
+    // reaches the registry.
+    access: roleAccess(role, grants, {
+      preview: { accountId: env.CF_ACCOUNT_ID, workerName: env.PREVIEW_WORKER },
+      allow,
+    }),
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
+  });
+  if (result.exitCode >= 10) {
+    throw new Error(`${role} script exited ${result.exitCode}: ${result.stderr.slice(-2000)}`);
+  }
+  return result;
+}
+
+/** Mints the named grants for the run's origin and fork. */
+async function mintGrants<K extends keyof RunGrants>(
+  env: Env,
+  { project, attempt }: RunRepos,
+  names: readonly K[],
+): Promise<Pick<RunGrants, K>> {
+  const repos = reposFor(env);
+  const repoNames = { origin: originRepo(project), fork: forkRepo(project, attempt) };
+  const minted = await Promise.all(
+    names.map(async (name) => {
+      const { repo, access } = GRANT_SOURCES[name];
+      const [info, token] = await Promise.all([
+        repos.get(repoNames[repo]),
+        repos.mintToken(repoNames[repo], access, TOKEN_TTL_SECONDS),
+      ]);
+      return [name, { remote: info.remote, token: token.token, access }] as const;
+    }),
+  );
+  return Object.fromEntries(minted) as Pick<RunGrants, K>;
+}
+
+/**
+ * Copies a container's logs to R2 under `key(name)`, truncated over `MAX_LOG_BYTES`, with each log's
+ * `notes` appended (see `withNotes`), and returns the names stored. A step that never ran wrote no
+ * log, unless it has notes; a log that fails to copy is left out rather than failing the run.
+ */
+export async function storeLogs(
+  env: Env,
+  sandboxId: string,
+  names: string[],
+  key: (name: string) => string,
+  notes: ReadonlyMap<string, string[]> = new Map(),
+): Promise<string[]> {
+  const sandbox = env.SANDBOX.getByName(sandboxId);
+  const stored: string[] = [];
+  for (const name of names) {
+    try {
+      const read = await sandbox.run(readLogScript(name), { access: NO_ACCESS });
+      if (read.exitCode !== 0 && read.exitCode !== MISSING_LOG_EXIT) {
+        throw new Error(`exit ${read.exitCode}: ${read.stderr.slice(-500)}`);
+      }
+      const log = withNotes(read.exitCode === MISSING_LOG_EXIT ? null : read.stdout, notes.get(name) ?? []);
+      if (log === null) continue;
+      await env.LOGS.put(key(name), log, { httpMetadata: { contentType: LOG_CONTENT_TYPE } });
+      stored.push(name);
+    } catch (cause) {
+      console.error({ event: "sandbox.log_not_stored", sandbox: sandboxId, name, error: String(cause) });
+    }
+  }
+  return stored;
 }

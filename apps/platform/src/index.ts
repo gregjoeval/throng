@@ -9,6 +9,7 @@ import { forkRepo, originRepo } from "./repos";
 export { ProjectCoordinator } from "./project";
 export { RunSandbox, OutboundAuth } from "./sandbox";
 export { ScoringWorkflow } from "./workflows";
+export { LandingWorkflow } from "./landing-workflow";
 
 const FORK_READY_TIMEOUT_MS = 60_000;
 const PUSH_TOKEN_TTL_SECONDS = 60 * 60;

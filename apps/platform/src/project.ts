@@ -1,8 +1,16 @@
 import { DurableObject } from "cloudflare:workers";
-import { sandboxName, SCORING_ROLES } from "./grants";
+import { LANDING_ROLES, sandboxName, SCORING_ROLES, type SandboxRole } from "./grants";
 import { reposFor } from "./artifacts";
+import type { LandingOutcome } from "./landing";
 import type { ScoringOutcome, ScoringRequest, StoredRun } from "./scoring";
-import { parseAttemptRef, runTaskMethod, TaskStore, type Sql, type TaskOutcome } from "./task-store";
+import {
+  parseAttemptRef,
+  runTaskMethod,
+  TaskStore,
+  type ProjectContext,
+  type Sql,
+  type TaskOutcome,
+} from "./task-store";
 
 export interface JournalEntry {
   id: number;
@@ -14,12 +22,14 @@ export interface JournalEntry {
 /**
  * One per project: the source of truth for its tasks and attempts (`task-store.ts`), with their
  * rows, per-project counters and journal events for every transition, and for its scoring runs
- * (`scoring.ts`). After every store call it drains the scoring queue, starting and stopping runs.
+ * (`scoring.ts`), merge requests and the landings of its merge queue. After every store call and
+ * report it drains: stopping and starting Landing Workflows, then scoring runs.
  * The journal also records the hops the e2e suite reads timings back from.
  */
 export class ProjectCoordinator extends DurableObject<Env> {
   readonly #sql: SqlStorage;
   readonly #tasks: TaskStore;
+  #project: string | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -29,24 +39,21 @@ export class ProjectCoordinator extends DurableObject<Env> {
         ctx.storage.sql.exec(query, ...(bindings as SqlStorageValue[])).toArray() as T[],
       transaction: (fn) => ctx.storage.transactionSync(fn),
     };
+    const teardown = (roles: readonly SandboxRole[]) => async (instanceId: string) => {
+      await Promise.all(roles.map((role) => env.SANDBOX.getByName(sandboxName(instanceId, role)).destroy()));
+    };
     this.#tasks = new TaskStore({
       sql,
       repos: reposFor(env),
-      scoring: {
-        workflow: env.SCORING,
-        teardown: async (instanceId) => {
-          await Promise.all(
-            SCORING_ROLES.map((role) => env.SANDBOX.getByName(sandboxName(instanceId, role)).destroy()),
-          );
-        },
-      },
+      scoring: { workflow: env.SCORING, teardown: teardown(SCORING_ROLES) },
+      landing: { workflow: env.LANDING, teardown: teardown(LANDING_ROLES) },
     });
   }
 
   /** Runs one task or attempt operation (a `TaskStore` method) for the services in `tasks.ts`. */
   async tasks(method: string, args: unknown[]): Promise<TaskOutcome> {
     const outcome = await runTaskMethod(this.#tasks, method, args);
-    await this.#drain();
+    await this.#drain((args[0] as ProjectContext | undefined)?.id);
     return outcome;
   }
 
@@ -65,7 +72,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
       trigger: "push",
       actor: null,
     });
-    await this.#drain();
+    await this.#drain(project);
     return request;
   }
 
@@ -77,7 +84,28 @@ export class ProjectCoordinator extends DurableObject<Env> {
   /** Called by a run's Scoring Workflow when it ends. Reports from a superseded or cancelled run are discarded. */
   async scoringFinished(run: number, outcome: ScoringOutcome): Promise<void> {
     this.#tasks.scoringFinished(run, outcome);
-    await this.#drain();
+    await this.#drain(this.#tasks.scoring.getRun(run)?.project);
+  }
+
+  /**
+   * Called by a Landing Workflow's land step right before it pushes to `main`. False when its merge
+   * request has left the queue: it must not push.
+   */
+  claimLandingPush(landing: number): boolean {
+    return this.#tasks.claimLandingPush(landing);
+  }
+
+  /**
+   * Called by a Landing Workflow when it ends. The landing push is internal: this records it
+   * (`main_advanced`) and never scores or creates anything from it. Then the next landing starts.
+   * Reports from a stopped landing are discarded.
+   */
+  async landingFinished(landing: number, outcome: LandingOutcome): Promise<void> {
+    try {
+      await this.#tasks.landingFinished(landing, outcome);
+    } finally {
+      await this.#drain(this.#tasks.landings.get(landing)?.project);
+    }
   }
 
   journal(since = 0): JournalEntry[] {
@@ -95,12 +123,18 @@ export class ProjectCoordinator extends DurableObject<Env> {
     this.#log(kind, detail);
   }
 
-  /** Starts and stops scoring runs; a failure here never fails the call that triggered it. */
-  async #drain(): Promise<void> {
+  /**
+   * Starts and stops landings and scoring runs; a failure here never fails the call that triggered
+   * it. Landings need the project's id, which every call names (a project's DO is named by it), and
+   * is remembered for calls that can't tell.
+   */
+  async #drain(project: string | undefined): Promise<void> {
+    if (project !== undefined) this.#project = project;
     try {
-      await this.#tasks.scoring.drain();
+      if (this.#project === null) await this.#tasks.scoring.drain();
+      else await this.#tasks.drain(this.#project);
     } catch (cause) {
-      console.error({ event: "scoring.drain_failed", error: String(cause) });
+      console.error({ event: "project.drain_failed", error: String(cause) });
     }
   }
 

@@ -1,20 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { parseConfig } from "../src/config.ts";
 import { buildResult, scorePlan, type RawScore, type ScorePlan } from "../src/results.ts";
-import {
-  landScript,
-  parseResult,
-  previewScript,
-  retestScript,
-  scoreScript,
-  type LandResult,
-  type PreviewScriptResult,
-  type RetestResult,
-} from "../src/scripts.ts";
+import { parseResult, previewScript, scoreScript, type PreviewScriptResult } from "../src/scripts.ts";
 
 // Runs the Sandbox scripts against local bare repos standing in for Artifacts remotes.
 
@@ -62,49 +53,6 @@ beforeEach(() => {
   commit("a.txt", "one\ntwo\nthree\n", "base");
   git(work, "push", "-q", origin, "main");
   git(root, "clone", "-q", "--bare", origin, fork);
-});
-
-/**
- * Gives the repo a local `file:` dependency and a lockfile. Its tests pass only if the dependency was
- * installed and the dependency's install script did not run.
- */
-function addDependency(): void {
-  mkdirSync(join(work, "dep"));
-  writeFileSync(
-    join(work, "dep/package.json"),
-    JSON.stringify({
-      name: "dep",
-      version: "1.0.0",
-      main: "index.js",
-      scripts: {
-        postinstall: `node -e "require('fs').writeFileSync(process.env.INIT_CWD + '/ran-install-script', '')"`,
-      },
-    }),
-  );
-  writeFileSync(join(work, "dep/index.js"), "module.exports = 42;");
-  writeFileSync(
-    join(work, "package.json"),
-    JSON.stringify({ scripts: { test: "node check.js" }, dependencies: { dep: "file:./dep" } }),
-  );
-  writeFileSync(
-    join(work, "check.js"),
-    `const fs = require("fs");
-if (require("dep") !== 42) process.exit(1);
-if (fs.existsSync("ran-install-script")) { console.error("install script ran"); process.exit(1); }`,
-  );
-  execFileSync("npm", ["install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund"], { cwd: work });
-}
-
-describe("dependency install", () => {
-  it("installs before the retest after rebasing, without running install scripts", () => {
-    addDependency();
-    const attempt = commit("a.txt", "one\ntwo\nthree\n", "with dependency");
-    git(work, "push", "-q", fork, "main");
-    git(work, "reset", "-q", "--hard", "HEAD~1");
-    commit("c.txt", "someone else\n", "main moved");
-    git(work, "push", "-q", origin, "main");
-    expect(runScript<RetestResult>(retestScript(origin, fork, attempt))).toMatchObject({ kind: "tested" });
-  });
 });
 
 const plan = (overrides: Partial<ScorePlan> = {}): ScorePlan => ({ setup: [], checks: [], allow: [], ...overrides });
@@ -342,94 +290,5 @@ describe("previewScript", () => {
     const bin = fakeWrangler("deploys");
     const { result, sandbox } = runPreview(script, bin);
     expect(runPreview(script, bin, sandbox).result).toEqual(result);
-  });
-});
-
-/** The attempt adds b.txt on top of base; meanwhile main gains c.txt. */
-function divergedAttempt(): string {
-  const attempt = commit("b.txt", "attempt\n", "attempt");
-  git(work, "push", "-q", fork, "main");
-  git(work, "reset", "-q", "--hard", "HEAD~1");
-  commit("c.txt", "someone else\n", "main moved");
-  git(work, "push", "-q", origin, "main");
-  return attempt;
-}
-
-describe("retestScript", () => {
-  it("rebases onto the current main and reports the base and the tested tree", () => {
-    const attempt = divergedAttempt();
-    const result = runScript<RetestResult>(retestScript(origin, fork, attempt));
-    expect(result).toMatchObject({ kind: "tested", base: git(origin, "rev-parse", "main") });
-    expect(result.kind === "tested" && result.tree).toMatch(/^[0-9a-f]{40}$/);
-  });
-
-  it("bounces a conflicting attempt with the conflicted files and hunks", () => {
-    const attempt = commit("a.txt", "one\nmine\nthree\n", "attempt");
-    git(work, "push", "-q", fork, "main");
-    git(work, "reset", "-q", "--hard", "HEAD~1");
-    commit("a.txt", "one\ntheirs\nthree\n", "main moved");
-    git(work, "push", "-q", origin, "main");
-
-    const result = runScript<RetestResult>(retestScript(origin, fork, attempt));
-    expect(result).toMatchObject({ kind: "bounced", files: ["a.txt"] });
-    expect(result.kind === "bounced" && result.diff).toMatch(/<<<<<<<[\s\S]*theirs[\s\S]*=======[\s\S]*mine/);
-  });
-
-  it("fails when tests break after the rebase", () => {
-    const attempt = commit("b.txt", "attempt\n", "attempt");
-    git(work, "push", "-q", fork, "main");
-    git(work, "reset", "-q", "--hard", "HEAD~1");
-    commit("a.txt", "one\nbad\nthree\n", "main broke");
-    git(work, "push", "-q", origin, "main");
-
-    expect(runScript<RetestResult>(retestScript(origin, fork, attempt))).toMatchObject({ kind: "failed" });
-  });
-});
-
-function retested(attempt: string): { base: string; tree: string } {
-  const result = runScript<RetestResult>(retestScript(origin, fork, attempt));
-  if (result.kind !== "tested") throw new Error(`retest did not pass: ${JSON.stringify(result)}`);
-  return result;
-}
-
-describe("landScript", () => {
-  it("lands exactly the tree the retest step tested", () => {
-    const attempt = divergedAttempt();
-    const tested = retested(attempt);
-
-    const result = runScript<LandResult>(landScript(origin, fork, attempt, tested));
-    expect(result).toEqual({ kind: "landed", mainSha: git(origin, "rev-parse", "main") });
-    expect(git(origin, "rev-parse", "main^{tree}")).toBe(tested.tree);
-    expect(git(origin, "log", "--format=%s", "main")).toBe("attempt\nmain moved\nbase");
-  });
-
-  it("reports main moved, without pushing, when main changed after the retest", () => {
-    const attempt = divergedAttempt();
-    const tested = retested(attempt);
-    commit("d.txt", "later\n", "main moved again");
-    git(work, "push", "-q", origin, "main");
-    const before = git(origin, "rev-parse", "main");
-
-    expect(runScript<LandResult>(landScript(origin, fork, attempt, tested))).toEqual({ kind: "moved" });
-    expect(git(origin, "rev-parse", "main")).toBe(before);
-  });
-
-  it("refuses to push a tree other than the one tested", () => {
-    const attempt = divergedAttempt();
-    const tested = retested(attempt);
-    const before = git(origin, "rev-parse", "main");
-
-    const forged = { ...tested, tree: git(work, "rev-parse", "HEAD^{tree}") };
-    expect(runScript<LandResult>(landScript(origin, fork, attempt, forged))).toMatchObject({ kind: "mismatch" });
-    expect(git(origin, "rev-parse", "main")).toBe(before);
-  });
-
-  it("runs no repository code: no npm, node or hooks", () => {
-    const script = landScript("https://example.invalid/c.git", "https://example.invalid/f.git", "a".repeat(40), {
-      base: "b".repeat(40),
-      tree: "c".repeat(40),
-    });
-    expect(script).not.toMatch(/\bnpm\b|\bnode\b/);
-    expect(script).toContain("core.hooksPath /dev/null");
   });
 });

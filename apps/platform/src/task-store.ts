@@ -9,6 +9,8 @@
 import { archiveRef } from "./archive.ts";
 import { CONFIG_PATH, loadConfig, type ConfigResult } from "./config.ts";
 import { ServiceError, type ErrorCode } from "./errors.ts";
+import type { LandingOutcome, LandingParams, LandingRunner } from "./landing.ts";
+import { Landings, type StoredLanding } from "./landings.ts";
 import { isLogName, logKey, missingLog } from "./logs.ts";
 import {
   MergeRequests,
@@ -21,6 +23,7 @@ import { isZeroId } from "./pkt-line.ts";
 import { forkRepo, originRepo, type Repos } from "./repos.ts";
 import {
   headAttemptRef,
+  SCORING_CAP,
   ScoringQueue,
   type AttemptScoring,
   type ScoredAttempt,
@@ -338,6 +341,8 @@ export interface TaskStoreDeps {
   now?: () => Date;
   /** Starts and stops scoring runs; without one, scoring requests stay queued. */
   scoring?: ScoringRunner | null | undefined;
+  /** Starts and stops the merge queue's Landing Workflows; without one, nothing lands on its own. */
+  landing?: LandingRunner | null | undefined;
 }
 
 /**
@@ -354,13 +359,18 @@ export class TaskStore {
   readonly scoring: ScoringQueue;
   /** The project's merge requests and merge queue. */
   readonly mergeRequests: MergeRequests;
+  /** The merge queue's landings, one Landing Workflow each. */
+  readonly landings: Landings;
+  readonly #landing: LandingRunner | null;
 
-  constructor({ sql, repos, now = () => new Date(), scoring = null }: TaskStoreDeps) {
+  constructor({ sql, repos, now = () => new Date(), scoring = null, landing = null }: TaskStoreDeps) {
     this.#sql = sql;
     this.#repos = repos;
     this.#now = now;
+    this.#landing = landing;
     migrate(sql);
-    this.scoring = new ScoringQueue({ sql, runner: scoring, now });
+    this.landings = new Landings({ sql, now });
+    this.scoring = new ScoringQueue({ sql, runner: scoring, now, reserved: () => this.#landingSlots() });
     this.mergeRequests = new MergeRequests({
       sql,
       now,
@@ -1044,8 +1054,8 @@ export class TaskStore {
   // closes its other active attempts. The merge request enters the queue once its approved head's
   // latest scoring run is done with a passing gate, checked on selection, on approval and whenever
   // a run finishes (`scoringFinished`). A push to the source needs a new approval; ending the source
-  // cancels it. Landing (#140) moves the front of the queue through `startLanding`, then reports
-  // through `dequeueMergeRequest` or `landMergeRequest`.
+  // cancels it. Landings (below) move the front of the queue to `landing` and start its Landing
+  // Workflow, whose report merges it (`landMergeRequest`) or dequeues it (`dequeueMergeRequest`).
 
   /**
    * Selects an open attempt of an open task as its merge request, approving the attempt's current
@@ -1186,6 +1196,169 @@ export class TaskStore {
     return merged;
   }
 
+  // --- landings --------------------------------------------------------------------------------
+  //
+  // The Durable Object calls `drain` after every store call and report. It stops the Landing
+  // Workflow of a merge request that left the queue (a new push or a cancel) before its land step
+  // claimed the push to main, then starts one for the front of the queue when nothing is landing
+  // and a Sandbox slot is free, then starts scoring runs. A landing takes a slot under the cap ahead
+  // of waiting scoring runs: while one is landing or waiting to, scoring leaves it a slot.
+
+  /** Stops stale landings, starts the next one, then drains the scoring queue. */
+  async drain(project: string): Promise<void> {
+    await this.#drainLandings(project);
+    await this.scoring.drain();
+  }
+
+  /**
+   * For the Landing Workflow's land step, right before it pushes: claims the push (again, for a retried step), so the merge
+   * request can no longer be dequeued by a push or cancelled, and the result of the push to main is
+   * what gets recorded. False when the landing was stopped; it must not push.
+   */
+  claimLandingPush(landing: number): boolean {
+    return this.#sql.transaction(() => {
+      const current = this.landings.get(landing);
+      if (current === null || !this.#landingCurrent(current)) return false;
+      if (current.status === "pushing") return true;
+      if (current.status !== "running") return false;
+      this.landings.move(landing, "pushing");
+      return true;
+    });
+  }
+
+  /**
+   * Records how a landing ended, from its Workflow's report: `landed` merges the merge request (its
+   * source attempt merged, its task closed, its fork archived) and journals `main_advanced`; any
+   * other outcome dequeues it with that reason and its details, back to `pending`, or to
+   * `needs_review` if its source moved while it was pushing. A report from a landing that was stopped,
+   * or already reported, is discarded. Returns whether it was recorded. The caller drains afterwards,
+   * which starts the next landing.
+   */
+  async landingFinished(landing: number, outcome: LandingOutcome): Promise<boolean> {
+    const current = this.landings.get(landing);
+    if (current === null || (current.status !== "running" && current.status !== "pushing")) {
+      console.log({ event: "landing.discarded_report", landing, status: current?.status ?? null });
+      return false;
+    }
+    if (!this.#landingCurrent(current)) {
+      this.#sql.transaction(() => this.landings.move(landing, "stopped"));
+      return false;
+    }
+    const project = { id: current.project, owner: "" };
+    if (outcome.kind === "landed") {
+      await this.landMergeRequest(project, null, { task: current.task, sha: outcome.sha });
+      this.landings.move(landing, "landed");
+      this.#journal(null, "main_advanced", current.task, current.attempt, {
+        merge_request: taskRef(current.task),
+        head: current.head,
+        sha: outcome.sha,
+      });
+      return true;
+    }
+    this.#sql.transaction(() => {
+      this.landings.move(landing, "dequeued");
+      const mr = this.#openMergeRequest(current.task);
+      const source = this.#attempt(sourceOf(mr));
+      const moved = this.scoring.statusFor(scoredAttempt(source)).sha !== mr.approved_head;
+      this.mergeRequests.dequeue(null, mr, outcome.kind, moved ? "needs_review" : "pending", outcome.details);
+    });
+    return true;
+  }
+
+  /** The landing's merge request is still open and landing. */
+  #landingCurrent(landing: StoredLanding): boolean {
+    const mr = this.mergeRequests.open(landing.task);
+    return mr !== null && mr.id === landing.merge_request && mr.state === "landing";
+  }
+
+  /** Whether the merge request's landing has claimed its push to main. */
+  #pushing(mr: StoredMergeRequest): boolean {
+    if (mr.state !== "landing") return false;
+    const active = this.landings.active();
+    return active?.merge_request === mr.id && active.status === "pushing";
+  }
+
+  /** The Sandbox slot the merge queue holds: one while a landing is in flight or the queue is waiting to start one. */
+  #landingSlots(): number {
+    if (this.#landing === null) return 0;
+    return this.landings.active() !== null || this.mergeRequests.queue().length > 0 ? 1 : 0;
+  }
+
+  async #drainLandings(project: string): Promise<void> {
+    const runner = this.#landing;
+    if (runner === null) return;
+    const stopping = this.#sql.transaction(() => {
+      const active = this.landings.active();
+      if (active?.status === "running" && !this.#landingCurrent(active)) this.landings.move(active.id, "stopped");
+      return this.landings.claimStopped();
+    });
+    await Promise.all(stopping.map((landing) => this.#stopLanding(runner, landing)));
+
+    const started = this.#sql.transaction(() => this.#startLanding(project));
+    if (started === null) return;
+    try {
+      await runner.workflow.create({ id: started.instance_id, params: started.params });
+    } catch (cause) {
+      await this.landingFinished(started.id, {
+        kind: "errored",
+        details: { step: "start", error: String(cause).slice(0, 2000) },
+      });
+      await this.#drainLandings(project);
+      return;
+    }
+    // A push or cancel may have dequeued it while its Workflow was being created.
+    if (this.landings.get(started.id)?.status === "running" && !this.#landingCurrent(started)) {
+      await this.#drainLandings(project);
+    }
+  }
+
+  /**
+   * Starts a landing for the front of the queue when nothing is landing and a Sandbox slot is free:
+   * moves it to `landing` and records the landing with what its Workflow needs.
+   */
+  #startLanding(project: string): (StoredLanding & { params: LandingParams }) | null {
+    if (this.landings.active() !== null) return null;
+    if (this.scoring.running() >= SCORING_CAP) return null;
+    const [front] = this.mergeRequests.queue();
+    if (front === undefined) return null;
+    // A merge request already landing without a landing in flight (one started before landings were
+    // recorded) gets one now.
+    const mr = front.state === "queued" ? this.mergeRequests.startLanding(null, front) : front;
+    const landing = this.landings.start(
+      { project, task: mr.task, attempt: mr.attempt, merge_request: mr.id, head: mr.approved_head },
+      (id) => `${forkRepo(project, attemptRef(mr.task, mr.attempt))}-landing-${id}`,
+    );
+    const coAuthors = this.#sql.exec<{ user: string; agent: string }>(
+      `SELECT user_id AS user, agent FROM journal WHERE kind = 'pushed' AND task = ? AND attempt = ?
+         AND user_id IS NOT NULL AND agent IS NOT NULL GROUP BY user_id, agent ORDER BY MIN(id)`,
+      mr.task,
+      mr.attempt,
+    );
+    const params: LandingParams = {
+      project,
+      landing: landing.id,
+      task: mr.task,
+      attempt: mr.attempt,
+      title: this.#task(mr.task).title,
+      head: mr.approved_head,
+      approver: mr.approved_by,
+      coAuthors: coAuthors.map(({ user, agent }) => ({ user, agent })),
+      startedAt: landing.started_at,
+    };
+    return { ...landing, params };
+  }
+
+  async #stopLanding(runner: LandingRunner, landing: StoredLanding): Promise<void> {
+    try {
+      const instance = await runner.workflow.get(landing.instance_id);
+      await instance.terminate();
+      await runner.teardown(landing.instance_id);
+    } catch (cause) {
+      // It may already have ended; its report is discarded either way.
+      console.warn({ event: "landing.stop_failed", instance_id: landing.instance_id, error: String(cause) });
+    }
+  }
+
   // --- internals -------------------------------------------------------------------------------
 
   #task(number: number): StoredTask {
@@ -1240,6 +1413,8 @@ export class TaskStore {
     const mr = this.mergeRequests.open(attempt.task);
     if (mr === null || mr.attempt !== attempt.number || mr.state === "needs_review") return;
     if (head === mr.approved_head) return;
+    // A landing pushing to main lands the approved head; the compare-and-swap on main decides.
+    if (this.#pushing(mr)) return;
     if (mr.state === "queued" || mr.state === "landing") {
       this.mergeRequests.dequeue(actor, mr, "new_push", "needs_review");
     } else {
@@ -1249,6 +1424,9 @@ export class TaskStore {
 
   /** Cancels an open merge request, dequeuing it if it is in the queue. */
   #cancel(actor: Actor | null, mr: StoredMergeRequest): StoredMergeRequest {
+    if (this.#pushing(mr)) {
+      throw invalidState(`${taskRef(mr.task)}'s merge request is landing on main; try again once it has landed`);
+    }
     if (mr.state === "queued" || mr.state === "landing") {
       return this.mergeRequests.dequeue(actor, mr, "cancelled", "cancelled");
     }
@@ -1643,7 +1821,7 @@ export class TaskStore {
 
   #journal(
     actor: Actor | null,
-    kind: TaskEvent | MergeRequestEvent,
+    kind: TaskEvent | MergeRequestEvent | "main_advanced",
     task: number,
     attempt: number | null,
     extra: Record<string, unknown> = {},

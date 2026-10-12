@@ -76,9 +76,9 @@ export interface Attempt {
   mergeRequest: { state: AttemptMergeRequest["state"]; lastDequeue: { reason: DequeueReason } | null } | null;
 }
 
-/** Who approved or created a merge request: a user, and the agent they acted under. */
+/** Who approved or created a merge request: a user, and the alias they acted under. */
 export interface ActorRef extends UserRef {
-  agent: string | null;
+  alias: string | null;
 }
 
 /** A merge request as the API shows it. Its latest dequeue's details are read separately. */
@@ -134,7 +134,7 @@ export interface ScoringRun {
   status: StoredRun["status"];
   /** Who asked for it, or null when no user did. */
   requestedBy: UserRef | null;
-  agent: string | null;
+  alias: string | null;
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
@@ -256,7 +256,7 @@ export function taskService({ db, backend }: TaskServiceDeps) {
       mergeRequest(await invoke(method, await project(input), actor, { task: taskNumber(input.task) }));
 
   return {
-    /** Creates an open task; the caller's human is its creator. Any signed-in user may. */
+    /** Creates an open task; the caller's user is its creator. Any signed-in user may. */
     async createTask(
       actor: Actor,
       input: ProjectPath & { title: string; body?: string | undefined; attemptLimit?: number | null | undefined },
@@ -312,7 +312,7 @@ export function taskService({ db, backend }: TaskServiceDeps) {
       return attempts(await invoke("listAttempts", await project(input), actor, list));
     },
 
-    /** Edits an attempt's note. Only its author (or their agents) may. */
+    /** Edits an attempt's note. Only its author (or their aliases) may. */
     async editAttempt(actor: Actor, input: AttemptPath & { note: string }): Promise<Attempt> {
       const edit = { ...attemptRefOf(input.attempt), note: input.note };
       return one(await invoke("editAttempt", await project(input), actor, edit), attempts);
@@ -325,7 +325,7 @@ export function taskService({ db, backend }: TaskServiceDeps) {
     obsoleteAttempt: attemptMove("obsoleteAttempt"),
     restoreAttempt: attemptMove("restoreAttempt"),
 
-    /** Scores a draft attempt's head now. Only its author (or their agents) may. */
+    /** Scores a draft attempt's head now. Only its author (or their aliases) may. */
     scoreNow: scoringRequest("scoreNow"),
     /** Scores an open attempt's head again. Its author, the task's creator or the project owner may. */
     rescore: scoringRequest("rescore"),
@@ -380,7 +380,7 @@ export function taskService({ db, backend }: TaskServiceDeps) {
 
     /**
      * Hands an active attempt to the user with handle `to`, who becomes its author. Only its
-     * author (or their agents) may. An unknown handle is `notFound`; handing it to its own author
+     * author (or their aliases) may. An unknown handle is `notFound`; handing it to its own author
      * is `invalidRequest`.
      */
     async handOffAttempt(actor: Actor, input: AttemptPath & { to: string }): Promise<Attempt> {
@@ -520,8 +520,8 @@ function publicAttempt(a: StoredAttempt, users: Map<string, string>): Attempt {
   };
 }
 
-function actorRef(acted: { user: string; agent: string | null }, users: Map<string, string>): ActorRef {
-  return { ...userRef(acted.user, users), agent: acted.agent };
+function actorRef(acted: { user: string; alias: string | null }, users: Map<string, string>): ActorRef {
+  return { ...userRef(acted.user, users), alias: acted.alias };
 }
 
 function publicMergeRequest(mr: StoredMergeRequest, users: Map<string, string>): MergeRequest {
@@ -563,7 +563,7 @@ function publicRun(run: StoredRun, users: Map<string, string>): ScoringRun {
     trigger: run.trigger,
     status: run.status,
     requestedBy: run.user_id === null ? null : userRef(run.user_id, users),
-    agent: run.agent,
+    alias: run.alias,
     createdAt: new Date(run.created_at).toISOString(),
     startedAt: iso(run.started_at),
     finishedAt: iso(run.finished_at),

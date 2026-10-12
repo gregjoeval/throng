@@ -9,11 +9,11 @@ import { attemptRef, taskRef } from "./task-refs.ts";
 /** Commits name people by a no-reply address, never their real email. */
 export const NOREPLY_DOMAIN = "users.noreply.throng";
 
-/** Who a merge commit names: a user, and the agent alias they acted under, if any. */
+/** Who a merge commit names: a user, and the alias they acted under, if any. */
 export interface Signer {
   id: string;
   handle: string;
-  agent: string | null;
+  alias: string | null;
 }
 
 export interface GitIdentity {
@@ -24,16 +24,16 @@ export interface GitIdentity {
 /** The merge commit's committer. */
 export const THRONG_COMMITTER: GitIdentity = { name: "Throng", email: `noreply@${NOREPLY_DOMAIN}` };
 
-/** The merge commit's author: the approver's human. */
+/** The merge commit's author: the approver's user. */
 export function mergeAuthor(approver: Signer): GitIdentity {
   return { name: approver.handle, email: `${approver.id}+${approver.handle}@${NOREPLY_DOMAIN}` };
 }
 
-/** `ada (claude) <ada00001+claude@…>`, or `ada <ada00001+ada@…>` without an agent. */
-function trailerName({ id, handle, agent }: Signer): string {
-  return agent === null
+/** `ada (claude) <ada00001+claude@…>`, or `ada <ada00001+ada@…>` without an alias. */
+function trailerName({ id, handle, alias }: Signer): string {
+  return alias === null
     ? `${handle} <${id}+${handle}@${NOREPLY_DOMAIN}>`
-    : `${handle} (${agent}) <${id}+${agent}@${NOREPLY_DOMAIN}>`;
+    : `${handle} (${alias}) <${id}+${alias}@${NOREPLY_DOMAIN}>`;
 }
 
 export interface MergeCommitInput {
@@ -41,11 +41,11 @@ export interface MergeCommitInput {
   attempt: number;
   title: string;
   approver: Signer;
-  /** Each agent alias that pushed to the attempt. */
+  /** Each alias that pushed to the attempt. */
   coAuthors: Signer[];
 }
 
-/** `Merge t42a3: <task title>` with the Throng trailers, `Approved-by` and a `Co-authored-by` per agent alias. */
+/** `Merge t42a3: <task title>` with the Throng trailers, `Approved-by` and a `Co-authored-by` per alias. */
 export function mergeCommitMessage({ task, attempt, title, approver, coAuthors }: MergeCommitInput): string {
   const subject = `Merge ${attemptRef(task, attempt)}: ${title.replace(/\s+/gu, " ").trim()}`;
   const trailers = [
@@ -70,9 +70,9 @@ export interface LandingParams {
   title: string;
   /** The approved head, the only commit that can land. */
   head: string;
-  approver: { user: string; agent: string | null };
-  /** Each agent alias that pushed to the source attempt, with its human. */
-  coAuthors: { user: string; agent: string }[];
+  approver: { user: string; alias: string | null };
+  /** Each alias that pushed to the source attempt, with its user. */
+  coAuthors: { user: string; alias: string }[];
   /** When the landing started, in ms: the merge commit's time, so a retried land step makes the same commit. */
   startedAt: number;
 }

@@ -15,14 +15,14 @@ async function setup() {
 describe("tokens", () => {
   it("authenticates a minted token until it expires", async () => {
     const { db, user } = await setup();
-    const { plaintext, token } = await mintToken(db, { userId: user.id, agent: null, ttlSeconds: 60, now: NOW });
-    expect(await authenticateToken(db, plaintext, at(59))).toEqual({ actor: { user, agent: null }, token });
+    const { plaintext, token } = await mintToken(db, { userId: user.id, alias: null, ttlSeconds: 60, now: NOW });
+    expect(await authenticateToken(db, plaintext, at(59))).toEqual({ actor: { user, alias: null }, token });
     expect(await authenticateToken(db, plaintext, at(60))).toBeNull();
   });
 
   it("stores the SHA-256 hex of the plaintext and nothing that reveals it", async () => {
     const { db, user } = await setup();
-    const { plaintext, token } = await mintToken(db, { userId: user.id, agent: null, ttlSeconds: 60, now: NOW });
+    const { plaintext, token } = await mintToken(db, { userId: user.id, alias: null, ttlSeconds: 60, now: NOW });
     const row = await db.prepare("SELECT * FROM tokens WHERE id = ?").bind(token.id).first<Record<string, unknown>>();
     expect(row?.["hash"]).toBe(await hashToken(plaintext));
     expect(JSON.stringify(row)).not.toContain(plaintext.slice(4));
@@ -32,15 +32,15 @@ describe("tokens", () => {
 
   it("mints distinct tokens", async () => {
     const { db, user } = await setup();
-    const a = await mintToken(db, { userId: user.id, agent: null, ttlSeconds: 60, now: NOW });
-    const b = await mintToken(db, { userId: user.id, agent: null, ttlSeconds: 60, now: NOW });
+    const a = await mintToken(db, { userId: user.id, alias: null, ttlSeconds: 60, now: NOW });
+    const b = await mintToken(db, { userId: user.id, alias: null, ttlSeconds: 60, now: NOW });
     expect(a.plaintext).not.toBe(b.plaintext);
     expect(a.token.id).not.toBe(b.token.id);
   });
 
   it("rejects revoked and unknown tokens", async () => {
     const { db, user } = await setup();
-    const { plaintext, token } = await mintToken(db, { userId: user.id, agent: "claude", ttlSeconds: 60, now: NOW });
+    const { plaintext, token } = await mintToken(db, { userId: user.id, alias: "claude", ttlSeconds: 60, now: NOW });
     expect(await revokeToken(db, { userId: user.id, id: token.id, now: NOW })).toMatchObject({
       revoked_at: NOW.toISOString(),
     });
@@ -49,13 +49,13 @@ describe("tokens", () => {
     expect(await authenticateToken(db, "", NOW)).toBeNull();
   });
 
-  it("scopes listing and revoking to an agent when given", async () => {
+  it("scopes listing and revoking to an alias when given", async () => {
     const { db, user } = await setup();
-    const human = await mintToken(db, { userId: user.id, agent: null, ttlSeconds: 60, now: NOW });
-    const claude = await mintToken(db, { userId: user.id, agent: "claude", ttlSeconds: 60, now: at(1) });
+    const human = await mintToken(db, { userId: user.id, alias: null, ttlSeconds: 60, now: NOW });
+    const claude = await mintToken(db, { userId: user.id, alias: "claude", ttlSeconds: 60, now: at(1) });
     expect((await listTokens(db, user.id)).map((t) => t.id)).toEqual([claude.token.id, human.token.id]);
     expect((await listTokens(db, user.id, "claude")).map((t) => t.id)).toEqual([claude.token.id]);
-    expect(await revokeToken(db, { userId: user.id, agent: "claude", id: human.token.id, now: NOW })).toBeNull();
+    expect(await revokeToken(db, { userId: user.id, alias: "claude", id: human.token.id, now: NOW })).toBeNull();
     expect(await revokeToken(db, { userId: "someone", id: human.token.id, now: NOW })).toBeNull();
   });
 });

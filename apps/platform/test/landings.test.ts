@@ -18,12 +18,12 @@ import { testSql } from "./support/task-backend.ts";
 
 const PROJECT: ProjectContext = { id: "abc123", owner: "owner001" };
 
-function actor(id: string, agent: string | null = null): Actor {
-  return { user: { id, handle: id, email: `${id}@example.com`, created_at: "" }, agent };
+function actor(id: string, alias: string | null = null): Actor {
+  return { user: { id, handle: id, email: `${id}@example.com`, created_at: "" }, alias };
 }
 const owner = actor("owner001");
 const ada = actor("ada00001");
-const adaAgent = actor("ada00001", "claude");
+const adaAlias = actor("ada00001", "claude");
 
 /** A Workflow binding that records what it was asked to start and stop. */
 class FakeWorkflows<P> {
@@ -139,7 +139,7 @@ describe("starting landings", () => {
         attempt: t1.number,
         title: "First",
         head: base.hash,
-        approver: { user: owner.user.id, agent: null },
+        approver: { user: owner.user.id, alias: null },
         coAuthors: [],
         startedAt: expect.any(Number),
       },
@@ -153,17 +153,17 @@ describe("starting landings", () => {
     expect(store.claimLandingPush(1)).toBeTruthy();
   });
 
-  it("names each agent alias that pushed to the attempt as a co-author", async () => {
+  it("names each alias that pushed to the attempt as a co-author", async () => {
     const { store, drain, attempt, score, push, landingWorkflow } = await setup();
-    const ref = await attempt("Agents");
-    push(ref, adaAgent);
+    const ref = await attempt("Aliases");
+    push(ref, adaAlias);
     push(ref, ada);
-    push(ref, adaAgent);
+    push(ref, adaAlias);
     await drain();
     score(ref);
     await store.selectAttempt(PROJECT, owner, ref);
     await drain();
-    expect(landingWorkflow.created[0]?.params.coAuthors).toEqual([{ user: ada.user.id, agent: "claude" }]);
+    expect(landingWorkflow.created[0]?.params.coAuthors).toEqual([{ user: ada.user.id, alias: "claude" }]);
   });
 });
 

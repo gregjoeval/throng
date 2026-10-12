@@ -30,10 +30,10 @@ async function setup() {
     const res = await api.request(path, init, env);
     return { status: res.status, body: (await res.json()) as Json };
   };
-  /** A bearer token for the user with `email`, under `agent` if given. */
-  const tokenFor = async (email: string, agent?: string) => {
+  /** A bearer token for the user with `email`, under `alias` if given. */
+  const tokenFor = async (email: string, alias?: string) => {
     const headers = { "Cf-Access-Jwt-Assertion": `as:${email}`, "Content-Type": "application/json" };
-    const res = await api.request("/tokens", { method: "POST", headers, body: JSON.stringify({ agent }) }, env);
+    const res = await api.request("/tokens", { method: "POST", headers, body: JSON.stringify({ alias }) }, env);
     return ((await res.json()) as Json)["token"] as string;
   };
 
@@ -203,7 +203,7 @@ describe("attempt routes", () => {
         trigger: "scoreNow",
         status: "queued",
         requestedBy: { id: expect.any(String), handle: "ada" },
-        agent: "claude",
+        alias: "claude",
         createdAt: "2026-10-10T12:00:00.000Z",
         startedAt: null,
         finishedAt: null,
@@ -280,7 +280,7 @@ describe("merge request routes", () => {
 
     const selected = await call("POST", `${base}/tasks/t1/selection`, adaClaude, { attempt: "t1a1" });
     expect(selected.status).toBe(200);
-    const ref = { id: expect.any(String), handle: "ada", agent: "claude" };
+    const ref = { id: expect.any(String), handle: "ada", alias: "claude" };
     expect(selected.body).toEqual({
       task: "t1",
       attempt: "t1a1",

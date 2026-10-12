@@ -15,19 +15,19 @@ const TOKEN_SECRET_BYTES = 32;
 export interface Token {
   id: string;
   user_id: string;
-  agent: string | null;
+  alias: string | null;
   expires_at: string;
   revoked_at: string | null;
   created_at: string;
 }
 
-/** Who is acting: a user, and the agent alias they act under when the token names one. */
+/** Who is acting: a user, and the alias they act under when the token names one. */
 export interface Actor {
   user: User;
-  agent: string | null;
+  alias: string | null;
 }
 
-const TOKEN_COLUMNS = "id, user_id, agent, expires_at, revoked_at, created_at";
+const TOKEN_COLUMNS = "id, user_id, alias, expires_at, revoked_at, created_at";
 
 /** A fresh plaintext token: the prefix and 32 random bytes as base64url (no padding). */
 function newPlaintext(): string {
@@ -47,20 +47,20 @@ export async function hashToken(plaintext: string): Promise<string> {
   return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-/** Mints a token for `userId` (and `agent`, when given) that expires `ttlSeconds` after `now`. */
+/** Mints a token for `userId` (and `alias`, when given) that expires `ttlSeconds` after `now`. */
 export async function mintToken(
   db: Database,
-  { userId, agent, ttlSeconds, now }: { userId: string; agent: string | null; ttlSeconds: number; now: Date },
+  { userId, alias, ttlSeconds, now }: { userId: string; alias: string | null; ttlSeconds: number; now: Date },
 ): Promise<{ token: Token; plaintext: string }> {
   const plaintext = newPlaintext();
   const token = await db
     .prepare(
-      `INSERT INTO tokens (id, user_id, agent, hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING ${TOKEN_COLUMNS}`,
+      `INSERT INTO tokens (id, user_id, alias, hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING ${TOKEN_COLUMNS}`,
     )
     .bind(
       randomId(TOKEN_ID_LENGTH),
       userId,
-      agent,
+      alias,
       await hashToken(plaintext),
       new Date(now.getTime() + ttlSeconds * 1000).toISOString(),
       now.toISOString(),
@@ -71,34 +71,34 @@ export async function mintToken(
 }
 
 /**
- * A user's tokens, newest first. With `agent`, only that alias's tokens: an agent sees and manages its
- * own tokens, never its human's or another agent's.
+ * A user's tokens, newest first. With `alias`, only that alias's tokens: an alias sees and manages its
+ * own tokens, never its user's own or another alias's.
  */
-export async function listTokens(db: Database, userId: string, agent?: string | null): Promise<Token[]> {
-  const scoped = agent !== undefined && agent !== null;
+export async function listTokens(db: Database, userId: string, alias?: string | null): Promise<Token[]> {
+  const scoped = alias !== undefined && alias !== null;
   const { results } = await db
     .prepare(
-      `SELECT ${TOKEN_COLUMNS} FROM tokens WHERE user_id = ?${scoped ? " AND agent = ?" : ""} ORDER BY created_at DESC, id`,
+      `SELECT ${TOKEN_COLUMNS} FROM tokens WHERE user_id = ?${scoped ? " AND alias = ?" : ""} ORDER BY created_at DESC, id`,
     )
-    .bind(...(scoped ? [userId, agent] : [userId]))
+    .bind(...(scoped ? [userId, alias] : [userId]))
     .all<Token>();
   return results;
 }
 
 /**
- * Revokes one of a user's tokens (scoped to `agent` like `listTokens`). Revoking twice keeps the first
+ * Revokes one of a user's tokens (scoped to `alias` like `listTokens`). Revoking twice keeps the first
  * revocation time. Null when there's no such token for this caller.
  */
 export async function revokeToken(
   db: Database,
-  { userId, agent, id, now }: { userId: string; agent?: string | null; id: string; now: Date },
+  { userId, alias, id, now }: { userId: string; alias?: string | null; id: string; now: Date },
 ): Promise<Token | null> {
-  const scoped = agent !== undefined && agent !== null;
+  const scoped = alias !== undefined && alias !== null;
   return db
     .prepare(
-      `UPDATE tokens SET revoked_at = COALESCE(revoked_at, ?) WHERE id = ? AND user_id = ?${scoped ? " AND agent = ?" : ""} RETURNING ${TOKEN_COLUMNS}`,
+      `UPDATE tokens SET revoked_at = COALESCE(revoked_at, ?) WHERE id = ? AND user_id = ?${scoped ? " AND alias = ?" : ""} RETURNING ${TOKEN_COLUMNS}`,
     )
-    .bind(...(scoped ? [now.toISOString(), id, userId, agent] : [now.toISOString(), id, userId]))
+    .bind(...(scoped ? [now.toISOString(), id, userId, alias] : [now.toISOString(), id, userId]))
     .first<Token>();
 }
 
@@ -111,7 +111,7 @@ export async function authenticateToken(
   if (!plaintext.startsWith(TOKEN_PREFIX)) return null;
   const row = await db
     .prepare(
-      `SELECT t.id, t.user_id, t.agent, t.expires_at, t.revoked_at, t.created_at,
+      `SELECT t.id, t.user_id, t.alias, t.expires_at, t.revoked_at, t.created_at,
               u.id AS u_id, u.handle AS u_handle, u.email AS u_email, u.created_at AS u_created_at
          FROM tokens t JOIN users u ON u.id = t.user_id
         WHERE t.hash = ?`,
@@ -121,7 +121,7 @@ export async function authenticateToken(
   if (row === null || row.revoked_at !== null || now.toISOString() >= row.expires_at) return null;
   const { u_id, u_handle, u_email, u_created_at, ...token } = row;
   return {
-    actor: { user: { id: u_id, handle: u_handle, email: u_email, created_at: u_created_at }, agent: token.agent },
+    actor: { user: { id: u_id, handle: u_handle, email: u_email, created_at: u_created_at }, alias: token.alias },
     token,
   };
 }

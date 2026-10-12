@@ -9,8 +9,8 @@ import { testDatabase } from "./support/d1.ts";
 async function setup(newId?: () => string) {
   const db = testDatabase();
   const repos = new FakeRepos();
-  const greg: Actor = { user: await userForEmail(db, "greg@example.com"), agent: null };
-  const ada: Actor = { user: await userForEmail(db, "ada@example.com"), agent: "claude" };
+  const greg: Actor = { user: await userForEmail(db, "greg@example.com"), alias: null };
+  const ada: Actor = { user: await userForEmail(db, "ada@example.com"), alias: "claude" };
   const service = projectService(newId === undefined ? { db, repos } : { db, repos, newId });
   const count = async () => (await db.prepare("SELECT COUNT(*) AS n FROM projects").first<{ n: number }>())?.n;
   return { db, repos, greg, ada, service, count };
@@ -35,7 +35,7 @@ async function failure(promise: Promise<unknown>): Promise<ServiceError> {
 }
 
 describe("projectService.create", () => {
-  it("makes the caller's human the owner and creates the origin with main as default branch", async () => {
+  it("makes the caller's user the owner and creates the origin with main as default branch", async () => {
     const { repos, ada, service } = await setup();
     const project = await service.create(ada, { handle: "throng" });
     expect(project).toEqual({

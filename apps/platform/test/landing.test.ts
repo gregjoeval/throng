@@ -3,7 +3,7 @@ import { parseConfig } from "../src/config.ts";
 import { failedChecks, mergeAuthor, mergeCommitMessage, retestConfig, THRONG_COMMITTER } from "../src/landing.ts";
 import { buildResult } from "../src/results.ts";
 
-const ada = { id: "ada00001", handle: "ada", agent: null };
+const ada = { id: "ada00001", handle: "ada", alias: null };
 
 describe("mergeCommitMessage", () => {
   it("names the attempt and task, with the trailers from the spec", () => {
@@ -13,8 +13,8 @@ describe("mergeCommitMessage", () => {
       title: "Fix the greeting",
       approver: ada,
       coAuthors: [
-        { id: "bob00001", handle: "bob", agent: "claude" },
-        { id: "bob00001", handle: "bob", agent: "codex" },
+        { id: "bob00001", handle: "bob", alias: "claude" },
+        { id: "bob00001", handle: "bob", alias: "codex" },
       ],
     });
     expect(message).toBe(
@@ -32,7 +32,7 @@ describe("mergeCommitMessage", () => {
     );
   });
 
-  it("keeps the subject on one line and leaves out co-authors when no agent pushed", () => {
+  it("keeps the subject on one line and leaves out co-authors when no alias pushed", () => {
     const message = mergeCommitMessage({
       task: 7,
       attempt: 1,
@@ -44,12 +44,12 @@ describe("mergeCommitMessage", () => {
     expect(message).not.toContain("Co-authored-by");
   });
 
-  it("names the approver's agent when they approved under one", () => {
+  it("names the approver's alias when they approved under one", () => {
     const message = mergeCommitMessage({
       task: 7,
       attempt: 1,
       title: "x",
-      approver: { ...ada, agent: "claude" },
+      approver: { ...ada, alias: "claude" },
       coAuthors: [],
     });
     expect(message).toContain("Approved-by: ada (claude) <ada00001+claude@users.noreply.throng>");
@@ -116,8 +116,8 @@ describe("failedChecks", () => {
 });
 
 describe("the merge commit's identities", () => {
-  it("authors it as the approver's human and commits it as Throng", () => {
-    expect(mergeAuthor({ ...ada, agent: "claude" })).toEqual({
+  it("authors it as the approver's user and commits it as Throng", () => {
+    expect(mergeAuthor({ ...ada, alias: "claude" })).toEqual({
       name: "ada",
       email: "ada00001+ada@users.noreply.throng",
     });

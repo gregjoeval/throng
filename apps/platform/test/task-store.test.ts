@@ -19,13 +19,13 @@ import { testSql } from "./support/task-backend.ts";
 
 const PROJECT: ProjectContext = { id: "abc123", owner: "owner001" };
 
-function actor(id: string, agent: string | null = null): Actor {
-  return { user: { id, handle: id, email: `${id}@example.com`, created_at: "" }, agent };
+function actor(id: string, alias: string | null = null): Actor {
+  return { user: { id, handle: id, email: `${id}@example.com`, created_at: "" }, alias };
 }
 
 const owner = actor("owner001");
 const ada = actor("ada00001");
-const adaAgent = actor("ada00001", "claude");
+const adaAlias = actor("ada00001", "claude");
 const bob = actor("bob00001");
 
 function setup() {
@@ -34,10 +34,10 @@ function setup() {
   const sql = testSql();
   const store = new TaskStore({ sql, repos, now: () => new Date("2026-10-10T12:00:00.000Z") });
   const journal = () =>
-    sql.db.prepare("SELECT kind, user_id, agent, task, attempt, detail FROM journal ORDER BY id").all() as {
+    sql.db.prepare("SELECT kind, user_id, alias, task, attempt, detail FROM journal ORDER BY id").all() as {
       kind: string;
       user_id: string;
-      agent: string | null;
+      alias: string | null;
       task: number;
       attempt: number | null;
     }[];
@@ -178,7 +178,7 @@ describe("tasks", () => {
     store.createTask(PROJECT, ada, { title: "a" });
     expect(await code(() => store.editTask(PROJECT, bob, { task: 1, title: "x" }))).toBe("forbidden");
     expect(await code(() => store.closeTask(PROJECT, bob, { task: 1 }))).toBe("forbidden");
-    expect(await store.closeTask(PROJECT, adaAgent, { task: 1 })).toMatchObject({
+    expect(await store.closeTask(PROJECT, adaAlias, { task: 1 })).toMatchObject({
       state: "closed",
       closed_by: ada.user.id,
     });
@@ -242,10 +242,10 @@ describe("tasks", () => {
 });
 
 describe("attempts", () => {
-  it("creates a batch of draft attempts by the caller's human, each with a fork of the origin", async () => {
+  it("creates a batch of draft attempts by the caller's user, each with a fork of the origin", async () => {
     const { store, repos, journal } = setup();
     store.createTask(PROJECT, ada, { title: "a" });
-    const created = await store.createAttempts(PROJECT, adaAgent, { task: 1, count: 2, note: "try" });
+    const created = await store.createAttempts(PROJECT, adaAlias, { task: 1, count: 2, note: "try" });
     expect(created).toEqual(
       [1, 2].map((number) => ({
         task: 1,
@@ -266,8 +266,8 @@ describe("attempts", () => {
     expect(await repos.get("abc123-t1a1")).toMatchObject({ parent: "abc123-main" });
     expect(await repos.get("abc123-t1a2")).toMatchObject({ parent: "abc123-main" });
     expect(journal().filter((e) => e.attempt !== null)).toEqual([
-      expect.objectContaining({ kind: "created", user_id: ada.user.id, agent: "claude", task: 1, attempt: 1 }),
-      expect.objectContaining({ kind: "created", user_id: ada.user.id, agent: "claude", task: 1, attempt: 2 }),
+      expect.objectContaining({ kind: "created", user_id: ada.user.id, alias: "claude", task: 1, attempt: 1 }),
+      expect.objectContaining({ kind: "created", user_id: ada.user.id, alias: "claude", task: 1, attempt: 2 }),
     ]);
   });
 
@@ -346,12 +346,12 @@ describe("attempts", () => {
     });
   });
 
-  it("journals every transition with the acting user and agent", async () => {
+  it("journals every transition with the acting user and alias", async () => {
     const { store, journal } = setup();
     store.createTask(PROJECT, ada, { title: "a" });
-    await store.createAttempts(PROJECT, adaAgent, { task: 1 });
+    await store.createAttempts(PROJECT, adaAlias, { task: 1 });
     const ref = { task: 1, number: 1 };
-    await store.openAttempt(PROJECT, adaAgent, ref);
+    await store.openAttempt(PROJECT, adaAlias, ref);
     store.draftAttempt(PROJECT, ada, ref);
     await store.closeAttempt(PROJECT, ada, ref);
     await store.obsoleteAttempt(PROJECT, owner, ref);
@@ -359,7 +359,7 @@ describe("attempts", () => {
     await store.reopenAttempt(PROJECT, ada, ref);
     await store.openAttempt(PROJECT, ada, ref);
     await store.markMerged(PROJECT, owner, { ...ref, sha: "f00" });
-    expect(journal().map((e) => [e.kind, e.user_id, e.agent, e.attempt])).toEqual([
+    expect(journal().map((e) => [e.kind, e.user_id, e.alias, e.attempt])).toEqual([
       ["created", ada.user.id, null, null],
       ["created", ada.user.id, "claude", 1],
       ["opened", ada.user.id, "claude", 1],
@@ -374,7 +374,7 @@ describe("attempts", () => {
     ]);
   });
 
-  it("lets only the author, or their agents, change an attempt", async () => {
+  it("lets only the author, or their aliases, change an attempt", async () => {
     const { store } = setup();
     await attemptIn(store, "draft");
     const ref = { task: 1, number: 1 };
@@ -385,8 +385,8 @@ describe("attempts", () => {
       expect(await code(() => store.closeAttempt(PROJECT, who, ref))).toBe("forbidden");
       expect(await code(() => store.editAttempt(PROJECT, who, { ...ref, note: "x" }))).toBe("forbidden");
     }
-    expect(store.editAttempt(PROJECT, adaAgent, { ...ref, note: "mine" }).note).toBe("mine");
-    expect((await store.openAttempt(PROJECT, adaAgent, ref)).state).toBe("open");
+    expect(store.editAttempt(PROJECT, adaAlias, { ...ref, note: "mine" }).note).toBe("mine");
+    expect((await store.openAttempt(PROJECT, adaAlias, ref)).state).toBe("open");
     expect(await code(() => store.draftAttempt(PROJECT, bob, ref))).toBe("forbidden");
     await store.closeAttempt(PROJECT, ada, ref);
     expect(await code(store.reopenAttempt(PROJECT, bob, ref))).toBe("forbidden");
@@ -710,7 +710,7 @@ describe("migrate", () => {
     migrate(sql);
     migrate(sql);
     const columns = sql.exec<{ name: string }>("PRAGMA table_info(journal)").map((c) => c.name);
-    expect(columns).toEqual(["id", "at", "kind", "detail", "user_id", "agent", "task", "attempt"]);
+    expect(columns).toEqual(["id", "at", "kind", "detail", "user_id", "alias", "task", "attempt"]);
     expect(sql.exec("SELECT kind FROM journal")).toEqual([{ kind: "duplicate" }]);
   });
 
@@ -828,6 +828,48 @@ describe("migrate", () => {
     expect(tables).not.toContain("checks");
     expect(tables).not.toContain("pending");
     expect(tables).toContain("tasks");
+  });
+
+  it("renames the agent columns of tables from before aliases to alias, keeping their values", () => {
+    const sql = testSql();
+    sql.exec(`CREATE TABLE journal (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER, kind TEXT, detail TEXT, user_id TEXT, agent TEXT,
+      task INTEGER, attempt INTEGER
+    )`);
+    sql.exec("INSERT INTO journal (at, kind, detail, user_id, agent) VALUES (1, 'pushed', '{}', 'ada', 'claude')");
+    sql.exec(`CREATE TABLE scoring_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, task INTEGER NOT NULL, attempt INTEGER NOT NULL,
+      sha TEXT NOT NULL, trigger TEXT NOT NULL, user_id TEXT, agent TEXT, status TEXT NOT NULL,
+      instance_id TEXT NOT NULL, created_at INTEGER NOT NULL, started_at INTEGER, finished_at INTEGER,
+      torn_down INTEGER NOT NULL DEFAULT 0
+    )`);
+    sql.exec(
+      `INSERT INTO scoring_runs (project, task, attempt, sha, trigger, user_id, agent, status, instance_id, created_at)
+         VALUES ('abc123', 1, 1, 'a', 'open', 'ada', 'claude', 'done', 'i', 1)`,
+    );
+    sql.exec(`CREATE TABLE merge_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, task INTEGER NOT NULL, attempt INTEGER NOT NULL, state TEXT NOT NULL,
+      approved_head TEXT NOT NULL, approved_by_user TEXT NOT NULL, approved_by_agent TEXT, approved_at TEXT NOT NULL,
+      queued_at TEXT, held INTEGER NOT NULL DEFAULT 0, last_dequeue TEXT, dequeue_seen INTEGER NOT NULL DEFAULT 1,
+      merge_sha TEXT, merged_at TEXT, created_at TEXT NOT NULL, created_by_user TEXT NOT NULL, created_by_agent TEXT
+    )`);
+    sql.exec(
+      `INSERT INTO merge_requests (task, attempt, state, approved_head, approved_by_user, approved_by_agent,
+         approved_at, created_at, created_by_user, created_by_agent)
+         VALUES (1, 1, 'pending', 'a', 'ada', 'claude', 't', 't', 'ada', 'codex')`,
+    );
+    const repos = new FakeRepos();
+    expect(new TaskStore({ sql, repos })).toBeDefined();
+    expect(new TaskStore({ sql, repos })).toBeDefined();
+    expect(sql.exec("SELECT user_id, alias FROM journal")).toEqual([{ user_id: "ada", alias: "claude" }]);
+    expect(sql.exec("SELECT user_id, alias FROM scoring_runs")).toEqual([{ user_id: "ada", alias: "claude" }]);
+    expect(sql.exec("SELECT approved_by_alias, created_by_alias FROM merge_requests")).toEqual([
+      { approved_by_alias: "claude", created_by_alias: "codex" },
+    ]);
+    for (const table of ["journal", "scoring_runs", "merge_requests"]) {
+      const columns = sql.exec<{ name: string }>(`PRAGMA table_info(${table})`).map((c) => c.name);
+      expect(columns.filter((c) => c.includes("agent"))).toEqual([]);
+    }
   });
 });
 

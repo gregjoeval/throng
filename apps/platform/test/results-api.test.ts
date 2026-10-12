@@ -53,9 +53,9 @@ async function setup() {
     const res = await api.request(path, init, env);
     return { status: res.status, body: (await res.json()) as Json };
   };
-  const tokenFor = async (email: string, agent?: string) => {
+  const tokenFor = async (email: string, alias?: string) => {
     const headers = { "Cf-Access-Jwt-Assertion": `as:${email}`, "Content-Type": "application/json" };
-    const res = await api.request("/tokens", { method: "POST", headers, body: JSON.stringify({ agent }) }, env);
+    const res = await api.request("/tokens", { method: "POST", headers, body: JSON.stringify({ alias }) }, env);
     return ((await res.json()) as Json)["token"] as string;
   };
 
@@ -76,7 +76,7 @@ async function setup() {
   /** Commits a new head on the attempt's fork, as a push would. */
   const commit = (attempt: string, content: string) =>
     repos.commit(`${projectId}-${attempt}`, { files: { "README.md": content } }).hash;
-  const me = (await call("GET", "/me", ada)).body as { user: User; agent: null };
+  const me = (await call("GET", "/me", ada)).body as { user: User; alias: null };
   /** Pushes a new head to ada's attempt and records it, as the git proxy does once it lands. */
   const push = (task: number, attempt: number, content: string) => {
     const fork = `t${task}a${attempt}`;
@@ -227,7 +227,7 @@ describe("scoring runs", () => {
       trigger: "open",
       status: "done",
       requestedBy: { id: expect.any(String), handle: "ada" },
-      agent: null,
+      alias: null,
       createdAt: "2026-10-10T12:00:00.000Z",
       startedAt: "2026-10-10T12:00:00.000Z",
       finishedAt: "2026-10-10T12:00:00.000Z",

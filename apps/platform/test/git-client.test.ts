@@ -20,7 +20,7 @@ afterEach(async () => {
 });
 
 const PROJECT: ProjectContext = { id: "abc123", owner: "owner001" };
-const ada: Actor = { user: { id: "ada00001", handle: "ada", email: "ada@example.com", created_at: "" }, agent: null };
+const ada: Actor = { user: { id: "ada00001", handle: "ada", email: "ada@example.com", created_at: "" }, alias: null };
 const ORIGIN = originRepo(PROJECT.id);
 const FORK = forkRepo(PROJECT.id, "t1a1");
 const MAIN = "refs/heads/main";

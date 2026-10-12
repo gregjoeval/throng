@@ -215,10 +215,10 @@ export class LandingWorkflow extends WorkflowEntrypoint<Env, LandingParams> {
       .bind(...ids)
       .all<{ id: string; handle: string }>();
     const handles = new Map(results.map((u) => [u.id, u.handle]));
-    const signer = (id: string, agent: string | null): Signer => ({ id, handle: handles.get(id) ?? id, agent });
+    const signer = (id: string, alias: string | null): Signer => ({ id, handle: handles.get(id) ?? id, alias });
     return {
-      approver: signer(params.approver.user, params.approver.agent),
-      coAuthors: params.coAuthors.map((c) => signer(c.user, c.agent)),
+      approver: signer(params.approver.user, params.approver.alias),
+      coAuthors: params.coAuthors.map((c) => signer(c.user, c.alias)),
     };
   }
 }

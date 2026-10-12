@@ -1,6 +1,6 @@
 // Authentication for the product API and the git proxy. Machines present a Throng token: as
 // `Authorization: Bearer` on `/api/*`, and as the HTTP Basic password (any username) on `/git/*`.
-// Handlers read `c.var.actor` (`{user, agent}`) and `c.var.token` (null under an Access session).
+// Handlers read `c.var.actor` (`{user, alias}`) and `c.var.token` (null under an Access session).
 
 import { createMiddleware } from "hono/factory";
 import { verifierFromEnv } from "./access.ts";
@@ -86,7 +86,7 @@ export function bearerOrAccess({
     if (identity === null) {
       return c.json(errorBody("unauthorized", "a bearer token or Access session is required"), 401, BEARER_CHALLENGE);
     }
-    c.set("actor", { user: await userForEmail(c.env.DB, identity.email), agent: null });
+    c.set("actor", { user: await userForEmail(c.env.DB, identity.email), alias: null });
     c.set("token", null);
     await next();
   });
@@ -107,7 +107,7 @@ export function bearerOrForwarded({ now, trustForwardedIdentity = false }: AuthO
     if (identity === null) {
       return c.json(errorBody("unauthorized", "a bearer token is required"), 401, BEARER_CHALLENGE);
     }
-    c.set("actor", { user: await userForEmail(c.env.DB, identity.email), agent: null });
+    c.set("actor", { user: await userForEmail(c.env.DB, identity.email), alias: null });
     c.set("token", null);
     await next();
   });

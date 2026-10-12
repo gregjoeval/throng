@@ -43,7 +43,7 @@ const params: LandingParams = {
   attempt: 1,
   title: "Do it",
   head: HEAD,
-  approver: { user: "ada00001", agent: null },
+  approver: { user: "ada00001", alias: null },
   coAuthors: [],
   startedAt: 1_700_000_000_000,
 };

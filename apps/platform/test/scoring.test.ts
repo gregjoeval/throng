@@ -13,13 +13,13 @@ import { testSql } from "./support/task-backend.ts";
 const PROJECT: ProjectContext = { id: "abc123", owner: "owner001" };
 const ORIGIN = "abc123-main";
 
-function actor(id: string, agent: string | null = null): Actor {
-  return { user: { id, handle: id, email: `${id}@example.com`, created_at: "" }, agent };
+function actor(id: string, alias: string | null = null): Actor {
+  return { user: { id, handle: id, email: `${id}@example.com`, created_at: "" }, alias };
 }
 
 const owner = actor("owner001");
 const ada = actor("ada00001");
-const adaAgent = actor("ada00001", "claude");
+const adaAlias = actor("ada00001", "claude");
 const bob = actor("bob00001");
 const cat = actor("cat00001");
 
@@ -120,10 +120,10 @@ describe("scoring triggers", () => {
   it("scores the head when an attempt is opened", async () => {
     const { store, workflow, runs, base, draft } = setup();
     const ref = await draft();
-    await store.openAttempt(PROJECT, adaAgent, ref);
+    await store.openAttempt(PROJECT, adaAlias, ref);
 
     expect(runs(ref)).toMatchObject([
-      { sha: base.hash, trigger: "open", status: "queued", user_id: ada.user.id, agent: "claude" },
+      { sha: base.hash, trigger: "open", status: "queued", user_id: ada.user.id, alias: "claude" },
     ]);
     await store.scoring.drain();
     expect(runs(ref)).toMatchObject([{ status: "running" }]);
@@ -174,8 +174,8 @@ describe("scoring triggers", () => {
     const ref = await draft();
     expect(await code(store.scoreNow(PROJECT, bob, ref))).toBe("forbidden");
 
-    const request = queued(await store.scoreNow(PROJECT, adaAgent, ref));
-    expect(request.run).toMatchObject({ sha: base.hash, trigger: "scoreNow", agent: "claude" });
+    const request = queued(await store.scoreNow(PROJECT, adaAlias, ref));
+    expect(request.run).toMatchObject({ sha: base.hash, trigger: "scoreNow", alias: "claude" });
 
     await store.openAttempt(PROJECT, ada, ref);
     expect(await code(store.scoreNow(PROJECT, ada, ref))).toBe("invalidState");

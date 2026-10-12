@@ -33,7 +33,7 @@ export async function e2eToken(db: Database, now: Date): Promise<{ token: string
   const user = await userForEmail(db, E2E_EMAIL);
   const { plaintext, token } = await mintToken(db, {
     userId: user.id,
-    agent: null,
+    alias: null,
     ttlSeconds: E2E_TOKEN_TTL_SECONDS,
     now,
   });
@@ -51,7 +51,7 @@ export async function e2eProject(
   id: string,
 ): Promise<{ project: Project; remote: string; token: string }> {
   const user = await userForEmail(db, E2E_EMAIL);
-  const project = await projectService({ db, repos, newId: () => id }).create({ user, agent: null }, { handle: id });
+  const project = await projectService({ db, repos, newId: () => id }).create({ user, alias: null }, { handle: id });
   const [origin, { token }] = await Promise.all([
     repos.get(originRepo(id)),
     repos.mintToken(originRepo(id), "write", ORIGIN_TOKEN_TTL_SECONDS),

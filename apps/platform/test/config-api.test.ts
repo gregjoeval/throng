@@ -30,7 +30,7 @@ function setup() {
 describe("POST /api/config/validate", () => {
   it("returns the parse result for a YAML body, to any valid token", async () => {
     const { mint, validate } = setup();
-    for (const token of [await mint(), await mint({ agent: "claude" })]) {
+    for (const token of [await mint(), await mint({ alias: "claude" })]) {
       const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/yaml" };
       expect(await validate("checks:\n  - { name: test, command: pnpm test }\n", headers)).toEqual({
         status: 200,

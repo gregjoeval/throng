@@ -9,7 +9,7 @@ import { testDatabase } from "./support/d1.ts";
 const NOW = new Date("2026-10-10T12:00:00.000Z");
 
 const whoami = (c: { var: AuthEnv["Variables"]; json: (body: unknown) => Response }) =>
-  c.json({ handle: c.var.actor.user.handle, agent: c.var.actor.agent, token: c.var.token?.id ?? null });
+  c.json({ handle: c.var.actor.user.handle, alias: c.var.actor.alias, token: c.var.token?.id ?? null });
 const basic = (username: string, password: string) => `Basic ${btoa(`${username}:${password}`)}`;
 
 async function setup() {
@@ -17,7 +17,7 @@ async function setup() {
   const user = await userForEmail(env.DB, "greg@example.com");
   const { token, plaintext } = await mintToken(env.DB, {
     userId: user.id,
-    agent: "claude",
+    alias: "claude",
     ttlSeconds: 3600,
     now: NOW,
   });
@@ -30,11 +30,11 @@ async function setup() {
 }
 
 describe("bearerAuth", () => {
-  it("exposes the token's user and agent", async () => {
+  it("exposes the token's user and alias", async () => {
     const { get, plaintext, token } = await setup();
     const res = await get("/api/x", `Bearer ${plaintext}`);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ handle: "greg", agent: "claude", token: token.id });
+    expect(await res.json()).toEqual({ handle: "greg", alias: "claude", token: token.id });
   });
 
   it("rejects Basic credentials, unknown tokens and missing headers", async () => {
@@ -59,7 +59,7 @@ describe("gitAuth", () => {
     for (const username of ["git", "x-access-token", ""]) {
       const res = await get("/git/x", basic(username, plaintext));
       expect(res.status).toBe(200);
-      expect(await res.json()).toMatchObject({ handle: "greg", agent: "claude" });
+      expect(await res.json()).toMatchObject({ handle: "greg", alias: "claude" });
     }
   });
 

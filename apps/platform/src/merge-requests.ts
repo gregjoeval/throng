@@ -9,6 +9,7 @@
 //   cancel, or the source attempt ending, from any open state ─► cancelled
 
 import { normaliseDequeue } from "./casing.ts";
+import { renameColumns } from "./columns.ts";
 import type { ConflictDetails } from "./conflicts.ts";
 import type { ErroredDetails, FailedChecksDetails, LandingOutcome } from "./landing.ts";
 import type { Sql } from "./task-store.ts";
@@ -36,10 +37,10 @@ export type MergeRequestEvent =
   | "merged"
   | "cancelled";
 
-/** Who acted: a user id, and the agent alias they acted under, if any. */
+/** Who acted: a user id, and the alias they acted under, if any. */
 export interface ActedBy {
   user: string;
-  agent: string | null;
+  alias: string | null;
 }
 
 /**
@@ -98,7 +99,7 @@ interface MergeRequestRow {
   state: MergeRequestState;
   approved_head: string;
   approved_by_user: string;
-  approved_by_agent: string | null;
+  approved_by_alias: string | null;
   approved_at: string;
   queued_at: string | null;
   /** 1 after a dequeue back to pending, until an approval or a push: it doesn't requeue on its own. */
@@ -110,7 +111,7 @@ interface MergeRequestRow {
   merged_at: string | null;
   created_at: string;
   created_by_user: string;
-  created_by_agent: string | null;
+  created_by_alias: string | null;
 }
 
 const SCHEMA = [
@@ -121,7 +122,7 @@ const SCHEMA = [
     state TEXT NOT NULL,
     approved_head TEXT NOT NULL,
     approved_by_user TEXT NOT NULL,
-    approved_by_agent TEXT,
+    approved_by_alias TEXT,
     approved_at TEXT NOT NULL,
     queued_at TEXT,
     held INTEGER NOT NULL DEFAULT 0,
@@ -131,12 +132,17 @@ const SCHEMA = [
     merged_at TEXT,
     created_at TEXT NOT NULL,
     created_by_user TEXT NOT NULL,
-    created_by_agent TEXT
+    created_by_alias TEXT
   )`,
   // One open merge request per task.
   `CREATE UNIQUE INDEX IF NOT EXISTS merge_requests_open_task ON merge_requests (task)
     WHERE state IN ('pending', 'queued', 'landing', 'needsReview')`,
 ];
+/** `merge_requests` columns named before an actor's alias was called an alias. */
+const RENAMES = [
+  ["approved_by_agent", "approved_by_alias"],
+  ["created_by_agent", "created_by_alias"],
+] as const;
 
 export interface MergeRequestsDeps {
   sql: Sql;
@@ -175,6 +181,7 @@ export class MergeRequests {
     );
     if (index?.sql.includes("needs_review") === true) sql.exec("DROP INDEX merge_requests_open_task");
     for (const statement of SCHEMA) sql.exec(statement);
+    renameColumns(sql, "merge_requests", RENAMES);
   }
 
   /** The task's open merge request, if any. */
@@ -232,18 +239,18 @@ export class MergeRequests {
   select(actor: Actor, input: { task: number; attempt: number; head: string }): StoredMergeRequest {
     const at = this.#stamp();
     const [row] = this.#sql.exec<MergeRequestRow>(
-      `INSERT INTO merge_requests (task, attempt, state, approved_head, approved_by_user, approved_by_agent,
-         approved_at, created_at, created_by_user, created_by_agent)
+      `INSERT INTO merge_requests (task, attempt, state, approved_head, approved_by_user, approved_by_alias,
+         approved_at, created_at, created_by_user, created_by_alias)
        VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
       input.task,
       input.attempt,
       input.head,
       actor.user.id,
-      actor.agent,
+      actor.alias,
       at,
       at,
       actor.user.id,
-      actor.agent,
+      actor.alias,
     );
     if (row === undefined) throw new Error("merge request insert returned no row");
     const mr = this.#toMergeRequest(row);
@@ -255,11 +262,11 @@ export class MergeRequests {
   /** Approves `head`, moving the merge request to `pending` and releasing any hold. */
   approve(actor: Actor, mr: StoredMergeRequest, head: string): StoredMergeRequest {
     this.#sql.exec(
-      `UPDATE merge_requests SET state = 'pending', approved_head = ?, approved_by_user = ?, approved_by_agent = ?,
+      `UPDATE merge_requests SET state = 'pending', approved_head = ?, approved_by_user = ?, approved_by_alias = ?,
          approved_at = ?, held = 0 WHERE id = ?`,
       head,
       actor.user.id,
-      actor.agent,
+      actor.alias,
       this.#stamp(),
       mr.id,
     );
@@ -354,7 +361,7 @@ export class MergeRequests {
       attempt: row.attempt,
       state: row.state,
       approved_head: row.approved_head,
-      approved_by: { user: row.approved_by_user, agent: row.approved_by_agent },
+      approved_by: { user: row.approved_by_user, alias: row.approved_by_alias },
       approved_at: row.approved_at,
       queued_at: row.queued_at,
       position: place,
@@ -362,7 +369,7 @@ export class MergeRequests {
       merge_sha: row.merge_sha,
       merged_at: row.merged_at,
       created_at: row.created_at,
-      created_by: { user: row.created_by_user, agent: row.created_by_agent },
+      created_by: { user: row.created_by_user, alias: row.created_by_alias },
     };
   }
 

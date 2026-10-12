@@ -1,8 +1,8 @@
 // One attempt's lane: its header (ref, gate, verdict counts, the author's note and a menu), then its
-// change set against its base, file by file. The arena shows several side by side; the
-// single-attempt view shows one.
+// change set against its base or current main, file by file. The arena shows several side by side;
+// the single-attempt view shows one.
 
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { EllipsisIcon } from "lucide-react";
 import { useState } from "react";
@@ -17,9 +17,12 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { compareQuery } from "@/lib/api";
+import { compareQuery, mainHeadQuery, meQuery, projectKey, scoreNow } from "@/lib/api";
+import type { Compare } from "@/lib/api";
 import { GATE_STATE_LABELS, gateState } from "@/lib/arena";
 import type { ArenaAttempt } from "@/lib/arena";
+import type { Layout, Reference } from "@/lib/arena-view";
+import { apiError } from "@/lib/errors";
 import { buildPath } from "@/lib/paths";
 
 interface InProject {
@@ -29,7 +32,9 @@ interface InProject {
 
 /**
  * A lane for `attempt`. `note` is the author's note from the attempt itself; `actions` goes in the
- * header beside the menu (the selection slice's Select). The menu opens the attempt's details.
+ * header beside the menu (the selection slice's Select). The menu opens the attempt's details. Its
+ * change set is against `reference`, its diffs laid out by `layout`; with `files` false it lists no
+ * files, only its notices (the arena's by-file arrangement shows the files in rows instead).
  */
 export function Lane({
   owner,
@@ -37,10 +42,16 @@ export function Lane({
   attempt,
   note,
   actions,
+  reference = "base",
+  layout = "split",
+  files = true,
 }: InProject & {
   attempt: ArenaAttempt;
   note: string;
   actions?: ReactNode;
+  reference?: Reference;
+  layout?: Layout;
+  files?: boolean;
 }) {
   const [details, setDetails] = useState(false);
   return (
@@ -59,7 +70,14 @@ export function Lane({
         <VerdictCounts verdicts={attempt.verdicts} />
         {note === "" ? null : <p className="text-sm text-muted-foreground">{note}</p>}
       </header>
-      <LaneChanges owner={owner} project={project} attempt={attempt} />
+      <LaneChanges
+        owner={owner}
+        project={project}
+        attempt={attempt}
+        reference={reference}
+        layout={layout}
+        files={files}
+      />
       <AttemptDetails owner={owner} project={project} attempt={attempt} open={details} onOpenChange={setDetails} />
     </section>
   );
@@ -98,22 +116,111 @@ function LaneMenu({
   );
 }
 
-/** The attempt's change set: the compare from its base to its head, once it has both. */
-function LaneChanges({ owner, project, attempt }: InProject & { attempt: ArenaAttempt }) {
-  const { sha, base } = attempt;
-  const changes = useQuery({
-    ...compareQuery(owner, project, base?.sha ?? "", sha ?? "", attempt.ref),
-    enabled: sha !== null && base !== null,
-  });
-  if (sha === null) return <LaneNotice>Nothing has been pushed to {attempt.ref} yet.</LaneNotice>;
-  if (base === null) {
-    return (
-      <LaneNotice>{attempt.ref} shares no history with the task's line, so it has no base to diff against.</LaneNotice>
-    );
+/** The attempt's notices, then its change set against `reference` unless `files` is false. */
+function LaneChanges({
+  owner,
+  project,
+  attempt,
+  reference,
+  layout,
+  files,
+}: InProject & { attempt: ArenaAttempt; reference: Reference; layout: Layout; files: boolean }) {
+  const changes = useLaneCompare(owner, project, attempt, reference);
+  if (changes.state === "none") return <LaneNotice>Nothing has been pushed to {attempt.ref} yet.</LaneNotice>;
+  return (
+    <>
+      {changes.fellBack ? (
+        <LaneNotice>
+          {attempt.ref} has no base (it shares no history with the task's line), so it's diffed against current main.
+        </LaneNotice>
+      ) : null}
+      <ScoreNow owner={owner} project={project} attempt={attempt} />
+      {changes.state === "noMain" ? <LaneNotice>main has no commits to diff {attempt.ref} against.</LaneNotice> : null}
+      {files ? <LaneFiles changes={changes} attempt={attempt} layout={layout} /> : null}
+    </>
+  );
+}
+
+function LaneFiles({ changes, attempt, layout }: { changes: LaneCompare; attempt: ArenaAttempt; layout: Layout }) {
+  switch (changes.state) {
+    case "pending": {
+      return <Loading label="Loading changes…" />;
+    }
+    case "error": {
+      return <ErrorState error={changes.error} />;
+    }
+    case "ready": {
+      return <CommitFiles diff={changes.diff} idPrefix={`${attempt.ref}-`} layout={layout} />;
+    }
+    default: {
+      return null;
+    }
   }
-  if (changes.isPending) return <Loading label="Loading changes…" />;
-  if (changes.isError) return <ErrorState error={changes.error} />;
-  return <CommitFiles diff={changes.data} idPrefix={`${attempt.ref}-`} />;
+}
+
+/**
+ * A lane's change set as it loads: `none` before the attempt has a head, `noMain` when it's diffed
+ * against a `main` with no commits. `fellBack` says an attempt with no base is diffed against `main`.
+ */
+type LaneCompare = { fellBack: boolean } & (
+  | { state: "none" | "noMain" | "pending" }
+  | { state: "error"; error: unknown }
+  | { state: "ready"; diff: Compare }
+);
+
+/**
+ * What the attempt's change set is diffed against for `reference`: its base, or `main` (`onMain`).
+ * An attempt with a head but no base falls back to `main` (`fellBack`).
+ */
+export function laneReference(attempt: ArenaAttempt, reference: Reference) {
+  const fellBack = attempt.sha !== null && reference === "base" && attempt.base === null;
+  const onMain = attempt.sha !== null && (reference === "main" || fellBack);
+  return { fellBack, onMain };
+}
+
+/** The compare query of the attempt's change set from `from` (a sha, or null while unknown). */
+export const laneCompareQuery = (owner: string, project: string, attempt: ArenaAttempt, from: string | null) => ({
+  ...compareQuery(owner, project, from ?? "", attempt.sha ?? "", attempt.ref),
+  enabled: attempt.sha !== null && from !== null,
+});
+
+/** The attempt's change set against `reference`, both ends by sha (see `laneReference`). */
+function useLaneCompare(owner: string, project: string, attempt: ArenaAttempt, reference: Reference): LaneCompare {
+  const { fellBack, onMain } = laneReference(attempt, reference);
+  const main = useQuery({ ...mainHeadQuery(owner, project), enabled: onMain });
+  const from = onMain ? (main.data ?? null) : (attempt.base?.sha ?? null);
+  const compare = useQuery(laneCompareQuery(owner, project, attempt, from));
+  if (attempt.sha === null) return { fellBack, state: "none" };
+  if (onMain && main.isError) return { fellBack, state: "error", error: main.error };
+  if (onMain && main.isSuccess && main.data === null) return { fellBack, state: "noMain" };
+  if (compare.isError) return { fellBack, state: "error", error: compare.error };
+  if (compare.isSuccess) return { fellBack, state: "ready", diff: compare.data };
+  return { fellBack, state: "pending" };
+}
+
+/**
+ * Score now, for a draft's author while its head has no result, since drafts aren't scored on push.
+ * Once asked, the arena's polling shows the run.
+ */
+function ScoreNow({ owner, project, attempt }: InProject & { attempt: ArenaAttempt }) {
+  const me = useQuery(meQuery);
+  const queryClient = useQueryClient();
+  const score = useMutation({
+    mutationFn: () => scoreNow(owner, project, attempt.ref),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: projectKey(owner, project) }),
+  });
+  const unscored = attempt.result === undefined && (attempt.status === "none" || attempt.status === "errored");
+  const isAuthor = me.isSuccess && me.data.user.id === attempt.author.id;
+  if (attempt.state !== "draft" || !unscored || !isAuthor) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+      <span>Drafts aren't scored on push.</span>
+      <Button size="sm" variant="outline" disabled={score.isPending || score.isSuccess} onClick={() => score.mutate()}>
+        Score now
+      </Button>
+      {score.isError ? <span role="alert">{apiError(score.error).message}</span> : null}
+    </div>
+  );
 }
 
 function LaneNotice({ children }: { children: ReactNode }) {

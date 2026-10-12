@@ -5,7 +5,7 @@
 
 import { parseDocument } from "yaml";
 import { z } from "zod";
-import { METRIC_FORMATS, METRIC_TYPES } from "./metric-values.ts";
+import { METRIC_FORMATS, METRIC_TYPES, parseFrom } from "./metric-values.ts";
 import type { MetricFormat } from "./metric-values.ts";
 import { originRepo } from "./repos.ts";
 import type { Repos } from "./repos.ts";
@@ -259,7 +259,7 @@ const ConfigSchema = z
       }
       metrics.add(metric.name);
       checkMetricFields(metric, i, ctx);
-      const check = metric.from.split(".")[0] ?? "";
+      const { check } = parseFrom(metric.from);
       if (!checks.has(check)) {
         ctx.addIssue({ code: "custom", path: ["metrics", i, "from"], message: `no check is named ${check}` });
       }

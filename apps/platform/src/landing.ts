@@ -3,6 +3,7 @@
 
 import type { ConfigResult } from "./config.ts";
 import type { ConflictDetails } from "./conflicts.ts";
+import { parseFrom } from "./metric-values.ts";
 import type { CheckOutcome, ScoringResult } from "./results.ts";
 import { attemptRef, taskRef } from "./task-refs.ts";
 
@@ -123,7 +124,7 @@ export function retestConfig(config: ConfigResult): ConfigResult | null {
   if (config.kind === "invalid") return config;
   const checks = config.config.checks.filter((check) => check.required);
   const kept = new Set(checks.map((check) => check.name));
-  const metrics = config.config.metrics.filter((metric) => kept.has(metric.from.split(".")[0] ?? ""));
+  const metrics = config.config.metrics.filter((metric) => kept.has(parseFrom(metric.from).check));
   return checks.length === 0 ? null : { kind: "valid", config: { ...config.config, checks, metrics } };
 }
 

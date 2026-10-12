@@ -16,6 +16,7 @@ import {
   MetricSchema,
 } from "./config.ts";
 import type { CheckConfig, Config, ConfigResult, MetricConfig } from "./config.ts";
+import { parseFrom } from "./metric-values.ts";
 
 export interface TaskDefinitions {
   /** Run after the project's checks, in order. */
@@ -120,7 +121,7 @@ function clashes(project: Config | null, task: TaskDefinitions): string[] {
       if (problems.length === 0 && taskChecks.has(metric.name)) {
         problems.push(`${path}: ${metric.name} is also the name of one of the task's checks`);
       }
-      const check = metric.from.split(".")[0] ?? "";
+      const { check } = parseFrom(metric.from);
       if (!checks.has(check) && !taskChecks.has(check)) problems.push(`metrics[${i}].from: no check is named ${check}`);
       return problems;
     }),

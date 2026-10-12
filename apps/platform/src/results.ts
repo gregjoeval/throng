@@ -4,7 +4,7 @@
 
 import { DEFAULT_CHECK_TIMEOUT_MS } from "./config.ts";
 import type { CheckConfig, ConfigResult, MetricConfig, MetricOrder } from "./config.ts";
-import { typedValue } from "./metric-values.ts";
+import { parseFrom, typedValue } from "./metric-values.ts";
 import type { MetricFormat, MetricRule, MetricValue } from "./metric-values.ts";
 import type { PreviewScriptResult } from "./scripts.ts";
 
@@ -114,7 +114,7 @@ export interface RawScore {
 
 /** The metrics read from `check`'s output, in config order. */
 function metricsFrom(check: string, metrics: MetricConfig[]): MetricConfig[] {
-  return metrics.filter((metric) => metric.from.split(".")[0] === check);
+  return metrics.filter((metric) => parseFrom(metric.from).check === check);
 }
 
 /** The rule a metric's value must fit: its type, and an enum's values. */

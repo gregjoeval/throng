@@ -16,7 +16,7 @@ import { blobQuery, refsQuery, treeQuery } from "@/lib/api";
 import type { Refs } from "@/lib/api";
 import { shortSha } from "@/lib/commits";
 import { apiError } from "@/lib/errors";
-import { buildPath } from "@/lib/paths";
+import { buildPath, projectRefOf } from "@/lib/paths";
 import type { BrowseLocation } from "@/lib/paths";
 
 /** The heads of a group of attempts, active or archived. */
@@ -48,7 +48,7 @@ async function switchedTo(
 }
 
 export function RefSwitcher({ at }: { at: BrowseLocation }) {
-  const projectRef = { owner: at.owner, project: at.project };
+  const projectRef = projectRefOf(at);
   const refs = useQuery(refsQuery(projectRef));
   const queryClient = useQueryClient();
   const navigate = useNavigate();

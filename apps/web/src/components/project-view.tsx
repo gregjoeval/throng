@@ -7,7 +7,7 @@ import type { ReactNode } from "react";
 import { RefSwitcher } from "@/components/ref-switcher";
 import { ErrorState, Loading } from "@/components/states";
 import { projectQuery } from "@/lib/api";
-import { buildPath, splitPath } from "@/lib/paths";
+import { attemptHint, buildPath, splitPath } from "@/lib/paths";
 import type { BrowseLocation, ProjectLocation } from "@/lib/paths";
 import { cn } from "@/lib/utils";
 
@@ -82,7 +82,14 @@ export function Breadcrumbs({ location }: { location: BrowseLocation }) {
   const parts = splitPath(location.path);
   const { owner, project, ref } = location;
   const at = (count: number) =>
-    buildPath({ view: "tree", owner, project, ref, path: parts.slice(0, count).join("/"), ...attemptOf(location) });
+    buildPath({
+      view: "tree",
+      owner,
+      project,
+      ref,
+      path: parts.slice(0, count).join("/"),
+      ...attemptHint(location.attempt),
+    });
   return (
     <div className="flex flex-wrap items-center gap-3">
       <RefSwitcher at={location} />
@@ -105,8 +112,4 @@ export function Breadcrumbs({ location }: { location: BrowseLocation }) {
       </nav>
     </div>
   );
-}
-
-function attemptOf(location: { attempt?: string }) {
-  return location.attempt === undefined ? {} : { attempt: location.attempt };
 }

@@ -7,6 +7,7 @@ import type { AppType } from "@throng/platform/app";
 import { hc, parseResponse } from "hono/client";
 import type { ClientResponse, InferResponseType } from "hono/client";
 import { PlatformError } from "@/lib/errors";
+import { attemptHint, encodePath } from "@/lib/paths";
 
 /**
  * Same-origin, so the browser's Access session rides along. Calls go through the global `fetch` at
@@ -275,10 +276,6 @@ export interface BrowseAt {
   attempt?: string | undefined;
 }
 
-// `hc` puts params into the URL as given, so each segment of a path is encoded here.
-const encodePath = (path: string) => path.split("/").filter(Boolean).map(encodeURIComponent).join("/");
-const attemptQuery = (attempt: string | undefined) => (attempt === undefined ? {} : { attempt });
-
 /**
  * One directory's entries at a ref, folders first. With `sizes`, each file has its size too, which
  * costs the platform a read per file: ask only where sizes show.
@@ -286,7 +283,8 @@ const attemptQuery = (attempt: string | undefined) => (attempt === undefined ? {
 export const treeQuery = (projectRef: ProjectRef, { ref, path, attempt }: BrowseAt, { sizes = false } = {}) =>
   apiQuery([...projectKey(projectRef), "tree", ref, encodePath(path), { attempt, sizes }], (init) => {
     const param = { ...projectRef, ref: encodeURIComponent(ref) };
-    const query = { ...attemptQuery(attempt), ...(sizes ? { sizes: "true" as const } : {}) };
+    const query = { ...attemptHint(attempt), ...(sizes ? { sizes: "true" as const } : {}) };
+    // `hc` puts params into the URL as given, so each segment of a path is encoded here.
     const tail = encodePath(path);
     return tail === ""
       ? projectApi.tree[":ref"].$get({ param, query }, { init })
@@ -300,7 +298,7 @@ export type TreeEntry = Tree["entries"][number];
 export const blobQuery = (projectRef: ProjectRef, { ref, path, attempt }: BrowseAt) =>
   apiQuery([...projectKey(projectRef), "blob", ref, encodePath(path), { attempt }], (init) =>
     projectApi.blob[":ref"][":path{.+}"].$get(
-      { param: { ...projectRef, ref: encodeURIComponent(ref), path: encodePath(path) }, query: attemptQuery(attempt) },
+      { param: { ...projectRef, ref: encodeURIComponent(ref), path: encodePath(path) }, query: attemptHint(attempt) },
       { init },
     ),
   );

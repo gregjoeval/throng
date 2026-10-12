@@ -10,7 +10,7 @@ import { Button, Tree, TreeItem, TreeItemContent } from "react-aria-components";
 import type { Key, Selection } from "react-aria-components";
 import { EntryIcon, entryLocation } from "@/components/directory";
 import { treeQuery } from "@/lib/api";
-import { buildPath, splitPath } from "@/lib/paths";
+import { buildPath, projectRefOf, splitPath } from "@/lib/paths";
 import type { BrowseLocation } from "@/lib/paths";
 import { cn } from "@/lib/utils";
 
@@ -23,7 +23,7 @@ function foldersOf(at: BrowseLocation): string[] {
 
 export function FileTree({ at }: { at: BrowseLocation }) {
   const navigate = useNavigate();
-  const projectRef = { owner: at.owner, project: at.project };
+  const projectRef = projectRefOf(at);
   const [expanded, setExpanded] = useState<Set<Key>>(() => new Set(foldersOf(at)));
   // Arriving somewhere new opens the folders it's in, leaving the others as they were.
   const [shownPath, setShownPath] = useState(at.path);

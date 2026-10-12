@@ -5,7 +5,7 @@ import { ProjectView } from "@/components/project-view";
 import { EmptyState, ErrorState, Loading } from "@/components/states";
 import { commitsQuery } from "@/lib/api";
 import { shortSha, subject } from "@/lib/commits";
-import { buildPath, commitsSearch } from "@/lib/paths";
+import { attemptHint, buildPath, commitsSearch } from "@/lib/paths";
 
 export const Route = createFileRoute("/$owner/$project/commits/$ref")({
   validateSearch: commitsSearch,
@@ -17,7 +17,7 @@ function CommitLog() {
   const { owner, project, ref } = Route.useParams();
   const search = commitsSearch(Route.useSearch());
   const page = useQuery(commitsQuery({ owner, project }, ref, search));
-  const attempt = search.attempt === undefined ? {} : { attempt: search.attempt };
+  const attempt = attemptHint(search.attempt);
   const pageAt = (offset: number) => buildPath({ view: "commits", owner, project, ref, ...attempt, offset });
 
   return (

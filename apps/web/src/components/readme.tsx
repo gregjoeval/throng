@@ -5,7 +5,7 @@ import { Markdown } from "@/components/markdown";
 import { ErrorState, Loading } from "@/components/states";
 import { blobQuery } from "@/lib/api";
 import type { TreeEntry } from "@/lib/api";
-import { isMarkdown, markdownLinks } from "@/lib/paths";
+import { isMarkdown, markdownLinks, projectRefOf } from "@/lib/paths";
 import type { BrowseLocation } from "@/lib/paths";
 
 const README = /^readme(?:\.md)?$/iu;
@@ -18,7 +18,7 @@ export function findReadme(entries: TreeEntry[]): TreeEntry | undefined {
 /** The README `entry` of the directory at `at`, rendered. */
 export function Readme({ at, entry }: { at: BrowseLocation; entry: TreeEntry }) {
   const file: BrowseLocation = { ...at, view: "blob", path: entry.path };
-  const blob = useQuery(blobQuery({ owner: at.owner, project: at.project }, file));
+  const blob = useQuery(blobQuery(projectRefOf(at), file));
   return (
     <section aria-label={entry.name} className="flex flex-col rounded-xl border">
       <h2 className="border-b px-4 py-2 font-mono text-sm">{entry.name}</h2>

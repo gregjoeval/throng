@@ -443,7 +443,9 @@ function gitHeader(old: FileSide | null, next: FileSide | null): string[] {
   else if (next === null) lines.push(`deleted file mode ${a.mode}`);
   else if (old.mode !== next.mode) lines.push(`old mode ${old.mode}`, `new mode ${next.mode}`);
   if (old !== null && next !== null && old.path !== next.path) {
-    lines.push("similarity index 100%", `rename from ${old.path}`, `rename to ${next.path}`);
+    // Only an exact rename has a known similarity; `diffFile` may be given a moved, edited file.
+    if (old.hash === next.hash) lines.push("similarity index 100%");
+    lines.push(`rename from ${old.path}`, `rename to ${next.path}`);
   }
   const oldHash = old?.hash ?? ZERO_HASH;
   const newHash = next?.hash ?? ZERO_HASH;

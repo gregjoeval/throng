@@ -358,5 +358,14 @@ describe("diffFile", () => {
         "",
       ].join("\n"),
     );
+
+    const moved = await diffFile(
+      repos,
+      REPO,
+      { path: "a.txt", mode: "100644", hash: oldHash },
+      { path: "b.txt", mode: "100644", hash: newHash },
+    );
+    expect(moved.status).toBe("renamed");
+    expect(moved.patch).toMatch(/^diff --git a\/a.txt b\/b.txt\nrename from a.txt\nrename to b.txt\nindex /);
   });
 });

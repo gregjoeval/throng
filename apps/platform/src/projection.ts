@@ -29,9 +29,9 @@ export const PROJECTION_RETRY_MS = 60_000;
 export const MAX_PROJECTION_RETRY_MS = 60 * 60_000;
 
 const SCHEMA = [
-  // AUTOINCREMENT keeps ids rising after rows are removed, so they can serve as versions.
   // One row: when this store's outbox was created, which outranks every earlier store of the project.
   `CREATE TABLE IF NOT EXISTS projection_epoch (epoch INTEGER NOT NULL)`,
+  // AUTOINCREMENT keeps ids rising after rows are removed, so they can serve as versions.
   `CREATE TABLE IF NOT EXISTS projection_outbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task INTEGER NOT NULL,
@@ -39,13 +39,19 @@ const SCHEMA = [
   )`,
   `CREATE TRIGGER IF NOT EXISTS projection_task_inserted AFTER INSERT ON tasks
     BEGIN INSERT INTO projection_outbox (task) VALUES (NEW.number); END`,
+  // `UPDATE OF` fires for every column a statement sets, changed or not (editing a task's body sets
+  // its title too), so `WHEN` keeps the outbox to real changes.
   `CREATE TRIGGER IF NOT EXISTS projection_task_updated
     AFTER UPDATE OF title, creator, state, created_at, closed_at ON tasks
+    WHEN OLD.title IS NOT NEW.title OR OLD.creator IS NOT NEW.creator OR OLD.state IS NOT NEW.state
+      OR OLD.created_at IS NOT NEW.created_at OR OLD.closed_at IS NOT NEW.closed_at
     BEGIN INSERT INTO projection_outbox (task) VALUES (NEW.number); END`,
   `CREATE TRIGGER IF NOT EXISTS projection_attempt_inserted AFTER INSERT ON attempts
     BEGIN INSERT INTO projection_outbox (task, attempt) VALUES (NEW.task, NEW.number); END`,
   `CREATE TRIGGER IF NOT EXISTS projection_attempt_updated
     AFTER UPDATE OF author, state, created_at, closed_at ON attempts
+    WHEN OLD.author IS NOT NEW.author OR OLD.state IS NOT NEW.state
+      OR OLD.created_at IS NOT NEW.created_at OR OLD.closed_at IS NOT NEW.closed_at
     BEGIN INSERT INTO projection_outbox (task, attempt) VALUES (NEW.task, NEW.number); END`,
 ];
 

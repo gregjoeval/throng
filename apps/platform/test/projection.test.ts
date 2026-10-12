@@ -256,6 +256,17 @@ describe("the D1 projection of tasks and attempts", () => {
     expect(await listings.tasks(ada)).toEqual([]);
   });
 
+  it("publishes nothing for a change to a field it doesn't carry", async () => {
+    const { store, db } = await setup();
+    const task = store.createTask(PROJECT, ada, { title: "Fix login" });
+    expect(await store.projection.publish(db, PROJECT.id)).toBeNull();
+
+    await store.editTask(PROJECT, ada, { task: task.number, body: "Steps to reproduce", attemptLimit: 3 });
+    expect(store.projection.hasChanges()).toBeFalsy();
+    await store.editTask(PROJECT, ada, { task: task.number, title: "Fix the login" });
+    expect(store.projection.hasChanges()).toBeTruthy();
+  });
+
   it("backfills the tasks and attempts a store had before the projection existed", async () => {
     const { repos, sql, store, db, listings } = await setup();
     const task = store.createTask(PROJECT, ada, { title: "Fix login" });

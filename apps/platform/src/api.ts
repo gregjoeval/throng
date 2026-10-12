@@ -30,6 +30,7 @@ import type { TaskBackend } from "./tasks.ts";
 import { DEFAULT_TOKEN_TTL_SECONDS, MAX_TOKEN_TTL_SECONDS, tokenService } from "./tokens.ts";
 import type { Token } from "./tokens.ts";
 import type { User } from "./users.ts";
+import { MAX_VERDICT_BODY, VERDICT_RECOMMENDATIONS } from "./verdicts.ts";
 
 const UserSchema = z
   .object({ id: z.string(), handle: z.string(), email: z.string(), createdAt: z.string() })
@@ -120,6 +121,36 @@ const TaskSchema = z
   })
   .openapi("Task");
 
+const VerdictSummarySchema = z
+  .object({
+    head: z.string().nullable().openapi({ description: "The attempt's current head; null before any push." }),
+    merge: z.number().int(),
+    revise: z.number().int(),
+    reject: z.number().int(),
+  })
+  .openapi("VerdictSummary", {
+    description: "The verdicts on the attempt's current head, counted by recommendation. Superseded ones don't count.",
+  });
+
+const VerdictSchema = z
+  .object({
+    reviewer: UserRefSchema,
+    agent: z.string().nullable().openapi({ description: "The agent alias the reviewer posted under, if any." }),
+    head: z.string().openapi({ description: "The head it judges: the attempt's current head when it was posted." }),
+    recommendation: z.enum(VERDICT_RECOMMENDATIONS),
+    body: z.string().openapi({ description: "Markdown." }),
+    at: z.string().openapi({ description: "When it was posted, or last replaced." }),
+    superseded: z.boolean().openapi({ description: "Whether its head is no longer the attempt's current head." }),
+  })
+  .openapi("Verdict");
+
+const PostVerdictSchema = z
+  .object({
+    recommendation: z.enum(VERDICT_RECOMMENDATIONS),
+    body: z.string().max(MAX_VERDICT_BODY).openapi({ description: "Markdown, up to 64 KB." }),
+  })
+  .openapi("PostVerdict");
+
 const AttemptSchema = z
   .object({
     ref: z.string().openapi({ description: "The attempt's reference.", example: "t42a3" }),
@@ -154,6 +185,7 @@ const AttemptSchema = z
           "The latest merge request this attempt is the source of, for polling: its state and why it last left the queue. " +
           "Null when it was never selected.",
       }),
+    verdicts: VerdictSummarySchema,
   })
   .openapi("Attempt");
 
@@ -275,6 +307,7 @@ const TaskArenaSchema = z
         ref: z.string().openapi({ example: "t42a3" }),
         state: z.enum(ATTEMPT_STATES),
         author: UserRefSchema,
+        verdicts: VerdictSummarySchema,
       }).openapi("ArenaAttempt"),
     ),
   })
@@ -1215,6 +1248,60 @@ export function apiRoutes(options: ApiOptions = {}) {
       async (c) => {
         const input = { ...attemptPath(c.req.valid("param")), ...c.req.valid("json") };
         return c.json(await tasks(c.env).handOffAttempt(c.var.actor, input), 200);
+      },
+    )
+    .openapi(
+      createRoute({
+        method: "post",
+        path: "/projects/{owner}/{project}/attempts/{a}/verdicts",
+        operationId: "postVerdict",
+        tags: ["Verdicts"],
+        summary: "Post a verdict on an attempt's current head",
+        description:
+          "Recommends `merge`, `revise` or `reject` for the attempt's current head, with a markdown explanation. Anyone " +
+          "but the attempt's author, or their agents, may, while it is a draft, open or merged. Posting again for the same " +
+          "head replaces your verdict; after a push, your verdict on the old head stays, superseded. Verdicts are advice: " +
+          "they never change the gate, the score or the merge queue. Journals `verdictPosted`.",
+        security: bearerOrWeb,
+        middleware: [browser] as const,
+        request: { params: AttemptPathSchema, body: { required: true, ...json(PostVerdictSchema) } },
+        responses: {
+          201: { description: "The verdict as stored.", ...json(VerdictSchema) },
+          400: errorResponse("The request is invalid: a bad reference or recommendation, or a body over 64 KB."),
+          401: unauthorizedBearer,
+          403: errorResponse("The attempt's author, or their agents, can't post a verdict on it."),
+          404: errorResponse("No such project or attempt."),
+          409: errorResponse("`invalidState`: the attempt is closed or obsolete, or nothing has been pushed to it."),
+        },
+      }),
+      async (c) => {
+        const input = { ...attemptPath(c.req.valid("param")), ...c.req.valid("json") };
+        return c.json(await tasks(c.env).postVerdict(c.var.actor, input), 201);
+      },
+    )
+    .openapi(
+      createRoute({
+        method: "get",
+        path: "/projects/{owner}/{project}/attempts/{a}/verdicts",
+        operationId: "listVerdicts",
+        tags: ["Verdicts"],
+        summary: "List an attempt's verdicts",
+        description:
+          "Every reviewer's verdict on every head the attempt has had, oldest first. One per reviewer and head; " +
+          "`superseded` marks those on a head that is no longer current.",
+        security: bearerOrWeb,
+        middleware: [browser] as const,
+        request: { params: AttemptPathSchema },
+        responses: {
+          200: { description: "The verdicts, oldest first.", ...json(z.object({ verdicts: z.array(VerdictSchema) })) },
+          400: errorResponse("The attempt reference is invalid."),
+          401: unauthorizedBearer,
+          404: errorResponse("No such project or attempt."),
+        },
+      }),
+      async (c) => {
+        const verdicts = await tasks(c.env).listVerdicts(c.var.actor, attemptPath(c.req.valid("param")));
+        return c.json({ verdicts }, 200);
       },
     )
     .openapi(

@@ -135,6 +135,7 @@ describe("attempt routes", () => {
         archivedSha: null,
         scoring: { status: "none", sha: null },
         mergeRequest: null,
+        verdicts: { head: null, merge: 0, revise: 0, reject: 0 },
       })),
     );
     expect(await repos.list(`${project["id"]}-t`)).toEqual([`${project["id"]}-t1a1`, `${project["id"]}-t1a2`]);

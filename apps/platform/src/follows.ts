@@ -11,7 +11,7 @@ import type { FollowResult } from "./scripts.ts";
 import { attemptRef, taskRef } from "./task-refs.ts";
 import type { Sql } from "./task-store.ts";
 
-export const FOLLOW_STATUSES = ["queued", "running", "done", "stopped"] as const;
+const FOLLOW_STATUSES = ["queued", "running", "done", "stopped"] as const;
 export type FollowStatus = (typeof FOLLOW_STATUSES)[number];
 
 export interface StoredFollow {

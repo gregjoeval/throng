@@ -60,7 +60,7 @@ const PathParamSchema = RefParamSchema.extend({
     .openapi({ description: "A repository-relative path; slashes need no escaping.", example: "src/app.ts" }),
 });
 
-const AttemptQuerySchema = z.object({
+export const AttemptQuerySchema = z.object({
   attempt: z
     .string()
     .optional()
@@ -154,7 +154,7 @@ const RefsSchema = z
   })
   .openapi("Refs");
 
-const PageQuerySchema = z.object({
+export const PageQuerySchema = z.object({
   offset: z.coerce.number().int().min(0).default(0).openapi({ description: "Commits to skip." }),
   limit: z.coerce
     .number()

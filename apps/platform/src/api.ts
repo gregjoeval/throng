@@ -164,7 +164,7 @@ const VerdictSchema = z
   })
   .openapi("Verdict");
 
-const PostVerdictSchema = z
+export const PostVerdictSchema = z
   .object({
     recommendation: z.enum(VERDICT_RECOMMENDATIONS),
     body: z.string().max(MAX_VERDICT_BODY).openapi({ description: "Markdown, up to 64 KB." }),
@@ -450,7 +450,7 @@ const MergeRequestSchema = z
   })
   .openapi("MergeRequest");
 
-const SelectionSchema = z
+export const SelectionSchema = z
   .object({ attempt: z.string().openapi({ description: "An open attempt of the task.", example: "t42a3" }) })
   .openapi("Selection");
 
@@ -477,7 +477,7 @@ const AttemptLimitSchema = z
   .nullable()
   .openapi({ description: "Overrides the project's cap on active attempts; null to use the project's." });
 
-const CreateTaskSchema = z
+export const CreateTaskSchema = z
   .object({
     title: z.string().trim().min(1).max(200),
     body: z.string().max(65_536).optional().openapi({ description: "Markdown." }),
@@ -493,7 +493,7 @@ const EditTaskSchema = z
   })
   .openapi("EditTask");
 
-const CreateAttemptsSchema = z
+export const CreateAttemptsSchema = z
   .object({
     count: z.number().int().min(1).max(100).optional().openapi({ description: "Attempts to create. Defaults to 1." }),
     note: z.string().max(65_536).optional().openapi({ description: "Markdown, set on every new attempt." }),
@@ -509,11 +509,11 @@ const CreateAttemptsSchema = z
   })
   .openapi("CreateAttempts");
 
-const EditAttemptSchema = z
+export const EditAttemptSchema = z
   .object({ note: z.string().max(65_536).openapi({ description: "Markdown." }) })
   .openapi("EditAttempt");
 
-const HandOffSchema = z
+export const HandOffSchema = z
   .object({
     to: z.string().min(1).openapi({ description: "The handle of the user who becomes the author.", example: "bob" }),
   })
@@ -527,7 +527,7 @@ const AttemptPathSchema = ProjectPathSchema.extend({
   a: z.string().openapi({ description: "An attempt reference.", example: "t42a3" }),
 });
 
-const WaitQuerySchema = z.object({
+export const WaitQuerySchema = z.object({
   wait: z.coerce.number().int().min(1).max(MAX_WAIT_SECONDS).optional().openapi({
     description:
       "Seconds to hold the request until what `until` watches changes. Without it, the attempt is returned at once.",
@@ -625,7 +625,7 @@ export interface ApiOptions extends AuthOptions {
 }
 
 /** The Workers Cache API's default cache, when running in a Worker. */
-function workersCache(): DiffCache | undefined {
+export function workersCache(): DiffCache | undefined {
   return (globalThis as { caches?: { default?: DiffCache } }).caches?.default;
 }
 

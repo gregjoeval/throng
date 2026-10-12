@@ -4,7 +4,7 @@
 
 import { ServiceError } from "./errors.ts";
 import { resolveProject } from "./projects.ts";
-import type { ScoringResult } from "./results.ts";
+import type { CheckResult, ScoringResult } from "./results.ts";
 import { headAttemptRef, type AttemptScoring, type ScoringRequest, type StoredRun } from "./scoring.ts";
 import {
   parseAttemptRef,
@@ -72,14 +72,20 @@ export interface RunDetail extends ScoringRun {
   /** Whether its head is no longer the attempt's current head. */
   superseded: boolean;
   error: string | null;
-  result: ScoringResult | null;
+  result: PublicResult | null;
+}
+
+/** A result as answers carry it, its field names in snake_case like the rest of the API. */
+export interface PublicResult extends Omit<ScoringResult, "checks" | "builtin"> {
+  checks: (Omit<CheckResult, "durationMs"> & { duration_ms: number })[];
+  builtin: { files_changed: number; additions: number; deletions: number; duration_ms: number };
 }
 
 /**
  * An attempt's current result: the latest `done` run for its current head, with the run it came
  * from and every check's metrics in one map (metric names are unique per project).
  */
-export interface CurrentResult extends ScoringResult {
+export interface CurrentResult extends PublicResult {
   run: number;
   finished_at: string;
   metrics: Record<string, number>;
@@ -384,7 +390,21 @@ function publicRun(run: StoredRun, users: Map<string, string>): ScoringRun {
 }
 
 function runDetail(run: StoredRun, users: Map<string, string>): RunDetail {
-  return { ...publicRun(run, users), superseded: run.superseded, error: run.error, result: run.result };
+  const result = run.result === null ? null : publicResult(run.result);
+  return { ...publicRun(run, users), superseded: run.superseded, error: run.error, result };
+}
+
+function publicResult({ checks, builtin, ...result }: ScoringResult): PublicResult {
+  return {
+    ...result,
+    checks: checks.map(({ durationMs, ...check }) => ({ ...check, duration_ms: durationMs })),
+    builtin: {
+      files_changed: builtin.filesChanged,
+      additions: builtin.additions,
+      deletions: builtin.deletions,
+      duration_ms: builtin.durationMs,
+    },
+  };
 }
 
 /** An attempt's scoring status for polling, with its current result once its head has one. */
@@ -395,7 +415,8 @@ function scoringStatus({ current, ...status }: AttemptScoringDetail): ScoringSta
 function currentResult(run: StoredRun): CurrentResult {
   if (run.result === null || run.finished_at === null) throw new Error(`run ${run.id} is done without a result`);
   const metrics = Object.assign({}, ...run.result.checks.map((c) => c.metrics)) as Record<string, number>;
-  return { ...run.result, run: run.id, finished_at: new Date(run.finished_at).toISOString(), metrics };
+  const result = publicResult(run.result);
+  return { ...result, run: run.id, finished_at: new Date(run.finished_at).toISOString(), metrics };
 }
 
 function iso(ms: number | null): string | null {

@@ -32,6 +32,21 @@ function result(overrides: Partial<ScoringResult> = {}): ScoringResult {
   };
 }
 
+/** How answers carry `result()`: its field names in snake_case. */
+function answered(overrides: Partial<ScoringResult> = {}): Json {
+  const { checks, builtin, ...rest } = result(overrides);
+  return {
+    ...rest,
+    checks: checks.map(({ durationMs, ...check }) => ({ ...check, duration_ms: durationMs })),
+    builtin: {
+      files_changed: builtin.filesChanged,
+      additions: builtin.additions,
+      deletions: builtin.deletions,
+      duration_ms: builtin.durationMs,
+    },
+  };
+}
+
 async function setup() {
   const repos = new FakeRepos();
   const runner = {
@@ -168,7 +183,7 @@ describe("the arena", () => {
         status: "done",
         sha: scored,
         result: {
-          ...result(),
+          ...answered(),
           run: 1,
           finished_at: "2026-10-10T12:00:00.000Z",
           metrics: { coverage: 81.5, bundle_kb: 120 },
@@ -233,7 +248,7 @@ describe("scoring runs", () => {
       finished_at: "2026-10-10T12:00:00.000Z",
       superseded: true,
       error: null,
-      result: result(),
+      result: answered(),
     });
     expect(list.body["runs"][2]).toEqual(one.body);
   });
@@ -290,7 +305,7 @@ describe("attempt scoring", () => {
       status: "done",
       sha: head,
       result: {
-        ...result(),
+        ...answered(),
         run: 1,
         finished_at: "2026-10-10T12:00:00.000Z",
         metrics: { coverage: 81.5, bundle_kb: 120 },

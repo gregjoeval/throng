@@ -188,7 +188,7 @@ const ScoringResultSchema = z
           name: z.string().openapi({ example: "test" }),
           required: z.boolean(),
           outcome: z.enum(CHECK_OUTCOMES),
-          durationMs: z.number(),
+          duration_ms: z.number(),
           metrics: MetricsSchema.openapi({ description: "The metrics it declared and reported, by name." }),
           notes: z.array(z.string()).openapi({ description: "Ignored metrics, or why it was skipped." }),
           error: z.string().optional().openapi({ description: "Only on the `config` entry of an invalid config." }),
@@ -196,7 +196,7 @@ const ScoringResultSchema = z
         .openapi("CheckResult"),
     ),
     builtin: z
-      .object({ filesChanged: z.number(), additions: z.number(), deletions: z.number(), durationMs: z.number() })
+      .object({ files_changed: z.number(), additions: z.number(), deletions: z.number(), duration_ms: z.number() })
       .openapi({ description: "Diff size against the base." }),
     preview: z
       .discriminatedUnion("status", [

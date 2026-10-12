@@ -37,7 +37,7 @@ The platform trusts that header only on `WebEntrypoint`, a named entrypoint that
 
 In the browser, `src/lib/api.ts` has the typed `hc` client, built from the platform's `AppType`, and `apiQuery`, which turns a client call into TanStack Query options.
 
-Over the binding, the forwarded user can call `/api/me`, `/api/tokens` and the project routes (`GET` and `POST /api/projects`, `GET /api/projects/{owner}/{project}`). On the public hostname the project routes stay bearer-only.
+Over the binding, the forwarded user can call `/api/me`, `/api/tokens`, the project routes (`GET` and `POST /api/projects`, `GET /api/projects/{owner}/{project}`), and the task routes the task pages use: listing, creating and reading tasks, their transitions (`…/tasks/{t}/close`, `reopen`, `obsolete`, `restore`), listing a task's attempts, and the read-only scoring and merge request routes. On the public hostname these routes stay bearer-only.
 
 Raw file URLs (`/:owner/:project/raw/:ref/*`) are forwarded the same way, to the platform's `/api/projects/:owner/:project/raw/:ref/*`.
 
@@ -55,6 +55,8 @@ The header's **Sign out** links to `/cdn-cgi/access/logout` on the app's own hos
 - `/:owner/:project/raw/:ref/*`: raw bytes, proxied to the platform
 - `/:owner/:project/commits/:ref`: the commit log
 - `/:owner/:project/commit/:sha`: one commit
+- `/:owner/:project/tasks`: the task list, open by default (`?state=closed` or `?state=obsolete` for the other tabs)
+- `/:owner/:project/tasks/:t`: one task, `t42`
 
 A ref is `main`, an attempt (`t42a3`) or a full sha. A sha can carry `?attempt=t42a3`, naming the attempt fork to look it up in.
 

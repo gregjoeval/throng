@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { AccessVerifier } from "../src/access.ts";
 import { apiRoutes } from "../src/api.ts";
+import { webApp } from "../src/app.ts";
+import { FORWARDED_EMAIL_HEADER } from "../src/forwarded.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
 import { at } from "./support/defined.ts";
@@ -347,5 +349,78 @@ describe("merge request routes", () => {
     expect((await call("GET", `${base}/merge-queue`, bob)).body).toEqual({
       queue: [{ position: 1, task: "t1", attempt: "t1a2", state: "queued" }],
     });
+  });
+});
+
+describe("the task list's summaries", () => {
+  type Env = Awaited<ReturnType<typeof setup>>;
+
+  /** Finishes the latest run of t1's attempt `attempt` with `gate`. */
+  async function finish(env: Env, attempt: number, gate: "passed" | "failed") {
+    const tasks = env.store(env.project["id"]);
+    await tasks.scoring.drain();
+    const run = at(tasks.scoring.listRuns({ task: 1, attempt }), -1);
+    tasks.scoringFinished(run.id, {
+      status: "done",
+      result: {
+        base: null,
+        config: { kind: "none" },
+        gate,
+        checks: [],
+        builtin: { filesChanged: 0, additions: 0, deletions: 0, durationMs: 1 },
+        preview: { status: "none" },
+        logs: [],
+      },
+    });
+  }
+
+  const summary = async ({ call, bob, base }: Env) => {
+    const [task] = (await call("GET", `${base}/tasks`, bob)).body["tasks"] as Json[];
+    const { attemptCount, bestGate, mergeRequestState } = task as Json;
+    return { attemptCount, bestGate, mergeRequestState };
+  };
+
+  it("counts attempts and gives the best gate and the merge request's state, so the list is one call", async () => {
+    const env = await setup();
+    await twoAttempts(env);
+    expect(await summary(env)).toEqual({ attemptCount: 2, bestGate: null, mergeRequestState: null });
+    await finish(env, 1, "failed");
+    expect(await summary(env)).toMatchObject({ bestGate: "failed" });
+    await finish(env, 2, "passed");
+    expect(await summary(env)).toMatchObject({ bestGate: "passed" });
+    await env.call("POST", `${env.base}/tasks/t1/selection`, env.ada, { attempt: "t1a2" });
+    expect(await summary(env)).toEqual({ attemptCount: 2, bestGate: "passed", mergeRequestState: "queued" });
+  });
+
+  it("leaves obsolete attempts out of the count", async () => {
+    const env = await setup();
+    await twoAttempts(env);
+    await env.call("POST", `${env.base}/attempts/t1a1/obsolete`, env.greg);
+    expect(await summary(env)).toMatchObject({ attemptCount: 1 });
+  });
+});
+
+describe("over throng-web's service binding", () => {
+  it("lists, creates, reads, closes and obsoletes tasks, and lists attempts, as the forwarded user", async () => {
+    const repos = new FakeRepos();
+    const { backend } = testTaskBackends(repos, now);
+    const web = webApp({ verifierFor: () => verify, now, repos: () => repos, tasks: () => backend });
+    const env = { DB: testDatabase(), ACCESS_TEAM_DOMAIN: "throng.cloudflareaccess.com", ACCESS_AUD: "aud" };
+    const call = async (method: string, path: string, body?: unknown) => {
+      const headers: Record<string, string> = { [FORWARDED_EMAIL_HEADER]: "ada@example.com" };
+      if (body !== undefined) headers["Content-Type"] = "application/json";
+      const init = { method, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) };
+      const res = await web.request(`/api${path}`, init, env);
+      return { status: res.status, body: (await res.json()) as Json };
+    };
+    await call("POST", "/projects", { handle: "throng" });
+    const base = "/projects/ada/throng";
+    expect((await call("POST", `${base}/tasks`, { title: "a" })).status).toBe(201);
+    await call("POST", `${base}/tasks`, { title: "b" });
+    expect((await call("GET", `${base}/tasks`)).body["tasks"]).toHaveLength(2);
+    expect((await call("GET", `${base}/tasks/t1`)).body["title"]).toBe("a");
+    expect((await call("GET", `${base}/tasks/t1/attempts`)).body).toEqual({ attempts: [] });
+    expect((await call("POST", `${base}/tasks/t1/close`)).body["state"]).toBe("closed");
+    expect((await call("POST", `${base}/tasks/t2/obsolete`)).body["state"]).toBe("obsolete");
   });
 });

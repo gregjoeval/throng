@@ -28,6 +28,8 @@ import type {
 import { isZeroId } from "./pkt-line.ts";
 import { forkRepo, originRepo } from "./repos.ts";
 import type { Repos } from "./repos.ts";
+import { GATES } from "./results.ts";
+import type { Gate } from "./results.ts";
 import { headAttemptRef, SCORING_CAP, ScoringQueue } from "./scoring.ts";
 import type {
   AttemptScoring,
@@ -101,6 +103,16 @@ export interface StoredAttempt {
   merge_request: AttemptMergeRequest | null;
   /** Its verdicts on its current head, counted by recommendation. */
   verdicts: VerdictSummary;
+}
+
+/** A task as the task list shows it: with what its rows summarise, so the list is one call. */
+export interface ListedTask extends StoredTask {
+  /** Its attempts, obsolete ones left out. */
+  attempt_count: number;
+  /** `passed` when any of those attempts' current results passed, else `failed` when any failed, else null. */
+  best_gate: Gate | null;
+  /** Its latest merge request's state, or null when it has none. */
+  merge_request_state: MergeRequestState | null;
 }
 
 /** A merge request as its source attempt shows it. */
@@ -406,12 +418,27 @@ export class TaskStore {
   }
 
   /** The project's tasks by number. Obsolete tasks are left out unless `state` asks for them. */
-  listTasks(_project: ProjectContext, _actor: Actor, input: { state?: TaskState | undefined }): StoredTask[] {
+  listTasks(_project: ProjectContext, _actor: Actor, input: { state?: TaskState | undefined }): ListedTask[] {
     const rows =
       input.state === undefined
         ? this.#sql.exec<TaskRow>("SELECT * FROM tasks WHERE state != 'obsolete' ORDER BY number")
         : this.#sql.exec<TaskRow>("SELECT * FROM tasks WHERE state = ? ORDER BY number", input.state);
-    return rows.map(toTask);
+    return rows.map((row) => this.#listed(toTask(row)));
+  }
+
+  /** The task with its attempt count, best gate and latest merge request's state. */
+  #listed(task: StoredTask): ListedTask {
+    const attempts = this.#sql
+      .exec<AttemptRow>("SELECT * FROM attempts WHERE task = ? AND state != 'obsolete'", task.number)
+      .map((row) => toAttempt(row));
+    const gates = attempts.map((a) => this.scoring.currentRun(scoredAttempt(a))?.result?.gate);
+    // `passed` is best, then `failed`; GATES lists them in that order.
+    return {
+      ...task,
+      attempt_count: attempts.length,
+      best_gate: GATES.find((gate) => gates.includes(gate)) ?? null,
+      merge_request_state: this.mergeRequests.latest(task.number)?.state ?? null,
+    };
   }
 
   /** Edits a task's title, body or attempt limit. The project owner or the task's creator may. */

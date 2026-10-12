@@ -508,7 +508,7 @@ export class TaskStore {
    * What a task defines over the project's config, for a scoring run to merge. None for a task with
    * no row, like the spike's attempts.
    */
-  taskDefinitions(task: number): TaskDefinitions {
+  definitionsOf(task: number): TaskDefinitions {
     const [row] = this.#sql.exec<TaskRow>("SELECT * FROM tasks WHERE number = ?", task);
     return row === undefined ? NO_TASK_DEFINITIONS : toTask(row).definitions;
   }
@@ -552,7 +552,7 @@ export class TaskStore {
     const current = this.#task(input.task);
     this.#mayEditTask(project, actor, current);
     const definitions = storedDefinitions(
-      config === null ? current.definitions : taskDefinitions(input, current.definitions, config),
+      config === null ? current.definitions : editedDefinitions(input, current.definitions, config),
     );
     this.#sql.exec(
       "UPDATE tasks SET title = ?, body = ?, attempt_limit = ?, definitions = ? WHERE number = ?",
@@ -2560,7 +2560,7 @@ function storedDefinitions(definitions: TaskDefinitions): string | null {
  * A task's definitions after an edit: the checks and metrics it gave, with `current`'s for those it
  * left out, checked against the project's config on `main`.
  */
-function taskDefinitions(
+function editedDefinitions(
   input: { checks?: unknown; metrics?: unknown },
   current: TaskDefinitions,
   config: ConfigResult,

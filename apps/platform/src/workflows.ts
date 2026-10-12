@@ -87,7 +87,7 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
     const task = parseAttemptRef(params.attempt)?.task;
     const [project, definitions] = await Promise.all([
       loadConfig(reposFor(this.env), params.project),
-      task === undefined ? NO_TASK_DEFINITIONS : this.env.PROJECT.getByName(params.project).taskDefinitions(task),
+      task === undefined ? NO_TASK_DEFINITIONS : this.env.PROJECT.getByName(params.project).definitionsOf(task),
     ]);
     return withTask(project, definitions);
   }

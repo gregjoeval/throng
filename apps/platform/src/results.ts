@@ -185,13 +185,13 @@ export function previewPlan(config: ConfigResult, result: ScoringResult): Previe
 }
 
 /** A check with its metrics, before its outcome metric is added. */
-interface Scored {
+interface ScoredCheck {
   check: CheckResult;
   metrics: Record<string, MetricResult>;
 }
 
 /** The check's outcome metric, then its own metrics. */
-function metricsOf({ check, metrics }: Scored): Record<string, MetricResult> {
+function metricsOf({ check, metrics }: ScoredCheck): Record<string, MetricResult> {
   const outcome: MetricResult = {
     source: check.source,
     type: "enum",
@@ -211,7 +211,7 @@ function diffMetric(value: number): MetricResult {
 }
 
 /** `_diff`: finding the base and diffing, with the diff's size. */
-function diffScored(size: ReturnType<typeof parseShortstat>, durationMs: number): Scored {
+function diffScored(size: ReturnType<typeof parseShortstat>, durationMs: number): ScoredCheck {
   return {
     check: platformCheck(DIFF_CHECK, "passed", durationMs, []),
     metrics: {
@@ -223,10 +223,10 @@ function diffScored(size: ReturnType<typeof parseShortstat>, durationMs: number)
 }
 
 /** `_preview` with its outcome, and `_preview.url`: null with a note unless it passed. */
-function previewScored(outcome: CheckOutcome, durationMs: number, notes: string[], url: string | null): Scored {
+function previewScored(outcome: CheckOutcome, durationMs: number, notes: string[], url: string | null): ScoredCheck {
   const what = `${PREVIEW_CHECK} ${outcome === "skipped" ? "was skipped" : outcome}`;
   const note = notes.length === 0 ? what : `${what}: ${notes.join("; ")}`;
-  const base = { source: "platform", type: "string", format: "url" } as const;
+  const urlFields = { source: "platform", type: "string", format: "url" } as const;
   return {
     check: platformCheck(
       PREVIEW_CHECK,
@@ -234,7 +234,9 @@ function previewScored(outcome: CheckOutcome, durationMs: number, notes: string[
       durationMs,
       notes.map((n) => `${outcome}: ${n}`),
     ),
-    metrics: { [`${PREVIEW_CHECK}.url`]: url === null ? { ...base, value: null, note } : { ...base, value: url } },
+    metrics: {
+      [`${PREVIEW_CHECK}.url`]: url === null ? { ...urlFields, value: null, note } : { ...urlFields, value: url },
+    },
   };
 }
 
@@ -255,7 +257,7 @@ export function withPreview(
   deployed: PreviewScriptResult | null | { error: string },
   durationMs: number,
 ): ScoringResult {
-  let scored: Scored;
+  let scored: ScoredCheck;
   if (deployed !== null && "error" in deployed) scored = previewScored("errored", durationMs, [deployed.error], null);
   else if (deployed === null) scored = previewScored("failed", durationMs, ["the preview script gave no result"], null);
   else if (deployed.ok) scored = previewScored("passed", durationMs, [], deployed.url);
@@ -323,12 +325,12 @@ function configScored(
   metrics: MetricConfig[],
   ran: RawScore["checks"][number] | undefined,
   setupFailed: number | null,
-): Scored {
+): ScoredCheck {
   const outcome = checkOutcome(ran?.exit ?? null, ran?.durationMs ?? 0, check.timeoutMs);
-  const skipped = setupFailed === null ? "skipped" : `skipped: setup command ${setupFailed} failed`;
-  const value = (metric: MetricConfig): MetricValue =>
+  const skipNote = setupFailed === null ? "skipped" : `skipped: setup command ${setupFailed} failed`;
+  const metricValue = (metric: MetricConfig): MetricValue =>
     outcome === "skipped"
-      ? { value: null, note: `${check.name}: ${check.name} was ${skipped}` }
+      ? { value: null, note: `${check.name}: ${check.name} was ${skipNote}` }
       : checkedValue(metric, ran?.metrics[metric.name]);
   return {
     check: {
@@ -337,12 +339,12 @@ function configScored(
       required: check.required,
       outcome,
       durationMs: ran?.durationMs ?? 0,
-      notes: outcome === "skipped" && setupFailed !== null ? [skipped] : [],
+      notes: outcome === "skipped" && setupFailed !== null ? [skipNote] : [],
     },
     metrics: Object.fromEntries(
       metricsFrom(check.name, metrics).map((metric): [string, MetricResult] => [
         metric.name,
-        metricResult(metric, value(metric)),
+        metricResult(metric, metricValue(metric)),
       ]),
     ),
   };
@@ -366,12 +368,13 @@ export function buildResult(config: ConfigResult, raw: RawScore): ScoringResult 
     ...checks,
     previewScored("skipped", 0, [previewSkipped(config, gate)], null),
   ];
-  const kind = config.kind === "invalid" ? { kind: "invalid" as const, error: config.error } : { kind: config.kind };
-  return { base: raw.base, config: kind, gate, ...flatten(scored), logs: [] };
+  const configSummary =
+    config.kind === "invalid" ? { kind: "invalid" as const, error: config.error } : { kind: config.kind };
+  return { base: raw.base, config: configSummary, gate, ...flatten(scored), logs: [] };
 }
 
 /** The checks, and every metric by name: each check's outcome metric, then its own metrics. */
-function flatten(scored: Scored[]): Pick<ScoringResult, "checks" | "metrics"> {
+function flatten(scored: ScoredCheck[]): Pick<ScoringResult, "checks" | "metrics"> {
   return {
     checks: scored.map((s) => s.check),
     metrics: Object.assign({}, ...scored.map(metricsOf)) as Record<string, MetricResult>,
@@ -403,7 +406,7 @@ export function upgradeResult(stored: ScoringResult | LegacyResult): ScoringResu
   const { builtin, preview } = stored;
   const checks = stored.checks
     .filter((check) => check.error === undefined)
-    .map(({ metrics, error: _error, ...check }): Scored => ({
+    .map(({ metrics, error: _error, ...check }): ScoredCheck => ({
       check: { ...check, source: "project" },
       metrics: Object.fromEntries(
         Object.entries(metrics).map(([name, value]): [string, MetricResult] => [
@@ -412,7 +415,7 @@ export function upgradeResult(stored: ScoringResult | LegacyResult): ScoringResu
         ]),
       ),
     }));
-  let deployed: Scored;
+  let deployed: ScoredCheck;
   if (preview.status === "ready") deployed = previewScored("passed", 0, [], preview.url);
   else if (preview.status === "errored") deployed = previewScored("errored", 0, [preview.error], null);
   else deployed = previewScored(preview.status === "none" ? "skipped" : "failed", 0, [], null);

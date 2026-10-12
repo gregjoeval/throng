@@ -272,7 +272,7 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
    * `main`; none when it gave neither. Anyone may create a task; an edit's are checked by the store,
    * after who may edit.
    */
-  async function taskDefinitions(
+  async function newTaskDefinitions(
     ctx: ProjectContext,
     input: { checks?: unknown; metrics?: unknown },
   ): Promise<TaskDefinitions> {
@@ -348,7 +348,7 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
     ): Promise<Task> {
       const { title, body, attemptLimit } = input;
       const ctx = await project(input);
-      const definitions = await taskDefinitions(ctx, input);
+      const definitions = await newTaskDefinitions(ctx, input);
       return one(await invoke("createTask", ctx, actor, { title, body, attemptLimit, ...definitions }), tasks(ctx));
     },
 

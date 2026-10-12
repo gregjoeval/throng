@@ -30,6 +30,7 @@ import type {
   StoredMergeRequest,
 } from "./merge-requests.ts";
 import { isZeroId } from "./pkt-line.ts";
+import { Projection } from "./projection.ts";
 import { forkRepo, originRepo } from "./repos.ts";
 import type { Repos } from "./repos.ts";
 import { GATES } from "./results.ts";
@@ -431,6 +432,8 @@ export class TaskStore {
   readonly landings: Landings;
   /** The project's verdicts. */
   readonly verdicts: Verdicts;
+  /** What of its tasks and attempts is still to be published to the D1 projection. */
+  readonly projection: Projection;
   readonly #landing: LandingRunner | null;
   /** Active attempts' follows of their task branch. */
   readonly follows: Follows;
@@ -445,6 +448,7 @@ export class TaskStore {
     this.#landing = landing;
     this.#follow = follow;
     migrate(sql);
+    this.projection = new Projection({ sql });
     this.landings = new Landings({ sql, now });
     this.follows = new Follows({ sql, now });
     this.verdicts = new Verdicts({ sql });

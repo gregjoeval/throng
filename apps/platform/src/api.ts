@@ -288,31 +288,18 @@ const PROJECTION_NOTE =
 
 const MyListingQuerySchema = pageQuerySchema("Items", DEFAULT_LISTING_PAGE, MAX_LISTING_PAGE);
 
-const MyTaskSchema = z
-  .object({
-    project: ProjectSchema,
-    ref: z.string().openapi({ example: "t42" }),
-    number: z.number().int().openapi({ example: 42 }),
-    title: z.string(),
-    state: z.enum(TASK_STATES),
-    creator: UserRefSchema,
-    createdAt: z.string(),
-    closedAt: z.string().nullable(),
-  })
+/** A task as a listing across projects shows it: the fields the projection carries, and its project. */
+const MyTaskSchema = TaskSchema.pick({
+  ref: true,
+  number: true,
+  title: true,
+  state: true,
+  creator: true,
+  createdAt: true,
+  closedAt: true,
+})
+  .extend({ project: ProjectSchema })
   .openapi("MyTask");
-
-const MyAttemptSchema = z
-  .object({
-    project: ProjectSchema,
-    ref: z.string().openapi({ example: "t42a3" }),
-    task: z.object({ ref: z.string().openapi({ example: "t42" }), number: z.number().int(), title: z.string() }),
-    number: z.number().int().openapi({ example: 3 }),
-    state: z.enum(ATTEMPT_STATES),
-    author: UserRefSchema,
-    createdAt: z.string(),
-    closedAt: z.string().nullable(),
-  })
-  .openapi("MyAttempt");
 
 /** Where an attempt was copied from: provenance only, never its base. */
 const AliasSchema = z.string().nullable().openapi({
@@ -628,6 +615,21 @@ const TaskPathSchema = ProjectPathSchema.extend({
 const AttemptPathSchema = ProjectPathSchema.extend({
   a: z.string().openapi({ description: "An attempt reference.", example: "t42a3" }),
 });
+
+/** An attempt as a listing across projects shows it: the fields the projection carries, its task and project. */
+const MyAttemptSchema = AttemptSchema.pick({
+  ref: true,
+  number: true,
+  state: true,
+  author: true,
+  createdAt: true,
+  closedAt: true,
+})
+  .extend({
+    project: ProjectSchema,
+    task: z.object({ ref: z.string().openapi({ example: "t42" }), number: z.number().int(), title: z.string() }),
+  })
+  .openapi("MyAttempt");
 
 const WaitedAttemptSchema = AttemptSchema.extend({
   changed: z

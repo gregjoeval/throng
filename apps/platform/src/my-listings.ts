@@ -10,7 +10,7 @@ import type { Project } from "./projects.ts";
 import { attemptRef, taskRef } from "./task-refs.ts";
 import { ATTEMPT_STATES, listedStates, TASK_STATES } from "./task-store.ts";
 import type { AttemptState, TaskState } from "./task-store.ts";
-import type { UserRef } from "./tasks.ts";
+import type { Attempt, Task } from "./tasks.ts";
 import type { Actor } from "./tokens.ts";
 import type { Database } from "./users.ts";
 
@@ -24,28 +24,18 @@ export interface ListingPage {
   limit: number;
 }
 
-/** A task in a listing across projects. */
-export interface MyTask {
+/** A task in a listing across projects: the fields the projection carries, and its project. */
+export interface MyTask extends Pick<
+  Task,
+  "ref" | "number" | "title" | "state" | "creator" | "createdAt" | "closedAt"
+> {
   project: Project;
-  ref: string;
-  number: number;
-  title: string;
-  state: TaskState;
-  creator: UserRef;
-  createdAt: string;
-  closedAt: string | null;
 }
 
-/** An attempt in a listing across projects. */
-export interface MyAttempt {
+/** An attempt in a listing across projects: the fields the projection carries, its task and project. */
+export interface MyAttempt extends Pick<Attempt, "ref" | "number" | "state" | "author" | "createdAt" | "closedAt"> {
   project: Project;
-  ref: string;
   task: { ref: string; number: number; title: string };
-  number: number;
-  state: AttemptState;
-  author: UserRef;
-  createdAt: string;
-  closedAt: string | null;
 }
 
 interface TaskListingRow extends StoredProjectedTask {

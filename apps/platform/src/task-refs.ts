@@ -20,6 +20,11 @@ export function parseAttemptRef(ref: string): { task: number; number: number } |
   return task === null || number === null ? null : { task, number };
 }
 
+/** Whether `ref` is an attempt reference in its canonical form, `t42a3`, as repo names use it. */
+export function isAttemptRef(ref: string): boolean {
+  return ref.startsWith("t") && ATTEMPT_REF.test(ref);
+}
+
 export function taskRef(task: number): string {
   return `t${task}`;
 }

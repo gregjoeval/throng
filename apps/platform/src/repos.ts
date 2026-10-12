@@ -1,11 +1,12 @@
 // The Repos seam: every Artifacts call goes through this interface. Production wraps the binding
 // (`artifacts.ts`); tests use the in-memory fake (`test/fake-repos.ts`).
 
+import { isAttemptRef } from "./task-refs.ts";
+
 /** Artifacts caps repo names at 63 characters. */
 export const MAX_REPO_NAME = 63;
 
 const PROJECT_ID = /^[a-z0-9]+$/u;
-const ATTEMPT = /^t[1-9]\d*a[1-9]\d*$/u;
 const ORIGIN_SUFFIX = "main";
 
 /** What a repo name says: a project's origin, or the fork of one of its attempts. */
@@ -18,7 +19,7 @@ export function originRepo(project: string): string {
 
 /** An attempt fork's repo, named after the attempt: `<projectId>-t42a3`. */
 export function forkRepo(project: string, attempt: string): string {
-  if (!ATTEMPT.test(attempt)) throw new Error(`not an attempt: ${attempt}`);
+  if (!isAttemptRef(attempt)) throw new Error(`not an attempt: ${attempt}`);
   return repoName(project, attempt);
 }
 
@@ -29,7 +30,7 @@ export function parseRepoName(name: string): RepoName | null {
   const suffix = name.slice(at + 1);
   if (at === -1 || !PROJECT_ID.test(project)) return null;
   if (suffix === ORIGIN_SUFFIX) return { kind: "origin", project };
-  if (ATTEMPT.test(suffix)) return { kind: "fork", project, attempt: suffix };
+  if (isAttemptRef(suffix)) return { kind: "fork", project, attempt: suffix };
   return null;
 }
 

@@ -80,8 +80,8 @@ describe("checkOutcome", () => {
   });
 
   it("counts timeout's exits as timed out only when the check ran out its time", () => {
-    expect(checkOutcome(124, 1000, 1000)).toBe("timed_out");
-    expect(checkOutcome(137, 11_000, 1000)).toBe("timed_out");
+    expect(checkOutcome(124, 1000, 1000)).toBe("timedOut");
+    expect(checkOutcome(137, 11_000, 1000)).toBe("timedOut");
     expect(checkOutcome(124, 5, 1000)).toBe("failed");
   });
 });
@@ -104,7 +104,7 @@ describe("gateFor", () => {
   });
 
   it("fails on any required check that didn't pass", () => {
-    for (const outcome of ["failed", "timed_out", "skipped"] as const) {
+    for (const outcome of ["failed", "timedOut", "skipped"] as const) {
       expect(gateFor([entry(true, "passed"), entry(true, outcome)])).toBe("failed");
     }
   });
@@ -206,7 +206,7 @@ describe("buildResult", () => {
         ],
       }),
     );
-    expect(result.checks.map((c) => c.outcome)).toEqual(["timed_out", "passed"]);
+    expect(result.checks.map((c) => c.outcome)).toEqual(["timedOut", "passed"]);
     expect(result.gate).toBe("failed");
   });
 

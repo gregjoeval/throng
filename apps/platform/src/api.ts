@@ -23,19 +23,27 @@ import { CHECK_OUTCOMES } from "./results.ts";
 import { ATTEMPT_SCORING_STATUSES, RUN_STATUSES, SCORING_TRIGGERS } from "./scoring.ts";
 import { ATTEMPT_STATES, TASK_STATES } from "./task-store.ts";
 import { taskService, type TaskBackend } from "./tasks.ts";
-import { DEFAULT_TOKEN_TTL_SECONDS, listTokens, MAX_TOKEN_TTL_SECONDS, mintToken, revokeToken } from "./tokens.ts";
+import {
+  DEFAULT_TOKEN_TTL_SECONDS,
+  listTokens,
+  MAX_TOKEN_TTL_SECONDS,
+  mintToken,
+  revokeToken,
+  type Token,
+} from "./tokens.ts";
+import type { User } from "./users.ts";
 
 const UserSchema = z
-  .object({ id: z.string(), handle: z.string(), email: z.string(), created_at: z.string() })
+  .object({ id: z.string(), handle: z.string(), email: z.string(), createdAt: z.string() })
   .openapi("User");
 
 const TokenSchema = z
   .object({
     id: z.string(),
     agent: z.string().nullable(),
-    expires_at: z.string(),
-    revoked_at: z.string().nullable(),
-    created_at: z.string(),
+    expiresAt: z.string(),
+    revokedAt: z.string().nullable(),
+    createdAt: z.string(),
   })
   .openapi("Token");
 
@@ -44,7 +52,7 @@ const MeSchema = z
     user: UserSchema,
     agent: z.string().nullable().openapi({ description: "The agent alias the caller's token acts under." }),
     token: z
-      .object({ id: z.string(), expires_at: z.string() })
+      .object({ id: z.string(), expiresAt: z.string() })
       .nullable()
       .openapi({ description: "The caller's token; null under an Access session." }),
   })
@@ -60,7 +68,7 @@ const MintTokenSchema = z
       .regex(/^[^\p{C}()]+$/u, "agent must be printable text without parentheses")
       .optional()
       .openapi({ description: "An agent alias of the caller, e.g. `claude`. Omit for the human." }),
-    expires_in: z
+    expiresIn: z
       .number()
       .int()
       .min(1)
@@ -79,7 +87,7 @@ const ProjectSchema = z
     id: z.string().openapi({ description: "The opaque project id, which names its repos.", example: "k3x9q2" }),
     handle: z.string().openapi({ example: "throng" }),
     owner: z.object({ id: z.string(), handle: z.string().openapi({ example: "greg" }) }),
-    created_at: z.string(),
+    createdAt: z.string(),
   })
   .openapi("Project");
 
@@ -103,10 +111,10 @@ const TaskSchema = z
     body: z.string().openapi({ description: "Markdown." }),
     creator: UserRefSchema,
     state: z.enum(TASK_STATES),
-    created_at: z.string(),
-    closed_at: z.string().nullable(),
-    closed_by: UserRefSchema.nullable(),
-    attempt_limit: z
+    createdAt: z.string(),
+    closedAt: z.string().nullable(),
+    closedBy: UserRefSchema.nullable(),
+    attemptLimit: z
       .number()
       .int()
       .nullable()
@@ -124,10 +132,10 @@ const AttemptSchema = z
     fork: z.string().openapi({ description: "The logical fork name, kept for the attempt's life.", example: "t42a3" }),
     branch: z.string().nullable().openapi({ description: "The origin branch a push created it from." }),
     note: z.string().openapi({ description: "Markdown." }),
-    created_at: z.string(),
-    closed_at: z.string().nullable(),
-    merged_sha: z.string().nullable(),
-    archived_sha: z.string().nullable(),
+    createdAt: z.string(),
+    closedAt: z.string().nullable(),
+    mergedSha: z.string().nullable(),
+    archivedSha: z.string().nullable(),
     scoring: z
       .object({
         status: z.enum(ATTEMPT_SCORING_STATUSES),
@@ -137,10 +145,10 @@ const AttemptSchema = z
         description:
           "The current head's scoring status, for polling. `none` when the head has no run yet, or its run was cancelled.",
       }),
-    merge_request: z
+    mergeRequest: z
       .object({
         state: z.enum(MERGE_REQUEST_STATES),
-        last_dequeue: z.object({ reason: z.enum(DEQUEUE_REASONS) }).nullable(),
+        lastDequeue: z.object({ reason: z.enum(DEQUEUE_REASONS) }).nullable(),
       })
       .nullable()
       .openapi("AttemptMergeRequest", {
@@ -157,11 +165,11 @@ const ScoringRunFields = z.object({
   sha: z.string().openapi({ description: "The head it scores." }),
   trigger: z.enum(SCORING_TRIGGERS),
   status: z.enum(RUN_STATUSES),
-  requested_by: UserRefSchema.nullable(),
+  requestedBy: UserRefSchema.nullable(),
   agent: z.string().nullable(),
-  created_at: z.string(),
-  started_at: z.string().nullable(),
-  finished_at: z.string().nullable(),
+  createdAt: z.string(),
+  startedAt: z.string().nullable(),
+  finishedAt: z.string().nullable(),
 });
 
 const ScoringSchema = z
@@ -198,7 +206,7 @@ const ScoringResultSchema = z
           name: z.string().openapi({ example: "test" }),
           required: z.boolean(),
           outcome: z.enum(CHECK_OUTCOMES),
-          duration_ms: z.number(),
+          durationMs: z.number(),
           metrics: MetricsSchema.openapi({ description: "The metrics it declared and reported, by name." }),
           notes: z.array(z.string()).openapi({ description: "Ignored metrics, or why it was skipped." }),
           error: z.string().optional().openapi({ description: "Only on the `config` entry of an invalid config." }),
@@ -206,7 +214,7 @@ const ScoringResultSchema = z
         .openapi("CheckResult"),
     ),
     builtin: z
-      .object({ files_changed: z.number(), additions: z.number(), deletions: z.number(), duration_ms: z.number() })
+      .object({ filesChanged: z.number(), additions: z.number(), deletions: z.number(), durationMs: z.number() })
       .openapi({ description: "Diff size against the base." }),
     preview: z
       .discriminatedUnion("status", [
@@ -235,7 +243,7 @@ const ScoringResultSchema = z
 
 const CurrentResultSchema = ScoringResultSchema.extend({
   run: z.number().int().openapi({ description: "The run it came from." }),
-  finished_at: z.string(),
+  finishedAt: z.string(),
   metrics: MetricsSchema.openapi({ description: "Every check's metrics in one map; metric names are unique." }),
 }).openapi("CurrentResult", {
   description: "The attempt's current result: the latest `done` run for its current head.",
@@ -283,23 +291,23 @@ const MergeRequestSchema = z
     task: z.string().openapi({ description: "The task, which also names its merge request.", example: "t42" }),
     attempt: z.string().openapi({ description: "The source attempt.", example: "t42a3" }),
     state: z.enum(MERGE_REQUEST_STATES),
-    approved_head: z.string().openapi({ description: "The only head that can land." }),
-    approved_by: ActorRefSchema,
-    approved_at: z.string(),
-    queued_at: z.string().nullable().openapi({ description: "When it entered the queue, while queued or landing." }),
+    approvedHead: z.string().openapi({ description: "The only head that can land." }),
+    approvedBy: ActorRefSchema,
+    approvedAt: z.string(),
+    queuedAt: z.string().nullable().openapi({ description: "When it entered the queue, while queued or landing." }),
     position: z
       .number()
       .int()
       .nullable()
       .openapi({ description: "Its 1-based place in the merge queue while queued or landing; the landing one is 1." }),
-    last_dequeue: z
+    lastDequeue: z
       .object({ reason: z.enum(DEQUEUE_REASONS), at: z.string() })
       .nullable()
       .openapi({ description: "Why it last left the queue without landing." }),
-    merge_sha: z.string().nullable().openapi({ description: "The merge commit on `main`, once merged." }),
-    merged_at: z.string().nullable(),
-    created_at: z.string(),
-    created_by: ActorRefSchema,
+    mergeSha: z.string().nullable().openapi({ description: "The merge commit on `main`, once merged." }),
+    mergedAt: z.string().nullable(),
+    createdAt: z.string(),
+    createdBy: ActorRefSchema,
   })
   .openapi("MergeRequest");
 
@@ -334,7 +342,7 @@ const CreateTaskSchema = z
   .object({
     title: z.string().trim().min(1).max(200),
     body: z.string().max(65_536).optional().openapi({ description: "Markdown." }),
-    attempt_limit: AttemptLimitSchema.optional(),
+    attemptLimit: AttemptLimitSchema.optional(),
   })
   .openapi("CreateTask");
 
@@ -342,7 +350,7 @@ const EditTaskSchema = z
   .object({
     title: z.string().trim().min(1).max(200).optional(),
     body: z.string().max(65_536).optional().openapi({ description: "Markdown." }),
-    attempt_limit: AttemptLimitSchema.optional(),
+    attemptLimit: AttemptLimitSchema.optional(),
   })
   .openapi("EditTask");
 
@@ -495,7 +503,7 @@ function taskTransition<V extends string>(
       401: unauthorizedBearer,
       403: errorResponse(forbidden),
       404: errorResponse("No such project or task."),
-      409: errorResponse(`\`invalid_state\`: ${conflicts.join(" ")}`),
+      409: errorResponse(`\`invalidState\`: ${conflicts.join(" ")}`),
     },
   });
 }
@@ -525,7 +533,7 @@ function mergeRequestAction<V extends string>(
       403: errorResponse(TASK_MANAGERS),
       404: errorResponse("No such project or task."),
       409: errorResponse(
-        "`invalid_state`: the task has no open merge request, or it isn't in a state that allows this.",
+        "`invalidState`: the task has no open merge request, or it isn't in a state that allows this.",
       ),
     },
   });
@@ -603,7 +611,7 @@ function scoringRoute<V extends string>(
     summary,
     description,
     forbidden,
-    conflict: `\`invalid_state\`: ${conflict}, or its fork has no commits.`,
+    conflict: `\`invalidState\`: ${conflict}, or its fork has no commits.`,
     ok: { description: "The run now covering the attempt's head.", schema: ScoringSchema },
   });
 }
@@ -613,8 +621,14 @@ const OWNER_ONLY = "Only the project owner may.";
 const TASK_MANAGERS = "Only the project owner or the task's creator may.";
 const RESCORERS = "Only the attempt's author (or their agents), the task's creator or the project owner may.";
 
-function publicToken({ id, agent, expires_at, revoked_at, created_at }: z.infer<typeof TokenSchema>) {
-  return { id, agent, expires_at, revoked_at, created_at };
+/** A token row as the API shows it. */
+function publicToken({ id, agent, expires_at, revoked_at, created_at }: Token): z.infer<typeof TokenSchema> {
+  return { id, agent, expiresAt: expires_at, revokedAt: revoked_at, createdAt: created_at };
+}
+
+/** A user row as the API shows it. */
+function publicUser({ id, handle, email, created_at }: User): z.infer<typeof UserSchema> {
+  return { id, handle, email, createdAt: created_at };
 }
 
 export function apiRoutes(options: ApiOptions = {}) {
@@ -632,7 +646,7 @@ export function apiRoutes(options: ApiOptions = {}) {
 
   const api = new OpenAPIHono<AuthEnv>({
     defaultHook: (result, c) => {
-      if (!result.success) return c.json(errorBody("invalid_request", z.prettifyError(result.error)), 400);
+      if (!result.success) return c.json(errorBody("invalidRequest", z.prettifyError(result.error)), 400);
       return undefined;
     },
   });
@@ -674,8 +688,8 @@ export function apiRoutes(options: ApiOptions = {}) {
       }),
       (c) => {
         const { user, agent } = c.var.actor;
-        const token = c.var.token === null ? null : { id: c.var.token.id, expires_at: c.var.token.expires_at };
-        return c.json({ user, agent, token }, 200);
+        const token = c.var.token === null ? null : { id: c.var.token.id, expiresAt: c.var.token.expires_at };
+        return c.json({ user: publicUser(user), agent, token }, 200);
       },
     )
     .openapi(
@@ -695,7 +709,7 @@ export function apiRoutes(options: ApiOptions = {}) {
         },
         responses: {
           201: { description: "The new token.", content: { "application/json": { schema: MintedTokenSchema } } },
-          400: errorResponse("The request is invalid, e.g. `expires_in` is above 7 days."),
+          400: errorResponse("The request is invalid, e.g. `expiresIn` is above 7 days."),
           401: unauthorized,
           403: errorResponse("An agent's token tried to mint for the human or another agent."),
         },
@@ -707,13 +721,13 @@ export function apiRoutes(options: ApiOptions = {}) {
           return c.json(errorBody("forbidden", "an agent's token can only mint tokens for that agent"), 403);
         }
         const at = now();
-        let ttlSeconds = body.expires_in ?? DEFAULT_TOKEN_TTL_SECONDS;
+        let ttlSeconds = body.expiresIn ?? DEFAULT_TOKEN_TTL_SECONDS;
         if (caller !== null) {
           // A token can't be used to extend itself: what it mints expires no later than it does.
           const remaining = Math.floor((Date.parse(caller.expires_at) - at.getTime()) / 1000);
-          if (body.expires_in === undefined) ttlSeconds = Math.min(ttlSeconds, remaining);
+          if (body.expiresIn === undefined) ttlSeconds = Math.min(ttlSeconds, remaining);
           if (ttlSeconds > remaining || ttlSeconds < 1) {
-            return c.json(errorBody("invalid_request", "a token can't mint a token that outlives it"), 400);
+            return c.json(errorBody("invalidRequest", "a token can't mint a token that outlives it"), 400);
           }
         }
         const { token, plaintext } = await mintToken(c.env.DB, {
@@ -774,7 +788,7 @@ export function apiRoutes(options: ApiOptions = {}) {
           id: c.req.valid("param").id,
           now: now(),
         });
-        if (revoked === null) return c.json(errorBody("not_found", "no such token"), 404);
+        if (revoked === null) return c.json(errorBody("notFound", "no such token"), 404);
         return c.json(publicToken(revoked), 200);
       },
     )
@@ -931,7 +945,7 @@ export function apiRoutes(options: ApiOptions = {}) {
           401: unauthorizedBearer,
           403: errorResponse(TASK_MANAGERS),
           404: errorResponse("No such project or task."),
-          409: errorResponse("`invalid_state`: the task is obsolete."),
+          409: errorResponse("`invalidState`: the task is obsolete."),
         },
       }),
       async (c) => {
@@ -981,7 +995,7 @@ export function apiRoutes(options: ApiOptions = {}) {
           400: errorResponse("The request is invalid."),
           401: unauthorizedBearer,
           404: errorResponse("No such project or task."),
-          409: errorResponse("`invalid_state`: the task isn't open; `attempt_limit`: the batch would exceed the cap."),
+          409: errorResponse("`invalidState`: the task isn't open; `attemptLimit`: the batch would exceed the cap."),
         },
       }),
       async (c) => {
@@ -1048,7 +1062,7 @@ export function apiRoutes(options: ApiOptions = {}) {
           401: unauthorizedBearer,
           403: errorResponse(AUTHOR_ONLY),
           404: errorResponse("No such project or attempt."),
-          409: errorResponse("`invalid_state`: the attempt is obsolete."),
+          409: errorResponse("`invalidState`: the attempt is obsolete."),
         },
       }),
       async (c) => {
@@ -1058,38 +1072,38 @@ export function apiRoutes(options: ApiOptions = {}) {
     )
     .openapi(
       attemptTransition(bearer, "open", "openAttempt", "Open a draft attempt for scoring and merging", AUTHOR_ONLY, [
-        "`invalid_state`: the attempt isn't a draft.",
+        "`invalidState`: the attempt isn't a draft.",
       ]),
       async (c) => c.json(await tasks(c.env).openAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
       attemptTransition(bearer, "draft", "draftAttempt", "Return an open attempt to draft", AUTHOR_ONLY, [
-        "`invalid_state`: the attempt isn't open.",
+        "`invalidState`: the attempt isn't open.",
       ]),
       async (c) => c.json(await tasks(c.env).draftAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
       attemptTransition(bearer, "close", "closeAttempt", "Close a draft or open attempt", AUTHOR_ONLY, [
-        "`invalid_state`: the attempt isn't active.",
+        "`invalidState`: the attempt isn't active.",
       ]),
       async (c) => c.json(await tasks(c.env).closeAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
       attemptTransition(bearer, "reopen", "reopenAttempt", "Reopen a closed attempt as a draft", AUTHOR_ONLY, [
-        "`invalid_state`: the attempt isn't closed or its task isn't open;",
-        "`attempt_limit`: the task is at its cap; `conflict`: another active attempt has its branch.",
+        "`invalidState`: the attempt isn't closed or its task isn't open;",
+        "`attemptLimit`: the task is at its cap; `conflict`: another active attempt has its branch.",
       ]),
       async (c) => c.json(await tasks(c.env).reopenAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
       attemptTransition(bearer, "obsolete", "obsoleteAttempt", "Make an attempt obsolete", OWNER_ONLY, [
-        "`invalid_state`: the attempt is merged or already obsolete.",
+        "`invalidState`: the attempt is merged or already obsolete.",
       ]),
       async (c) => c.json(await tasks(c.env).obsoleteAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
       attemptTransition(bearer, "restore", "restoreAttempt", "Restore an obsolete attempt to closed", OWNER_ONLY, [
-        "`invalid_state`: the attempt isn't obsolete.",
+        "`invalidState`: the attempt isn't obsolete.",
       ]),
       async (c) => c.json(await tasks(c.env).restoreAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
@@ -1218,7 +1232,7 @@ export function apiRoutes(options: ApiOptions = {}) {
         description:
           "Only the attempt's author, or their agents, may, and only while it is a draft or open. " +
           "The user named by `to` becomes its author at once, and the git proxy checks the new author " +
-          "on the next push, so the old author's pushes are refused from then on. Journals `handed_off`.",
+          "on the next push, so the old author's pushes are refused from then on. Journals `handedOff`.",
         security: bearerOnly,
         middleware: [bearer] as const,
         request: { params: AttemptPathSchema, body: { required: true, ...json(HandOffSchema) } },
@@ -1228,7 +1242,7 @@ export function apiRoutes(options: ApiOptions = {}) {
           401: unauthorizedBearer,
           403: errorResponse(AUTHOR_ONLY),
           404: errorResponse("No such project, attempt or user."),
-          409: errorResponse("`invalid_state`: the attempt isn't active."),
+          409: errorResponse("`invalidState`: the attempt isn't active."),
         },
       }),
       async (c) => {
@@ -1246,7 +1260,7 @@ export function apiRoutes(options: ApiOptions = {}) {
         description:
           "Each setup command, check and preview of a run writes a log. Logs over " +
           `${MAX_LOG_BYTES / (1024 * 1024)} MB keep their head and tail, with a marker between them. Logs are ` +
-          `deleted ${LOG_RETENTION_DAYS} days after the run; an expired log is \`not_found\`, like a missing one.`,
+          `deleted ${LOG_RETENTION_DAYS} days after the run; an expired log is \`notFound\`, like a missing one.`,
         security: bearerOrWeb,
         middleware: [browser] as const,
         request: { params: RunLogPathSchema },
@@ -1320,7 +1334,7 @@ export function apiRoutes(options: ApiOptions = {}) {
           403: errorResponse(TASK_MANAGERS),
           404: errorResponse("No such project, task or attempt."),
           409: errorResponse(
-            "`invalid_state`: the attempt isn't open, the task isn't open, the task already has an open merge request, " +
+            "`invalidState`: the attempt isn't open, the task isn't open, the task already has an open merge request, " +
               "or the attempt has no commits.",
           ),
         },
@@ -1336,7 +1350,7 @@ export function apiRoutes(options: ApiOptions = {}) {
         "approve",
         "approveMergeRequest",
         "Approve the source attempt's current head",
-        "Moves a merge request in `needs_review` back to `pending`, approving the source attempt's current head. From " +
+        "Moves a merge request in `needsReview` back to `pending`, approving the source attempt's current head. From " +
           "`pending` it re-approves the same head, which requeues one held after a dequeue (an `errored` one, say). Then, " +
           "as on selection, it enters the queue once the head's gate has passed. Journals `approved`.",
       ),
@@ -1360,7 +1374,7 @@ export function apiRoutes(options: ApiOptions = {}) {
         operationId: "getMergeRequest",
         tags: ["Merge queue"],
         summary: "Get a task's merge request",
-        description: "Its latest merge request, open or not. `last_dequeue` leaves out the dequeue's details.",
+        description: "Its latest merge request, open or not. `lastDequeue` leaves out the dequeue's details.",
         security: bearerOrWeb,
         middleware: [browser] as const,
         request: { params: TaskPathSchema },

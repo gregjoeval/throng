@@ -3,7 +3,7 @@
 
 import { z, type OpenAPIHono, type RouteConfig } from "@hono/zod-openapi";
 import type { Context } from "hono";
-import { DIFF_FLAGS, FILE_STATUSES, type FileDiff } from "./diff.ts";
+import { DIFF_FLAGS, FILE_STATUSES } from "./diff.ts";
 
 export const ProjectPathSchema = z.object({
   owner: z.string().openapi({ description: "The owner's handle.", example: "greg" }),
@@ -29,51 +29,16 @@ const FLAGS_DESCRIPTION =
   "`binary`, `tooLarge` and `tooComplex` files get no patch. `truncated`: listed past the patched-file " +
   "cap with no patch, or cut short (or left out) once the whole diff hit its size cap.";
 
-/** One file's diff, with snake_case field names: what the conflict diff serves. */
+/** One file's diff, as the commit diff and a conflict's display diff both serve it. */
 export const FileDiffSchema = z
-  .object({
-    path: z.string().openapi({ description: "The new path, or the old one for a deleted file." }),
-    old_path: z.string().optional().openapi({ description: "Only for a rename: where the file was." }),
-    status: z.enum(FILE_STATUSES),
-    old_mode: z.string().nullable().openapi({ example: "100644" }),
-    new_mode: z.string().nullable().openapi({ example: "100755" }),
-    old_hash: z.string().nullable().openapi({ description: "The old blob's sha; null when there was no file." }),
-    new_hash: z.string().nullable().openapi({ description: "The new blob's sha; null when the file is gone." }),
-    additions: z.number().int(),
-    deletions: z.number().int(),
-    flags: z.array(z.enum(DIFF_FLAGS)).openapi({ description: FLAGS_DESCRIPTION }),
-    patch: z
-      .string()
-      .optional()
-      .openapi({ description: "The git-style unified patch, headers included; absent when a flag left it out." }),
-  })
-  .openapi("ConflictFileDiff");
-
-/** A file diff as `FileDiffSchema` answers it. */
-export function publicFileDiff({ oldPath, oldMode, newMode, oldHash, newHash, ...diff }: FileDiff) {
-  return {
-    ...diff,
-    ...(oldPath === undefined ? {} : { old_path: oldPath }),
-    old_mode: oldMode,
-    new_mode: newMode,
-    old_hash: oldHash,
-    new_hash: newHash,
-  };
-}
-
-/**
- * The commit diff's file and commit shapes, still served as `diff.ts` computes them (camelCase).
- * Moving the commit diff onto `FileDiffSchema` is the API casing decision.
- */
-const CommitFileDiffSchema = z
   .object({
     path: z.string().openapi({ description: "The new path, or the old one for a deleted file." }),
     oldPath: z.string().optional().openapi({ description: "Only for a rename: where the file was." }),
     status: z.enum(FILE_STATUSES),
     oldMode: z.string().nullable().openapi({ example: "100644" }),
     newMode: z.string().nullable().openapi({ example: "100755" }),
-    oldHash: z.string().nullable().openapi({ description: "The old blob's sha; null for an added file." }),
-    newHash: z.string().nullable().openapi({ description: "The new blob's sha; null for a deleted file." }),
+    oldHash: z.string().nullable().openapi({ description: "The old blob's sha; null when there was no file." }),
+    newHash: z.string().nullable().openapi({ description: "The new blob's sha; null when the file is gone." }),
     additions: z.number().int(),
     deletions: z.number().int(),
     flags: z.array(z.enum(DIFF_FLAGS)).openapi({ description: FLAGS_DESCRIPTION }),
@@ -90,7 +55,7 @@ export const CommitDiffSchema = z
     parent: z.string().nullable().openapi({ description: "The first parent; null for a root commit." }),
     oldTree: z.string().nullable().openapi({ description: "The parent's tree; null for a root commit." }),
     newTree: z.string(),
-    files: z.array(CommitFileDiffSchema).openapi({ description: "By path, byte-wise." }),
+    files: z.array(FileDiffSchema).openapi({ description: "By path, byte-wise." }),
     totals: z.object({ files: z.number().int(), additions: z.number().int(), deletions: z.number().int() }),
     truncated: z.boolean().openapi({ description: "More files changed than are listed." }),
   })

@@ -58,21 +58,21 @@ describe("task routes", () => {
       body: "It *fails*.",
       creator: { id: expect.any(String), handle: "ada" },
       state: "open",
-      created_at: "2026-10-10T12:00:00.000Z",
-      closed_at: null,
-      closed_by: null,
-      attempt_limit: null,
+      createdAt: "2026-10-10T12:00:00.000Z",
+      closedAt: null,
+      closedBy: null,
+      attemptLimit: null,
     });
-    await call("POST", `${base}/tasks`, bob, { title: "Second", attempt_limit: 3 });
+    await call("POST", `${base}/tasks`, bob, { title: "Second", attemptLimit: 3 });
 
     for (const ref of ["t1", "1"]) expect((await call("GET", `${base}/tasks/${ref}`, bob)).body).toEqual(created.body);
     const list = await call("GET", `${base}/tasks`, bob);
     expect(list.status).toBe(200);
     expect(list.body["tasks"].map((t: Json) => t["ref"])).toEqual(["t1", "t2"]);
 
-    const edited = await call("PATCH", `${base}/tasks/t1`, greg, { title: "Fix sign-in", attempt_limit: 4 });
+    const edited = await call("PATCH", `${base}/tasks/t1`, greg, { title: "Fix sign-in", attemptLimit: 4 });
     expect(edited.status).toBe(200);
-    expect(edited.body).toMatchObject({ title: "Fix sign-in", body: "It *fails*.", attempt_limit: 4 });
+    expect(edited.body).toMatchObject({ title: "Fix sign-in", body: "It *fails*.", attemptLimit: 4 });
     expect((await call("PATCH", `${base}/tasks/t1`, bob, { title: "x" })).status).toBe(403);
   });
 
@@ -81,9 +81,9 @@ describe("task routes", () => {
     await call("POST", `${base}/tasks`, ada, { title: "a" });
     expect((await call("POST", `${base}/tasks/t1/close`, bob)).status).toBe(403);
     const closed = await call("POST", `${base}/tasks/t1/close`, ada);
-    expect(closed.body).toMatchObject({ state: "closed", closed_by: { handle: "ada" } });
+    expect(closed.body).toMatchObject({ state: "closed", closedBy: { handle: "ada" } });
     expect((await call("POST", `${base}/tasks/t1/close`, ada)).body).toEqual({
-      error: { code: "invalid_state", message: "can't close t1: it is closed" },
+      error: { code: "invalidState", message: "can't close t1: it is closed" },
     });
     expect((await call("POST", `${base}/tasks/t1/reopen`, greg)).body["state"]).toBe("open");
     expect((await call("POST", `${base}/tasks/t1/obsolete`, ada)).status).toBe(403);
@@ -98,10 +98,10 @@ describe("task routes", () => {
   it("is 404 for an unknown project or task and 400 for a bad reference or body", async () => {
     const { call, ada, base } = await setup();
     expect((await call("GET", "/projects/greg/nothing/tasks", ada)).status).toBe(404);
-    expect((await call("GET", `${base}/tasks/t9`, ada)).body["error"]["code"]).toBe("not_found");
+    expect((await call("GET", `${base}/tasks/t9`, ada)).body["error"]["code"]).toBe("notFound");
     for (const ref of ["t0", "x", "t1a1"])
       expect((await call("GET", `${base}/tasks/${ref}`, ada)).status, ref).toBe(400);
-    for (const body of [{}, { title: "" }, { title: "a", attempt_limit: 0 }]) {
+    for (const body of [{}, { title: "" }, { title: "a", attemptLimit: 0 }]) {
       expect((await call("POST", `${base}/tasks`, ada, body)).status).toBe(400);
     }
   });
@@ -129,12 +129,12 @@ describe("attempt routes", () => {
         fork: `t1a${n}`,
         branch: null,
         note: "go",
-        created_at: "2026-10-10T12:00:00.000Z",
-        closed_at: null,
-        merged_sha: null,
-        archived_sha: null,
+        createdAt: "2026-10-10T12:00:00.000Z",
+        closedAt: null,
+        mergedSha: null,
+        archivedSha: null,
         scoring: { status: "none", sha: null },
-        merge_request: null,
+        mergeRequest: null,
       })),
     );
     expect(await repos.list(`${project["id"]}-t`)).toEqual([`${project["id"]}-t1a1`, `${project["id"]}-t1a2`]);
@@ -148,12 +148,12 @@ describe("attempt routes", () => {
     expect((await call("GET", `${base}/attempts/t1`, bob)).status).toBe(400);
   });
 
-  it("fails a batch over the cap whole, with attempt_limit", async () => {
+  it("fails a batch over the cap whole, with attemptLimit", async () => {
     const { call, ada, base } = await setup();
-    await call("POST", `${base}/tasks`, ada, { title: "a", attempt_limit: 2 });
+    await call("POST", `${base}/tasks`, ada, { title: "a", attemptLimit: 2 });
     const res = await call("POST", `${base}/tasks/t1/attempts`, ada, { count: 3 });
     expect(res.status).toBe(409);
-    expect(res.body["error"]["code"]).toBe("attempt_limit");
+    expect(res.body["error"]["code"]).toBe("attemptLimit");
     expect((await call("GET", `${base}/tasks/t1/attempts`, ada)).body["attempts"]).toEqual([]);
   });
 
@@ -166,15 +166,15 @@ describe("attempt routes", () => {
     expect((await call("POST", `${a}/open`, bob)).status).toBe(403);
     expect((await call("POST", `${a}/open`, greg)).status).toBe(403);
     expect((await call("POST", `${a}/open`, adaClaude)).body["state"]).toBe("open");
-    expect((await call("POST", `${a}/open`, ada)).body["error"]["code"]).toBe("invalid_state");
+    expect((await call("POST", `${a}/open`, ada)).body["error"]["code"]).toBe("invalidState");
     expect((await call("POST", `${a}/draft`, ada)).body["state"]).toBe("draft");
     expect((await call("PATCH", a, adaClaude, { note: "notes" })).body["note"]).toBe("notes");
     expect((await call("PATCH", a, bob, { note: "x" })).status).toBe(403);
     expect((await call("POST", `${a}/close`, ada)).body).toMatchObject({
       state: "closed",
-      closed_at: expect.any(String),
+      closedAt: expect.any(String),
     });
-    expect((await call("POST", `${a}/reopen`, ada)).body).toMatchObject({ state: "draft", closed_at: null });
+    expect((await call("POST", `${a}/reopen`, ada)).body).toMatchObject({ state: "draft", closedAt: null });
     expect((await call("POST", `${a}/obsolete`, ada)).status).toBe(403);
     expect((await call("POST", `${a}/obsolete`, greg)).body["state"]).toBe("obsolete");
     expect((await call("GET", `${base}/tasks/t1/attempts`, ada)).body["attempts"]).toEqual([]);
@@ -190,7 +190,7 @@ describe("attempt routes", () => {
     const a = `${base}/attempts/t1a1`;
 
     expect((await call("POST", `${a}/score`, bob)).status).toBe(403);
-    expect((await call("POST", `${a}/rescore`, ada)).body["error"]["code"]).toBe("invalid_state");
+    expect((await call("POST", `${a}/rescore`, ada)).body["error"]["code"]).toBe("invalidState");
     const scored = await call("POST", `${a}/score`, adaClaude);
     expect(scored.status).toBe(200);
     expect(scored.body).toEqual({
@@ -200,19 +200,19 @@ describe("attempt routes", () => {
         id: 1,
         ref: "t1a1",
         sha: head,
-        trigger: "score_now",
+        trigger: "scoreNow",
         status: "queued",
-        requested_by: { id: expect.any(String), handle: "ada" },
+        requestedBy: { id: expect.any(String), handle: "ada" },
         agent: "claude",
-        created_at: "2026-10-10T12:00:00.000Z",
-        started_at: null,
-        finished_at: null,
+        createdAt: "2026-10-10T12:00:00.000Z",
+        startedAt: null,
+        finishedAt: null,
       },
     });
     expect((await call("POST", `${a}/score`, ada)).body).toMatchObject({ queued: false, reason: "already queued" });
 
     await call("POST", `${a}/open`, ada);
-    expect((await call("POST", `${a}/score`, ada)).body["error"]["code"]).toBe("invalid_state");
+    expect((await call("POST", `${a}/score`, ada)).body["error"]["code"]).toBe("invalidState");
     expect((await call("POST", `${a}/rescore`, greg)).body).toMatchObject({ queued: false, run: { id: 1 } });
     const other = await call("POST", `${base}/tasks`, greg, { title: "b" });
     expect(other.status).toBe(201);
@@ -285,25 +285,25 @@ describe("merge request routes", () => {
       task: "t1",
       attempt: "t1a1",
       state: "pending",
-      approved_head: head,
-      approved_by: ref,
-      approved_at: "2026-10-10T12:00:00.000Z",
-      queued_at: null,
+      approvedHead: head,
+      approvedBy: ref,
+      approvedAt: "2026-10-10T12:00:00.000Z",
+      queuedAt: null,
       position: null,
-      last_dequeue: null,
-      merge_sha: null,
-      merged_at: null,
-      created_at: "2026-10-10T12:00:00.000Z",
-      created_by: ref,
+      lastDequeue: null,
+      mergeSha: null,
+      mergedAt: null,
+      createdAt: "2026-10-10T12:00:00.000Z",
+      createdBy: ref,
     });
     expect((await call("GET", `${base}/tasks/t1/merge-request`, bob)).body).toEqual(selected.body);
     expect((await call("GET", `${base}/attempts/t1a2`, bob)).body["state"]).toBe("closed");
-    expect((await call("GET", `${base}/attempts/t1a1`, bob)).body["merge_request"]).toEqual({
+    expect((await call("GET", `${base}/attempts/t1a1`, bob)).body["mergeRequest"]).toEqual({
       state: "pending",
-      last_dequeue: null,
+      lastDequeue: null,
     });
     const again = await call("POST", `${base}/tasks/t1/selection`, ada, { attempt: "t1a1" });
-    expect(again.body["error"]["code"]).toBe("invalid_state");
+    expect(again.body["error"]["code"]).toBe("invalidState");
   });
 
   it("approves and cancels with their permissions", async () => {
@@ -317,7 +317,7 @@ describe("merge request routes", () => {
     expect((await call("POST", `${base}/tasks/t1/merge-request/cancel`, bob)).status).toBe(403);
     expect((await call("POST", `${base}/tasks/t1/merge-request/cancel`, ada)).body["state"]).toBe("cancelled");
     const after = await call("POST", `${base}/tasks/t1/merge-request/cancel`, ada);
-    expect([after.status, after.body["error"]["code"]]).toEqual([409, "invalid_state"]);
+    expect([after.status, after.body["error"]["code"]]).toEqual([409, "invalidState"]);
   });
 
   it("lists the project's merge queue, front first", async () => {

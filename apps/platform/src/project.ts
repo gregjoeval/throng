@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { LANDING_ROLES, sandboxName, SCORING_ROLES, type SandboxRole } from "./grants";
 import { reposFor } from "./artifacts";
+import { camelKeys } from "./casing";
 import type { LandingOutcome } from "./landing";
 import type { ScoringOutcome, ScoringRequest, StoredRun } from "./scoring";
 import {
@@ -97,7 +98,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 
   /**
    * Called by a Landing Workflow when it ends. The landing push is internal: this records it
-   * (`main_advanced`) and never scores or creates anything from it. Then the next landing starts.
+   * (`mainAdvanced`) and never scores or creates anything from it. Then the next landing starts.
    * Reports from a stopped landing are discarded.
    */
   async landingFinished(landing: number, outcome: LandingOutcome): Promise<void> {
@@ -109,13 +110,16 @@ export class ProjectCoordinator extends DurableObject<Env> {
   }
 
   journal(since = 0): JournalEntry[] {
-    return this.#sql
-      .exec<{ id: number; at: number; kind: string; detail: string }>(
-        "SELECT id, at, kind, detail FROM journal WHERE id > ? ORDER BY id",
-        since,
-      )
-      .toArray()
-      .map((r) => ({ ...r, detail: JSON.parse(r.detail) as Record<string, unknown> }));
+    return (
+      this.#sql
+        .exec<{ id: number; at: number; kind: string; detail: string }>(
+          "SELECT id, at, kind, detail FROM journal WHERE id > ? ORDER BY id",
+          since,
+        )
+        .toArray()
+        // Entries written before ADR 0002 keep their snake_case detail keys; read them in camelCase.
+        .map((r) => ({ ...r, detail: camelKeys(JSON.parse(r.detail) as Record<string, unknown>) }))
+    );
   }
 
   /** E2e cleanup only: deletes all of this project's storage, so nothing of an e2e run is left. */

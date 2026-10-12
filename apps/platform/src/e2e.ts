@@ -5,6 +5,7 @@
 // project or repo without it, so they can never reach a real project.
 
 import { Hono, type Context } from "hono";
+import { camelKeys } from "./casing.ts";
 import { LOG_PREFIX } from "./logs.ts";
 import { type Project, projectService } from "./projects.ts";
 import { forkRepo, originRepo, parseRepoName, type Repos } from "./repos.ts";
@@ -182,7 +183,7 @@ export function e2eRoutes<E extends object>(deps: E2eDeps<E>) {
     const began = Date.now();
     const made = await e2eProject(deps.db(c.env), deps.repos(c.env), project);
     const createMs = Date.now() - began;
-    await deps.project(c.env, project).note("repo-created", { project, createMs });
+    await deps.project(c.env, project).note("repoCreated", { project, createMs });
     return c.json({ remote: made.remote, token: made.token, createMs, owner: made.project.owner.handle });
   });
 
@@ -219,7 +220,7 @@ export function e2eRoutes<E extends object>(deps: E2eDeps<E>) {
         const fork = await repos.get(name);
         const readyMs = Date.now() - began;
         const { token } = await repos.mintToken(name, "write", PUSH_TOKEN_TTL_SECONDS);
-        await deps.project(c.env, project).note("fork-ready", { name, forkMs, readyMs, polls });
+        await deps.project(c.env, project).note("forkReady", { name, forkMs, readyMs, polls });
         return c.json({ remote: fork.remote, token, forkMs, readyMs, polls });
       } catch (cause) {
         if (Date.now() - began > FORK_READY_TIMEOUT_MS) throw cause;
@@ -242,7 +243,7 @@ export function e2eRoutes<E extends object>(deps: E2eDeps<E>) {
   /** One scoring run of the project, with its result once it is done. */
   app.get("/projects/:project/runs/:run", async (c) => {
     const run = await deps.project(c.env, c.req.param("project")).run(Number(c.req.param("run")));
-    return run === null ? c.json({ error: "no such run" }, 404) : c.json(run);
+    return run === null ? c.json({ error: "no such run" }, 404) : c.json(camelKeys(run));
   });
 
   app.get("/projects/:project/journal", async (c) => {
@@ -275,9 +276,9 @@ export function e2eRoutes<E extends object>(deps: E2eDeps<E>) {
    * the suite can check the Worker-side git client against real Artifacts.
    */
   app.post("/repos/:name/copy-ref", async (c) => {
-    const [fromRef, to, toRef] = [c.req.query("from_ref"), c.req.query("to"), c.req.query("to_ref")];
+    const [fromRef, to, toRef] = [c.req.query("fromRef"), c.req.query("to"), c.req.query("toRef")];
     if (fromRef === undefined || to === undefined || toRef === undefined) {
-      return c.json({ error: "from_ref, to and to_ref are required" }, 400);
+      return c.json({ error: "fromRef, to and toRef are required" }, 400);
     }
     if (!e2eRepo(to)) return refused(c, "the target repo");
     const sha = await deps.repos(c.env).copyRef({ from: c.req.param("name"), fromRef, to, toRef });

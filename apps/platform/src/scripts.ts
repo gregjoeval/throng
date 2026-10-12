@@ -188,7 +188,7 @@ export interface MergePlan {
  * On a conflict, each path with all three sides is re-merged with `git merge-file -p --zdiff3`, its
  * lines outside the conflicts blanked so the output stays small but keeps its line numbers. A
  * re-merge whose conflicting lines are over twice the per-file cap, or that would take all of them
- * over twice the total cap, is `too_large`; `conflictFiles` applies the exact caps.
+ * over twice the total cap, is `tooLarge`; `conflictFiles` applies the exact caps.
  *
  * On a clean merge it reads `.throng/config.yml` from the merged tree, before any repository code
  * runs: the retest runs under the config the merge would land, not `main`'s.
@@ -244,7 +244,7 @@ for (const [path, s] of sides) if (s[1] && s[2] && s[3]) process.stdout.write([p
     status=$?
     size=$(wc -c < "../remerge/$n")
     if [ "$status" = 3 ] || [ $((total + size)) -gt ${2 * caps.totalBytes} ]; then
-      printf 'too_large\\0%s\\0' "$path" >> ../remerge.list
+      printf 'tooLarge\\0%s\\0' "$path" >> ../remerge.list
       continue
     fi
     total=$((total + size))

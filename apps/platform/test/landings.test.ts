@@ -5,7 +5,7 @@
 
 import { describe, expect, it } from "vitest";
 import { ServiceError } from "../src/errors.ts";
-import type { LandingParams, LandingWorkflowBinding } from "../src/landing.ts";
+import type { LandingOutcome, LandingParams, LandingWorkflowBinding } from "../src/landing.ts";
 import type { ScoringResult } from "../src/results.ts";
 import type { ScoringParams, ScoringWorkflow } from "../src/scoring.ts";
 import { TaskStore, type AttemptInput, type ProjectContext } from "../src/task-store.ts";
@@ -233,7 +233,7 @@ describe("after each outcome", () => {
     const { store, drain, queued, repos, base } = await setup();
     const t1 = await queued("First");
     await drain();
-    const files = [conflictFile("a", "content"), conflictFile("b", "add_add")];
+    const files = [conflictFile("a", "content"), conflictFile("b", "addAdd")];
     await store.landingFinished(1, {
       kind: "conflict",
       details: { attempt: "t1a1", head: base.hash, main: base.hash, base: base.hash, files },
@@ -243,12 +243,12 @@ describe("after each outcome", () => {
       ...t1,
       updates: [{ ref: "refs/heads/main", before: base.hash, after }],
     });
-    expect(pushed.merge_request?.dequeue).toEqual({ reason: "conflict", files: 2 });
+    expect(pushed.mergeRequest?.dequeue).toEqual({ reason: "conflict", files: 2 });
   });
 
   for (const outcome of [
     {
-      kind: "failed_checks" as const,
+      kind: "failedChecks" as const,
       details: { checks: [{ name: "test", outcome: "failed" as const, log: "test" }] },
     },
     { kind: "errored" as const, details: { error: "land script exited 13", step: "land" } },
@@ -267,6 +267,18 @@ describe("after each outcome", () => {
       expect(landingWorkflow.created).toHaveLength(2);
     });
   }
+
+  it("records a report in snake_case, from a Workflow started before ADR 0002, in camelCase", async () => {
+    const { store, drain, queued, mr } = await setup();
+    const t1 = await queued("First");
+    await drain();
+    const old = { kind: "failed_checks", details: { checks: [{ name: "test", outcome: "timed_out", log: null }] } };
+    await store.landingFinished(1, old as unknown as LandingOutcome);
+    expect(mr(t1.task)).toMatchObject({
+      state: "pending",
+      last_dequeue: { reason: "failedChecks", details: { checks: [{ name: "test", outcome: "timedOut", log: null }] } },
+    });
+  });
 
   it("starts a landing when a merge request is queued with nothing landing", async () => {
     const { drain, queued, mr, landingWorkflow } = await setup();
@@ -296,12 +308,12 @@ describe("a merge request leaving the queue while landing", () => {
     push(t1);
     await drain();
 
-    expect(mr(t1.task)).toMatchObject({ state: "needs_review", last_dequeue: { reason: "new_push" } });
+    expect(mr(t1.task)).toMatchObject({ state: "needsReview", last_dequeue: { reason: "newPush" } });
     expect(landingWorkflow.terminated).toEqual(["abc123-t1a1-landing-1"]);
     expect(tornDown).toEqual(["abc123-t1a1-landing-1"]);
     expect(store.claimLandingPush(1)).toBe(false);
     expect(await store.landingFinished(1, landed())).toBe(false);
-    expect(mr(t1.task).state).toBe("needs_review");
+    expect(mr(t1.task).state).toBe("needsReview");
     expect(mr(t2.task).state).toBe("landing");
   });
 
@@ -326,7 +338,7 @@ describe("a merge request leaving the queue while landing", () => {
       .then(() => store.cancelMergeRequest(PROJECT, owner, { task: t1.task }))
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ServiceError);
-    expect((err as ServiceError).code).toBe("invalid_state");
+    expect((err as ServiceError).code).toBe("invalidState");
     await drain();
     expect(landingWorkflow.terminated).toEqual([]);
 
@@ -378,7 +390,7 @@ describe("a merge request leaving the queue while landing", () => {
     expect(await store.landingFinished(1, landed())).toBe(false);
     expect(mr(t1.task).state).toBe("merged");
     expect(store.landings.get(1)?.status).toBe("landed");
-    expect(journalKinds().filter((k) => k === "main_advanced")).toHaveLength(1);
+    expect(journalKinds().filter((k) => k === "mainAdvanced")).toHaveLength(1);
   });
 
   it("sends a failed landing whose source moved while pushing to needs_review", async () => {
@@ -388,6 +400,6 @@ describe("a merge request leaving the queue while landing", () => {
     store.claimLandingPush(1);
     push(t1);
     await store.landingFinished(1, { kind: "errored", details: { error: "main moved", step: "land" } });
-    expect(mr(t1.task)).toMatchObject({ state: "needs_review", last_dequeue: { reason: "errored" } });
+    expect(mr(t1.task)).toMatchObject({ state: "needsReview", last_dequeue: { reason: "errored" } });
   });
 });

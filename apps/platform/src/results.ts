@@ -5,7 +5,7 @@
 import { DEFAULT_CHECK_TIMEOUT_MS, type ConfigResult } from "./config.ts";
 import type { PreviewScriptResult } from "./scripts.ts";
 
-export const CHECK_OUTCOMES = ["passed", "failed", "timed_out", "skipped"] as const;
+export const CHECK_OUTCOMES = ["passed", "failed", "timedOut", "skipped"] as const;
 export type CheckOutcome = (typeof CHECK_OUTCOMES)[number];
 
 /** Longest a `setup` command may run; the spec gives setup no timeout of its own. */
@@ -106,7 +106,7 @@ export function scoreTimeoutMs(plan: ScorePlan): number {
 export function checkOutcome(exit: number | null, durationMs: number, timeoutMs: number): CheckOutcome {
   if (exit === null) return "skipped";
   if (exit === 0) return "passed";
-  return TIMED_OUT_EXITS.has(exit) && durationMs >= timeoutMs ? "timed_out" : "failed";
+  return TIMED_OUT_EXITS.has(exit) && durationMs >= timeoutMs ? "timedOut" : "failed";
 }
 
 /** Files changed, lines added and lines deleted from a `git diff --shortstat` line; zeros when empty. */

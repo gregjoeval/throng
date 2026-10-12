@@ -12,6 +12,7 @@ import { ServiceError, type ErrorCode } from "./errors.ts";
 import { isLogName, logKey, missingLog } from "./logs.ts";
 import {
   MergeRequests,
+  type Dequeue,
   type DequeueReason,
   type MergeRequestEvent,
   type MergeRequestState,
@@ -156,6 +157,27 @@ export function taskRef(task: number): string {
 
 export function attemptRef(task: number, number: number): string {
   return `t${task}a${number}`;
+}
+
+/** What `recordPush` did: the scoring it queued, and what to tell the pusher of their merge request. */
+export interface PushRecord {
+  scoring: ScoringRequest | null;
+  merge_request: PushNotice | null;
+}
+
+/** The merge request news a push to its source attempt carries back to the pusher. */
+export interface PushNotice {
+  task: number;
+  /** A dequeue not yet reported, with its conflict file count when known. */
+  dequeue: { reason: DequeueReason; files: number | null } | null;
+  /** The new head, when this push moved the merge request to `needs_review`. */
+  needs_review: string | null;
+}
+
+/** How many files a dequeue's details name (a conflict's), or null when they name none. */
+function fileCount(dequeue: Dequeue): number | null {
+  const files = (dequeue.details as { files?: unknown } | null | undefined)?.files;
+  return Array.isArray(files) ? files.length : null;
 }
 
 /** An attempt as the scoring queue keys it. */
@@ -847,23 +869,35 @@ export class TaskStore {
    * proxy checked the claim before forwarding the push, and the push has landed, so this checks
    * nothing. Returns the scoring request, or null when the push asked for none.
    */
-  recordPush(
-    project: ProjectContext,
-    actor: Actor,
-    input: AttemptInput & { updates: PushedRef[] },
-  ): { scoring: ScoringRequest | null } {
+  recordPush(project: ProjectContext, actor: Actor, input: AttemptInput & { updates: PushedRef[] }): PushRecord {
     const current = this.#attempt(input);
     return this.#sql.transaction(() => {
       const head = this.#recordPushed(actor, current, input.updates);
-      if (head === null) return { scoring: null };
-      this.#pushedToSource(actor, current, head);
+      const needsReview = head !== null && this.#pushedToSource(actor, current, head);
+      const merge_request = this.#pushNotice(current, needsReview ? head : null);
+      if (head === null) return { scoring: null, merge_request };
       // A draft isn't scored, but its old result no longer describes its head.
       if (current.state !== "open") {
         this.scoring.moveHead({ ...scoredAttempt(current), sha: head });
-        return { scoring: null };
+        return { scoring: null, merge_request };
       }
-      return { scoring: this.#request(project, actor, current, head, "push") };
+      return { scoring: this.#request(project, actor, current, head, "push"), merge_request };
     });
+  }
+
+  /**
+   * What a push to the attempt has to tell its pusher about the merge request it is the source of:
+   * a dequeue they haven't been told of (marked told), and the new head if this push moved it to
+   * `needs_review`. A `new_push` dequeue is this push's own doing, which `needs_review` already says.
+   */
+  #pushNotice(attempt: StoredAttempt, needsReview: string | null): PushNotice | null {
+    const mr = this.mergeRequests.forAttempt(attempt.task, attempt.number);
+    if (mr === null) return null;
+    const unseen = this.mergeRequests.takeUnseenDequeue(mr);
+    const dequeue =
+      unseen === null || unseen.reason === "new_push" ? null : { reason: unseen.reason, files: fileCount(unseen) };
+    if (dequeue === null && needsReview === null) return null;
+    return { task: mr.task, dequeue, needs_review: needsReview };
   }
 
   // --- push-to-create --------------------------------------------------------------------------
@@ -1235,16 +1269,20 @@ export class TaskStore {
     return this.mergeRequests.enqueue(actor, mr);
   }
 
-  /** A push moved the attempt's head: if it is an open merge request's source, that needs a new approval. */
-  #pushedToSource(actor: Actor, attempt: StoredAttempt, head: string): void {
+  /**
+   * A push moved the attempt's head: if it is an open merge request's source, that needs a new
+   * approval. True when this moved the merge request to `needs_review`.
+   */
+  #pushedToSource(actor: Actor, attempt: StoredAttempt, head: string): boolean {
     const mr = this.mergeRequests.open(attempt.task);
-    if (mr === null || mr.attempt !== attempt.number || mr.state === "needs_review") return;
-    if (head === mr.approved_head) return;
+    if (mr === null || mr.attempt !== attempt.number || mr.state === "needs_review") return false;
+    if (head === mr.approved_head) return false;
     if (mr.state === "queued" || mr.state === "landing") {
       this.mergeRequests.dequeue(actor, mr, "new_push", "needs_review");
     } else {
       this.mergeRequests.move(actor, mr, "needs_review", { head });
     }
+    return true;
   }
 
   /** Cancels an open merge request, dequeuing it if it is in the queue. */

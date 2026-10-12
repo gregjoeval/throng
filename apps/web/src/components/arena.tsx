@@ -3,20 +3,22 @@
 // toggles arrange them by attempt or by file, diff them against their bases or current main, and lay
 // the diffs out split or unified; the URL and `localStorage` remember the choice (`arena-view.ts`).
 
-import { useQueries, useQuery } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { getRouteApi } from "@tanstack/react-router";
 import { CheckIcon } from "lucide-react";
 import { useEffect, useId, useState } from "react";
 import type { ReactNode } from "react";
 import { FileSection } from "@/components/commit-files";
 import { GatePill, Lane, laneCompareQuery, laneReference, VerdictCounts } from "@/components/lane";
+import { useSelect } from "@/components/selection";
 import { ErrorState, Loading } from "@/components/states";
 import { Button } from "@/components/ui/button";
-import { mainHeadQuery, taskArenaQuery } from "@/lib/api";
+import { mainHeadQuery, meQuery, reopenAttempt, taskArenaQuery, taskKey } from "@/lib/api";
 import { bestValues, formatValue, isActiveAttempt, isPassing, metricColumns, sortRail, toggleLane } from "@/lib/arena";
 import type { ArenaAttempt, MetricColumn, RailSort } from "@/lib/arena";
 import { arenaView, fileRows, parseArenaSearch, readStoredView, storageKey, storeView } from "@/lib/arena-view";
 import type { ArenaSearch, ArenaView, Arrangement, Layout, Reference } from "@/lib/arena-view";
+import { apiError } from "@/lib/errors";
 import type { Attempt } from "@/lib/tasks";
 
 /** Past this many lanes, each keeps a minimum width and the lanes scroll sideways. */
@@ -68,14 +70,19 @@ function ArenaLayout({
   const [view, change] = useArenaView(owner, project, task, active);
   const shown = view.lanes.flatMap((ref) => active.filter((a) => a.ref === ref));
   const sideways = shown.length > SHARED_WIDTH_LANES;
+  const select = useSelect(owner, project, task, active.length);
   return (
     <div data-testid="arena" className="grid gap-4 lg:grid-cols-[16rem_minmax(0,1fr)] lg:items-start">
       <Rail
+        owner={owner}
+        project={project}
+        task={task}
         attempts={active}
         closed={closed}
         columns={columns}
         lanes={view.lanes}
         onToggle={(ref) => change({ lanes: toggleLane(view.lanes, ref) })}
+        select={select}
       />
       <div className="flex min-w-0 flex-col gap-3">
         <ViewToggles view={view} lanes={shown.length} onChange={change} />
@@ -96,6 +103,7 @@ function ArenaLayout({
                 reference={view.ref}
                 layout={view.layout}
                 files={view.by === "attempt"}
+                actions={select?.(attempt.ref)}
               />
             ))}
             {view.by === "file" ? (
@@ -312,17 +320,22 @@ const SORT_LABELS = { number: "Number", gate: "Gate" } as const;
 
 /** The attempt cards, sortable, then the closed attempts, collapsed. */
 function Rail({
+  owner,
+  project,
+  task,
   attempts,
   closed,
   columns,
   lanes,
   onToggle,
-}: {
+  select,
+}: InTask & {
   attempts: ArenaAttempt[];
   closed: ArenaAttempt[];
   columns: MetricColumn[];
   lanes: string[];
   onToggle: (ref: string) => void;
+  select: ((ref: string) => ReactNode) | null;
 }) {
   const [sort, setSort] = useState<RailSort>("number");
   const best = bestValues(attempts, columns);
@@ -361,12 +374,13 @@ function Rail({
               best={best}
               shown={lanes.includes(attempt.ref)}
               onToggle={() => onToggle(attempt.ref)}
+              footer={select?.(attempt.ref)}
             />
           </li>
         ))}
       </ul>
       <p className="text-xs text-muted-foreground">Click a card to add or remove its lane.</p>
-      {closed.length === 0 ? null : <ClosedGroup closed={closed} />}
+      {closed.length === 0 ? null : <ClosedGroup owner={owner} project={project} task={task} closed={closed} />}
     </aside>
   );
 }
@@ -472,19 +486,46 @@ function Badge({ children }: { children: ReactNode }) {
   return <span className="rounded-md border px-1.5 text-xs text-muted-foreground">{children}</span>;
 }
 
-/** The task's closed attempts, collapsed under their count. */
-function ClosedGroup({ closed }: { closed: ArenaAttempt[] }) {
+/** The task's closed attempts, collapsed under their count; each author may reopen theirs. */
+function ClosedGroup({ owner, project, task, closed }: InTask & { closed: ArenaAttempt[] }) {
+  const me = useQuery(meQuery);
   return (
     <details className="rounded-xl border px-3 py-2 text-sm">
       <summary className="cursor-pointer text-muted-foreground">Closed ({closed.length})</summary>
       <ul aria-label="Closed attempts" className="mt-2 flex flex-col gap-1">
         {closed.map((attempt) => (
-          <li key={attempt.ref} className="flex items-center gap-2">
+          <li key={attempt.ref} className="flex flex-wrap items-center gap-2">
             <span className="font-mono">{attempt.ref}</span>
             <span className="text-xs text-muted-foreground">{attempt.author.handle}</span>
+            {me.data?.user.id === attempt.author.id ? (
+              <ReopenAttempt owner={owner} project={project} task={task} attempt={attempt.ref} />
+            ) : null}
           </li>
         ))}
       </ul>
     </details>
+  );
+}
+
+/** Reopens a closed attempt as a draft; only its author may. */
+function ReopenAttempt({ owner, project, task, attempt }: InTask & { attempt: string }) {
+  const queryClient = useQueryClient();
+  const reopen = useMutation({
+    mutationFn: () => reopenAttempt(owner, project, attempt),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: taskKey(owner, project, task) });
+    },
+  });
+  return (
+    <>
+      <Button variant="ghost" size="sm" className="ml-auto" disabled={reopen.isPending} onClick={() => reopen.mutate()}>
+        Reopen
+      </Button>
+      {reopen.isError ? (
+        <p role="alert" className="w-full text-xs text-destructive">
+          {apiError(reopen.error).message}
+        </p>
+      ) : null}
+    </>
   );
 }

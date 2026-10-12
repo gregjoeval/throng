@@ -1,14 +1,12 @@
 // The task page (`/:owner/:project/tasks/:t`): the task's header, then a body chosen by its state.
-// The merge request view is a placeholder its own slice fills in.
 
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { ChevronDownIcon, ChevronRightIcon } from "lucide-react";
 import { useState } from "react";
-import type { ReactNode } from "react";
 import { Arena } from "@/components/arena";
 import { Markdown } from "@/components/markdown";
-import { Placeholder } from "@/components/project-view";
+import { MergeRequestView } from "@/components/merge-request";
 import { SingleAttemptView } from "@/components/single-attempt";
 import { EmptyState, ErrorState, Loading } from "@/components/states";
 import { TaskActions } from "@/components/task-actions";
@@ -109,25 +107,12 @@ function TaskBody({ owner, project, task, attempts }: TaskAt & { task: Task; att
       return <Arena owner={owner} project={project} task={task.ref} attempts={body.attempts} />;
     }
     case "mergeRequest": {
-      return (
-        <Slot id="merge-request-view">
-          The merge request from <span className="font-mono">{body.source.ref}</span> will show here.
-        </Slot>
-      );
+      return <MergeRequestView owner={owner} project={project} task={task} source={body.source} />;
     }
     case "ended": {
       return <Ended owner={owner} project={project} task={task} merged={body.merged} archived={body.archived} />;
     }
   }
-}
-
-/** Where a later slice's view goes; tests find it by `id`. */
-function Slot({ id, children }: { id: string; children: ReactNode }) {
-  return (
-    <div data-testid={id}>
-      <Placeholder>{children}</Placeholder>
-    </div>
-  );
 }
 
 /** How to start an attempt: the MCP tool, or a push of a branch reserved for this task. */

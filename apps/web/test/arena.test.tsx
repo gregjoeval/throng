@@ -54,6 +54,7 @@ const card = (ref: string) => within(rail()).getByRole("button", { name: ref });
 const railOrder = () =>
   within(rail())
     .getAllByRole("button")
+    .filter((b) => b.hasAttribute("aria-pressed"))
     .map((b) => b.getAttribute("aria-label"));
 const lanes = () =>
   screen.getAllByRole("region", { name: /^Lane /u }).map((lane) => lane.getAttribute("aria-label")?.slice(5));

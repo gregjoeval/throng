@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { attemptBase } from "../src/base.ts";
+import { attemptBase, readTaskBranch } from "../src/base.ts";
 import { taskBranchRef } from "../src/task-refs.ts";
 import { FakeRepos } from "./fake-repos.ts";
 
@@ -93,5 +93,34 @@ describe("attemptBase", () => {
       parents: [head.hash, tests.hash],
     });
     expect(await base("t1a2", merged.hash)).toEqual({ sha: tests.hash, on: "task" });
+  });
+});
+
+describe("readTaskBranch", () => {
+  it("is null when the task has no task branch", async () => {
+    const { repos } = await setup();
+    expect(await readTaskBranch(repos, PROJECT, 1)).toBeNull();
+  });
+
+  it("counts the task branch's commits that main doesn't have, which land with the selected attempt", async () => {
+    const { repos, root } = await setup();
+    repos.commit(ORIGIN, { files: { "t.test": "1\n" }, branch: "task", parents: [root.hash] });
+    const two = repos.commit(ORIGIN, { files: { "t.test": "2\n" }, branch: "task" });
+    repos.commit(ORIGIN, { files: { "README.md": "main moved\n" } });
+    repos.setRef(ORIGIN, taskBranchRef(1), two.hash);
+    expect(await readTaskBranch(repos, PROJECT, 1)).toEqual({ sha: two.hash, commits: 2 });
+
+    // Merging main in counts the merge, and none of main's commits.
+    const later = repos.commit(ORIGIN, { files: { "README.md": "later\n" } });
+    const merge = repos.commit(ORIGIN, { files: { "t.test": "2\n" }, branch: "task", parents: [two.hash, later.hash] });
+    repos.setRef(ORIGIN, taskBranchRef(1), merge.hash);
+    expect(await readTaskBranch(repos, PROJECT, 1)).toEqual({ sha: merge.hash, commits: 3 });
+  });
+
+  it("counts none once main has the task branch's head", async () => {
+    const { repos, root } = await setup();
+    repos.commit(ORIGIN, { files: { "README.md": "main moved\n" } });
+    repos.setRef(ORIGIN, taskBranchRef(1), root.hash);
+    expect(await readTaskBranch(repos, PROJECT, 1)).toEqual({ sha: root.hash, commits: 0 });
   });
 });

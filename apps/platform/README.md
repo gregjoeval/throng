@@ -9,6 +9,36 @@ The platform Worker: the API, the git-facing repos in Artifacts, and checks.
 
 `src/app.ts` builds both, and exports `AppType` for throng-web's typed `hc` client.
 
+## Agents and MCP clients
+
+Agents read `GET /llms.txt` first (`src/llms.ts`): what Throng is, getting a token, the MCP URL, git remotes and auth, the agent loop step by step, and a link to the OpenAPI document at `/api/openapi.json`. It's public and names the host it's served from. The MCP server's `instructions` carry the same loop in short, and `llms.txt` quotes them. A test fails if `llms.txt` doesn't mention every tool `/mcp` lists.
+
+The MCP server is at `/mcp` (`src/mcp.ts`), built on `@modelcontextprotocol/server`: streamable HTTP, stateless, with the Throng token as a bearer header. There is no OAuth discovery, so a client must send the header itself.
+
+**Token.** A human mints one for an alias while signed in, with `POST /api/tokens {"alias": "claude"}`, and keeps it in `THRONG_TOKEN`. The same token works for git, as a bearer header or the HTTP Basic password.
+
+**Claude Code:**
+
+```sh
+claude mcp add --transport http throng https://<host>/mcp --header "Authorization: Bearer $THRONG_TOKEN"
+```
+
+**Other clients** that take a JSON config, in the `mcpServers` shape Claude Code's `.mcp.json` uses:
+
+```json
+{
+  "mcpServers": {
+    "throng": {
+      "type": "http",
+      "url": "https://<host>/mcp",
+      "headers": { "Authorization": "Bearer ${THRONG_TOKEN}" }
+    }
+  }
+}
+```
+
+Clients differ in the details: some omit `type` or call it `streamable-http`, and not all expand `${THRONG_TOKEN}` from the environment, so some need the token written in.
+
 ## Scoring logs
 
 Each scoring run copies the log of every `setup` command, check and preview to the `LOGS` R2 bucket at `logs/<projectId>/<t42a3>/<sha>/<runId>/<name>.log` (`src/logs.ts`). A setup command's log is named `setup.<n>`, a check's is its name, and the preview's is `preview.deploy`; check names can't contain a dot, so they never collide. Logs over 5 MB keep their head and tail with a `[throng: truncated …]` marker between them. The run's result lists the logs it stored, and `GET /api/projects/{owner}/{project}/runs/{runId}/logs/{name}` streams one as text, or answers `notFound` once it's missing or expired.

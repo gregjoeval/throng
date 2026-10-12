@@ -250,7 +250,7 @@ describe("following the task branch", () => {
     await git(mine, env, "push", "-q", host.path(fork("t1a1")), "HEAD:main");
     await git(mine, env, "reset", "-q", "--hard", "HEAD~1");
     expect(tasks.claimFollowPush(follow.follow)).toBeTruthy();
-    await tasks.followFinished(follow.follow, { kind: "merged", before, sha: merged });
+    await tasks.followFinished(follow.follow, { kind: "merged", before, head: merged });
     expect(tests).not.toBe(merged);
 
     // bob, not having pulled, forces his next commit; a host that refuses non-fast-forwards rejects it.

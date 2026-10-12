@@ -1116,16 +1116,16 @@ export class TaskStore {
       switch (outcome.kind) {
         case "merged":
         case "current": {
-          const head = outcome.kind === "merged" ? outcome.sha : outcome.head;
+          const { head } = outcome;
           const recorded = this.scoring.statusFor(scoredAttempt(attempt)).sha;
           this.#setFollow(attempt, { needs_update: null });
           // A `current` head other than the recorded one is this follow's own push, made before its
           // step was retried. An attempt with no recorded head yet has nothing to move on from.
-          const moved = outcome.kind === "merged" ? head !== recorded : recorded !== null && head !== recorded;
-          if (moved) {
-            const before = outcome.kind === "merged" ? outcome.before : head;
-            this.#followedTo(project, attempt, { before, after: head, taskHead: current.task_head });
-          }
+          const [moved, before] =
+            outcome.kind === "merged"
+              ? [head !== recorded, outcome.before]
+              : [recorded !== null && head !== recorded, head];
+          if (moved) this.#followedTo(project, attempt, { before, after: head, taskHead: current.task_head });
           break;
         }
         case "conflict": {

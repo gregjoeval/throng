@@ -121,7 +121,7 @@ async function setup({ landing = true } = {}) {
   /** A clean merge of the task head into the fork, as the follow script makes it. */
   const merged = (ref: AttemptInput, taskHead: string) => (before: string) => {
     const sha = repos.commit(fork(ref), { files: { "README.md": `merged ${++n}\n` }, parents: [before, taskHead] });
-    return { kind: "merged" as const, before, sha: sha.hash };
+    return { kind: "merged" as const, before, head: sha.hash };
   };
   const scoreLatest = (ref: AttemptInput) => {
     const run = at(store.scoring.listRuns({ task: ref.task, attempt: ref.number }), -1);
@@ -217,7 +217,7 @@ describe("a clean update", () => {
     const { head } = moveTaskBranch();
     await drain();
     await follow(t1a1, merged(t1a1, head));
-    await follow(t1a2, (before) => ({ kind: "merged", before, sha: head }));
+    await follow(t1a2, (before) => ({ kind: "merged", before, head }));
 
     const open = attempt(t1a1);
     expect(open).toMatchObject({ needs_update: false, scoring: { status: "running" } });

@@ -351,7 +351,7 @@ result '{"kind":"moved"}'
 
 /** How following the task branch went: see `followScript`. */
 export type FollowResult =
-  | { kind: "merged"; before: string; sha: string }
+  | { kind: "merged"; before: string; head: string }
   | { kind: "current"; head: string }
   | { kind: "conflict"; head: string }
   | { kind: "moved" }
@@ -402,7 +402,7 @@ else
   [ "$code" = 0 ] || exit 13
   commit=$(git commit-tree "$tree" -p "$head" -p ${taskHead} -F ../message) || exit 13
 fi
-merged="{\\"kind\\":\\"merged\\",\\"before\\":\\"$head\\",\\"sha\\":\\"$commit\\"}"
+merged="{\\"kind\\":\\"merged\\",\\"before\\":\\"$head\\",\\"head\\":\\"$commit\\"}"
 git push -q --force-with-lease=refs/heads/main:"$head" ${quote(forkRemote)} "$commit:refs/heads/main" 2> ../push.log && result "$merged"
 now=$(git ls-remote ${quote(forkRemote)} refs/heads/main | cut -f 1) || exit 10
 [ "$now" = "$commit" ] && result "$merged"

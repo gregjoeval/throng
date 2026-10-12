@@ -40,7 +40,7 @@ const params: FollowParams = {
   taskHead: "a".repeat(40),
   startedAt: 1_700_000_000_000,
 };
-const MERGED = { kind: "merged", before: "b".repeat(40), sha: "c".repeat(40) } as const;
+const MERGED = { kind: "merged", before: "b".repeat(40), head: "c".repeat(40) } as const;
 
 /** Runs a follow whose claim answers `claimed`, recording what each binding was asked. */
 async function follow(claimed: boolean) {

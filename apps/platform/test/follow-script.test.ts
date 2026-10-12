@@ -85,7 +85,7 @@ describe("followScript", () => {
     const result = run(plan(task));
 
     const merged = forkHead();
-    expect(result).toEqual({ kind: "merged", before: head, sha: merged });
+    expect(result).toEqual({ kind: "merged", before: head, head: merged });
     expect(git(fork, "log", "-1", "--format=%P", "main")).toBe(`${head} ${task}`);
     expect(git(fork, "log", "-1", "--format=%an <%ae>|%cn <%ce>|%B", "main")).toBe(
       "Throng <noreply@users.noreply.throng>|Throng <noreply@users.noreply.throng>|" +
@@ -99,7 +99,7 @@ describe("followScript", () => {
     const task = commit("test.txt", "a test\n", "task branch moved");
     git(work, "push", "-q", origin, "HEAD:refs/tasks/t1");
 
-    expect(run(plan(task))).toEqual({ kind: "merged", before: base, sha: task });
+    expect(run(plan(task))).toEqual({ kind: "merged", before: base, head: task });
     expect(forkHead()).toBe(task);
   });
 

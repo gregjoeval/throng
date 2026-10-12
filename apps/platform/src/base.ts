@@ -39,24 +39,6 @@ export async function attemptBase(
   return sha === null ? null : { sha, on: line.on };
 }
 
-/**
- * Whether commit `head` on attempt `attempt`'s fork has `commit` from the origin in its history: an
- * ancestry test, read through `Repos` with the same walk limit as `attemptBase`. False past it.
- */
-export async function containsCommit(
-  repos: Repos,
-  project: string,
-  { attempt, head }: { attempt: string; head: string },
-  commit: string,
-): Promise<boolean> {
-  const sha = await mergeBase(
-    repos,
-    { repo: forkRepo(project, attempt), sha: head },
-    { repo: originRepo(project), sha: commit },
-  );
-  return sha === commit;
-}
-
 /** The head of task `task`'s task branch in the origin, or null when it has none. */
 export async function taskBranchHead(repos: Repos, project: string, task: number): Promise<{ sha: string } | null> {
   const sha = await tip(repos, originRepo(project), taskBranchRef(task));
@@ -112,6 +94,37 @@ async function mergeBase(repos: Repos, one: Side, two: Side): Promise<string | n
     if (marks.get(next) === BOTH) return next;
   }
   return null;
+}
+
+/**
+ * Whether commit `head` on attempt `attempt`'s fork has `commit` from the origin in its history: an
+ * ancestry test, read through `Repos` with the same walk limit as `attemptBase`. The walk stops early
+ * at `known`, a commit of the fork already known to contain `commit`. Null when it can't tell: `head`
+ * can't be read, or the walk reached its limit. A read that fails throws.
+ */
+export async function containsCommit(
+  repos: Repos,
+  project: string,
+  { attempt, head, known = null }: { attempt: string; head: string; known?: string | null },
+  commit: string,
+): Promise<boolean | null> {
+  const marks = new Map<string, number>([[head, ONE]]);
+  marks.set(commit, (marks.get(commit) ?? 0) | TWO);
+  const sides = [
+    { repo: forkRepo(project, attempt), sha: head },
+    { repo: originRepo(project), sha: commit },
+  ];
+  let walked = 0;
+  let readHead = false;
+  for await (const { next } of walkNewestFirst(repos, head === commit ? [sides[0] as Side] : sides, marks)) {
+    walked++;
+    readHead ||= next === head;
+    const mark = marks.get(next) ?? 0;
+    if (next === known && mark & ONE) return true;
+    // The first commit both reach is their merge base, which is `commit` when `head` contains it.
+    if (mark === BOTH) return next === commit;
+  }
+  return readHead && walked < MAX_BASE_WALK ? false : null;
 }
 
 /**

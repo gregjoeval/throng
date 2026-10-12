@@ -320,6 +320,58 @@ describe("an author's push that drops the task branch", () => {
     expect(newer).toBeDefined();
     expect(started(t1a1)?.params.taskHead).toBe(newer);
   });
+
+  it("reads only the new commits of a push on a head known to contain the task head", async () => {
+    const { repos, drain, t1a1, moveTaskBranch, push, follow, merged, followWorkflow } = await setup();
+    const { head } = moveTaskBranch();
+    await drain();
+    await follow(t1a1, merged(t1a1, head));
+    for (let i = 0; i < 30; i++) await push(t1a1);
+    const before = repos.calls.length;
+    await push(t1a1);
+    await drain();
+    expect(repos.calls.slice(before).filter((c) => c.method === "readCommit").length).toBeLessThanOrEqual(3);
+    expect(followWorkflow.created.filter((c) => c.params.attempt === 1)).toHaveLength(1);
+  });
+
+  it("queues no follow when the push's history is too long to walk", async () => {
+    const { repos, base, drain, t1a1, moveTaskBranch, push, follow, merged, followWorkflow } = await setup();
+    const { head } = moveTaskBranch();
+    await drain();
+    await follow(t1a1, merged(t1a1, head));
+    let tip = base.hash;
+    for (let i = 0; i < 2100; i++) {
+      tip = repos.commit(fork(t1a1), { files: { "README.md": `long ${i}\n` }, parents: [tip] }).hash;
+    }
+    await push(t1a1, [tip]);
+    await drain();
+    expect(followWorkflow.created.filter((c) => c.params.attempt === 1)).toHaveLength(1);
+  });
+
+  it.each(["fork", "origin"] as const)(
+    "queues no follow while the %s can't be read, and checks the next push",
+    async (side) => {
+      const { repos, base, drain, t1a1, moveTaskBranch, push, follow, merged, followWorkflow } = await setup();
+      const { head } = moveTaskBranch();
+      await drain();
+      await follow(t1a1, merged(t1a1, head));
+      const readCommit = repos.readCommit.bind(repos);
+      let down = true;
+      repos.readCommit = async (name, hash) => {
+        if (down && name === (side === "fork" ? fork(t1a1) : ORIGIN)) throw new Error("unavailable");
+        return readCommit(name, hash);
+      };
+      const follows = () => followWorkflow.created.filter((c) => c.params.attempt === 1).length;
+      await push(t1a1, [base.hash]);
+      await drain();
+      expect(follows()).toBe(1);
+
+      down = false;
+      await push(t1a1, [base.hash]);
+      await drain();
+      expect(follows()).toBe(2);
+    },
+  );
 });
 
 /** `setup` with t1a1 selected: its merge request is pending until its head's run passes, then queued. */

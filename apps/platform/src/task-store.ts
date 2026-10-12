@@ -325,6 +325,8 @@ interface AttemptRow {
   needs_update: string | null;
   /** The head a follow last wrote to its fork, until its author pushes again. */
   followed_head: string | null;
+  /** A head of the attempt known to contain its task head, where checking a later push stops. */
+  contains_task_head: string | null;
 }
 
 const SCHEMA = [
@@ -356,6 +358,7 @@ const SCHEMA = [
     needs_update TEXT,
     followed_head TEXT,
     alias TEXT,
+    contains_task_head TEXT,
     PRIMARY KEY (task, number)
   )`,
   // Branch names are unique per project among active attempts.
@@ -393,7 +396,13 @@ const TASK_COLUMNS = ["task_head TEXT"];
  * Columns added to attempts after their table was made: where a forked attempt was copied from, how
  * it follows its task branch, and the alias its author started it under.
  */
-const ATTEMPT_COLUMNS = ["forked_from INTEGER", "needs_update TEXT", "followed_head TEXT", "alias TEXT"];
+const ATTEMPT_COLUMNS = [
+  "forked_from INTEGER",
+  "needs_update TEXT",
+  "followed_head TEXT",
+  "alias TEXT",
+  "contains_task_head TEXT",
+];
 
 /**
  * Creates the store's tables, adds the journal's and attempts' newer columns to tables that predate
@@ -1131,6 +1140,7 @@ export class TaskStore {
     return this.#sql.transaction(() => {
       this.#task(input.task);
       this.#sql.exec("UPDATE tasks SET task_head = ? WHERE number = ?", input.head, input.task);
+      this.#sql.exec("UPDATE attempts SET contains_task_head = NULL WHERE task = ?", input.task);
       this.#journal(actor, "taskBranchPushed", input.task, null, { head: input.head });
       const active = this.#activeAttempts(input.task);
       for (const attempt of active) {
@@ -1193,6 +1203,8 @@ export class TaskStore {
           const { head } = outcome;
           const recorded = this.scoring.statusFor(scoredAttempt(attempt)).sha;
           this.#setFollow(attempt, { needs_update: null });
+          if (current.task_head === this.#taskHead(attempt.task))
+            this.#setFollow(attempt, { contains_task_head: head });
           // A `current` head other than the recorded one is this follow's own push, made before its
           // step was retried. An attempt with no recorded head yet has nothing to move on from.
           const [moved, before] =
@@ -1249,7 +1261,10 @@ export class TaskStore {
     else this.scoring.moveHead({ ...scoredAttempt(attempt), sha: after });
   }
 
-  #setFollow(attempt: AttemptInput, set: Partial<Pick<AttemptRow, "needs_update" | "followed_head">>): void {
+  #setFollow(
+    attempt: AttemptInput,
+    set: Partial<Pick<AttemptRow, "needs_update" | "followed_head" | "contains_task_head">>,
+  ): void {
     for (const [column, value] of Object.entries(set)) {
       this.#sql.exec(
         `UPDATE attempts SET ${column} = ? WHERE task = ? AND number = ?`,
@@ -1273,38 +1288,52 @@ export class TaskStore {
 
   /**
    * Queues a follow of the task head when an author's push moved the attempt to `head` and `head`
-   * doesn't contain it, and returns it. Null when the task has no task branch, `head` contains its
-   * head, or the attempt needs update: `#authorMoved` already queued its follow. A head that can't
-   * be read, or whose history is too long to walk, is followed: a follow of a head that contains the
-   * task head changes nothing.
+   * doesn't contain it, and returns it; when it does, remembers `head`, where checking a later push
+   * stops. Null when there is nothing to check (`#toCheck`), or `head` contains the task head. A
+   * check that can't tell, because a commit can't be read or the history is too long to walk, is
+   * logged and queues nothing: the attempt's next push is checked again, and a task branch push
+   * follows it anyway.
    */
   async #followIfDropped(project: ProjectId, attempt: AttemptInput, head: string): Promise<FollowNotice | null> {
-    const taskHead = this.#taskHeadToCheck(attempt, head);
-    if (taskHead === null) return null;
+    const check = this.#toCheck(attempt, head);
+    if (check === null) return null;
+    const { taskHead, known } = check;
     const fork = attemptRef(attempt.task, attempt.number);
+    let contains: boolean | null;
     try {
-      if (await containsCommit(this.#repos, project.id, { attempt: fork, head }, taskHead)) return null;
+      contains = await containsCommit(this.#repos, project.id, { attempt: fork, head, known }, taskHead);
     } catch (error) {
-      console.error({ event: "follow.head_unreadable", attempt: fork, error: String(error) });
+      console.error({ event: "follow.check_failed", attempt: fork, head, taskHead, error: String(error) });
+      return null;
+    }
+    if (contains === null) {
+      console.warn({ event: "follow.check_unknown", attempt: fork, head, taskHead });
+      return null;
     }
     return this.#sql.transaction(() => {
       // The task branch, the attempt or its head may have moved on while the head was read: a newer
       // push is checked on its own, and a task branch push queued a follow of its new head.
-      if (this.#taskHeadToCheck(attempt, head) !== taskHead) return null;
+      if (this.#toCheck(attempt, head)?.taskHead !== taskHead) return null;
+      if (contains) {
+        this.#setFollow(attempt, { contains_task_head: head });
+        return null;
+      }
       this.#queueFollow(project, attempt, taskHead);
       return { task: attempt.task, attempt: fork, taskHead };
     });
   }
 
   /**
-   * The task head to check the attempt's head `head` against. Null when there is nothing to check:
-   * the attempt ended, or needs update (`#authorMoved` queued its follow), `head` is no longer its
-   * head, or its task has no task branch.
+   * What checking the attempt's head `head` needs: its task head, and the head known to contain it.
+   * Null when there is nothing to check: the attempt ended, or needs update (`#authorMoved` queued
+   * its follow), `head` is no longer its head, or its task has no task branch.
    */
-  #taskHeadToCheck(input: AttemptInput, head: string): string | null {
-    const attempt = this.#attempt(input);
-    if (!isActive(attempt.state) || attempt.needs_update || attempt.scoring.sha !== head) return null;
-    return this.#taskHead(attempt.task);
+  #toCheck(input: AttemptInput, head: string): { taskHead: string; known: string | null } | null {
+    const row = this.#attemptRow(input);
+    if (row === undefined || !isActive(row.state) || row.needs_update !== null) return null;
+    if (this.scoring.statusFor(scoredAttempt(row)).sha !== head) return null;
+    const taskHead = this.#taskHead(row.task);
+    return taskHead === null ? null : { taskHead, known: row.contains_task_head };
   }
 
   /** Queues a follow of the task's task branch for an attempt that (re)starts, when the task has one. */

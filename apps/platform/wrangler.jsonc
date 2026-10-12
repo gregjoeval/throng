@@ -44,7 +44,6 @@
   ],
   "vars": {
     "CF_ACCOUNT_ID": "9ff7e9e225aeb0ab0c56b05b42ca2b13",
-    "PREVIEW_WORKER": "throng-fixture-worker",
     // PLACEHOLDER: the Zero Trust team domain and the Access application's audience (AUD) tag.
     "ACCESS_TEAM_DOMAIN": "gregjoeval.cloudflareaccess.com",
     "ACCESS_AUD": "2a713dce7fdf28f6d07c5954b0a9d57e867717b5af65ba730b98473b3366712b",
@@ -94,7 +93,6 @@
       ],
       "vars": {
         "CF_ACCOUNT_ID": "9ff7e9e225aeb0ab0c56b05b42ca2b13",
-        "PREVIEW_WORKER": "throng-fixture-worker",
         "ACCESS_TEAM_DOMAIN": "gregjoeval.cloudflareaccess.com",
         "ACCESS_AUD": "2a713dce7fdf28f6d07c5954b0a9d57e867717b5af65ba730b98473b3366712b",
       },

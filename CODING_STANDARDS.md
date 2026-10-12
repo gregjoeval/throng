@@ -7,6 +7,9 @@ is in `.oxlintrc.json` (`pnpm lint`). Apply each rule below when writing code an
 
 - **API:** every name and value a client sees is camelCase. [ADR 0002](docs/adr/0002-api-names-and-values-are-camelcase.md)
   holds the rule and its exceptions.
+- **MCP:** tool names are snake_case (`start_attempts`), tool parameters camelCase, the server ID kebab-case, and
+  resource names Title Case or URIs. [ADR 0002](docs/adr/0002-api-names-and-values-are-camelcase.md#amendment-mcp-names)
+  says why.
 - **SQL:** columns, and the `Stored*` row types that mirror them, are snake_case.
 - **All other TypeScript** is camelCase: variables, functions, properties and enum values. Types and classes are
   PascalCase.

@@ -17,6 +17,14 @@ The MCP server is at `/mcp` (`src/mcp.ts`), built on `@modelcontextprotocol/serv
 
 **Token.** A human mints one for an alias while signed in, with `POST /api/tokens {"alias": "claude"}`, and keeps it in `THRONG_TOKEN`. The same token works for git, as a bearer header or the HTTP Basic password.
 
+**Git.** Every attempt the API returns carries its `remote`. An agent clones it with:
+
+```sh
+git clone -c http.extraHeader="Authorization: Bearer $THRONG_TOKEN" <remote>
+```
+
+The `-c` comes after `clone`, so git writes the header into the new repo's config and a plain `git push` sends it too; `git -c … clone` would use it for the clone only.
+
 **Claude Code:**
 
 ```sh
@@ -75,7 +83,7 @@ gh workflow run e2e.yml --ref my-branch     # every scenario, against a branch
   - `zeroconfig`: a project with no `.throng/config.yml`. Selecting `t1a1` closes `t1a2`, and the merge request lands as a merge commit whose parents are the old `main` and the approved head, with the `Throng-Task`, `Throng-Attempt`, `Throng-Merge-Request` and `Approved-by` trailers. It also checks custom refs after landing: both attempts are archived under `refs/attempts/` in the origin.
   - `conflict`: two tasks whose attempts edit the same line. `t1`'s merge request lands, and `t2`'s is dequeued with reason `conflict` and the expected three-way hunk. Its author merges `main` and pushes, which moves it to `needsReview`. Once approved, it lands.
   - `needsreview`: a slow required check keeps the landing in its retest. A push to the source while it's queued or landing dequeues it with `newPush` to `needsReview`. Once the new head passes, it still doesn't requeue on its own.
-- `mcp`: the agent loop through `/mcp` (with the MCP SDK's client) and git only, on a real project with no config (`agentLoop` in `scripts/e2e-mcp.ts`, which `test/mcp.test.ts` also runs in process). The e2e user's agent calls `whoami`, `create_task` and `start_attempts count=2`, clones `t1a1` with its returned `clone` command, pushes, `update_attempt state=open`, waits with `wait_for_attempt until=scored` and checks the result with `get_attempt`. A second e2e user, `e2e-reviewer@throng.invalid` (`POST /e2e/token?as=reviewer`), posts a `merge` verdict. The first selects `t1a1` and waits with `until=mergeRequestChanged` until it merges.
+- `mcp`: the agent loop through `/mcp` (with the MCP SDK's client) and git only, on a real project with no config (`agentLoop` in `scripts/e2e-mcp.ts`, which `test/mcp.test.ts` also runs in process). Both agents' tokens are minted under an alias (`POST /e2e/token?alias=claude`), so the loop runs as `user (alias)` and checks the attempt and the verdict record it. The e2e user's agent calls `whoami`, `create_task` and `start_attempts count=2`, clones `t1a1`'s `remote` with the recipe above (through `sh`, with the token in `THRONG_TOKEN`), pushes with no auth of its own, `update_attempt state=open`, waits with `wait_for_attempt until=scored` and checks the result with `get_attempt`. A second e2e user, `e2e-reviewer@throng.invalid` (`POST /e2e/token?as=reviewer&alias=codex`), posts a `merge` verdict. The first selects `t1a1` and waits with `until=mergeRequestChanged` until it merges.
 - `arena`: the attempt arena in a browser. Like `zeroconfig`, it makes a real project as the e2e user, with task `t1` and two attempts: `t1a1` edits `src/greeting.js`, and `t1a2` edits it and `src/index.js`. Once both are scored, Playwright's Chromium opens `t1` on `throng-web-ci` (`THRONG_WEB_URL`) and checks that:
   1. the arena shows lanes `t1a1` and `t1a2`, each with its own files, and each compared against its base (`main`, since the task has no branch);
   2. **By file** lists `src/greeting.js` (changed by 2 of 2) and then `src/index.js` (changed by 1 of 2, which `t1a1` left alone);

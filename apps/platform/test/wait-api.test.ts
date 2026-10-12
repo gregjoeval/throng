@@ -33,14 +33,29 @@ async function setup() {
     teardown: async () => {},
   };
   const { backend, store } = testTaskBackends(repos, now, runner);
-  // Counts the waits that reached the project's store, which snapshots them as they arrive.
+  // Counts the waits that reached the project's store, which snapshots them as they arrive. Each
+  // can be dropped as a reset of the project's Durable Object drops it (see `evict`).
   let arrived = 0;
+  const drops: ((error: Error) => void)[] = [];
   const counting = (projectId: string): TaskBackend => ({
     call: async (method, args) => {
-      if (method === "waitForAttempt") arrived++;
-      return backend(projectId).call(method, args);
+      if (method !== "waitForAttempt") return backend(projectId).call(method, args);
+      arrived++;
+      const dropped = new Promise<never>((_, reject) => drops.push(reject));
+      return Promise.race([backend(projectId).call(method, args), dropped]);
     },
   });
+  /**
+   * What a deploy, or an eviction, does to the waits in flight: the Durable Object's waiters live in
+   * memory, so the runtime fails each caller's RPC with a reset error.
+   */
+  const evict = () => {
+    for (const drop of drops.splice(0)) {
+      drop(
+        Object.assign(new Error("Durable Object reset because its code was updated."), { durableObjectReset: true }),
+      );
+    }
+  };
   const api = apiRoutes({ verifierFor: () => verify, now, repos: () => repos, tasks: () => counting });
   const env = { DB: testDatabase(), ACCESS_TEAM_DOMAIN: "throng.cloudflareaccess.com", ACCESS_AUD: "aud" };
 
@@ -107,7 +122,7 @@ async function setup() {
     return { answer, answered: () => done };
   };
 
-  return { call, store, projectId, greg, ada, adaClaude, bob, base, push, finish, wait };
+  return { call, store, projectId, greg, ada, adaClaude, bob, base, push, finish, wait, evict };
 }
 
 /** Lets every pending request run as far as it can without the clock moving. */
@@ -183,12 +198,34 @@ describe("waiting on an attempt", () => {
     await finish(1);
     expect((await answer).body).toMatchObject({ scoring: { status: "done", sha: head }, changed: true });
 
+    const next = await push(1, "two\n");
     const errored = await wait(1, "wait=30&until=scored");
-    await call("POST", `${base}/attempts/t1a1/rescore`, ada);
-    await settle();
     expect(errored.answered()).toBeFalsy();
     await finish(1, { status: "errored", error: "sandbox lost" });
-    expect((await errored.answer).body).toMatchObject({ scoring: { status: "errored" }, changed: true });
+    expect((await errored.answer).body).toMatchObject({ scoring: { status: "errored", sha: next }, changed: true });
+  });
+
+  it("answers scored at once when the current head already has a done or errored run", async () => {
+    const { call, ada, base, push, finish } = await setup();
+    await call("POST", `${base}/attempts/t1a1/open`, ada);
+    const head = await push(1, "one\n");
+    await finish(1);
+    // No timer runs: the answer comes without the clock moving.
+    const { status, body } = await call("GET", `${base}/attempts/t1a1?wait=30&until=scored`, ada);
+    expect(status).toBe(200);
+    expect(body).toMatchObject({ scoring: { status: "done", sha: head }, changed: true });
+  });
+
+  it("still waits on `any` for a change when the head is already scored", async () => {
+    const { call, ada, base, push, finish, wait } = await setup();
+    await call("POST", `${base}/attempts/t1a1/open`, ada);
+    await push(1, "one\n");
+    await finish(1);
+    const { answer, answered } = await wait(1, "wait=30");
+    await settle();
+    expect(answered()).toBeFalsy();
+    await call("POST", `${base}/attempts/t1a1/draft`, ada);
+    expect((await answer).body).toMatchObject({ state: "draft", changed: true });
   });
 
   it("answers mergeRequestChanged once the attempt is selected, and once its merge request moves", async () => {
@@ -254,6 +291,20 @@ describe("waiting on an attempt", () => {
     expect(again.answered()).toBeFalsy();
     await vi.advanceTimersByTimeAsync(30_000);
     expect((await again.answer).body["changed"]).toBeFalsy();
+  });
+
+  it("answers changed: false when a deploy or eviction drops the wait, and the client can wait again", async () => {
+    const { call, ada, base, wait, evict } = await setup();
+    const dropped = await wait(1, "wait=30&until=stateChanged");
+    evict();
+    const { status, body } = await dropped.answer;
+    expect(status).toBe(200);
+    expect(body).toMatchObject({ ref: "t1a1", state: "draft", changed: false });
+
+    const again = await wait(1, "wait=30&until=stateChanged");
+    expect(again.answered()).toBeFalsy();
+    await call("POST", `${base}/attempts/t1a1/open`, ada);
+    expect((await again.answer).body).toMatchObject({ state: "open", changed: true });
   });
 
   it("answers 404 for an attempt that doesn't exist, without waiting", async () => {

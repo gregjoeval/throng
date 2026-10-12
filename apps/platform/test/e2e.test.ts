@@ -170,6 +170,23 @@ describe("the e2e routes", () => {
     expect(await authenticateToken(db, reviewers["token"], new Date())).toBeNull();
   });
 
+  it("mint a token under an alias, for either e2e user", async () => {
+    const { db, call } = setup();
+    const { body: mine } = await call("POST", "/e2e/token?alias=claude");
+    const { body: reviewers } = await call("POST", "/e2e/token?as=reviewer&alias=codex");
+    if (mine === null || reviewers === null) throw new Error("minting returned no JSON");
+    expect((await authenticateToken(db, mine["token"], new Date()))?.actor).toMatchObject({
+      user: { email: "e2e@throng.invalid" },
+      alias: "claude",
+    });
+    expect((await authenticateToken(db, reviewers["token"], new Date()))?.actor).toMatchObject({
+      user: { email: "e2e-reviewer@throng.invalid" },
+      alias: "codex",
+    });
+    expect((await call("POST", "/e2e/token?alias=Not%20One")).status).toBe(400);
+    expect((await call("DELETE", `/e2e/tokens/${mine["id"]}`)).status).toBe(200);
+  });
+
   it("revoke the run's token, and only the e2e user's", async () => {
     const { db, call } = setup();
     const { body: minted } = await call("POST", "/e2e/token");

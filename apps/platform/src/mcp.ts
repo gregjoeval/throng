@@ -10,39 +10,46 @@ import type { CallToolResult, ToolCallback } from "@modelcontextprotocol/server"
 import { Hono } from "hono";
 import type { AccessBindings } from "./access.ts";
 import {
+  AttemptQuerySchema,
   CreateAttemptsSchema,
   CreateTaskSchema,
   EditAttemptSchema,
   HandOffSchema,
+  PageQuerySchema,
   PostVerdictSchema,
   SelectionSchema,
   WaitQuerySchema,
+  WaitSecondsSchema,
   workersCache,
-} from "./api.ts";
+} from "./api-shared.ts";
 import type { ApiOptions } from "./api.ts";
 import { bearerAuth } from "./auth.ts";
 import type { AuthEnv } from "./auth.ts";
-import { AttemptQuerySchema, PageQuerySchema } from "./browse-api.ts";
 import { browseService } from "./browse.ts";
 import { DIFF_CAPS, diffCommit, unifiedPatch } from "./diff.ts";
 import { ServiceError } from "./errors.ts";
 import { missingLog } from "./logs.ts";
-import { TASK_STATES } from "./task-store.ts";
+import { ATTEMPT_STATES, TASK_STATES } from "./task-store.ts";
 import { taskService } from "./tasks.ts";
+import type { MergeRequest, ScoringAnswer } from "./tasks.ts";
 import type { Actor } from "./tokens.ts";
-import { MAX_WAIT_SECONDS } from "./waiters.ts";
+import { DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS } from "./waiters.ts";
 
 /** `read_file` returns at most this much of a file's text. */
 export const MAX_FILE_BYTES = 256 * 1024;
 /** `get_log` returns at most this much of a log: by default its last this many bytes. */
 export const MAX_LOG_SLICE_BYTES = 64 * 1024;
 
+/** How an agent clones an attempt's remote: `-c` after `clone` is saved in the clone's config, so a plain push works. */
+export const CLONE_RECIPE = 'git clone -c http.extraHeader="Authorization: Bearer $THRONG_TOKEN" <remote>';
+
 /** What the server tells a client it is for: the agent loop, in short. `llms.txt` has the long form. */
 export const MCP_INSTRUCTIONS = [
   "Throng runs many attempts at a task in parallel, scores each, and merges the best one.",
   "Every tool but `whoami` takes `project` as `owner/project`. Tasks are `t42`, attempts `t42a3`.",
-  "The loop: `start_attempts` gives each attempt a git `remote` and a `clone` command that reads the token " +
-    "from `$THRONG_TOKEN`. Clone, commit, push to `main`, then `update_attempt` with `state: open`. " +
+  "The loop: `start_attempts` gives each attempt a git `remote`. Clone it with " +
+    `\`${CLONE_RECIPE}\`, ` +
+    "which keeps the header for later pushes. Commit, push to `main`, then `update_attempt` with `state: open`. " +
     "`wait_for_attempt` with `until: scored` holds until the head is scored; read the result with " +
     "`get_attempt` (and failing checks' logs with `get_log`), fix, push, and wait again.",
   "If a merge request is dequeued, `get_dequeue` says why (with conflict hunks): merge `main` into the attempt " +
@@ -95,6 +102,9 @@ const TaskRefSchema = z.string().describe("A task reference: `t42` or `42`.");
 const AttemptRefSchema = z.string().describe("An attempt reference, e.g. `t42a3`.");
 const RefSchema = z.string().describe("`main`, an attempt reference (`t42a3`), or a full 40-character commit sha.");
 
+/** The states `update_attempt` moves an attempt to; `merged` and `obsolete` aren't its author's to choose. */
+const UPDATE_STATES = z.enum(ATTEMPT_STATES).exclude(["merged", "obsolete"]);
+
 const onProject = z.object({ project: ProjectRefSchema });
 const onTask = onProject.extend({ task: TaskRefSchema });
 const onAttempt = onProject.extend({ attempt: AttemptRefSchema });
@@ -113,6 +123,21 @@ function answer(summary: string, data: Record<string, unknown>): CallToolResult 
     ],
     structuredContent: data,
   };
+}
+
+/** A summary line with its hint, if any, as one more sentence. */
+function withHint(summary: string, hint: string | null): string {
+  return hint === null ? summary : `${summary}. ${hint}`;
+}
+
+/** The answer to a scoring request: the run it queued, or why it queued none. */
+function scoringAnswer(scored: ScoringAnswer): CallToolResult {
+  return answer(scored.queued ? `queued run ${scored.run.id}` : `not queued: ${scored.reason}`, { ...scored });
+}
+
+/** The answer to a call that moves the task's merge request: its new state. */
+function mergeRequestAnswer(mergeRequest: MergeRequest): CallToolResult {
+  return answer(`merge request is ${mergeRequest.state}`, { mergeRequest });
 }
 
 /** Runs a tool, turning a service's refusal into a tool error the model can read and act on. */
@@ -203,12 +228,12 @@ function mcpServer({ repos, tasks, logs, diffCache }: Deps, { actor, token, env,
 
   tool(
     "start_attempts",
-    "Start `count` draft attempts at a task. Each comes with its git `remote` and a `clone` command that " +
-      "reads the token from `$THRONG_TOKEN`.",
+    `Start \`count\` draft attempts at a task. Each comes with its git \`remote\`: \`${CLONE_RECIPE}\`.`,
     CreateAttemptsSchema.extend(onTask.shape),
     async ({ project, task, ...input }) => {
       const attempts = await service.createAttempts(actor, { ...projectPath(project), task, ...input });
-      return answer(`started ${attempts.map((a) => a.ref).join(", ")}`, { attempts });
+      const refs = attempts.map((a) => a.ref).join(", ");
+      return answer(`started ${refs}; clone each remote with ${CLONE_RECIPE}`, { attempts });
     },
   );
 
@@ -218,17 +243,16 @@ function mcpServer({ repos, tasks, logs, diffCache }: Deps, { actor, token, env,
       "`closed`. Only its author may.",
     onAttempt.extend({
       note: EditAttemptSchema.shape.note.optional(),
-      state: z.enum(["open", "draft", "closed"]).optional(),
+      state: UPDATE_STATES.optional(),
     }),
     async ({ project, attempt, note, state }) => {
       const path = { ...projectPath(project), attempt };
       if (note === undefined && state === undefined) {
         throw new ServiceError("invalidRequest", "give a `note`, a `state`, or both");
       }
+      const moves = { open: service.openAttempt, draft: service.draftAttempt, closed: service.closeAttempt };
       let updated = note === undefined ? null : await service.editAttempt(actor, { ...path, note });
-      if (state === "open") updated = await service.openAttempt(actor, path);
-      if (state === "draft") updated = await service.draftAttempt(actor, path);
-      if (state === "closed") updated = await service.closeAttempt(actor, path);
+      if (state !== undefined) updated = await moves[state](actor, path);
       if (updated === null) throw new Error("unreachable: an update with nothing to do");
       return answer(`${updated.ref} is ${updated.state}`, { attempt: updated });
     },
@@ -285,7 +309,7 @@ function mcpServer({ repos, tasks, logs, diffCache }: Deps, { actor, token, env,
         content,
         hint,
       };
-      return answer(`${file.path} at ${at.sha}: ${file.size} bytes${hint === null ? "" : `. ${hint}`}`, data);
+      return answer(withHint(`${file.path} at ${at.sha}: ${file.size} bytes`, hint), data);
     },
   );
 
@@ -319,7 +343,7 @@ function mcpServer({ repos, tasks, logs, diffCache }: Deps, { actor, token, env,
           ? "Some files have no patch or a cut-short one (see `capped`); diff them in a clone."
           : null;
       const { totals } = diff;
-      const summary = `${totals.files} files, +${totals.additions} -${totals.deletions}${hint === null ? "" : `. ${hint}`}`;
+      const summary = withHint(`${totals.files} files, +${totals.additions} -${totals.deletions}`, hint);
       return answer(summary, {
         sha: diff.sha,
         parent: diff.parent,
@@ -348,10 +372,12 @@ function mcpServer({ repos, tasks, logs, diffCache }: Deps, { actor, token, env,
 
   tool(
     "wait_for_attempt",
-    `Hold until what \`until\` watches on the attempt changes, or \`wait\` seconds (at most ${MAX_WAIT_SECONDS}) ` +
-      "pass, then return the attempt and whether it changed. Call again while `changed` is false.",
+    `Hold until what \`until\` watches on the attempt changes, or \`wait\` seconds (default ${DEFAULT_WAIT_SECONDS}, ` +
+      `at most ${MAX_WAIT_SECONDS}) pass, then return the attempt and whether it changed. \`until: scored\` waits ` +
+      "for the current head to have a `done` or `errored` run, and answers at once if it already has one. " +
+      "Call again while `changed` is false. A deploy drops waits in flight: they answer `changed: false`.",
     onAttempt.extend({
-      wait: z.number().int().min(1).max(MAX_WAIT_SECONDS).default(MAX_WAIT_SECONDS).describe("Seconds to hold."),
+      wait: WaitSecondsSchema.default(DEFAULT_WAIT_SECONDS).describe(`Seconds to hold, 1 to ${MAX_WAIT_SECONDS}.`),
       until: WaitQuerySchema.shape.until,
     }),
     async ({ project, attempt, wait, until }) => {
@@ -365,14 +391,12 @@ function mcpServer({ repos, tasks, logs, diffCache }: Deps, { actor, token, env,
     "Score a draft attempt's head now. Only its author may.",
     onAttempt,
     async ({ project, attempt }) => {
-      const scored = await service.scoreNow(actor, { ...projectPath(project), attempt });
-      return answer(scored.queued ? `queued run ${scored.run.id}` : `not queued: ${scored.reason}`, { ...scored });
+      return scoringAnswer(await service.scoreNow(actor, { ...projectPath(project), attempt }));
     },
   );
 
   tool("rescore", "Score an open attempt's head again.", onAttempt, async ({ project, attempt }) => {
-    const scored = await service.rescore(actor, { ...projectPath(project), attempt });
-    return answer(scored.queued ? `queued run ${scored.run.id}` : `not queued: ${scored.reason}`, { ...scored });
+    return scoringAnswer(await service.rescore(actor, { ...projectPath(project), attempt }));
   });
 
   tool(
@@ -395,7 +419,7 @@ function mcpServer({ repos, tasks, logs, diffCache }: Deps, { actor, token, env,
       const capped = start > 0 || end < bytes.length;
       const hint = capped ? `Bytes ${start}-${end} of ${bytes.length}; pass \`offset\` to read another part.` : null;
       const data = { run, name, size: bytes.length, offset: start, text: sliceBytes(bytes, start, end - start), hint };
-      return answer(`${name} of run ${run}: ${bytes.length} bytes${hint === null ? "" : `. ${hint}`}`, data);
+      return answer(withHint(`${name} of run ${run}: ${bytes.length} bytes`, hint), data);
     },
   );
 
@@ -426,8 +450,7 @@ function mcpServer({ repos, tasks, logs, diffCache }: Deps, { actor, token, env,
       "task's other active attempts. The task's creator or the project owner may.",
     SelectionSchema.extend(onTask.shape),
     async ({ project, task, attempt }) => {
-      const mergeRequest = await service.selectAttempt(actor, { ...projectPath(project), task, attempt });
-      return answer(`merge request is ${mergeRequest.state}`, { mergeRequest });
+      return mergeRequestAnswer(await service.selectAttempt(actor, { ...projectPath(project), task, attempt }));
     },
   );
 
@@ -436,14 +459,12 @@ function mcpServer({ repos, tasks, logs, diffCache }: Deps, { actor, token, env,
     "Approve the task's merge request at its source attempt's current head, e.g. after it was dequeued and fixed.",
     onTask,
     async ({ project, task }) => {
-      const mergeRequest = await service.approveMergeRequest(actor, { ...projectPath(project), task });
-      return answer(`merge request is ${mergeRequest.state}`, { mergeRequest });
+      return mergeRequestAnswer(await service.approveMergeRequest(actor, { ...projectPath(project), task }));
     },
   );
 
   tool("cancel_merge_request", "Cancel the task's open merge request.", onTask, async ({ project, task }) => {
-    const mergeRequest = await service.cancelMergeRequest(actor, { ...projectPath(project), task });
-    return answer(`merge request is ${mergeRequest.state}`, { mergeRequest });
+    return mergeRequestAnswer(await service.cancelMergeRequest(actor, { ...projectPath(project), task }));
   });
 
   tool(

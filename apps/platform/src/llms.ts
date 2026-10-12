@@ -3,13 +3,13 @@
 // this is the long form, step by step.
 
 import { Hono } from "hono";
-import { attemptRemote, cloneCommand } from "./git-remotes.ts";
-import { MAX_FILE_BYTES, MAX_LOG_SLICE_BYTES, MCP_INSTRUCTIONS } from "./mcp.ts";
-import { MAX_WAIT_SECONDS, MAX_WAITERS_PER_USER } from "./waiters.ts";
+import { attemptRemote } from "./git-remotes.ts";
+import { CLONE_RECIPE, MAX_FILE_BYTES, MAX_LOG_SLICE_BYTES, MCP_INSTRUCTIONS } from "./mcp.ts";
+import { DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS, MAX_WAITERS_PER_USER } from "./waiters.ts";
 
 /** The guide, for a platform served at `origin`. */
 export function llmsText(origin: string): string {
-  const remote = attemptRemote(origin, "<owner>", "<project>", "t42a3");
+  const remote = attemptRemote(origin, { owner: "<owner>", project: "<project>" }, "t42a3");
   return `# Throng
 
 > Throng runs many attempts at a task in parallel, scores each one with the project's checks, and merges the
@@ -34,10 +34,13 @@ A tool answers with a one-line summary and the data as JSON; a refusal is a tool
 ## Git
 
 Each attempt is its own repo: \`${remote}\`. Its \`main\` branch is the attempt's head.
-The git proxy takes the token as a bearer header or as the HTTP Basic password (any username). \`start_attempts\`
-returns each attempt's \`remote\` and a \`clone\` command that reads the token from the environment:
+The git proxy takes the token as a bearer header or as the HTTP Basic password (any username). Every attempt
+the API returns carries its \`remote\`. Clone it with the token from the environment:
 
-    ${cloneCommand(remote)}
+    ${CLONE_RECIPE.replace("<remote>", remote)}
+
+The \`-c\` comes after \`clone\`, so git saves the header in the new repo's config and a plain \`git push\` from the
+clone sends it too. (With \`git -c … clone\`, the header is used for the clone only, and a later push has none.)
 
 Pushing a branch \`t42/<name>\` to the project's origin, \`${origin}/git/<owner>/<project>.git\`, also makes an
 open attempt at \`t42\`. The origin's \`main\` only moves through the merge queue.
@@ -47,12 +50,14 @@ open attempt at \`t42\`. The origin's \`main\` only moves through the merge queu
 1. Find work: \`list_tasks\`, then \`get_task\` for a task's attempts, their scores and its merge request.
    \`create_task\` adds one.
 2. \`start_attempts\` with a \`task\` (and \`count\`, \`note\`, or \`from\` to start at another attempt's head).
-3. Clone with the \`clone\` command, commit, and \`git push origin main\`.
+3. Clone the attempt's \`remote\` as above, commit, and \`git push origin main\`: the clone already sends the token.
 4. \`update_attempt\` with \`state: open\`: the attempt is ready to be scored and selected. While it is a draft,
    \`score_now\` scores its head on demand.
-5. \`wait_for_attempt\` with \`until: scored\` holds for up to ${MAX_WAIT_SECONDS} seconds until the head is scored.
+5. \`wait_for_attempt\` with \`until: scored\` holds for up to ${DEFAULT_WAIT_SECONDS} seconds (\`wait\`, at most
+   ${MAX_WAIT_SECONDS}) until the head has a \`done\` or \`errored\` run, and answers at once if it already has one.
    Call it again while \`changed\` is false. Each user may have ${MAX_WAITERS_PER_USER} waits at a time per project;
-   past that, a wait returns at once with \`changed: false\`. \`until\` also takes \`stateChanged\`,
+   past that, a wait returns at once with \`changed: false\`. Waits are held in memory, so a deploy of Throng drops
+   the ones in flight: each answers \`changed: false\` early, and you wait again. \`until\` also takes \`stateChanged\`,
    \`mergeRequestChanged\` and \`any\`.
 6. \`get_attempt\` gives the scoring status and the current result: the gate, each check and the metrics. For a
    failing check, \`get_log\` with the run id and the check's name returns the log's last
@@ -83,7 +88,7 @@ Every tool wraps a route of the REST API, which takes the same bearer token. Err
 \`{"error": {"code", "message"}}\`; names and values are camelCase.
 
 - OpenAPI 3.1 document: ${origin}/api/openapi.json
-- Long-poll an attempt: \`GET ${origin}/api/projects/<owner>/<project>/attempts/t42a3?wait=30&until=scored\`
+- Long-poll an attempt: \`GET ${origin}/api/projects/<owner>/<project>/attempts/t42a3?wait=${DEFAULT_WAIT_SECONDS}&until=scored\`
 `;
 }
 

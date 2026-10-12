@@ -1,8 +1,10 @@
 // The git proxy, driven by real `git` through a local `git http-backend` standing in for Artifacts.
 
+import { execFile } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { Hono } from "hono";
 import { afterEach, describe, expect, it } from "vitest";
 import { gitRoutes, UPSTREAM_TOKEN_TTL_SECONDS } from "../src/git-proxy.ts";
@@ -146,13 +148,18 @@ describe("git proxy", () => {
     expect(pushed.stderr).not.toMatch(/scoring/u);
   });
 
-  it("takes the token as an `Authorization: Bearer` header, as the clone command sends it", async () => {
+  it("takes the token as an `Authorization: Bearer` header, which the documented clone keeps for later pushes", async () => {
     const { ada, commit, env, host, project, server, work } = await setup();
-    const header = ["-c", `http.extraHeader=Authorization: Bearer ${ada.token}`];
     const dir = join(work, "bearer");
-    await git(work, env, ...header, "clone", "-q", `${server.origin}/git/greg/throng/t1a1.git`, dir);
+    // The recipe `llms.txt` gives, run as an agent would: `-c` after `clone` is written into the new repo's config.
+    const recipe = 'git clone -q -c http.extraHeader="Authorization: Bearer $THRONG_TOKEN" "$1" "$2"';
+    const remote = `${server.origin}/git/greg/throng/t1a1.git`;
+    await promisify(execFile)("sh", ["-c", recipe, "sh", remote, dir], {
+      cwd: work,
+      env: { ...env, THRONG_TOKEN: ada.token },
+    });
     const sha = await commit(dir, "fix");
-    const pushed = await tryGit(dir, env, ...header, "push", "origin", "HEAD:main");
+    const pushed = await tryGit(dir, env, "push", "origin", "HEAD:main");
     expect(pushed.stderr).not.toMatch(/rejected/u);
     expect(pushed.ok).toBeTruthy();
     expect(await host.head(forkRepo(project.id, "t1a1"))).toBe(sha);

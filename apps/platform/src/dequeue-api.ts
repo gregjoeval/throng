@@ -11,6 +11,7 @@ import {
   FileDiffSchema,
   json,
   ProjectPathSchema,
+  requestTaskService,
   TAIL,
   tailedRoutes,
 } from "./api-shared.ts";
@@ -24,7 +25,6 @@ import type { LogStore } from "./logs.ts";
 import { DEQUEUE_REASONS } from "./merge-requests.ts";
 import type { Repos } from "./repos.ts";
 import { CHECK_OUTCOMES } from "./results.ts";
-import { taskService } from "./tasks.ts";
 import type { TaskBackend } from "./tasks.ts";
 
 export interface DequeueOptions {
@@ -131,8 +131,7 @@ const errors = {
 const taskPath = ({ t, ...rest }: { owner: string; project: string; t: string }) => ({ ...rest, task: t });
 
 export function dequeueRoutes({ auth, repos, tasks, logs }: DequeueOptions) {
-  const service = ({ env, req }: { env: AccessBindings; req: { url: string } }) =>
-    taskService({ db: env.DB, repos: repos(env), backend: tasks(env), origin: new URL(req.url).origin });
+  const service = requestTaskService(repos, tasks);
 
   const api = new OpenAPIHono<AuthEnv>({
     defaultHook: (result, c) => {

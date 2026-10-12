@@ -6,11 +6,15 @@ import { describe, expect, it } from "vitest";
 import { agentLoop, toolCaller } from "../scripts/e2e-mcp.ts";
 import type { AccessVerifier } from "../src/access.ts";
 import { publicApp } from "../src/app.ts";
+import { DIFF_CAPS } from "../src/diff.ts";
 import { FORWARDED_EMAIL_HEADER } from "../src/forwarded.ts";
 import type { LogStore } from "../src/logs.ts";
 import { MAX_FILE_BYTES, MAX_LOG_SLICE_BYTES } from "../src/mcp.ts";
 import type { ScoringResult } from "../src/results.ts";
+import type { TaskBackend } from "../src/tasks.ts";
+import type { Actor } from "../src/tokens.ts";
 import { userForEmail } from "../src/users.ts";
+import { DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS } from "../src/waiters.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
 import type { Json } from "./support/json.ts";
@@ -85,7 +89,21 @@ async function setup() {
   const repos = new FakeRepos();
   const logs = new MemoryLogs();
   const { backend, store, sql } = testTaskBackends(repos, now, runner, runner);
-  const app = publicApp({ verifierFor: () => verify, now, repos: () => repos, tasks: () => backend, logs: () => logs });
+  // Every store call a tool makes, with the actor it passed: a store method takes `(project, actor, …)`.
+  const storeCalls: { method: string; actor: Actor }[] = [];
+  const recording = (projectId: string): TaskBackend => ({
+    call: async (method, args) => {
+      storeCalls.push({ method, actor: args[1] as Actor });
+      return backend(projectId).call(method, args);
+    },
+  });
+  const app = publicApp({
+    verifierFor: () => verify,
+    now,
+    repos: () => repos,
+    tasks: () => recording,
+    logs: () => logs,
+  });
   const env = { DB: testDatabase(), ACCESS_TEAM_DOMAIN: "throng.cloudflareaccess.com", ACCESS_AUD: "aud" };
   const fetchApp = (input: string | URL | Request, init?: RequestInit) =>
     Promise.resolve(app.request(input instanceof Request ? input : new Request(input, init), undefined, env));
@@ -135,7 +153,7 @@ async function setup() {
     };
   };
 
-  return { repos, logs, store, env, app, fetchApp, tokenFor, connect, runPlatform };
+  return { repos, logs, store, storeCalls, env, app, fetchApp, tokenFor, connect, runPlatform };
 }
 
 /** greg's project with one commit on `main` and a task t1, and clients for greg, ada, and ada as `claude`. */
@@ -176,6 +194,16 @@ describe("/mcp", () => {
     for (const tool of tools) expect(tool.description).toEqual(expect.any(String));
   });
 
+  it("names its tools in snake_case, their parameters in camelCase, and itself in kebab-case (ADR 0002)", async () => {
+    const { tokenFor, connect } = await setup();
+    const client = await connect(await tokenFor("greg@example.com"));
+    expect(client.getServerVersion()?.name).toMatch(/^[a-z0-9]+(?:-[a-z0-9]+)*$/u);
+    const { tools } = await client.listTools();
+    expect(tools.map((t) => t.name).filter((name) => !/^[a-z]+(?:_[a-z]+)*$/u.test(name))).toEqual([]);
+    const params = tools.flatMap((t) => Object.keys(t.inputSchema.properties ?? {}).map((p) => `${t.name}.${p}`));
+    expect(params.filter((p) => !/\.[a-z][a-zA-Z0-9]*$/u.test(p))).toEqual([]);
+  });
+
   it("describes the agent loop in its instructions", async () => {
     const { tokenFor, connect } = await setup();
     const client = await connect(await tokenFor("greg@example.com"));
@@ -209,11 +237,43 @@ describe("/mcp", () => {
     });
   });
 
+  it("calls each tool family's services as the token's user and alias", async () => {
+    const { claude, greg, project, pushTo, storeCalls } = await withProject();
+    await call(greg, "start_attempts", { project, task: "t1" });
+    await pushTo(1, "greg@example.com");
+    /** The store methods `name` reached and who each was called as. */
+    const actingAs = async (name: string, args: Record<string, unknown>) => {
+      storeCalls.length = 0;
+      const result = await call(claude, name, { project, ...args });
+      expect(result.isError, `${name}: ${result.summary}`).toBeFalsy();
+      return storeCalls.map(({ method, actor }) => `${method}: ${actor.user.handle} (${actor.alias})`);
+    };
+    // Tasks.
+    expect(await actingAs("create_task", { title: "Mine" })).toEqual(["createTask: ada (claude)"]);
+    expect(await actingAs("list_tasks", {})).toEqual(["listTasks: ada (claude)"]);
+    // Attempts.
+    expect(await actingAs("start_attempts", { task: "t2" })).toEqual(["createAttempts: ada (claude)"]);
+    expect(await actingAs("update_attempt", { attempt: "t2a1", state: "open" })).toEqual(["openAttempt: ada (claude)"]);
+    expect(await actingAs("rescore", { attempt: "t2a1" })).toEqual(["rescore: ada (claude)"]);
+    // Verdicts, on greg's attempt.
+    expect(await actingAs("post_verdict", { attempt: "t1a1", recommendation: "merge", body: "ok" })).toEqual([
+      "postVerdict: ada (claude)",
+    ]);
+    expect(await actingAs("list_verdicts", { attempt: "t1a1" })).toEqual(["listVerdicts: ada (claude)"]);
+    // Merge requests, on the task ada created as claude.
+    expect(await actingAs("select_attempt", { task: "t2", attempt: "t2a1" })).toEqual(["selectAttempt: ada (claude)"]);
+    expect(await actingAs("cancel_merge_request", { task: "t2" })).toEqual(["cancelMergeRequest: ada (claude)"]);
+    // Browsing an attempt's fork resolves the attempt as the caller.
+    expect(await actingAs("list_files", { ref: "t1a1" })).toEqual(["getAttempt: ada (claude)"]);
+  });
+
   it("drives the agent loop through the services: start, open, read", async () => {
     const { claude, greg, project } = await withProject();
     const started = await call(claude, "start_attempts", { project, task: "t1", count: 2, note: "two tries" });
     expect(started.isError).toBeFalsy();
-    expect(started.summary).toBe("started t1a1, t1a2");
+    expect(started.summary).toBe(
+      'started t1a1, t1a2; clone each remote with git clone -c http.extraHeader="Authorization: Bearer $THRONG_TOKEN" <remote>',
+    );
     const remote = `${ORIGIN}/git/greg/throng/t1a1.git`;
     expect(started.data["attempts"][0]).toMatchObject({
       ref: "t1a1",
@@ -221,8 +281,8 @@ describe("/mcp", () => {
       alias: "claude",
       note: "two tries",
       remote,
-      clone: `git -c http.extraHeader="Authorization: Bearer $THRONG_TOKEN" clone ${remote}`,
     });
+    expect(started.data["attempts"][0]).not.toHaveProperty("clone");
 
     const opened = await call(claude, "update_attempt", { project, attempt: "t1a1", note: "ready", state: "open" });
     expect(opened.data["attempt"]).toMatchObject({ ref: "t1a1", state: "open", note: "ready" });
@@ -237,18 +297,18 @@ describe("/mcp", () => {
   });
 
   it("runs the e2e suite's agent loop: start, push, open, wait for scoring, review, select, wait for the merge", async () => {
-    const { connect, tokenFor, runPlatform, repos, env, store, projectId, project, ada } = await withProject();
+    const { connect, tokenFor, runPlatform, repos, env, store, projectId, project, claude } = await withProject();
     const codex = await connect(await tokenFor("greg@example.com", "codex"));
     const stop = runPlatform(projectId);
     const pushed: string[] = [];
     try {
       const result = await agentLoop({
         creator: toolCaller(codex),
-        reviewer: toolCaller(ada),
+        reviewer: toolCaller(claude),
         project,
         // What `git push` to the attempt's remote does, through the git proxy.
-        push: async ({ ref, clone, remote }) => {
-          expect(clone).toBe(`git -c http.extraHeader="Authorization: Bearer $THRONG_TOKEN" clone ${remote}`);
+        push: async ({ ref, remote }) => {
+          expect(remote).toBe(`${ORIGIN}/git/greg/throng/${ref}.git`);
           const [, task = "", number = ""] = /^t(\d+)a(\d+)$/u.exec(ref) ?? [];
           const fork = `${projectId}-${ref}`;
           const before = repos.ref(fork, "refs/heads/main") ?? "0".repeat(40);
@@ -268,6 +328,8 @@ describe("/mcp", () => {
       });
       expect(pushed).toEqual(["t2a1"]);
       expect(result).toMatchObject({
+        creator: "greg (codex)",
+        reviewer: "ada (claude)",
         task: "t2",
         attempt: "t2a1",
         mergeSha: repos.ref(`${projectId}-main`, "refs/heads/main"),
@@ -324,6 +386,21 @@ describe("/mcp", () => {
     expect(invalid.isError).toBeTruthy();
   });
 
+  it("takes the same wait limits as `?wait=`, defaulting to the documented length", async () => {
+    const { tokenFor, connect, app, env } = await setup();
+    const client = await connect(await tokenFor("greg@example.com"));
+    const { tools } = await client.listTools();
+    const tool = tools.find((t) => t.name === "wait_for_attempt");
+    const mcpWait = tool?.inputSchema.properties?.["wait"] as Json;
+    const doc = (await (await app.request(`${ORIGIN}/api/openapi.json`, {}, env)).json()) as Json;
+    const params = doc["paths"]["/projects/{owner}/{project}/attempts/{a}"]["get"]["parameters"] as Json[];
+    const restWait = params.find((p) => p["name"] === "wait")?.["schema"] as Json;
+    expect({ min: mcpWait["minimum"], max: mcpWait["maximum"] }).toEqual({ min: 1, max: MAX_WAIT_SECONDS });
+    expect({ min: restWait["minimum"], max: restWait["maximum"] }).toEqual({ min: 1, max: MAX_WAIT_SECONDS });
+    expect(mcpWait["default"]).toBe(DEFAULT_WAIT_SECONDS);
+    expect(restWait["example"]).toBe(DEFAULT_WAIT_SECONDS);
+  });
+
   it("selects an attempt, and cancels its merge request", async () => {
     const { ada, greg, project, pushTo } = await withProject();
     await call(ada, "start_attempts", { project, task: "t1", count: 2 });
@@ -367,6 +444,36 @@ describe("/mcp", () => {
     expect(diff.data["patch"]).toContain("-hi\n+hello\n");
     const commits = await call(greg, "list_commits", { project, ref: "main", limit: 1 });
     expect(commits.data).toMatchObject({ commits: [{ sha }], next: 1 });
+  });
+
+  it("caps a large commit diff at the diff caps, listing what it cut with a hint", async () => {
+    const { greg, repos, projectId, project } = await withProject();
+    // One file too large to diff, then more small ones than get a patch: the last by path goes without.
+    const small = Object.fromEntries(
+      Array.from({ length: DIFF_CAPS.maxPatchedFiles }, (_, i) => [`f/${String(i).padStart(3, "0")}.txt`, "a\n"]),
+    );
+    const files = { "README.md": "hi\n", "a-huge.txt": "x".repeat(DIFF_CAPS.maxBlobBytes + 1), ...small };
+    const sha = repos.commit(`${projectId}-main`, { files }).hash;
+    const diff = await call(greg, "get_commit_diff", { project, sha });
+    expect(diff.isError).toBeFalsy();
+    expect(diff.data).toMatchObject({
+      sha,
+      totals: { files: DIFF_CAPS.maxPatchedFiles + 1 },
+      truncated: false,
+      hint: "Some files have no patch or a cut-short one (see `capped`); diff them in a clone.",
+    });
+    const last = `f/${String(DIFF_CAPS.maxPatchedFiles - 1).padStart(3, "0")}.txt`;
+    expect(diff.data["capped"]).toEqual([
+      { path: "a-huge.txt", flags: ["tooLarge"] },
+      { path: last, flags: ["truncated"] },
+    ]);
+    // Lines are counted for patched files only.
+    expect(diff.summary).toBe(
+      `${DIFF_CAPS.maxPatchedFiles + 1} files, +${DIFF_CAPS.maxPatchedFiles - 1} -0. ${diff.data["hint"]}`,
+    );
+    expect(diff.data["patch"]).toContain("+++ b/f/000.txt");
+    expect(diff.data["patch"]).not.toContain(`+++ b/${last}`);
+    expect(diff.data["patch"]).not.toContain("xxxx");
   });
 
   it("returns a log's last 64 KB by default, and another part from `offset`", async () => {

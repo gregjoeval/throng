@@ -9,10 +9,10 @@ export type ToolCall = (name: string, args: Record<string, unknown>) => Promise<
 /** What the loop reads of an attempt as the tools return it (`src/api.ts`'s `Attempt`). */
 export interface LoopAttempt {
   ref: string;
+  author: { handle: string };
+  alias: string | null;
   state: string;
   remote: string;
-  /** Only from `start_attempts`. */
-  clone?: string;
   scoring: { status: string; sha: string | null; result?: { gate: string } };
   mergeRequest: { state: string; lastDequeue: { reason: string } | null } | null;
   verdicts: { head: string | null; merge: number; revise: number; reject: number };
@@ -50,8 +50,8 @@ export interface WaitOptions {
 }
 
 /**
- * Calls `wait_for_attempt` until `done` holds. Each answer is checked whether or not it `changed`:
- * what `until` watches may have changed before the first wait began.
+ * Calls `wait_for_attempt` until `done` holds. Each answer is checked whether or not it `changed`: a
+ * merge request may pass through several states, or change before the first wait began.
  */
 export async function waitForAttempt(call: ToolCall, options: WaitOptions): Promise<LoopAttempt> {
   const { project, attempt, until, wait, done, failed, timeoutMs } = options;
@@ -75,8 +75,8 @@ export interface AgentLoopOptions {
   reviewer: ToolCall;
   /** `owner/project`. */
   project: string;
-  /** Clones the attempt with its `clone` command, commits a change, pushes it, and returns the head pushed. */
-  push: (attempt: LoopAttempt & { clone: string }) => Promise<string>;
+  /** Clones the attempt's `remote` as `llms.txt` says, commits a change, pushes it, and returns the head pushed. */
+  push: (attempt: LoopAttempt) => Promise<string>;
   /** Seconds each `wait_for_attempt` holds. */
   wait: number;
   /** How long scoring, then merging, may take. */
@@ -85,45 +85,64 @@ export interface AgentLoopOptions {
 }
 
 export interface AgentLoopResult {
+  /** Who the creator's agent acts as: `user (alias)`. */
+  creator: string;
+  /** Who the reviewer's agent acts as: `user (alias)`. */
+  reviewer: string;
   task: string;
   attempt: string;
   head: string;
   mergeSha: string;
 }
 
+/** Who `whoami` says an agent's token acts as. */
+interface Agent {
+  user: { id: string; handle: string };
+  alias: string | null;
+}
+
+/** An agent as the UI shows an actor: `greg (claude)`. */
+function actorName({ user, alias }: { user: { handle: string }; alias: string | null }): string {
+  return alias === null ? user.handle : `${user.handle} (${alias})`;
+}
+
 /**
  * The agent loop, end to end: the creator's agent creates a task and starts two attempts, pushes to
  * one and opens it, and waits until it is scored; another user's agent posts a verdict on it; the
- * creator's agent selects it and waits until it merges.
+ * creator's agent selects it and waits until it merges. Both agents act under an alias, which the
+ * attempt and the verdict record.
  */
 export async function agentLoop(options: AgentLoopOptions): Promise<AgentLoopResult> {
   const { creator, reviewer, project, push, wait, timeoutMs } = options;
   const log = options.log ?? (() => {});
 
-  const me = (await creator("whoami", {}))["user"] as { id: string; handle: string };
-  const them = (await reviewer("whoami", {}))["user"] as { id: string; handle: string };
-  assert(me.id !== them.id, `the reviewer is the creator, ${me.handle}`);
-  log(`creator ${me.handle}, reviewer ${them.handle}`);
+  const me = (await creator("whoami", {})) as unknown as Agent;
+  const them = (await reviewer("whoami", {})) as unknown as Agent;
+  assert(me.user.id !== them.user.id, `the reviewer is the creator, ${me.user.handle}`);
+  assert(me.alias !== null && them.alias !== null, `both agents need an alias: ${actorName(me)}, ${actorName(them)}`);
+  log(`creator ${actorName(me)}, reviewer ${actorName(them)}`);
 
   const task = ((await creator("create_task", { project, title: "Greet over MCP" }))["task"] as { ref: string }).ref;
   const started = (await creator("start_attempts", { project, task, count: 2 }))["attempts"] as LoopAttempt[];
   assert(started.length === 2, `started ${started.length} attempts, expected 2`);
   const [first, second] = started as [LoopAttempt, LoopAttempt];
+  assert(first.remote.endsWith(`/${first.ref}.git`), `${first.ref}'s remote is ${first.remote}`);
   assert(
-    first.clone !== undefined && first.clone.includes(first.remote),
-    `${first.ref}'s clone command doesn't clone its remote: ${first.clone}`,
+    actorName({ user: first.author, alias: first.alias }) === actorName(me),
+    `${first.ref} is by ${actorName({ user: first.author, alias: first.alias })}, expected ${actorName(me)}`,
   );
   log(`${task}: started ${first.ref}, ${second.ref}`);
 
-  const head = await push({ ...first, clone: first.clone });
+  const head = await push(first);
   log(`${first.ref}: pushed ${head}`);
   const opened = (await creator("update_attempt", { project, attempt: first.ref, state: "open" }))[
     "attempt"
   ] as LoopAttempt;
   assert(opened.state === "open", `${first.ref} is ${opened.state} after opening it`);
 
-  const ended = (a: LoopAttempt) => a.scoring.sha === head && ["done", "errored"].includes(a.scoring.status);
-  await waitForAttempt(creator, { project, attempt: first.ref, until: "scored", wait, done: ended, timeoutMs });
+  // `scored` holds once the current head, `head`, has a finished run: a wait says so with `changed`.
+  const scoredHead = (a: LoopAttempt) => a.changed === true;
+  await waitForAttempt(creator, { project, attempt: first.ref, until: "scored", wait, done: scoredHead, timeoutMs });
   const scored = (await creator("get_attempt", { project, attempt: first.ref }))["attempt"] as LoopAttempt;
   assert(
     scored.scoring.status === "done" && scored.scoring.sha === head && scored.scoring.result?.gate === "passed",
@@ -133,14 +152,16 @@ export async function agentLoop(options: AgentLoopOptions): Promise<AgentLoopRes
 
   const verdict = (
     await reviewer("post_verdict", { project, attempt: first.ref, recommendation: "merge", body: "Looks right." })
-  )["verdict"] as { head: string };
+  )["verdict"] as { head: string; reviewer: { handle: string }; alias: string | null };
   assert(verdict.head === head, `the verdict is on ${verdict.head}, expected ${head}`);
+  const by = actorName({ user: verdict.reviewer, alias: verdict.alias });
+  assert(by === actorName(them), `the verdict is by ${by}, expected ${actorName(them)}`);
   const reviewed = (await creator("get_attempt", { project, attempt: first.ref }))["attempt"] as LoopAttempt;
   assert(
     reviewed.verdicts.head === head && reviewed.verdicts.merge === 1,
     `${first.ref}'s verdicts: ${JSON.stringify(reviewed.verdicts)}`,
   );
-  log(`${first.ref}: ${them.handle} recommends merge`);
+  log(`${first.ref}: ${by} recommends merge`);
 
   await creator("select_attempt", { project, task, attempt: first.ref });
   log(`${task}: selected ${first.ref}`);
@@ -163,7 +184,14 @@ export async function agentLoop(options: AgentLoopOptions): Promise<AgentLoopRes
   const sibling = (found["attempts"] as LoopAttempt[]).find((a) => a.ref === second.ref);
   assert(sibling?.state === "closed", `selecting ${first.ref} left ${second.ref} ${sibling?.state}`);
   log(`${task}: merged as ${mergeRequest.mergeSha}`);
-  return { task, attempt: first.ref, head, mergeSha: mergeRequest.mergeSha };
+  return {
+    creator: actorName(me),
+    reviewer: actorName(them),
+    task,
+    attempt: first.ref,
+    head,
+    mergeSha: mergeRequest.mergeSha,
+  };
 }
 
 function assert(condition: boolean, message: string): asserts condition {

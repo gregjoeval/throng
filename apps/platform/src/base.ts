@@ -1,6 +1,6 @@
 // An attempt's base (ADR 0003): where its head's history meets its task's task branch, or
-// `origin/main` when the task has none. Derived from git on every read and never stored. The score
-// script applies the same rule with git itself (`scoreScript`).
+// `origin/main` when the task has none. Derived from git on every read and never stored; the scoring
+// run derives it here too and hands it to the score script.
 
 import { forkRepo, missingAsNull, originRepo } from "./repos.ts";
 import type { Commit, Repos } from "./repos.ts";
@@ -16,7 +16,7 @@ export interface Base {
 }
 
 /** Most commits the walk reads before giving up; past it, the base is null as if unrelated. */
-export const MAX_BASE_WALK = 2000;
+const MAX_BASE_WALK = 2000;
 
 /**
  * The base of attempt `attempt` (`t42a3`) at commit `head`, which its fork holds: the merge base of

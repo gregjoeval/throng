@@ -51,7 +51,7 @@ export const GRANT_SOURCES: Record<keyof RunGrants, { repo: "origin" | "fork"; a
 
 /** The grants each role's container gets. */
 export const ROLE_GRANTS = {
-  score: ["originRead", "forkRead"],
+  score: ["forkRead"],
   preview: ["forkRead"],
   check: ["originRead", "forkRead"],
   land: ["originWrite", "forkRead"],

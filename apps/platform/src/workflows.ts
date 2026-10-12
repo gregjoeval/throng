@@ -1,6 +1,7 @@
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import { reposFor } from "./artifacts";
+import { attemptBase } from "./base";
 import { loadConfig } from "./config";
 import type { ConfigResult } from "./config";
 import { GRANT_SOURCES, ROLE_GRANTS, sandboxName, SCORING_ROLES } from "./grants";
@@ -46,8 +47,11 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
       );
       const plan = scorePlan(config);
       const timeoutMs = scoreTimeoutMs(plan);
+      const base = await step.do("base", { retries: STEP_RETRIES, timeout: "1 minute" }, () =>
+        attemptBase(reposFor(this.env), params.project, { attempt: params.attempt, head: params.sha }),
+      );
       const scored = await step.do("score", { retries: STEP_RETRIES, timeout: timeoutMs }, () =>
-        this.#score(instanceId, params, config, plan, timeoutMs),
+        this.#score(instanceId, params, base?.sha ?? null, config, plan, timeoutMs),
       );
       const preview = previewPlan(config, scored);
       let result = scored;
@@ -76,6 +80,7 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
   async #score(
     instanceId: string,
     params: ScoringParams,
+    base: string | null,
     config: ConfigResult,
     plan: ScorePlan,
     timeoutMs: number,
@@ -85,7 +90,7 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
       instanceId,
       params,
       "score",
-      (g) => scoreScript(g.forkRead.remote, g.originRead.remote, { attempt: params.attempt, sha: params.sha }, plan),
+      (g) => scoreScript(g.forkRead.remote, { sha: params.sha, base }, plan),
       { allow: plan.allow, timeoutMs },
     );
     const raw = parseResult<RawScore>(run.stdout);

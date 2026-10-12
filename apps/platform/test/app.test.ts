@@ -7,6 +7,7 @@ import { userForEmail } from "../src/users.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
 import type { Json } from "./support/json.ts";
+import { FakePreviewWorkers } from "./support/preview-workers.ts";
 
 const NOW = new Date("2026-10-10T12:00:00.000Z");
 const verify: AccessVerifier = async (token) => (token === "valid" ? { email: "greg@example.com" } : null);
@@ -14,7 +15,12 @@ const verify: AccessVerifier = async (token) => (token === "valid" ? { email: "g
 async function setup() {
   const env = { DB: testDatabase(), ACCESS_TEAM_DOMAIN: "throng.cloudflareaccess.com", ACCESS_AUD: "aud" };
   const repos = new FakeRepos();
-  const options = { verifierFor: () => verify, now: () => NOW, repos: () => repos };
+  const options = {
+    verifierFor: () => verify,
+    now: () => NOW,
+    repos: () => repos,
+    previewWorkers: () => new FakePreviewWorkers(),
+  };
   const apps = { public: publicApp(options), binding: webApp(options) };
   const owner = await userForEmail(env.DB, "owner@example.com");
   const { plaintext } = await mintToken(env.DB, { userId: owner.id, alias: null, ttlSeconds: 3600, now: NOW });

@@ -5,6 +5,7 @@
 // REST API and later MCP share it.
 
 import { ServiceError } from "./errors.ts";
+import type { PreviewWorkers } from "./preview-workers.ts";
 import { originRepo } from "./repos.ts";
 import type { Repos } from "./repos.ts";
 import type { Actor } from "./tokens.ts";
@@ -28,6 +29,8 @@ export interface Project {
 export interface ProjectDeps {
   db: Database;
   repos: Repos;
+  /** Each project's own preview Worker, created with the project. */
+  previewWorkers: PreviewWorkers;
   /** Draws a project id; tests pass their own to force collisions. */
   newId?: () => string;
 }
@@ -75,11 +78,12 @@ export async function resolveProject(db: Database, owner: string, handle: string
 }
 
 /** The project services. Every signed-in actor may create projects and read any project in P0. */
-export function projectService({ db, repos, newId = randomProjectId }: ProjectDeps) {
+export function projectService({ db, repos, previewWorkers, newId = randomProjectId }: ProjectDeps) {
   return {
     /**
-     * Creates a project owned by the actor's user, and its origin repo with `main` as the default
-     * branch. The repo is created before the row, so a failure creating it leaves no project behind.
+     * Creates a project owned by the actor's user, its origin repo with `main` as the default branch,
+     * and its preview Worker. Both are created before the row, so a failure creating either leaves no
+     * project behind.
      */
     async create(actor: Actor, input: { handle: string }): Promise<Project> {
       const owner = actor.user;
@@ -89,6 +93,7 @@ export function projectService({ db, repos, newId = randomProjectId }: ProjectDe
       const id = await createOrigin(db, repos, newId);
       let row: ProjectRow | null;
       try {
+        await previewWorkers.ensure(id);
         row = await db
           .prepare(
             `INSERT INTO projects (id, owner_id, handle) VALUES (?, ?, ?)
@@ -100,6 +105,9 @@ export function projectService({ db, repos, newId = randomProjectId }: ProjectDe
       } catch (error) {
         await repos.delete(originRepo(id)).catch((deleteError: unknown) => {
           console.error({ event: "project.orphan_repo", repo: originRepo(id), error: String(deleteError) });
+        });
+        await previewWorkers.delete(id).catch((deleteError: unknown) => {
+          console.error({ event: "project.orphan_preview_worker", project: id, error: String(deleteError) });
         });
         // Another request took the handle between the check and the insert.
         if (/UNIQUE constraint failed: projects\.(owner_id|handle)/u.test(String(error))) {

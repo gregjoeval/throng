@@ -45,6 +45,7 @@ import { LOG_CONTENT_TYPE, LOG_RETENTION_DAYS, MAX_LOG_BYTES, missingLog } from 
 import type { LogStore } from "./logs.ts";
 import { DEQUEUE_REASONS, MERGE_REQUEST_STATES } from "./merge-requests.ts";
 import { METRIC_FORMATS, METRIC_TYPES } from "./metric-values.ts";
+import type { PreviewWorkers } from "./preview-workers.ts";
 import { MAX_PROJECT_HANDLE, PROJECT_HANDLE, projectService } from "./projects.ts";
 import type { Repos } from "./repos.ts";
 import { CHECK_OUTCOMES, GATES } from "./results.ts";
@@ -650,6 +651,8 @@ const unauthorizedBearer = errorResponse("No valid bearer token.");
 export interface ApiOptions extends AuthOptions {
   /** The environment's repos: production passes the Artifacts-backed `reposFor`, tests a fake. */
   repos?: (env: AccessBindings) => Repos;
+  /** Projects' preview Workers: production passes the Cloudflare API's, tests a fake. */
+  previewWorkers?: (env: AccessBindings) => PreviewWorkers;
   /** A project's task backend: production passes its Durable Object, tests an in-process store. */
   tasks?: (env: AccessBindings) => (projectId: string) => TaskBackend;
   /** The environment's logs bucket: production passes its R2 binding, tests one in memory. */
@@ -660,6 +663,15 @@ export interface ApiOptions extends AuthOptions {
 
 function noRepos(): Repos {
   throw new Error("this API was built without repos");
+}
+
+/** Only creating a project needs preview Workers, so reading projects works without them. */
+function noPreviewWorkers(): PreviewWorkers {
+  return { ensure: refusePreviewWorkers, delete: refusePreviewWorkers };
+}
+
+async function refusePreviewWorkers(): Promise<never> {
+  throw new Error("this API was built without preview Workers");
 }
 
 function noTasks(): (projectId: string) => TaskBackend {
@@ -842,7 +854,9 @@ export function apiRoutes(options: ApiOptions = {}) {
   const bearerRoute: RouteAuth = { middleware: bearer, security: bearerOnly };
   const webRoute: RouteAuth = { middleware: browser, security: bearerOrWeb };
   const reposFor = options.repos ?? noRepos;
-  const projects = (env: AccessBindings) => projectService({ db: env.DB, repos: reposFor(env) });
+  const previewWorkersFor = options.previewWorkers ?? noPreviewWorkers;
+  const projects = (env: AccessBindings) =>
+    projectService({ db: env.DB, repos: reposFor(env), previewWorkers: previewWorkersFor(env) });
   const backendFor = options.tasks ?? noTasks;
   const logsFor = options.logs ?? noLogs;
   const tasks = requestTaskService(reposFor, backendFor);

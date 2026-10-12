@@ -7,6 +7,7 @@ import type { LogStore } from "../src/logs.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
 import type { Json } from "./support/json.ts";
+import { FakePreviewWorkers } from "./support/preview-workers.ts";
 import { testTaskBackends } from "./support/task-backend.ts";
 
 const verify: AccessVerifier = async (token) => (token.startsWith("as:") ? { email: token.slice(3) } : null);
@@ -28,7 +29,14 @@ async function setup() {
   const repos = new FakeRepos();
   const logs = new MemoryLogs();
   const { backend } = testTaskBackends(repos, now);
-  const options = { verifierFor: () => verify, now, repos: () => repos, tasks: () => backend, logs: () => logs };
+  const options = {
+    verifierFor: () => verify,
+    now,
+    repos: () => repos,
+    previewWorkers: () => new FakePreviewWorkers(),
+    tasks: () => backend,
+    logs: () => logs,
+  };
   const api = apiRoutes(options);
   const web = webApp(options);
   const env = { DB: testDatabase(), ACCESS_TEAM_DOMAIN: "throng.cloudflareaccess.com", ACCESS_AUD: "aud" };

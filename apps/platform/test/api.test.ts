@@ -7,6 +7,7 @@ import { userForEmail } from "../src/users.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
 import type { Json } from "./support/json.ts";
+import { FakePreviewWorkers } from "./support/preview-workers.ts";
 
 const verify: AccessVerifier = async (token) => (token === "valid" ? { email: "greg@example.com" } : null);
 
@@ -23,7 +24,12 @@ const NOW = new Date("2026-10-10T12:00:00.000Z");
 function setup() {
   let clock = NOW;
   const repos = new FakeRepos();
-  const api = apiRoutes({ verifierFor: () => verify, now: () => clock, repos: () => repos });
+  const api = apiRoutes({
+    verifierFor: () => verify,
+    now: () => clock,
+    repos: () => repos,
+    previewWorkers: () => new FakePreviewWorkers(),
+  });
   const env = { DB: testDatabase(), ACCESS_TEAM_DOMAIN: "throng.cloudflareaccess.com", ACCESS_AUD: "aud" };
 
   /** Sends as an Access session (`{access}`) or a bearer token (`{bearer}`), or anonymously. */

@@ -7,6 +7,7 @@ import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
 import { at } from "./support/defined.ts";
 import type { Json } from "./support/json.ts";
+import { FakePreviewWorkers } from "./support/preview-workers.ts";
 import { testTaskBackends } from "./support/task-backend.ts";
 
 /** Access sessions are `as:<email>`. */
@@ -21,7 +22,13 @@ async function setup() {
     workflow: { create: async () => ({}), get: async () => ({ terminate: async () => {} }) },
     teardown: async () => {},
   });
-  const options = { verifierFor: () => verify, now, repos: () => repos, tasks: () => backend };
+  const options = {
+    verifierFor: () => verify,
+    now,
+    repos: () => repos,
+    previewWorkers: () => new FakePreviewWorkers(),
+    tasks: () => backend,
+  };
   const api = apiRoutes(options);
   // throng-web's binding, over the same database and backend.
   const web = webApp(options);
@@ -680,7 +687,13 @@ describe("over throng-web's service binding", () => {
   it("lists, creates, reads, closes and obsoletes tasks, and lists attempts, as the forwarded user", async () => {
     const repos = new FakeRepos();
     const { backend } = testTaskBackends(repos, now);
-    const web = webApp({ verifierFor: () => verify, now, repos: () => repos, tasks: () => backend });
+    const web = webApp({
+      verifierFor: () => verify,
+      now,
+      repos: () => repos,
+      previewWorkers: () => new FakePreviewWorkers(),
+      tasks: () => backend,
+    });
     const env = { DB: testDatabase(), ACCESS_TEAM_DOMAIN: "throng.cloudflareaccess.com", ACCESS_AUD: "aud" };
     const call = async (method: string, path: string, body?: unknown) => {
       const headers: Record<string, string> = { [FORWARDED_EMAIL_HEADER]: "ada@example.com" };

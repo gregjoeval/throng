@@ -10,6 +10,7 @@ import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
 import { at, defined } from "./support/defined.ts";
 import type { Json } from "./support/json.ts";
+import { FakePreviewWorkers } from "./support/preview-workers.ts";
 import { testTaskBackends } from "./support/task-backend.ts";
 
 const verify: AccessVerifier = async (token) => (token.startsWith("as:") ? { email: token.slice(3) } : null);
@@ -20,7 +21,14 @@ const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0
 async function setup(extra: Partial<Parameters<typeof apiRoutes>[0]> = {}) {
   const repos = new FakeRepos();
   const backends = testTaskBackends(repos, now);
-  const options = { verifierFor: () => verify, now, repos: () => repos, tasks: () => backends.backend, ...extra };
+  const options = {
+    verifierFor: () => verify,
+    now,
+    repos: () => repos,
+    previewWorkers: () => new FakePreviewWorkers(),
+    tasks: () => backends.backend,
+    ...extra,
+  };
   const api = apiRoutes(options);
   const env = { DB: testDatabase(), ACCESS_TEAM_DOMAIN: "throng.cloudflareaccess.com", ACCESS_AUD: "aud" };
 

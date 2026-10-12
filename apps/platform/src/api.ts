@@ -14,6 +14,7 @@ import { errorBody, errorResponse, ServiceError } from "./errors.ts";
 import { FORWARDED_EMAIL_HEADER } from "./forwarded.ts";
 import { LOG_CONTENT_TYPE, LOG_RETENTION_DAYS, MAX_LOG_BYTES, missingLog, type LogStore } from "./logs.ts";
 import { MAX_PROJECT_HANDLE, PROJECT_HANDLE, projectService } from "./projects.ts";
+import type { DiffCache } from "./diff.ts";
 import type { Repos } from "./repos.ts";
 import { CHECK_OUTCOMES } from "./results.ts";
 import { ATTEMPT_SCORING_STATUSES, RUN_STATUSES, SCORING_TRIGGERS } from "./scoring.ts";
@@ -388,6 +389,13 @@ export interface ApiOptions extends AuthOptions {
   tasks?: (env: AccessBindings) => (projectId: string) => TaskBackend;
   /** The environment's logs bucket: production passes its R2 binding, tests one in memory. */
   logs?: (env: AccessBindings) => LogStore;
+  /** Where commit diffs are cached: the Workers Cache API by default, none outside a Worker. */
+  diffCache?: (env: AccessBindings) => DiffCache | undefined;
+}
+
+/** The Workers Cache API's default cache, when running in a Worker. */
+function workersCache(): DiffCache | undefined {
+  return (globalThis as { caches?: { default?: DiffCache } }).caches?.default;
 }
 
 function noRepos(): Repos {
@@ -1201,7 +1209,10 @@ export function apiRoutes(options: ApiOptions = {}) {
       }),
       async (c) => c.json(parseConfig(await c.req.text()), 200),
     )
-    .route("/", browseRoutes({ auth: browser, repos: reposFor, tasks: backendFor }));
+    .route(
+      "/",
+      browseRoutes({ auth: browser, repos: reposFor, tasks: backendFor, diffCache: options.diffCache ?? workersCache }),
+    );
 
   api.doc31("/openapi.json", { openapi: "3.1.0", info: { title: "Throng API", version: "0.0.0" } });
 

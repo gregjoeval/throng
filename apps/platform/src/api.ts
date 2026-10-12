@@ -119,6 +119,18 @@ const TaskSchema = z
   })
   .openapi("Task");
 
+const ListedTaskSchema = TaskSchema.extend({
+  attemptCount: z.number().int().openapi({ description: "Its attempts, obsolete ones left out.", example: 3 }),
+  bestGate: z.enum(GATES).nullable().openapi({
+    description:
+      "The best gate among those attempts' current results: `passed` beats `failed`. Null when none has a result.",
+  }),
+  mergeRequestState: z
+    .enum(MERGE_REQUEST_STATES)
+    .nullable()
+    .openapi({ description: "Its latest merge request's state, or null when it has none." }),
+}).openapi("ListedTask");
+
 const AttemptSchema = z
   .object({
     ref: z.string().openapi({ description: "The attempt's reference.", example: "t42a3" }),
@@ -473,15 +485,16 @@ function noLogs(): LogStore {
 }
 
 type Bearer = ReturnType<typeof bearerAuth>;
+type Browser = ReturnType<typeof bearerOrForwarded>;
 
 const AUTHOR_ONLY = "Only the attempt's author, or their agents, may.";
 const OWNER_ONLY = "Only the project owner may.";
 const TASK_MANAGERS = "Only the project owner or the task's creator may.";
 const RESCORERS = "Only the attempt's author (or their agents), the task's creator or the project owner may.";
 
-/** A task transition route: `POST …/tasks/{t}/<verb>`. */
+/** A task transition route: `POST …/tasks/{t}/<verb>`, also open to throng-web. */
 function taskTransition<V extends string>(
-  bearer: Bearer,
+  browser: Browser,
   verb: V,
   operationId: string,
   summary: string,
@@ -494,8 +507,8 @@ function taskTransition<V extends string>(
     operationId,
     tags: ["Tasks"],
     summary,
-    security: bearerOnly,
-    middleware: [bearer] as const,
+    security: bearerOrWeb,
+    middleware: [browser] as const,
     request: { params: TaskPathSchema },
     responses: {
       200: { description: "The task after the transition.", ...json(TaskSchema) },
@@ -866,8 +879,8 @@ export function apiRoutes(options: ApiOptions = {}) {
         tags: ["Tasks"],
         summary: "Create a task in a project",
         description: "Any signed-in user may. The caller's human is its creator. The task starts open.",
-        security: bearerOnly,
-        middleware: [bearer] as const,
+        security: bearerOrWeb,
+        middleware: [browser] as const,
         request: { params: ProjectPathSchema, body: { required: true, ...json(CreateTaskSchema) } },
         responses: {
           201: { description: "The new task.", ...json(TaskSchema) },
@@ -889,11 +902,11 @@ export function apiRoutes(options: ApiOptions = {}) {
         tags: ["Tasks"],
         summary: "List a project's tasks",
         description: "Obsolete tasks are left out unless `state=obsolete` asks for them.",
-        security: bearerOnly,
-        middleware: [bearer] as const,
+        security: bearerOrWeb,
+        middleware: [browser] as const,
         request: { params: ProjectPathSchema, query: z.object({ state: z.enum(TASK_STATES).optional() }) },
         responses: {
-          200: { description: "The tasks, by number.", ...json(z.object({ tasks: z.array(TaskSchema) })) },
+          200: { description: "The tasks, by number.", ...json(z.object({ tasks: z.array(ListedTaskSchema) })) },
           400: errorResponse("The request is invalid."),
           401: unauthorizedBearer,
           404: errorResponse("No such project."),
@@ -911,8 +924,8 @@ export function apiRoutes(options: ApiOptions = {}) {
         operationId: "getTask",
         tags: ["Tasks"],
         summary: "Get a task by its reference",
-        security: bearerOnly,
-        middleware: [bearer] as const,
+        security: bearerOrWeb,
+        middleware: [browser] as const,
         request: { params: TaskPathSchema },
         responses: {
           200: { description: "The task.", ...json(TaskSchema) },
@@ -949,25 +962,25 @@ export function apiRoutes(options: ApiOptions = {}) {
       },
     )
     .openapi(
-      taskTransition(bearer, "close", "closeTask", "Close an open task, and its active attempts", TASK_MANAGERS, [
+      taskTransition(browser, "close", "closeTask", "Close an open task, and its active attempts", TASK_MANAGERS, [
         "the task isn't open.",
       ]),
       async (c) => c.json(await tasks(c.env).closeTask(c.var.actor, taskPath(c.req.valid("param"))), 200),
     )
     .openapi(
-      taskTransition(bearer, "reopen", "reopenTask", "Reopen a closed task", TASK_MANAGERS, [
+      taskTransition(browser, "reopen", "reopenTask", "Reopen a closed task", TASK_MANAGERS, [
         "the task isn't closed, or one of its attempts merged.",
       ]),
       async (c) => c.json(await tasks(c.env).reopenTask(c.var.actor, taskPath(c.req.valid("param"))), 200),
     )
     .openapi(
-      taskTransition(bearer, "obsolete", "obsoleteTask", "Make a task obsolete, and its active attempts", OWNER_ONLY, [
+      taskTransition(browser, "obsolete", "obsoleteTask", "Make a task obsolete, and its active attempts", OWNER_ONLY, [
         "the task is already obsolete.",
       ]),
       async (c) => c.json(await tasks(c.env).obsoleteTask(c.var.actor, taskPath(c.req.valid("param"))), 200),
     )
     .openapi(
-      taskTransition(bearer, "restore", "restoreTask", "Restore an obsolete task to closed", OWNER_ONLY, [
+      taskTransition(browser, "restore", "restoreTask", "Restore an obsolete task to closed", OWNER_ONLY, [
         "the task isn't obsolete.",
       ]),
       async (c) => c.json(await tasks(c.env).restoreTask(c.var.actor, taskPath(c.req.valid("param"))), 200),
@@ -1006,8 +1019,8 @@ export function apiRoutes(options: ApiOptions = {}) {
         tags: ["Attempts"],
         summary: "List a task's attempts",
         description: "Obsolete attempts are left out unless `state=obsolete` asks for them.",
-        security: bearerOnly,
-        middleware: [bearer] as const,
+        security: bearerOrWeb,
+        middleware: [browser] as const,
         request: { params: TaskPathSchema, query: z.object({ state: z.enum(ATTEMPT_STATES).optional() }) },
         responses: {
           200: { description: "The attempts, by number.", ...json(z.object({ attempts: z.array(AttemptSchema) })) },

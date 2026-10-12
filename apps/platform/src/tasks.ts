@@ -8,7 +8,7 @@ import type { ErroredDetails, FailedChecksDetails } from "./landing.ts";
 import type { Dequeue, DequeueReason, StoredMergeRequest } from "./merge-requests.ts";
 import { resolveProject } from "./projects.ts";
 import { forkRepo, originRepo } from "./repos.ts";
-import type { ScoringResult } from "./results.ts";
+import type { Gate, ScoringResult } from "./results.ts";
 import { headAttemptRef } from "./scoring.ts";
 import type { AttemptScoring, ScoringRequest, StoredRun } from "./scoring.ts";
 import { attemptRef, parseAttemptRef, parseTaskRef, taskRef } from "./task-refs.ts";
@@ -56,6 +56,16 @@ export interface Task {
   closedAt: string | null;
   closedBy: UserRef | null;
   attemptLimit: number | null;
+}
+
+/** A task as the task list shows it, with what its row summarises. */
+export interface ListedTask extends Task {
+  /** Its attempts, obsolete ones left out. */
+  attemptCount: number;
+  /** The best gate among those attempts' current results: `passed` beats `failed`; null when none has one. */
+  bestGate: Gate | null;
+  /** Its latest merge request's state, or null when it has none. */
+  mergeRequestState: StoredMergeRequest["state"] | null;
 }
 
 /** An attempt as the API shows it. */
@@ -270,8 +280,15 @@ export function taskService({ db, backend }: TaskServiceDeps) {
     },
 
     /** The project's tasks; obsolete ones only when `state` is `obsolete`. */
-    async listTasks(actor: Actor, input: ProjectPath & { state?: TaskState | undefined }): Promise<Task[]> {
-      return tasks(await invoke("listTasks", await project(input), actor, { state: input.state }));
+    async listTasks(actor: Actor, input: ProjectPath & { state?: TaskState | undefined }): Promise<ListedTask[]> {
+      const list = await invoke("listTasks", await project(input), actor, { state: input.state });
+      const shown = await tasks(list);
+      return list.map((t, i) => ({
+        ...(shown[i] as Task),
+        attemptCount: t.attempt_count,
+        bestGate: t.best_gate,
+        mergeRequestState: t.merge_request_state,
+      }));
     },
 
     /** Edits a task. The project owner or the task's creator may. */

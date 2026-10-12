@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { myListings } from "../src/my-listings.ts";
+import { MAX_LISTING_PAGE, myListings } from "../src/my-listings.ts";
 import { deliver, MAX_PROJECTION_RETRY_MS, PROJECTION_BATCH, PROJECTION_RETRY_MS } from "../src/projection.ts";
 import { TaskStore } from "../src/task-store.ts";
-import type { ProjectContext } from "../src/task-store.ts";
+import type { AttemptState, ProjectContext, TaskState } from "../src/task-store.ts";
 import type { Actor } from "../src/tokens.ts";
 import type { Database } from "../src/users.ts";
 import { FakeRepos } from "./fake-repos.ts";
@@ -40,8 +40,20 @@ async function setup() {
   const store = new TaskStore({ sql, repos, now: () => new Date("2026-10-10T12:00:00.000Z") });
   const db = testDatabase();
   await seed(db);
-  const listings = myListings({ db });
+  const listings = firstPages(myListings({ db }));
   return { repos, sql, store, db, listings };
+}
+
+/** Each listing's first page, as one long enough for every test but the paging one. */
+function firstPages(listings: ReturnType<typeof myListings>) {
+  const page = { offset: 0, limit: MAX_LISTING_PAGE };
+  return {
+    pages: listings,
+    tasks: async (caller: Actor, input: { state?: TaskState } = {}) =>
+      (await listings.tasks(caller, { ...page, ...input })).tasks,
+    attempts: async (caller: Actor, input: { state?: AttemptState } = {}) =>
+      (await listings.attempts(caller, { ...page, ...input })).attempts,
+  };
 }
 
 const down: Database = {
@@ -190,5 +202,41 @@ describe("the D1 projection of tasks and attempts", () => {
 
     expect((await listings.tasks(ada, {})).map((t) => t.ref)).toEqual(["t1"]);
     expect((await listings.attempts(ada, {})).map((a) => a.ref)).toEqual(["t1a1"]);
+  });
+
+  it("lists across more projects than D1 binds parameters, a page at a time", async () => {
+    const { db, listings } = await setup();
+    const projects = 120;
+    for (let i = 0; i < projects; i++) {
+      const id = `p${String(i).padStart(5, "0")}`;
+      await db
+        .prepare("INSERT INTO projects (id, owner_id, handle) VALUES (?, ?, ?)")
+        .bind(id, owner.user.id, `project-${i}`)
+        .all();
+      const repos = new FakeRepos();
+      await repos.create(`${id}-main`, { defaultBranch: "main" });
+      const store = new TaskStore({
+        sql: testSql(),
+        repos,
+        now: () => new Date(Date.UTC(2026, 9, 10, 12, 0, i)),
+      });
+      const task = store.createTask({ id, owner: owner.user.id }, ada, { title: `Task ${i}` });
+      await store.createAttempts({ id, owner: owner.user.id }, ada, { task: task.number });
+      expect(await store.projection.publish(db, id)).toBeNull();
+    }
+
+    const first = await listings.pages.tasks(ada, { offset: 0, limit: 100 });
+    expect(first.tasks).toHaveLength(100);
+    expect(first.tasks[0]?.project.handle).toBe("project-119");
+    expect(first.next).toBe(100);
+    const rest = await listings.pages.tasks(ada, { offset: 100, limit: 100 });
+    expect(rest.tasks.map((t) => t.project.handle)).toEqual(Array.from({ length: 20 }, (_, i) => `project-${19 - i}`));
+    expect(rest.next).toBeNull();
+
+    const attempts = await listings.pages.attempts(ada, { offset: 110, limit: 100 });
+    expect(attempts.attempts.map((a) => [a.project.handle, a.ref])).toEqual(
+      Array.from({ length: 10 }, (_, i) => [`project-${9 - i}`, "t1a1"]),
+    );
+    expect(attempts.next).toBeNull();
   });
 });

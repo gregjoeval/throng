@@ -15,6 +15,8 @@ import {
   EditAttemptSchema,
   HandOffSchema,
   json,
+  pageQuerySchema,
+  PageSchema,
   PostVerdictSchema,
   ProjectPathSchema,
   requestTaskService,
@@ -34,7 +36,7 @@ import { FORWARDED_EMAIL_HEADER } from "./forwarded.ts";
 import { LOG_CONTENT_TYPE, LOG_RETENTION_DAYS, MAX_LOG_BYTES, missingLog } from "./logs.ts";
 import type { LogStore } from "./logs.ts";
 import { DEQUEUE_REASONS, MERGE_REQUEST_STATES } from "./merge-requests.ts";
-import { myListings } from "./my-listings.ts";
+import { DEFAULT_LISTING_PAGE, MAX_LISTING_PAGE, myListings } from "./my-listings.ts";
 import { MAX_PROJECT_HANDLE, PROJECT_HANDLE, projectService } from "./projects.ts";
 import type { Repos } from "./repos.ts";
 import { CHECK_OUTCOMES, GATES } from "./results.ts";
@@ -191,7 +193,10 @@ const ListedTaskSchema = TaskSchema.extend({
 
 const PROJECTION_NOTE =
   "Read from a copy every project publishes after each change, so it can trail the project by a moment. " +
-  "Obsolete ones are left out unless `state=obsolete` asks for them.";
+  "Obsolete ones are left out unless `state=obsolete` asks for them. " +
+  `Paged by \`offset\` and \`limit\`: ${DEFAULT_LISTING_PAGE} by default, at most ${MAX_LISTING_PAGE}.`;
+
+const MyListingQuerySchema = pageQuerySchema("Items", DEFAULT_LISTING_PAGE, MAX_LISTING_PAGE);
 
 const MyTaskSchema = z
   .object({
@@ -842,14 +847,21 @@ export function apiRoutes(options: ApiOptions = {}) {
         description: `The caller's user's tasks, also when an alias's token calls, newest first. ${PROJECTION_NOTE}`,
         security: bearerOrWeb,
         middleware: [browser] as const,
-        request: { query: z.object({ state: z.enum(TASK_STATES).optional() }) },
+        request: { query: MyListingQuerySchema.extend({ state: z.enum(TASK_STATES).optional() }) },
         responses: {
-          200: { description: "The caller's tasks.", ...json(z.object({ tasks: z.array(MyTaskSchema) })) },
+          200: {
+            description: "One page of the caller's tasks.",
+            ...json(z.object({ tasks: z.array(MyTaskSchema), ...PageSchema })),
+          },
           400: errorResponse("The request is invalid."),
           401: unauthorizedBearer,
         },
       }),
-      async (c) => c.json({ tasks: await myListingsFor(c.env).tasks(c.var.actor, c.req.valid("query")) }, 200),
+      async (c) => {
+        const query = c.req.valid("query");
+        const page = await myListingsFor(c.env).tasks(c.var.actor, query);
+        return c.json({ ...page, offset: query.offset, limit: query.limit }, 200);
+      },
     )
     .openapi(
       createRoute({
@@ -861,14 +873,21 @@ export function apiRoutes(options: ApiOptions = {}) {
         description: `The caller's user's attempts, also when an alias's token calls, newest first. ${PROJECTION_NOTE}`,
         security: bearerOrWeb,
         middleware: [browser] as const,
-        request: { query: z.object({ state: z.enum(ATTEMPT_STATES).optional() }) },
+        request: { query: MyListingQuerySchema.extend({ state: z.enum(ATTEMPT_STATES).optional() }) },
         responses: {
-          200: { description: "The caller's attempts.", ...json(z.object({ attempts: z.array(MyAttemptSchema) })) },
+          200: {
+            description: "One page of the caller's attempts.",
+            ...json(z.object({ attempts: z.array(MyAttemptSchema), ...PageSchema })),
+          },
           400: errorResponse("The request is invalid."),
           401: unauthorizedBearer,
         },
       }),
-      async (c) => c.json({ attempts: await myListingsFor(c.env).attempts(c.var.actor, c.req.valid("query")) }, 200),
+      async (c) => {
+        const query = c.req.valid("query");
+        const page = await myListingsFor(c.env).attempts(c.var.actor, query);
+        return c.json({ ...page, offset: query.offset, limit: query.limit }, 200);
+      },
     )
     .openapi(
       createRoute({

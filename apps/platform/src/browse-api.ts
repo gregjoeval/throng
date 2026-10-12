@@ -18,6 +18,7 @@ import {
   diffResponse,
   json,
   PageQuerySchema,
+  PageSchema,
   ProjectPathSchema,
   TAIL,
   tailedRoutes,
@@ -123,10 +124,10 @@ const CommitSchema = z
 const CommitPageSchema = z
   .object({
     ...ResolvedSchema,
-    offset: z.number().int(),
-    limit: z.number().int(),
+    offset: PageSchema.offset,
+    limit: PageSchema.limit,
     commits: z.array(CommitSchema).openapi({ description: "First-parent history, newest first." }),
-    next: z.number().int().nullable().openapi({ description: "The next page's offset; null on the last page." }),
+    next: PageSchema.next,
   })
   .openapi("CommitPage");
 

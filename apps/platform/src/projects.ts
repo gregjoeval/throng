@@ -78,9 +78,10 @@ export async function resolveProject(db: Database, owner: string, handle: string
 export async function projectsById(db: Database, ids: readonly string[]): Promise<Map<string, Project>> {
   const unique = [...new Set(ids)];
   if (unique.length === 0) return new Map();
+  // One bound JSON array, not one parameter per id: D1 binds at most 100 parameters to a statement.
   const { results } = await db
-    .prepare(`${SELECT_PROJECT} WHERE p.id IN (${unique.map(() => "?").join(", ")})`)
-    .bind(...unique)
+    .prepare(`${SELECT_PROJECT} WHERE p.id IN (SELECT value FROM json_each(?))`)
+    .bind(JSON.stringify(unique))
     .all<ProjectRow>();
   return new Map(results.map((row) => [row.id, project(row)]));
 }

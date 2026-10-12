@@ -62,7 +62,7 @@ describe("GET /me/tasks and /me/attempts", () => {
     await call("POST", "/projects/greg/swarm/tasks", greg, { title: "Add search" });
     await call("POST", "/projects/greg/swarm/tasks/t1/attempts", adaClaude, { count: 2 });
 
-    expect((await call("GET", "/me/attempts", ada)).body).toEqual({ attempts: [] });
+    expect((await call("GET", "/me/attempts", ada)).body["attempts"]).toEqual([]);
     await publish();
 
     const tasks = await call("GET", "/me/tasks", adaClaude);
@@ -93,7 +93,7 @@ describe("GET /me/tasks and /me/attempts", () => {
     ]);
     expect((attempts.body["attempts"] as Json[])[0]?.["task"]).toEqual({ ref: "t1", number: 1, title: "Add search" });
     expect((await callAs("/me/attempts", "ada@example.com")).body).toEqual(attempts.body);
-    expect((await call("GET", "/me/attempts", greg)).body).toEqual({ attempts: [] });
+    expect((await call("GET", "/me/attempts", greg)).body["attempts"]).toEqual([]);
   });
 
   it("filter by state, leaving obsolete ones out by default", async () => {
@@ -131,6 +131,23 @@ describe("GET /me/tasks and /me/attempts", () => {
     expect((await call("GET", "/me/tasks?state=closed", ada)).body["tasks"]).toEqual([
       expect.objectContaining({ title: "Fix login", state: "closed" }),
     ]);
+  });
+
+  it("page by offset and limit", async () => {
+    const { call, ada, publish } = await setup();
+    await call("POST", "/projects/greg/throng/tasks", ada, { title: "Fix login" });
+    await call("POST", "/projects/greg/throng/tasks/t1/attempts", ada, { count: 3 });
+    await publish();
+
+    const first = await call("GET", "/me/attempts?limit=2", ada);
+    expect(first.status).toBe(200);
+    expect(first.body).toMatchObject({ offset: 0, limit: 2, next: 2 });
+    expect((first.body["attempts"] as Json[]).map((a) => a["ref"])).toEqual(["t1a3", "t1a2"]);
+    const last = await call("GET", "/me/attempts?limit=2&offset=2", ada);
+    expect(last.body).toMatchObject({ offset: 2, limit: 2, next: null });
+    expect((last.body["attempts"] as Json[]).map((a) => a["ref"])).toEqual(["t1a1"]);
+    expect((await call("GET", "/me/tasks", ada)).body).toMatchObject({ offset: 0, limit: 50, next: null });
+    expect((await call("GET", "/me/tasks?limit=101", ada)).status).toBe(400);
   });
 
   it("need a token or a signed-in user", async () => {

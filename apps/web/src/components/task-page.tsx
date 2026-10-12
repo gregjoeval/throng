@@ -7,11 +7,11 @@ import { useState } from "react";
 import { Arena } from "@/components/arena";
 import { ClosedAttempts } from "@/components/closed-attempts";
 import { Markdown } from "@/components/markdown";
-import { MergeRequestView } from "@/components/merge-request";
+import { MergeRequestSummary, MergeRequestView } from "@/components/merge-request";
 import { SingleAttemptView } from "@/components/single-attempt";
 import { EmptyState, ErrorState, Loading } from "@/components/states";
 import { TaskActions } from "@/components/task-actions";
-import { taskAttemptsQuery, taskQuery } from "@/lib/api";
+import { mergeRequestQuery, taskAttemptsQuery, taskQuery } from "@/lib/api";
 import type { ProjectRef } from "@/lib/api";
 import { buildPath } from "@/lib/paths";
 import { gitRemotePath, isActive, TASK_STATE_LABELS, taskBody } from "@/lib/tasks";
@@ -146,8 +146,31 @@ function NoActiveAttempts({ projectRef, task }: TaskAt & { task: Task }) {
   );
 }
 
-/** A closed or obsolete task: the merged attempt and its merge commit, and the archived attempts. */
+/**
+ * A closed or obsolete task: the merged merge request's summary, the merged attempt and its merge
+ * commit, and the archived attempts.
+ */
 function Ended({
+  projectRef,
+  task,
+  merged,
+  archived,
+}: TaskAt & { task: Task; merged: Attempt | null; archived: Attempt[] }) {
+  return (
+    <div className="flex flex-col gap-3">
+      {merged === null ? null : <MergedSummary projectRef={projectRef} task={task} />}
+      <EndedLinks projectRef={projectRef} task={task} merged={merged} archived={archived} />
+    </div>
+  );
+}
+
+/** The merged merge request's banner and approval; nothing while it loads or if it can't be read. */
+function MergedSummary({ projectRef, task }: TaskAt & { task: Task }) {
+  const mr = useQuery(mergeRequestQuery(projectRef, task.ref));
+  return mr.data === undefined ? null : <MergeRequestSummary mr={mr.data} />;
+}
+
+function EndedLinks({
   projectRef,
   task,
   merged,

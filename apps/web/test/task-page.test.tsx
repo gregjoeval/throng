@@ -18,6 +18,30 @@ async function openTask(t1: ListedTask, attempts: Attempt[] = []) {
 
 const body = () => screen.getByRole("region", { name: "Task body" });
 
+/** Serves t1's merge request from t1a2, approved by `me`, with `fields` over a pending one. */
+function serveMergeRequest(fields: Record<string, unknown>) {
+  server.use(
+    http.get("*/api/projects/:owner/:project/tasks/:t/merge-request", () =>
+      HttpResponse.json({
+        task: "t1",
+        attempt: "t1a2",
+        state: "pending",
+        approvedHead: SHA,
+        approvedBy: { ...me.user, agent: null },
+        approvedAt: me.user.createdAt,
+        queuedAt: null,
+        position: null,
+        lastDequeue: null,
+        mergeSha: null,
+        mergedAt: null,
+        createdAt: me.user.createdAt,
+        createdBy: { ...me.user, agent: null },
+        ...fields,
+      }),
+    ),
+  );
+}
+
 describe("the task page header", () => {
   it("shows the title, number, state, creator, the rendered body and the attempts' remotes", async () => {
     const t1 = task(1, { title: "Fix login", body: "Login *fails* on Safari." });
@@ -75,25 +99,7 @@ describe("the task page body", () => {
 
   it("shows the merge request view while a merge request is open", async () => {
     const source = attempt(1, 2, { state: "open", mergeRequest: { state: "queued", lastDequeue: null } });
-    server.use(
-      http.get("*/api/projects/:owner/:project/tasks/:t/merge-request", () =>
-        HttpResponse.json({
-          task: "t1",
-          attempt: "t1a2",
-          state: "queued",
-          approvedHead: SHA,
-          approvedBy: { ...me.user, agent: null },
-          approvedAt: me.user.createdAt,
-          queuedAt: me.user.createdAt,
-          position: 1,
-          lastDequeue: null,
-          mergeSha: null,
-          mergedAt: null,
-          createdAt: me.user.createdAt,
-          createdBy: { ...me.user, agent: null },
-        }),
-      ),
-    );
+    serveMergeRequest({ state: "queued", queuedAt: me.user.createdAt, position: 1 });
     await openTask(task(1), [attempt(1, 1, { state: "closed" }), source]);
     const view = await within(body()).findByTestId("merge-request-view");
     expect(within(view).getByRole("region", { name: "Lane t1a2" })).toBeInTheDocument();
@@ -121,7 +127,8 @@ describe("the task page body", () => {
     expect(within(body()).getByRole("list", { name: "Closed attempts", hidden: true })).toHaveTextContent("t1a1");
   });
 
-  it("summarises a closed task: its merge commit and archived attempts", async () => {
+  it("summarises a closed task: its merged merge request, merge commit and archived attempts", async () => {
+    serveMergeRequest({ state: "merged", mergeSha: SHA, mergedAt: me.user.createdAt });
     const merged = attempt(1, 2, {
       state: "merged",
       mergedSha: SHA,
@@ -131,6 +138,10 @@ describe("the task page body", () => {
       attempt(1, 1, { state: "closed", archivedSha: ARCHIVED }),
       merged,
     ]);
+    expect(await within(body()).findByRole("status", { name: "Merge request state" })).toHaveTextContent(
+      `Merged as ${SHA.slice(0, 7)}.`,
+    );
+    expect(body()).toHaveTextContent(`Approved ${SHA.slice(0, 7)} by ${me.user.handle}`);
     expect(body()).toHaveTextContent(`t1a2 was merged in ${SHA.slice(0, 7)}.`);
     expect(within(body()).getByRole("link", { name: SHA.slice(0, 7) })).toHaveAttribute(
       "href",

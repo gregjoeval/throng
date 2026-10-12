@@ -50,20 +50,10 @@ export function MergeRequestView({ projectRef, task, source }: InTask & { source
   const open = isOpenMergeRequest(state);
   return (
     <div data-testid="merge-request-view" className="flex flex-col gap-4">
-      <div className="flex flex-col gap-2 rounded-xl border px-4 py-3 text-sm">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <Banner mr={mr.data} />
-          {open && mayAct ? <CancelMergeRequest projectRef={projectRef} task={task} mr={mr.data} /> : null}
-        </div>
-        <p className="text-muted-foreground">
-          Approved <span className="font-mono text-foreground">{mr.data.approvedHead.slice(0, 7)}</span> by{" "}
-          <span className="text-foreground">
-            {mr.data.approvedBy.handle}
-            {mr.data.approvedBy.agent === null ? null : ` (${mr.data.approvedBy.agent})`}
-          </span>{" "}
-          <RelativeTime date={mr.data.approvedAt} />
-        </p>
-      </div>
+      <MergeRequestSummary
+        mr={mr.data}
+        action={open && mayAct ? <CancelMergeRequest projectRef={projectRef} task={task} mr={mr.data} /> : null}
+      />
       {state === "needsReview" ? (
         <ChangesSinceApproval projectRef={projectRef} task={task} mr={mr.data} attempt={attempt} mayApprove={mayAct} />
       ) : null}
@@ -71,6 +61,26 @@ export function MergeRequestView({ projectRef, task, source }: InTask & { source
         <Dequeued projectRef={projectRef} task={task} mr={mr.data} at={mr.data.lastDequeue.at} />
       ) : null}
       <Lane projectRef={projectRef} attempt={attempt} note={source.note} />
+    </div>
+  );
+}
+
+/** The merge request's state banner and its approval: the approved head, by whom and when. `action` sits beside the banner. */
+export function MergeRequestSummary({ mr, action = null }: { mr: MergeRequest; action?: ReactNode }) {
+  return (
+    <div className="flex flex-col gap-2 rounded-xl border px-4 py-3 text-sm">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <Banner mr={mr} />
+        {action}
+      </div>
+      <p className="text-muted-foreground">
+        Approved <span className="font-mono text-foreground">{mr.approvedHead.slice(0, 7)}</span> by{" "}
+        <span className="text-foreground">
+          {mr.approvedBy.handle}
+          {mr.approvedBy.agent === null ? null : ` (${mr.approvedBy.agent})`}
+        </span>{" "}
+        <RelativeTime date={mr.approvedAt} />
+      </p>
     </div>
   );
 }

@@ -92,6 +92,6 @@ class ArtifactsRepos implements Repos {
 
 /** A fork's `source` reads `artifacts:<namespace>/<repo>`; anything else (an import, or none) has no parent here. */
 function parentOf(source: string | null): string | null {
-  const match = /^artifacts:[^/]+\/(.+)$/.exec(source ?? "");
+  const match = /^artifacts:[^/]+\/(.+)$/u.exec(source ?? "");
   return match?.[1] ?? null;
 }

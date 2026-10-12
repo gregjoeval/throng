@@ -1,14 +1,8 @@
 import { describe, expect, it } from "vitest";
-import {
-  DIFF_CAPS,
-  DIFF_VERSION,
-  diffCommit,
-  diffFile,
-  unifiedPatch,
-  type DiffCache,
-  type DiffCaps,
-} from "../src/diff.ts";
+import { DIFF_CAPS, DIFF_VERSION, diffCommit, diffFile, unifiedPatch } from "../src/diff.ts";
+import type { DiffCache, DiffCaps } from "../src/diff.ts";
 import { FakeRepos } from "./fake-repos.ts";
+import { at, defined } from "./support/defined.ts";
 
 const REPO = "p1-main";
 
@@ -19,7 +13,7 @@ async function twoCommits(before: Parameters<FakeRepos["commit"]>[1]["files"], a
   const parent = repos.commit(REPO, { files: before });
   const child = repos.commit(REPO, { files: after });
   const diff = await diffCommit(repos, REPO, child.hash);
-  return { repos, parent, child, diff: diff! };
+  return { repos, parent, child, diff: defined(diff, "a diff") };
 }
 
 describe("diffCommit", () => {
@@ -31,7 +25,7 @@ describe("diffCommit", () => {
     expect(diff.sha).toBe(child.hash);
     expect(diff.parent).toBe(parent.hash);
     expect(diff.files).toHaveLength(1);
-    const [file] = diff.files;
+    const file = at(diff.files, 0);
     expect(file).toMatchObject({
       path: "src/a.txt",
       status: "modified",
@@ -41,10 +35,10 @@ describe("diffCommit", () => {
       deletions: 1,
       flags: [],
     });
-    expect(file!.patch).toBe(
+    expect(file.patch).toBe(
       [
         "diff --git a/src/a.txt b/src/a.txt",
-        `index ${file!.oldHash}..${file!.newHash} 100644`,
+        `index ${file.oldHash}..${file.newHash} 100644`,
         "--- a/src/a.txt",
         "+++ b/src/a.txt",
         "@@ -1,3 +1,3 @@",
@@ -56,18 +50,18 @@ describe("diffCommit", () => {
       ].join("\n"),
     );
     expect(diff.totals).toEqual({ files: 1, additions: 1, deletions: 1 });
-    expect(diff.truncated).toBe(false);
+    expect(diff.truncated).toBeFalsy();
   });
 
   it("writes an added file against /dev/null, with no newline at its end marked", async () => {
     const { diff } = await twoCommits({ "a.txt": "a\n" }, { "a.txt": "a\n", "new.txt": "x\ny" });
-    const [file] = diff.files;
+    const file = at(diff.files, 0);
     expect(file).toMatchObject({ path: "new.txt", status: "added", oldMode: null, oldHash: null, additions: 2 });
-    expect(file!.patch).toBe(
+    expect(file.patch).toBe(
       [
         "diff --git a/new.txt b/new.txt",
         "new file mode 100644",
-        `index ${"0".repeat(40)}..${file!.newHash}`,
+        `index ${"0".repeat(40)}..${file.newHash}`,
         "--- /dev/null",
         "+++ b/new.txt",
         "@@ -0,0 +1,2 @@",
@@ -81,13 +75,13 @@ describe("diffCommit", () => {
 
   it("writes a deleted file", async () => {
     const { diff } = await twoCommits({ "a.txt": "a\n", "gone.txt": "bye\n" }, { "a.txt": "a\n" });
-    const [file] = diff.files;
+    const file = at(diff.files, 0);
     expect(file).toMatchObject({ path: "gone.txt", status: "deleted", newMode: null, newHash: null, deletions: 1 });
-    expect(file!.patch).toBe(
+    expect(file.patch).toBe(
       [
         "diff --git a/gone.txt b/gone.txt",
         "deleted file mode 100644",
-        `index ${file!.oldHash}..${"0".repeat(40)}`,
+        `index ${file.oldHash}..${"0".repeat(40)}`,
         "--- a/gone.txt",
         "+++ /dev/null",
         "@@ -1 +0,0 @@",
@@ -102,7 +96,7 @@ describe("diffCommit", () => {
     expect(diff.files).toEqual([
       expect.objectContaining({ path: "run.sh", status: "modified", oldMode: "100644", newMode: "100755", flags: [] }),
     ]);
-    expect(diff.files[0]!.patch).toBe("diff --git a/run.sh b/run.sh\nold mode 100644\nnew mode 100755\n");
+    expect(at(diff.files, 0).patch).toBe("diff --git a/run.sh b/run.sh\nold mode 100644\nnew mode 100755\n");
   });
 
   it("pairs an exact rename by blob hash and writes no hunks", async () => {
@@ -115,7 +109,7 @@ describe("diffCommit", () => {
       additions: 0,
       deletions: 0,
     });
-    expect(diff.files[0]!.patch).toBe(
+    expect(at(diff.files, 0).patch).toBe(
       [
         "diff --git a/old/name.txt b/new/name.txt",
         "similarity index 100%",
@@ -139,7 +133,7 @@ describe("diffCommit", () => {
     const repos = new FakeRepos();
     await repos.create(REPO);
     const root = repos.commit(REPO, { files: { "b.txt": "b\n", "a/z.txt": "z\n" } });
-    const diff = (await diffCommit(repos, REPO, root.hash))!;
+    const diff = defined(await diffCommit(repos, REPO, root.hash));
     expect(diff.parent).toBeNull();
     expect(diff.oldTree).toBeNull();
     expect(diff.files.map((f) => [f.path, f.status])).toEqual([
@@ -162,7 +156,7 @@ describe("diffCommit", () => {
       parents: [first.hash, side.hash],
       files: { "a.txt": "a\n", "main.txt": "m\n", "side.txt": "s\n" },
     });
-    const diff = (await diffCommit(repos, REPO, merge.hash))!;
+    const diff = defined(await diffCommit(repos, REPO, merge.hash));
     expect(diff.parent).toBe(first.hash);
     expect(diff.files.map((f) => f.path)).toEqual(["side.txt"]);
   });
@@ -174,7 +168,10 @@ describe("diffCommit", () => {
     );
     expect(diff.files.map((f) => f.path)).toEqual(["Z", "a.b", "a/c"]);
     const root = await repos.readTree(REPO, parent.treeHash);
-    const same = root!.find((e) => e.name === "same")!.hash;
+    const same = defined(
+      root?.find((e) => e.name === "same"),
+      "the unchanged entry",
+    ).hash;
     expect(repos.calls.filter((c) => c.method === "readTree" && c.args[1] === same)).toHaveLength(0);
   });
 
@@ -203,7 +200,7 @@ async function diffWith(before: Record<string, string>, after: Record<string, st
   await repos.create(REPO);
   repos.commit(REPO, { files: before });
   const child = repos.commit(REPO, { files: after });
-  return (await diffCommit(repos, REPO, child.hash, { caps: limits }))!;
+  return defined(await diffCommit(repos, REPO, child.hash, { caps: limits }));
 }
 
 const numbered = (n: number, value: string) =>
@@ -223,13 +220,13 @@ describe("diffCommit caps", () => {
   it("stops listing at maxFiles and marks the diff truncated", async () => {
     const diff = await diffWith(numbered(5, "a\n"), numbered(5, "b\n"), caps({ maxFiles: 3 }));
     expect(diff.files.map((f) => f.path)).toEqual(["f00.txt", "f01.txt", "f02.txt"]);
-    expect(diff.truncated).toBe(true);
+    expect(diff.truncated).toBeTruthy();
     expect(diff.totals.files).toBe(3);
   });
 
   it("is not truncated when exactly maxFiles changed", async () => {
     const diff = await diffWith(numbered(3, "a\n"), numbered(3, "b\n"), caps({ maxFiles: 3 }));
-    expect(diff.truncated).toBe(false);
+    expect(diff.truncated).toBeFalsy();
   });
 
   it("lists files past maxPatchedFiles without a patch, flagged truncated", async () => {
@@ -240,7 +237,7 @@ describe("diffCommit caps", () => {
       [["truncated"], false],
       [["truncated"], false],
     ]);
-    expect(diff.truncated).toBe(false);
+    expect(diff.truncated).toBeFalsy();
   });
 
   it("flags a file with either side over maxBlobBytes tooLarge, without a patch", async () => {
@@ -271,12 +268,12 @@ describe("diffCommit caps", () => {
       // a.txt takes 16 lines; b.txt's headers and first hunk take the last 10.
       caps({ maxPatchLines: 26 }),
     );
-    const [a, b, c] = diff.files;
-    expect(a!.flags).toEqual([]);
-    expect(b!.flags).toEqual(["truncated"]);
-    expect(b!.patch!.match(/^@@/gm)).toHaveLength(1);
+    const [a, b, c] = [at(diff.files, 0), at(diff.files, 1), at(diff.files, 2)];
+    expect(a.flags).toEqual([]);
+    expect(b.flags).toEqual(["truncated"]);
+    expect(defined(b.patch).match(/^@@/gmu)).toHaveLength(1);
     expect(b).toMatchObject({ additions: 2, deletions: 2 });
-    expect(c!.flags).toEqual(["truncated"]);
+    expect(c.flags).toEqual(["truncated"]);
     expect(c).not.toHaveProperty("patch");
   });
 
@@ -287,7 +284,7 @@ describe("diffCommit caps", () => {
       { "a.txt": "2\n", "b.txt": "2\n" },
       caps({ maxPatchBytes: 250 }),
     );
-    expect(diff.files[0]!.flags).toEqual([]);
+    expect(at(diff.files, 0).flags).toEqual([]);
     expect(diff.files[1]).toMatchObject({ flags: ["truncated"] });
     expect(diff.files[1]).not.toHaveProperty("patch");
     expect(unifiedPatch(diff)).toHaveLength(165);
@@ -337,7 +334,7 @@ describe("diffFile", () => {
     await repos.create(REPO);
     const base = repos.commit(REPO, { files: { "a.txt": "one\n" } });
     const side = repos.commit(REPO, { files: { "a.txt": "two\n" } });
-    const hash = async (tree: string) => (await repos.readTree(REPO, tree))![0]!.hash;
+    const hash = async (tree: string) => at(defined(await repos.readTree(REPO, tree)), 0).hash;
     const [oldHash, newHash] = [await hash(base.treeHash), await hash(side.treeHash)];
 
     const file = await diffFile(
@@ -366,6 +363,6 @@ describe("diffFile", () => {
       { path: "b.txt", mode: "100644", hash: newHash },
     );
     expect(moved.status).toBe("renamed");
-    expect(moved.patch).toMatch(/^diff --git a\/a.txt b\/b.txt\nrename from a.txt\nrename to b.txt\nindex /);
+    expect(moved.patch).toMatch(/^diff --git a\/a.txt b\/b.txt\nrename from a.txt\nrename to b.txt\nindex /u);
   });
 });

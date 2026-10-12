@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { buildPath, parsePath, rawApiUrl, type ProjectLocation } from "@/lib/paths";
+import { buildPath, parsePath, rawApiUrl } from "@/lib/paths";
+import type { ProjectLocation } from "@/lib/paths";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const at = { owner: "greg", project: "throng" };

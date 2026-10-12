@@ -2,37 +2,35 @@
 // machine in the project's Durable Object (`task-store.ts`), where the permission checks sit next
 // to the state they guard. Answers carry users as `{id, handle}`, resolved from D1 at read time.
 
-import { ServiceError } from "./errors.ts";
-import { resolveProject } from "./projects.ts";
-import type { ScoringResult } from "./results.ts";
 import type { ConflictDetails, ConflictFile } from "./conflicts.ts";
+import { ServiceError } from "./errors.ts";
 import type { ErroredDetails, FailedChecksDetails } from "./landing.ts";
 import type { Dequeue, DequeueReason, StoredMergeRequest } from "./merge-requests.ts";
+import { resolveProject } from "./projects.ts";
 import { forkRepo, originRepo } from "./repos.ts";
-import { headAttemptRef, type AttemptScoring, type ScoringRequest, type StoredRun } from "./scoring.ts";
-import {
-  attemptRef,
-  type AttemptMergeRequest,
-  parseAttemptRef,
-  parseTaskRef,
-  taskRef,
-  type AttemptInput,
-  type AttemptScoringDetail,
-  type AttemptState,
-  type ProjectContext,
-  type StoredAttempt,
-  type StoredTask,
-  type TaskMethod,
-  type TaskOutcome,
-  type TaskState,
-  type TaskStore,
+import type { ScoringResult } from "./results.ts";
+import { headAttemptRef } from "./scoring.ts";
+import type { AttemptScoring, ScoringRequest, StoredRun } from "./scoring.ts";
+import { attemptRef, parseAttemptRef, parseTaskRef, taskRef } from "./task-refs.ts";
+import type {
+  AttemptInput,
+  AttemptMergeRequest,
+  AttemptScoringDetail,
+  AttemptState,
+  ProjectContext,
+  StoredAttempt,
+  StoredTask,
+  TaskMethod,
+  TaskOutcome,
+  TaskState,
+  TaskStore,
 } from "./task-store.ts";
 import type { Actor } from "./tokens.ts";
 import type { Database } from "./users.ts";
 
 /** A project's Durable Object, as the services call it: one store method per call. */
 export interface TaskBackend {
-  call(method: TaskMethod, args: unknown[]): Promise<TaskOutcome>;
+  call: (method: TaskMethod, args: unknown[]) => Promise<TaskOutcome>;
 }
 
 export interface TaskServiceDeps {

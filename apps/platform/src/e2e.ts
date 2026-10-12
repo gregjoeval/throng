@@ -4,13 +4,17 @@
 // made. Every project it makes is named with `E2E_PROJECT_PREFIX`, and these routes refuse any
 // project or repo without it, so they can never reach a real project.
 
-import { Hono, type Context } from "hono";
+import { Hono } from "hono";
+import type { Context } from "hono";
 import { camelKeys } from "./casing.ts";
 import { LOG_PREFIX } from "./logs.ts";
-import { type Project, projectService } from "./projects.ts";
-import { forkRepo, originRepo, parseRepoName, type Repos } from "./repos.ts";
+import { projectService } from "./projects.ts";
+import type { Project } from "./projects.ts";
+import { forkRepo, originRepo, parseRepoName } from "./repos.ts";
+import type { Repos } from "./repos.ts";
 import { mintToken, revokeToken } from "./tokens.ts";
-import { type Database, type User, userForEmail } from "./users.ts";
+import { userForEmail } from "./users.ts";
+import type { Database, User } from "./users.ts";
 
 /** The e2e suite's user. `.invalid` never resolves, so nothing is ever sent to it. */
 export const E2E_EMAIL = "e2e@throng.invalid";
@@ -57,7 +61,7 @@ export async function e2eProject(
 
 /** Whether `name` is an e2e project id or a run's prefix of one. */
 export function isE2eName(name: string): boolean {
-  return name.startsWith(E2E_PROJECT_PREFIX) && /^[a-z0-9]+$/.test(name);
+  return name.startsWith(E2E_PROJECT_PREFIX) && /^[a-z0-9]+$/u.test(name);
 }
 
 /** Whether the repo `name` belongs to an e2e project. */
@@ -68,23 +72,23 @@ function e2eRepo(name: string): boolean {
 
 /** The part of the logs R2 bucket cleanup needs. */
 export interface LogBucket {
-  list(options: {
+  list: (options: {
     prefix: string;
     cursor?: string;
-  }): Promise<{ objects: { key: string }[]; truncated: boolean; cursor?: string }>;
-  delete(keys: string[]): Promise<void>;
+  }) => Promise<{ objects: { key: string }[]; truncated: boolean; cursor?: string }>;
+  delete: (keys: string[]) => Promise<void>;
 }
 
 /** The project Durable Object's calls the e2e routes make. */
 export interface E2eProjectStub {
-  note(kind: string, detail: Record<string, unknown>): Promise<void> | void;
-  journal(since: number): Promise<unknown>;
+  note: (kind: string, detail: Record<string, unknown>) => Promise<void> | void;
+  journal: (since: number) => Promise<unknown>;
   /** Queues scoring of a commit pushed straight to an attempt's fork. */
-  score(project: string, attempt: string, sha: string): Promise<unknown>;
+  score: (project: string, attempt: string, sha: string) => Promise<unknown>;
   /** One scoring run, or null. */
-  run(id: number): Promise<unknown>;
+  run: (id: number) => Promise<unknown>;
   /** Deletes all of the project's Durable Object storage. */
-  destroy(): Promise<void>;
+  destroy: () => Promise<void>;
 }
 
 export interface E2eDeps<E> {
@@ -222,8 +226,8 @@ export function e2eRoutes<E extends object>(deps: E2eDeps<E>) {
         const { token } = await repos.mintToken(name, "write", PUSH_TOKEN_TTL_SECONDS);
         await deps.project(c.env, project).note("forkReady", { name, forkMs, readyMs, polls });
         return c.json({ remote: fork.remote, token, forkMs, readyMs, polls });
-      } catch (cause) {
-        if (Date.now() - began > FORK_READY_TIMEOUT_MS) throw cause;
+      } catch (error) {
+        if (Date.now() - began > FORK_READY_TIMEOUT_MS) throw error;
         await new Promise((r) => setTimeout(r, 250));
       }
     }

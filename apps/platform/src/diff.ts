@@ -6,7 +6,8 @@
 // one path deleted and one added) are paired. Every cap is a flag on the file it hit, so callers
 // can tell a missing patch from an empty one.
 
-import { structuredPatch, type StructuredPatchHunk } from "diff";
+import { structuredPatch } from "diff";
+import type { StructuredPatchHunk } from "diff";
 import { BINARY_SNIFF_BYTES, mapLimit, MAX_TEXT_BYTES } from "./browse.ts";
 import type { Repos, TreeEntry } from "./repos.ts";
 
@@ -121,8 +122,8 @@ export async function diffCommit(
  * trees are content-addressed, so one entry serves every repo that has both trees.
  */
 export interface DiffCache {
-  match(key: Request): Promise<Response | undefined>;
-  put(key: Request, res: Response): Promise<void>;
+  match: (key: Request) => Promise<Response | undefined>;
+  put: (key: Request, res: Response) => Promise<void>;
 }
 
 /** How long a cached tree diff is kept; it never goes stale, so this only bounds the cache. */
@@ -221,6 +222,13 @@ function isTree(e: TreeEntry): boolean {
   return e.type === "tree";
 }
 
+/** `preferred`, or else `other`: the side a change has. Every change has at least one. */
+function eitherSide<T>(preferred: T | null | undefined, other: T | null | undefined): T {
+  const found = preferred ?? other;
+  if (found === null || found === undefined) throw new Error("a change needs at least one side");
+  return found;
+}
+
 /** Git orders a tree's entries comparing a directory's name as if it ended in "/". */
 function orderKey(e: TreeEntry): string {
   return isTree(e) ? `${e.name}/` : e.name;
@@ -243,11 +251,10 @@ async function walkTrees(
   const byKey = new Map<string, { old?: TreeEntry; new?: TreeEntry }>();
   for (const e of olds) byKey.set(orderKey(e), { old: e });
   for (const e of news) byKey.set(orderKey(e), { ...byKey.get(orderKey(e)), new: e });
-  const keys = [...byKey.keys()].toSorted(byteOrder);
-  for (const key of keys) {
-    const { old, new: next } = byKey.get(key)!;
+  const sorted = [...byKey].toSorted(([a], [b]) => byteOrder(a, b));
+  for (const [, { old, new: next }] of sorted) {
     if (old !== undefined && next !== undefined && old.hash === next.hash && old.mode === next.mode) continue;
-    const path = prefix + (old ?? next)!.name;
+    const path = prefix + eitherSide(old, next).name;
     if ((old !== undefined && isTree(old)) || (next !== undefined && isTree(next))) {
       const done = await walkTrees(repos, repo, old?.hash ?? null, next?.hash ?? null, `${path}/`, out, limit);
       if (!done) return false;
@@ -312,6 +319,7 @@ function pairRenames(changes: Change[]): Change[] {
   return result.filter((c) => !taken.has(c)).toSorted((a, b) => byteOrder(pathOf(a), pathOf(b)));
 }
 
+const GITLINK_MODE = "160000";
 const EMPTY_BLOB = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
 
 function renameable(s: FileSide): boolean {
@@ -319,7 +327,7 @@ function renameable(s: FileSide): boolean {
 }
 
 function pathOf(c: Change): string {
-  return (c.new ?? c.old)!.path;
+  return eitherSide(c.new, c.old).path;
 }
 
 /** Byte order of UTF-8: for strings, code point order. */
@@ -333,7 +341,6 @@ function byteOrder(a: string, b: string): number {
 
 // --- One file --------------------------------------------------------------------------------
 
-const GITLINK_MODE = "160000";
 const ZERO_HASH = "0".repeat(40);
 
 /** A file's diff before rendering: its headers, and its hunks each already formatted. */
@@ -353,9 +360,9 @@ async function readBlob(repos: Repos, repo: string, hash: string): Promise<Blob>
 }
 
 function describe(old: FileSide | null, next: FileSide | null): Omit<FileDiff, "patch" | "flags"> {
-  const either = (next ?? old)!;
+  const either = eitherSide(next, old);
   const renamed = old !== null && next !== null && old.path !== next.path;
-  const status: FileStatus = old === null ? "added" : next === null ? "deleted" : renamed ? "renamed" : "modified";
+  const status = fileStatus(old, next, renamed);
   return {
     path: either.path,
     ...(renamed ? { oldPath: old.path } : {}),
@@ -367,6 +374,12 @@ function describe(old: FileSide | null, next: FileSide | null): Omit<FileDiff, "
     additions: 0,
     deletions: 0,
   };
+}
+
+function fileStatus(old: FileSide | null, next: FileSide | null, renamed: boolean): FileStatus {
+  if (old === null) return "added";
+  if (next === null) return "deleted";
+  return renamed ? "renamed" : "modified";
 }
 
 async function computeFile(
@@ -438,8 +451,8 @@ function label(prefix: "a" | "b", s: FileSide | null): string {
 
 /** The `diff --git` line and git's extended headers, in the order git writes them. */
 function gitHeader(old: FileSide | null, next: FileSide | null): string[] {
-  const a = (old ?? next)!;
-  const b = (next ?? old)!;
+  const a = eitherSide(old, next);
+  const b = eitherSide(next, old);
   const lines = [`diff --git a/${a.path} b/${b.path}`];
   if (old === null) lines.push(`new file mode ${b.mode}`);
   else if (next === null) lines.push(`deleted file mode ${a.mode}`);

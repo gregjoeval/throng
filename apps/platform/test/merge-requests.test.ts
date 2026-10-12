@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { ServiceError } from "../src/errors.ts";
-import type { ScoringResult } from "../src/results.ts";
+import type { DequeueCause } from "../src/merge-requests.ts";
+import type { Gate, ScoringResult } from "../src/results.ts";
 import type { ScoringOutcome, ScoringParams, ScoringWorkflow } from "../src/scoring.ts";
-import { TaskStore, type AttemptInput, type ProjectContext } from "../src/task-store.ts";
+import { TaskStore } from "../src/task-store.ts";
+import type { AttemptInput, ProjectContext } from "../src/task-store.ts";
 import type { Actor } from "../src/tokens.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { conflictDetails, ERRORED } from "./support/conflicts.ts";
+import { at, defined } from "./support/defined.ts";
 import { testSql } from "./support/task-backend.ts";
 
 const PROJECT: ProjectContext = { id: "abc123", owner: "owner001" };
@@ -25,12 +28,12 @@ class FakeWorkflow implements ScoringWorkflow {
   async create(_options: { id: string; params: ScoringParams }): Promise<unknown> {
     return {};
   }
-  async get(_id: string): Promise<{ terminate(): Promise<void> }> {
+  async get(_id: string): Promise<{ terminate: () => Promise<void> }> {
     return { terminate: async () => {} };
   }
 }
 
-function result(gate: "passed" | "failed" = "passed"): ScoringResult {
+function result(gate: Gate = "passed"): ScoringResult {
   return {
     base: "b".repeat(40),
     config: { kind: "none" },
@@ -42,7 +45,7 @@ function result(gate: "passed" | "failed" = "passed"): ScoringResult {
   };
 }
 
-const done = (gate: "passed" | "failed" = "passed"): ScoringOutcome => ({ status: "done", result: result(gate) });
+const done = (gate: Gate = "passed"): ScoringOutcome => ({ status: "done", result: result(gate) });
 
 /**
  * A task by cat, with attempts by ada and bob. `score` finishes the attempt's latest run, as its
@@ -72,7 +75,7 @@ async function setup() {
   const task = store.createTask(PROJECT, cat, { title: "Fix it" });
   const [a1] = await store.createAttempts(PROJECT, ada, { task: task.number });
   const [a2] = await store.createAttempts(PROJECT, bob, { task: task.number });
-  const refs = [a1!, a2!].map((a) => ({ task: a.task, number: a.number }));
+  const refs = [defined(a1, "attempt 1"), defined(a2, "attempt 2")].map((a) => ({ task: a.task, number: a.number }));
   const [ref1, ref2] = refs as [AttemptInput, AttemptInput];
 
   const author = (ref: AttemptInput) => (ref.number === 1 ? ada : bob);
@@ -80,7 +83,7 @@ async function setup() {
   /** Finishes the attempt's latest run with `outcome`, starting it first. */
   const score = async (ref: AttemptInput, outcome: ScoringOutcome = done()) => {
     await store.scoring.drain();
-    const run = store.scoring.listRuns({ task: ref.task, attempt: ref.number }).at(-1)!;
+    const run = at(store.scoring.listRuns({ task: ref.task, attempt: ref.number }), -1);
     store.scoringFinished(run.id, outcome);
   };
   let n = 0;
@@ -97,7 +100,7 @@ async function setup() {
 async function code(promise: Promise<unknown> | (() => unknown)): Promise<string> {
   const err = await (typeof promise === "function" ? Promise.resolve().then(promise) : promise).then(
     () => null,
-    (e: unknown) => e,
+    (error: unknown) => error,
   );
   expect(err).toBeInstanceOf(ServiceError);
   return (err as ServiceError).code;
@@ -174,8 +177,8 @@ describe("pending → queued", () => {
     await open(ref1);
     await store.selectAttempt(PROJECT, cat, ref1);
     const other = store.createTask(PROJECT, cat, { title: "Other" });
-    const [made] = await store.createAttempts(PROJECT, ada, { task: other.number });
-    const ref = { task: made!.task, number: made!.number };
+    const made = at(await store.createAttempts(PROJECT, ada, { task: other.number }), 0);
+    const ref = { task: made.task, number: made.number };
     await store.openAttempt(PROJECT, ada, ref);
     await score(ref);
     expect(mr().state).toBe("pending");
@@ -198,7 +201,7 @@ describe("selection permissions and requirements", () => {
     await open(ref2);
     await store.selectAttempt(PROJECT, cat, ref1);
     expect(await code(store.selectAttempt(PROJECT, cat, ref1))).toBe("invalidState");
-    expect(store.hasOpenMergeRequest(PROJECT, cat, { task: 1 })).toBe(true);
+    expect(store.hasOpenMergeRequest(PROJECT, cat, { task: 1 })).toBeTruthy();
     expect(await code(store.createAttempts(PROJECT, bob, { task: 1 }))).toBe("invalidState");
     expect(await code(store.reopenAttempt(PROJECT, bob, ref2))).toBe("invalidState");
   });
@@ -206,8 +209,8 @@ describe("selection permissions and requirements", () => {
   it("lets the task creator select their own attempt", async () => {
     const { store } = await setup();
     const task = store.createTask(PROJECT, cat, { title: "Mine" });
-    const [mine] = await store.createAttempts(PROJECT, cat, { task: task.number });
-    const ref = { task: mine!.task, number: mine!.number };
+    const mine = at(await store.createAttempts(PROJECT, cat, { task: task.number }), 0);
+    const ref = { task: mine.task, number: mine.number };
     await store.openAttempt(PROJECT, cat, ref);
     expect(await store.selectAttempt(PROJECT, catAgent, ref)).toMatchObject({ task: 2, attempt: 1, state: "pending" });
   });
@@ -215,8 +218,8 @@ describe("selection permissions and requirements", () => {
   it("merges a single-attempt task through the same call, closing nothing else", async () => {
     const { store } = await setup();
     const task = store.createTask(PROJECT, cat, { title: "Solo" });
-    const [only] = await store.createAttempts(PROJECT, ada, { task: task.number });
-    const ref = { task: only!.task, number: only!.number };
+    const only = at(await store.createAttempts(PROJECT, ada, { task: task.number }), 0);
+    const ref = { task: only.task, number: only.number };
     await store.openAttempt(PROJECT, ada, ref);
     expect((await store.selectAttempt(PROJECT, cat, ref)).state).toBe("pending");
     expect(store.getAttempt(PROJECT, cat, ref).state).toBe("open");
@@ -237,7 +240,7 @@ describe("approve and cancel", () => {
     expect(store.cancelMergeRequest(PROJECT, catAgent, { task: 1 }).state).toBe("cancelled");
   });
 
-  it("approves the source's current head from needs_review, and queues once it passes", async () => {
+  it("approves the source's current head from needsReview, and queues once it passes", async () => {
     const { store, ref1, open, push, score, mr, mrEvents } = await setup();
     await open(ref1);
     await store.selectAttempt(PROJECT, cat, ref1);
@@ -263,27 +266,26 @@ describe("approve and cancel", () => {
     expect(await code(() => store.cancelMergeRequest(PROJECT, cat, { task: 1 }))).toBe("invalidState");
   });
 
-  for (const from of ["pending", "needsReview", "queued", "landing"] as const) {
-    it(`cancels from ${from}`, async () => {
-      const { store, ref1, open, score, push, mr, mrEvents } = await setup();
-      await open(ref1);
-      await store.selectAttempt(PROJECT, cat, ref1);
-      if (from === "needsReview") push(ref1);
-      if (from === "queued" || from === "landing") await score(ref1);
-      if (from === "landing") store.startLanding(PROJECT, null);
-      expect(mr().state).toBe(from);
-      store.cancelMergeRequest(PROJECT, cat, { task: 1 });
-      const inQueue = from === "queued" || from === "landing";
-      expect(mr()).toMatchObject({
-        state: "cancelled",
-        position: null,
-        last_dequeue: inQueue ? { reason: "cancelled" } : null,
-      });
-      expect(mrEvents().slice(-2)).toEqual(inQueue ? ["dequeued", "cancelled"] : [expect.any(String), "cancelled"]);
-      expect(store.getTask(PROJECT, cat, { task: 1 }).state).toBe("open");
-      expect(store.getAttempt(PROJECT, cat, ref1).state).toBe("open");
+  it.each(["pending", "needsReview", "queued", "landing"] as const)("cancels from %s", async (from) => {
+    const { store, ref1, open, score, push, mr, mrEvents } = await setup();
+    await open(ref1);
+    await store.selectAttempt(PROJECT, cat, ref1);
+    if (from === "needsReview") push(ref1);
+    if (from === "queued" || from === "landing") await score(ref1);
+    if (from === "landing") store.startLanding(PROJECT, null);
+    expect(mr().state).toBe(from);
+    store.cancelMergeRequest(PROJECT, cat, { task: 1 });
+    const inQueue = from === "queued" || from === "landing";
+    expect(mr()).toMatchObject({
+      state: "cancelled",
+      position: null,
+      last_dequeue: inQueue ? { reason: "cancelled" } : null,
     });
-  }
+    expect(mrEvents().at(-1)).toBe("cancelled");
+    expect(mrEvents().at(-2) === "dequeued").toBe(inQueue);
+    expect(store.getTask(PROJECT, cat, { task: 1 }).state).toBe("open");
+    expect(store.getAttempt(PROJECT, cat, ref1).state).toBe("open");
+  });
 
   it("lets a task be selected again after a cancel", async () => {
     const { store, ref1, ref2, open, mr } = await setup();
@@ -300,27 +302,26 @@ describe("approve and cancel", () => {
 });
 
 describe("a push to the source attempt", () => {
-  for (const from of ["pending", "queued", "landing"] as const) {
-    it(`moves ${from} to needs_review`, async () => {
-      const { store, ref1, open, score, push, mr, mrEvents } = await setup();
-      await open(ref1);
-      await store.selectAttempt(PROJECT, cat, ref1);
-      if (from !== "pending") await score(ref1);
-      if (from === "landing") store.startLanding(PROJECT, null);
-      expect(mr().state).toBe(from);
-      push(ref1);
-      const inQueue = from !== "pending";
-      const lastDequeue = inQueue ? { reason: "newPush" } : null;
-      expect(mr()).toMatchObject({ state: "needsReview", position: null, last_dequeue: lastDequeue });
-      expect(mrEvents().slice(-2)).toEqual(inQueue ? ["dequeued", "needsReview"] : [expect.any(String), "needsReview"]);
-      expect(store.getAttempt(PROJECT, cat, ref1).merge_request).toEqual({
-        state: "needsReview",
-        last_dequeue: lastDequeue,
-      });
+  it.each(["pending", "queued", "landing"] as const)("moves %s to needsReview", async (from) => {
+    const { store, ref1, open, score, push, mr, mrEvents } = await setup();
+    await open(ref1);
+    await store.selectAttempt(PROJECT, cat, ref1);
+    if (from !== "pending") await score(ref1);
+    if (from === "landing") store.startLanding(PROJECT, null);
+    expect(mr().state).toBe(from);
+    push(ref1);
+    const inQueue = from !== "pending";
+    const lastDequeue = inQueue ? { reason: "newPush" } : null;
+    expect(mr()).toMatchObject({ state: "needsReview", position: null, last_dequeue: lastDequeue });
+    expect(mrEvents().at(-1)).toBe("needsReview");
+    expect(mrEvents().at(-2) === "dequeued").toBe(inQueue);
+    expect(store.getAttempt(PROJECT, cat, ref1).merge_request).toEqual({
+      state: "needsReview",
+      last_dequeue: lastDequeue,
     });
-  }
+  });
 
-  it("keeps needs_review, and never requeues on its own", async () => {
+  it("keeps needsReview, and never requeues on its own", async () => {
     const { store, ref1, open, score, push, mr, mrEvents } = await setup();
     await open(ref1);
     await score(ref1);
@@ -351,24 +352,22 @@ describe("the source attempt ending", () => {
     "closing its task": (store: TaskStore) => store.closeTask(PROJECT, cat, { task: 1 }),
     "making its task obsolete": (store: TaskStore) => store.obsoleteTask(PROJECT, owner, { task: 1 }),
   };
-  for (const [how, end] of Object.entries(ends)) {
-    it(`cancels the merge request: ${how}`, async () => {
-      const { store, ref1, open, score, mr, mrEvents } = await setup();
-      await open(ref1);
-      await score(ref1);
-      await store.selectAttempt(PROJECT, cat, ref1);
-      await end(store, ref1);
-      expect(mr()).toMatchObject({ state: "cancelled", last_dequeue: { reason: "cancelled" } });
-      expect(mrEvents().slice(-2)).toEqual(["dequeued", "cancelled"]);
-    });
-  }
+  it.each(Object.entries(ends))("cancels the merge request: %s", async (how, end) => {
+    const { store, ref1, open, score, mr, mrEvents } = await setup();
+    await open(ref1);
+    await score(ref1);
+    await store.selectAttempt(PROJECT, cat, ref1);
+    await end(store, ref1);
+    expect(mr()).toMatchObject({ state: "cancelled", last_dequeue: { reason: "cancelled" } });
+    expect(mrEvents().slice(-2)).toEqual(["dequeued", "cancelled"]);
+  });
 });
 
 /** Adds a task by cat with one opened, scored attempt by ada, and selects it; returns its number. */
 async function queuedTask(env: Awaited<ReturnType<typeof setup>>, title: string): Promise<number> {
   const task = env.store.createTask(PROJECT, cat, { title });
-  const [made] = await env.store.createAttempts(PROJECT, ada, { task: task.number });
-  const ref = { task: made!.task, number: made!.number };
+  const made = at(await env.store.createAttempts(PROJECT, ada, { task: task.number }), 0);
+  const ref = { task: made.task, number: made.number };
   await env.store.openAttempt(PROJECT, ada, ref);
   await env.score(ref);
   await env.store.selectAttempt(PROJECT, cat, ref);
@@ -407,19 +406,19 @@ describe("the queue", () => {
 });
 
 describe("dequeue", () => {
-  for (const reason of ["conflict", "failedChecks", "errored"] as const) {
-    it(`returns to pending after ${reason}, keeping the approval, and doesn't requeue on its own`, async () => {
+  const causes: Extract<DequeueCause, { details: unknown }>[] = [
+    { reason: "conflict", details: conflictDetails(["README.md"]) },
+    { reason: "failedChecks", details: { checks: [{ name: "test", outcome: "failed", log: "test" }] } },
+    { reason: "errored", details: ERRORED },
+  ];
+  it.each(causes)(
+    "returns to pending after $reason, keeping the approval, and doesn't requeue on its own",
+    async (cause) => {
       const { store, ref1, open, score, mr, mrEvents, base } = await setup();
       await open(ref1);
       await score(ref1);
       await store.selectAttempt(PROJECT, cat, ref1);
       store.startLanding(PROJECT, null);
-      const cause =
-        reason === "conflict"
-          ? { reason, details: conflictDetails(["README.md"]) }
-          : reason === "failedChecks"
-            ? { reason, details: { checks: [{ name: "test", outcome: "failed" as const, log: "test" }] } }
-            : { reason, details: ERRORED };
       store.dequeueMergeRequest(PROJECT, null, { task: 1, ...cause });
       expect(mr()).toMatchObject({
         state: "pending",
@@ -431,8 +430,8 @@ describe("dequeue", () => {
       await score(ref1);
       expect(mr().state).toBe("pending");
       expect(mrEvents().slice(-1)).toEqual(["dequeued"]);
-    });
-  }
+    },
+  );
 
   it("requeues an errored one on approve", async () => {
     const { store, ref1, open, score, mr } = await setup();

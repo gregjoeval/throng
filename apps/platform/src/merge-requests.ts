@@ -8,9 +8,9 @@
 //   conflict, failed_checks or errored in queued or landing ─► pending (held until approved or pushed)
 //   cancel, or the source attempt ending, from any open state ─► cancelled
 
+import { normaliseDequeue } from "./casing.ts";
 import type { ConflictDetails } from "./conflicts.ts";
 import type { ErroredDetails, FailedChecksDetails, LandingOutcome } from "./landing.ts";
-import { normaliseDequeue } from "./casing.ts";
 import type { Sql } from "./task-store.ts";
 import type { Actor } from "./tokens.ts";
 
@@ -59,12 +59,15 @@ export type Dequeue = DequeueCause & { at: string };
 /** The dequeue a landing outcome other than `landed` records. */
 export function dequeueCause(outcome: Exclude<LandingOutcome, { kind: "landed" }>): DequeueCause {
   switch (outcome.kind) {
-    case "conflict":
+    case "conflict": {
       return { reason: "conflict", details: outcome.details };
-    case "failedChecks":
+    }
+    case "failedChecks": {
       return { reason: "failedChecks", details: outcome.details };
-    case "errored":
+    }
+    case "errored": {
       return { reason: "errored", details: outcome.details };
+    }
   }
 }
 

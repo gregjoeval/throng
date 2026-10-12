@@ -7,30 +7,27 @@
 
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import type { AccessBindings } from "./access.ts";
-import { bearerAuth, bearerOrAccess, bearerOrForwarded, type AuthEnv, type AuthOptions } from "./auth.ts";
-import { ProjectPathSchema } from "./api-shared.ts";
+import { json, ProjectPathSchema } from "./api-shared.ts";
+import { bearerAuth, bearerOrAccess, bearerOrForwarded } from "./auth.ts";
+import type { AuthEnv, AuthOptions } from "./auth.ts";
 import { browseRoutes } from "./browse-api.ts";
+import { CONFIG_NAME, MAX_CHECK_TIMEOUT_MS, MAX_CONFIG_BYTES, METRIC_ORDERS, parseConfig } from "./config.ts";
 import { dequeueRoutes } from "./dequeue-api.ts";
-import { CONFIG_NAME, MAX_CHECK_TIMEOUT_MS, MAX_CONFIG_BYTES, parseConfig } from "./config.ts";
+import type { DiffCache } from "./diff.ts";
 import { errorBody, errorResponse, ServiceError } from "./errors.ts";
 import { FORWARDED_EMAIL_HEADER } from "./forwarded.ts";
+import { LOG_CONTENT_TYPE, LOG_RETENTION_DAYS, MAX_LOG_BYTES, missingLog } from "./logs.ts";
+import type { LogStore } from "./logs.ts";
 import { DEQUEUE_REASONS, MERGE_REQUEST_STATES } from "./merge-requests.ts";
-import { LOG_CONTENT_TYPE, LOG_RETENTION_DAYS, MAX_LOG_BYTES, missingLog, type LogStore } from "./logs.ts";
 import { MAX_PROJECT_HANDLE, PROJECT_HANDLE, projectService } from "./projects.ts";
-import type { DiffCache } from "./diff.ts";
 import type { Repos } from "./repos.ts";
-import { CHECK_OUTCOMES } from "./results.ts";
+import { CHECK_OUTCOMES, GATES } from "./results.ts";
 import { ATTEMPT_SCORING_STATUSES, RUN_STATUSES, SCORING_TRIGGERS } from "./scoring.ts";
 import { ATTEMPT_STATES, TASK_STATES } from "./task-store.ts";
-import { taskService, type TaskBackend } from "./tasks.ts";
-import {
-  DEFAULT_TOKEN_TTL_SECONDS,
-  listTokens,
-  MAX_TOKEN_TTL_SECONDS,
-  mintToken,
-  revokeToken,
-  type Token,
-} from "./tokens.ts";
+import { taskService } from "./tasks.ts";
+import type { TaskBackend } from "./tasks.ts";
+import { DEFAULT_TOKEN_TTL_SECONDS, listTokens, MAX_TOKEN_TTL_SECONDS, mintToken, revokeToken } from "./tokens.ts";
+import type { Token } from "./tokens.ts";
 import type { User } from "./users.ts";
 
 const UserSchema = z
@@ -199,7 +196,7 @@ const ScoringResultSchema = z
         z.object({ kind: z.literal("invalid"), error: z.string() }),
       ])
       .openapi({ description: "How the `.throng/config.yml` on `origin/main` it was scored under parsed." }),
-    gate: z.enum(["passed", "failed"]).openapi({ description: "Passed when every required check passed." }),
+    gate: z.enum(GATES).openapi({ description: "Passed when every required check passed." }),
     checks: z.array(
       z
         .object({
@@ -404,13 +401,13 @@ const ConfigSchema = z
             .number()
             .int()
             .max(MAX_CHECK_TIMEOUT_MS)
-            .openapi({ description: "Defaults to 10 minutes.", example: 600000 }),
+            .openapi({ description: "Defaults to 10 minutes.", example: 600_000 }),
           metrics: z.array(
             z.object({
               name: ConfigNameSchema.openapi({ example: "coverage" }),
               unit: z.string().nullable().openapi({ example: "%" }),
               order: z
-                .enum(["asc", "desc"])
+                .enum(METRIC_ORDERS)
                 .openapi({ description: "`asc` when lower is better, `desc` when higher is." }),
             }),
           ),
@@ -477,7 +474,10 @@ function noLogs(): LogStore {
 
 type Bearer = ReturnType<typeof bearerAuth>;
 
-const json = <T>(schema: T) => ({ content: { "application/json": { schema } } });
+const AUTHOR_ONLY = "Only the attempt's author, or their agents, may.";
+const OWNER_ONLY = "Only the project owner may.";
+const TASK_MANAGERS = "Only the project owner or the task's creator may.";
+const RESCORERS = "Only the attempt's author (or their agents), the task's creator or the project owner may.";
 
 /** A task transition route: `POST …/tasks/{t}/<verb>`. */
 function taskTransition<V extends string>(
@@ -615,11 +615,6 @@ function scoringRoute<V extends string>(
     ok: { description: "The run now covering the attempt's head.", schema: ScoringSchema },
   });
 }
-
-const AUTHOR_ONLY = "Only the attempt's author, or their agents, may.";
-const OWNER_ONLY = "Only the project owner may.";
-const TASK_MANAGERS = "Only the project owner or the task's creator may.";
-const RESCORERS = "Only the attempt's author (or their agents), the task's creator or the project owner may.";
 
 /** A token row as the API shows it. */
 function publicToken({ id, agent, expires_at, revoked_at, created_at }: Token): z.infer<typeof TokenSchema> {

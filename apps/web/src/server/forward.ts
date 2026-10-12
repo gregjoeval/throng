@@ -12,7 +12,7 @@ export function isApiRequest(url: URL): boolean {
 
 /** Where forwarded requests go: the `PLATFORM` binding in production, a fake in tests. */
 export interface Platform {
-  fetch(request: Request): Promise<Response>;
+  fetch: (request: Request) => Promise<Response>;
 }
 
 /**

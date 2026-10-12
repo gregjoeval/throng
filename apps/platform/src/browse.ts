@@ -9,8 +9,10 @@
 import { archiveRef } from "./archive.ts";
 import { ServiceError } from "./errors.ts";
 import { resolveProject } from "./projects.ts";
-import { forkRepo, originRepo, type Commit, type Repos, type TreeEntry } from "./repos.ts";
-import { attemptRef, parseAttemptRef, type ProjectContext, type StoredAttempt, type TaskMethod } from "./task-store.ts";
+import { forkRepo, originRepo } from "./repos.ts";
+import type { Commit, Repos, TreeEntry } from "./repos.ts";
+import { attemptRef, parseAttemptRef } from "./task-refs.ts";
+import type { ProjectContext, StoredAttempt, TaskMethod } from "./task-store.ts";
 import type { TaskBackend } from "./tasks.ts";
 import type { Actor } from "./tokens.ts";
 import type { Database } from "./users.ts";
@@ -24,7 +26,11 @@ export const MAX_COMMITS_PAGE = 100;
 /** Head lookups for `/refs` run at most this many at a time. */
 const HEAD_CONCURRENCY = 6;
 
-const SHA = /^[0-9a-f]{40}$/i;
+const TEXT_TYPE = "text/plain; charset=utf-8";
+const BINARY_TYPE = "application/octet-stream";
+
+/** A full commit sha, in either case. Spelled out rather than flagged `i`, which with `u` also folds Unicode. */
+export const SHA = /^[0-9a-fA-F]{40}$/u;
 
 export interface BrowseDeps {
   db: Database;
@@ -302,9 +308,6 @@ function isoSeconds(seconds: number): string {
   return new Date(seconds * 1000).toISOString();
 }
 
-const TEXT_TYPE = "text/plain; charset=utf-8";
-const BINARY_TYPE = "application/octet-stream";
-
 /**
  * Types for extensions a browser can show as they are. Anything else (HTML and scripts included)
  * is served as plain text or octet-stream, so `/raw` never hands a browser a page to run.
@@ -343,9 +346,9 @@ function contentType(name: string): string | null {
 async function missingAsNull<T>(read: Promise<T>): Promise<T | null> {
   try {
     return await read;
-  } catch (err) {
-    if ((err as { code?: unknown }).code === "NOT_FOUND") return null;
-    throw err;
+  } catch (error) {
+    if ((error as { code?: unknown }).code === "NOT_FOUND") return null;
+    throw error;
   }
 }
 

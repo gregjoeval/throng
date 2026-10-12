@@ -8,12 +8,11 @@ import {
   parseShortstat,
   previewPlan,
   scorePlan,
-  withPreview,
   scoreTimeoutMs,
   SETUP_TIMEOUT_MS,
-  type CheckResult,
-  type RawScore,
+  withPreview,
 } from "../src/results.ts";
+import type { CheckResult, RawScore } from "../src/results.ts";
 
 const BASE = "a".repeat(40);
 
@@ -167,7 +166,7 @@ describe("buildResult", () => {
         durationMs: 0,
         metrics: {},
         notes: [],
-        error: expect.stringMatching(/checks\[0\]\.name/),
+        error: expect.stringMatching(/checks\[0\]\.name/u),
       },
     ]);
   });

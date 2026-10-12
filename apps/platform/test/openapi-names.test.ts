@@ -6,7 +6,7 @@ import { testDatabase } from "./support/d1.ts";
 // ADR 0002: every name and value a client sees is camelCase. This walks the whole OpenAPI document
 // (`/api/openapi.json`, which includes the browse and dequeue routes) and lists anything that isn't.
 
-const CAMEL = /^[a-z][a-zA-Z0-9]*$/;
+const CAMEL = /^[a-z][a-zA-Z0-9]*$/u;
 
 /**
  * Names that keep a format someone else defined, matched by where they appear. Header parameters
@@ -15,7 +15,7 @@ const CAMEL = /^[a-z][a-zA-Z0-9]*$/;
  * values in a body or parameter, so the walk doesn't check them.)
  */
 const ALLOWED: { where: RegExp; why: string }[] = [
-  { where: /\/parameters\/\d+\[in=header\]\/name$/, why: "HTTP header names" },
+  { where: /\/parameters\/\d+\[in=header\]\/name$/u, why: "HTTP header names" },
 ];
 
 type Json = Record<string, unknown>;

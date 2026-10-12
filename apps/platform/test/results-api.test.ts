@@ -1,15 +1,15 @@
+import { hc, parseResponse } from "hono/client";
 import { describe, expect, it } from "vitest";
 import type { AccessVerifier } from "../src/access.ts";
-import { hc, parseResponse } from "hono/client";
-import { apiRoutes, type ApiRoutes } from "../src/api.ts";
+import { apiRoutes } from "../src/api.ts";
+import type { ApiRoutes } from "../src/api.ts";
 import type { ScoringResult } from "../src/results.ts";
 import type { ScoringOutcome } from "../src/scoring.ts";
 import type { User } from "../src/users.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
+import type { Json } from "./support/json.ts";
 import { testTaskBackends } from "./support/task-backend.ts";
-
-type Json = Record<string, any>;
 
 /** Access sessions are `as:<email>`. */
 const verify: AccessVerifier = async (token) => (token.startsWith("as:") ? { email: token.slice(3) } : null);
@@ -92,7 +92,7 @@ async function setup() {
   /** Starts queued runs, then reports how run `id` ended. */
   const finish = async (id: number, outcome: ScoringOutcome) => {
     await scoring().drain();
-    expect(scoring().finish(id, outcome)).toBe(true);
+    expect(scoring().finish(id, outcome)).toBeTruthy();
   };
 
   return { api, env, call, greg, ada, bob, base, drafts, commit, push, scoring, finish };

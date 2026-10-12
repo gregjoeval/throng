@@ -1,9 +1,10 @@
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
-import { CLOUDFLARE_API_HOST, interceptedHosts, outboundDecision, type OutboundAccess } from "./network";
+import { CLOUDFLARE_API_HOST, interceptedHosts, outboundDecision } from "./network";
+import type { OutboundAccess } from "./network";
 
-const INACTIVITY_TIMEOUT_MS = 10 * 60 * 1_000;
+const INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000;
 /** How long a script may run when its caller gives no timeout. */
-const COMMAND_TIMEOUT_MS = 5 * 60 * 1_000;
+const COMMAND_TIMEOUT_MS = 5 * 60 * 1000;
 const CA_PATH = "/etc/cloudflare/certs/cloudflare-containers-ca.crt";
 
 // HTTPS interception re-signs traffic with the Containers CA, and exec() does not inherit the
@@ -56,14 +57,18 @@ export class OutboundAuth extends WorkerEntrypoint<Env, OutboundAccess> {
       console.log({ event: "sandbox.cloudflare-api", method: request.method, path: url.pathname, decision });
     }
     switch (decision.action) {
-      case "deny":
+      case "deny": {
         return new Response(`no grant for ${request.method} ${url.host}${url.pathname}\n`, { status: 403 });
-      case "pass":
+      }
+      case "pass": {
         return fetch(request);
-      case "bearer":
+      }
+      case "bearer": {
         return fetch(withBearer(request, decision.token));
-      case "preview-token":
+      }
+      case "preview-token": {
         return fetch(withBearer(request, this.env.CF_PREVIEW_TOKEN));
+      }
     }
   }
 }

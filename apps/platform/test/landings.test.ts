@@ -8,10 +8,12 @@ import { ServiceError } from "../src/errors.ts";
 import type { LandingOutcome, LandingParams, LandingWorkflowBinding } from "../src/landing.ts";
 import type { ScoringResult } from "../src/results.ts";
 import type { ScoringParams, ScoringWorkflow } from "../src/scoring.ts";
-import { TaskStore, type AttemptInput, type ProjectContext } from "../src/task-store.ts";
+import { TaskStore } from "../src/task-store.ts";
+import type { AttemptInput, ProjectContext } from "../src/task-store.ts";
 import type { Actor } from "../src/tokens.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { conflictFile } from "./support/conflicts.ts";
+import { at } from "./support/defined.ts";
 import { testSql } from "./support/task-backend.ts";
 
 const PROJECT: ProjectContext = { id: "abc123", owner: "owner001" };
@@ -31,7 +33,7 @@ class FakeWorkflows<P> {
     this.created.push(options);
     return {};
   }
-  async get(id: string): Promise<{ terminate(): Promise<void> }> {
+  async get(id: string): Promise<{ terminate: () => Promise<void> }> {
     return { terminate: async () => void this.terminated.push(id) };
   }
 }
@@ -70,15 +72,15 @@ async function setup() {
   /** An open attempt by ada on a new task, with its first scoring run queued. */
   const attempt = async (title: string): Promise<AttemptInput> => {
     const task = store.createTask(PROJECT, owner, { title });
-    const [a] = await store.createAttempts(PROJECT, ada, { task: task.number });
-    const ref = { task: a!.task, number: a!.number };
+    const a = at(await store.createAttempts(PROJECT, ada, { task: task.number }), 0);
+    const ref = { task: a.task, number: a.number };
     await store.openAttempt(PROJECT, ada, ref);
     return ref;
   };
   /** Finishes the attempt's latest scoring run with a passing gate; the run must be running. */
   const score = (ref: AttemptInput) => {
-    const run = store.scoring.listRuns({ task: ref.task, attempt: ref.number }).at(-1)!;
-    expect(store.scoringFinished(run.id, { status: "done", result: passed })).toBe(true);
+    const run = at(store.scoring.listRuns({ task: ref.task, attempt: ref.number }), -1);
+    expect(store.scoringFinished(run.id, { status: "done", result: passed })).toBeTruthy();
   };
   /** An attempt whose head passed, selected: its merge request is queued. */
   const queued = async (title: string): Promise<AttemptInput> => {
@@ -89,7 +91,7 @@ async function setup() {
     return ref;
   };
   const runStates = (refs: AttemptInput[]) =>
-    refs.map((r) => store.scoring.listRuns({ task: r.task, attempt: r.number }).at(-1)!.status);
+    refs.map((r) => at(store.scoring.listRuns({ task: r.task, attempt: r.number }), -1).status);
   const mr = (task: number) => store.getMergeRequest(PROJECT, owner, { task });
   let n = 0;
   const push = (ref: AttemptInput, as: Actor = ada) => {
@@ -146,9 +148,9 @@ describe("starting landings", () => {
     expect(mr(t2.task).state).toBe("queued");
     await drain();
     expect(landingWorkflow.created).toHaveLength(1);
-    expect(store.claimLandingPush(1)).toBe(true);
+    expect(store.claimLandingPush(1)).toBeTruthy();
     // A retried claim step claims again.
-    expect(store.claimLandingPush(1)).toBe(true);
+    expect(store.claimLandingPush(1)).toBeTruthy();
   });
 
   it("names each agent alias that pushed to the attempt as a co-author", async () => {
@@ -181,12 +183,12 @@ describe("the Sandbox cap", () => {
     expect(mr(source.task).state).toBe("queued");
     expect(landingWorkflow.created).toHaveLength(0);
 
-    score(others[0]!);
+    score(at(others, 0));
     await drain();
     expect(landingWorkflow.created).toHaveLength(1);
     expect(runStates(others)).toEqual(["done", "running", "running", "queued"]);
 
-    score(others[1]!);
+    score(at(others, 1));
     await drain();
     expect(runStates(others)).toEqual(["done", "done", "running", "running"]);
   });
@@ -198,8 +200,8 @@ describe("after each outcome", () => {
     const t1 = await queued("First");
     const t2 = await queued("Second");
     await drain();
-    expect(store.claimLandingPush(1)).toBe(true);
-    expect(await store.landingFinished(1, landed())).toBe(true);
+    expect(store.claimLandingPush(1)).toBeTruthy();
+    expect(await store.landingFinished(1, landed())).toBeTruthy();
     await drain();
 
     expect(mr(t1.task)).toMatchObject({ state: "merged", merge_sha: "e".repeat(40) });
@@ -246,14 +248,13 @@ describe("after each outcome", () => {
     expect(pushed.mergeRequest?.dequeue).toEqual({ reason: "conflict", files: 2 });
   });
 
-  for (const outcome of [
-    {
-      kind: "failedChecks" as const,
-      details: { checks: [{ name: "test", outcome: "failed" as const, log: "test" }] },
-    },
-    { kind: "errored" as const, details: { error: "land script exited 13", step: "land" } },
-  ]) {
-    it(`dequeues ${outcome.kind}, then starts the next landing`, async () => {
+  const outcomes: Extract<LandingOutcome, { kind: "failedChecks" | "errored" }>[] = [
+    { kind: "failedChecks", details: { checks: [{ name: "test", outcome: "failed", log: "test" }] } },
+    { kind: "errored", details: { error: "land script exited 13", step: "land" } },
+  ];
+  it.each(outcomes.map((outcome) => [outcome.kind, outcome] as const))(
+    "dequeues %s, then starts the next landing",
+    async (_kind, outcome) => {
       const { store, drain, queued, mr, landingWorkflow } = await setup();
       const t1 = await queued("First");
       await queued("Second");
@@ -265,8 +266,8 @@ describe("after each outcome", () => {
         last_dequeue: { reason: outcome.kind, details: outcome.details },
       });
       expect(landingWorkflow.created).toHaveLength(2);
-    });
-  }
+    },
+  );
 
   it("records a report in snake_case, from a Workflow started before ADR 0002, in camelCase", async () => {
     const { store, drain, queued, mr } = await setup();
@@ -311,8 +312,8 @@ describe("a merge request leaving the queue while landing", () => {
     expect(mr(t1.task)).toMatchObject({ state: "needsReview", last_dequeue: { reason: "newPush" } });
     expect(landingWorkflow.terminated).toEqual(["abc123-t1a1-landing-1"]);
     expect(tornDown).toEqual(["abc123-t1a1-landing-1"]);
-    expect(store.claimLandingPush(1)).toBe(false);
-    expect(await store.landingFinished(1, landed())).toBe(false);
+    expect(store.claimLandingPush(1)).toBeFalsy();
+    expect(await store.landingFinished(1, landed())).toBeFalsy();
     expect(mr(t1.task).state).toBe("needsReview");
     expect(mr(t2.task).state).toBe("landing");
   });
@@ -325,24 +326,24 @@ describe("a merge request leaving the queue while landing", () => {
     await drain();
     expect(mr(t1.task).state).toBe("cancelled");
     expect(landingWorkflow.terminated).toEqual(["abc123-t1a1-landing-1"]);
-    expect(await store.landingFinished(1, landed())).toBe(false);
+    expect(await store.landingFinished(1, landed())).toBeFalsy();
   });
 
   it("lets a landing that is pushing to main finish: a push doesn't dequeue it and a cancel is refused", async () => {
     const { store, drain, queued, mr, push, landingWorkflow } = await setup();
     const t1 = await queued("First");
     await drain();
-    expect(store.claimLandingPush(1)).toBe(true);
+    expect(store.claimLandingPush(1)).toBeTruthy();
     push(t1);
     const err = await Promise.resolve()
       .then(() => store.cancelMergeRequest(PROJECT, owner, { task: t1.task }))
-      .catch((e: unknown) => e);
+      .catch((error: unknown) => error);
     expect(err).toBeInstanceOf(ServiceError);
     expect((err as ServiceError).code).toBe("invalidState");
     await drain();
     expect(landingWorkflow.terminated).toEqual([]);
 
-    expect(await store.landingFinished(1, landed())).toBe(true);
+    expect(await store.landingFinished(1, landed())).toBeTruthy();
     expect(mr(t1.task).state).toBe("merged");
   });
 
@@ -354,12 +355,12 @@ describe("a merge request leaving the queue while landing", () => {
     score(ref);
     await store.selectAttempt(PROJECT, owner, ref);
     await drain();
-    expect(store.claimLandingPush(1)).toBe(true);
+    expect(store.claimLandingPush(1)).toBeTruthy();
     // The push went through, but the land step's result was lost and its retries ran out.
     const merge = repos.commit("abc123-main", { files: { "README.md": "merged\n" }, parents: [base.hash, head] });
 
     const errored = { kind: "errored" as const, details: { step: "land", error: "land gave no result" } };
-    expect(await store.landingFinished(1, errored)).toBe(true);
+    expect(await store.landingFinished(1, errored)).toBeTruthy();
     expect(mr(ref.task)).toMatchObject({ state: "merged", merge_sha: merge.hash, last_dequeue: null });
     expect(store.getAttempt(PROJECT, owner, ref).state).toBe("merged");
     expect(store.landings.get(1)?.status).toBe("landed");
@@ -379,7 +380,7 @@ describe("a merge request leaving the queue while landing", () => {
     const { store, drain, queued, repos, mr, journalKinds } = await setup();
     const t1 = await queued("First");
     await drain();
-    expect(store.claimLandingPush(1)).toBe(true);
+    expect(store.claimLandingPush(1)).toBeTruthy();
     // The archive never finishes, as if the Durable Object were reset during it.
     const copyRef = repos.copyRef.bind(repos);
     repos.copyRef = () => new Promise(() => {});
@@ -387,13 +388,13 @@ describe("a merge request leaving the queue while landing", () => {
     await new Promise((r) => setTimeout(r, 0));
     repos.copyRef = copyRef;
 
-    expect(await store.landingFinished(1, landed())).toBe(false);
+    expect(await store.landingFinished(1, landed())).toBeFalsy();
     expect(mr(t1.task).state).toBe("merged");
     expect(store.landings.get(1)?.status).toBe("landed");
     expect(journalKinds().filter((k) => k === "mainAdvanced")).toHaveLength(1);
   });
 
-  it("sends a failed landing whose source moved while pushing to needs_review", async () => {
+  it("sends a failed landing whose source moved while pushing to needsReview", async () => {
     const { store, drain, queued, mr, push } = await setup();
     const t1 = await queued("First");
     await drain();

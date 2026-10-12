@@ -6,7 +6,8 @@ import { Link } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 import { ErrorState, Loading } from "@/components/states";
 import { projectQuery } from "@/lib/api";
-import { buildPath, splitPath, type ProjectLocation } from "@/lib/paths";
+import { buildPath, splitPath } from "@/lib/paths";
+import type { ProjectLocation } from "@/lib/paths";
 import { cn } from "@/lib/utils";
 
 export function ProjectView({ location, children }: { location: ProjectLocation; children: ReactNode }) {
@@ -35,7 +36,9 @@ export function ProjectView({ location, children }: { location: ProjectLocation;
           </Tab>
         </nav>
       </div>
-      {project.isPending ? <Loading /> : project.isError ? <ErrorState error={project.error} /> : children}
+      {project.isPending && <Loading />}
+      {project.isError && <ErrorState error={project.error} />}
+      {project.isSuccess && children}
     </div>
   );
 }

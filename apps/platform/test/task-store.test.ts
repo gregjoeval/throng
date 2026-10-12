@@ -2,21 +2,17 @@ import { describe, expect, it, vi } from "vitest";
 import { archiveRef } from "../src/archive.ts";
 import { CONFIG_PATH, parseConfig } from "../src/config.ts";
 import { ServiceError } from "../src/errors.ts";
+import { parseAttemptRef, parseTaskRef, reservedTask } from "../src/task-refs.ts";
 import {
   attemptLimitFromConfig,
   BRANCH_PUSH_TTL_MS,
   DEFAULT_ATTEMPT_LIMIT,
   MAX_TITLE,
   migrate,
-  parseAttemptRef,
-  parseTaskRef,
-  reservedTask,
   taskFromCommit,
   TaskStore,
-  type AttemptState,
-  type ProjectContext,
-  type StoredAttempt,
 } from "../src/task-store.ts";
+import type { AttemptState, ProjectContext, StoredAttempt } from "../src/task-store.ts";
 import type { Actor } from "../src/tokens.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testSql } from "./support/task-backend.ts";
@@ -51,13 +47,24 @@ function setup() {
 async function failure(promise: Promise<unknown> | (() => unknown)): Promise<ServiceError> {
   const err = await (typeof promise === "function" ? Promise.resolve().then(promise) : promise).then(
     () => null,
-    (e: unknown) => e,
+    (error: unknown) => error,
   );
   expect(err).toBeInstanceOf(ServiceError);
   return err as ServiceError;
 }
 
 const code = async (promise: Promise<unknown> | (() => unknown)) => (await failure(promise)).code;
+
+/** The ServiceError code `fn` fails with, or null when it succeeds. */
+async function errorCode(fn: () => unknown): Promise<string | null> {
+  try {
+    await fn();
+    return null;
+  } catch (error) {
+    if (error instanceof ServiceError) return error.code;
+    throw error;
+  }
+}
 
 /** A task by ada with one attempt by ada, in `state`. */
 async function attemptIn(store: TaskStore, state: AttemptState): Promise<StoredAttempt> {
@@ -318,22 +325,25 @@ describe("attempts", () => {
       obsolete: { restore: "closed" },
     };
 
-    for (const [from, allowed] of Object.entries(valid) as [AttemptState, Partial<Record<Move, AttemptState>>][]) {
-      for (const move of Object.keys(moves) as Move[]) {
-        const to = allowed[move];
-        it(`${from} --${move}--> ${to ?? "invalidState"}`, async () => {
-          const { store } = setup();
-          await attemptIn(store, from);
-          if (to === undefined) {
-            expect(await code(async () => moves[move](store))).toBe("invalidState");
-            expect(store.getAttempt(PROJECT, ada, ref).state).toBe(from);
-          } else {
-            await moves[move](store);
-            expect(store.getAttempt(PROJECT, ada, ref).state).toBe(to);
-          }
-        });
-      }
-    }
+    const pairs = (Object.entries(valid) as [AttemptState, Partial<Record<Move, AttemptState>>][]).flatMap(
+      ([from, allowed]) => (Object.keys(moves) as Move[]).map((move) => ({ from, move, to: allowed[move] })),
+    );
+    const allowedMoves = pairs.flatMap(({ from, move, to }) => (to === undefined ? [] : [{ from, move, to }]));
+    const refusedMoves = pairs.filter(({ to }) => to === undefined);
+
+    it.each(allowedMoves)("$from --$move--> $to", async ({ from, move, to }) => {
+      const { store } = setup();
+      await attemptIn(store, from);
+      expect(await errorCode(async () => moves[move](store))).toBeNull();
+      expect(store.getAttempt(PROJECT, ada, ref).state).toBe(to);
+    });
+
+    it.each(refusedMoves)("$from refuses $move", async ({ from, move }) => {
+      const { store } = setup();
+      await attemptIn(store, from);
+      expect(await errorCode(async () => moves[move](store))).toBe("invalidState");
+      expect(store.getAttempt(PROJECT, ada, ref).state).toBe(from);
+    });
   });
 
   it("journals every transition with the acting user and agent", async () => {
@@ -580,7 +590,7 @@ describe("archive", () => {
     const closed = await store.closeAttempt(PROJECT, ada, t1a1);
     expect(closed).toMatchObject({ state: "closed", archived_sha: null });
     expect(await repos.list("abc123-t")).toEqual(["abc123-t1a1"]);
-    expect(repos.calls.some((c) => c.method === "delete")).toBe(false);
+    expect(repos.calls.some((c) => c.method === "delete")).toBeFalsy();
   });
 
   it("archives every active attempt when the task closes, is made obsolete, or merges", async () => {
@@ -684,7 +694,7 @@ describe("archive", () => {
     const fork = repos.fork.bind(repos);
     let racing: Promise<unknown> | undefined;
     repos.fork = async (source, name) => {
-      racing ??= store.createAttempts(PROJECT, bob, { task: 1 }).catch((e: unknown) => e);
+      racing ??= store.createAttempts(PROJECT, bob, { task: 1 }).catch((error: unknown) => error);
       return fork(source, name);
     };
     expect((await store.reopenAttempt(PROJECT, ada, t1a1)).state).toBe("draft");
@@ -802,7 +812,7 @@ describe("migrate", () => {
         at,
         at,
       ),
-    ).toThrow(/UNIQUE/);
+    ).toThrow(/UNIQUE/u);
   });
 
   it("drops the spike's push inbox tables", () => {
@@ -859,17 +869,17 @@ describe("push-to-create", () => {
 
     // A second push of the branch while the first is in flight is refused, by anyone.
     expect((await failure(store.routeBranchPush(PROJECT, ada, { branch: "search" }))).message).toMatch(
-      /another push of branch search is creating its attempt/,
+      /another push of branch search is creating its attempt/u,
     );
     // Only the pusher may complete or abandon it.
     await store.abandonBranchPush(PROJECT, bob, { task: 1, number: 1 });
-    expect(await exists("abc123-t1a1")).toBe(true);
+    expect(await exists("abc123-t1a1")).toBeTruthy();
     expect(await code(store.completeBranchPush(PROJECT, bob, { task: 1, number: 1, head: "x", updates: [] }))).toBe(
       "invalidState",
     );
 
     await store.abandonBranchPush(PROJECT, ada, { task: 1, number: 1 });
-    expect(await exists("abc123-t1a1")).toBe(false);
+    expect(await exists("abc123-t1a1")).toBeFalsy();
     // Numbers are never reused: the next push takes t2.
     expect(await store.routeBranchPush(PROJECT, ada, { branch: "search" })).toMatchObject({ task: 2, number: 1 });
   });
@@ -905,7 +915,7 @@ describe("push-to-create", () => {
       attempt: done.attempt,
     });
     expect((await failure(store.routeBranchPush(PROJECT, ada, { branch: "t1/bob" }))).message).toMatch(
-      /branch t1\/bob belongs to t1a2, another user's attempt on t1/,
+      /branch t1\/bob belongs to t1a2, another user's attempt on t1/u,
     );
   });
 
@@ -918,7 +928,7 @@ describe("push-to-create", () => {
       "invalidState",
     );
     await store.abandonBranchPush(PROJECT, bob, { task: 1, number: 1 });
-    expect(await exists("abc123-t1a1")).toBe(false);
+    expect(await exists("abc123-t1a1")).toBeFalsy();
     expect(store.listAttempts(PROJECT, bob, { task: 1 })).toEqual([]);
   });
 
@@ -936,8 +946,8 @@ describe("push-to-create", () => {
     await store.routeBranchPush(PROJECT, ada, { branch: "search" });
     advance(BRANCH_PUSH_TTL_MS + 1);
     expect(await store.routeBranchPush(PROJECT, bob, { branch: "search" })).toMatchObject({ task: 2 });
-    expect(await exists("abc123-t1a1")).toBe(false);
-    expect(await exists("abc123-t2a1")).toBe(true);
+    expect(await exists("abc123-t1a1")).toBeFalsy();
+    expect(await exists("abc123-t2a1")).toBeTruthy();
   });
 
   it("keeps a closed attempt from reopening onto a branch a push is creating", async () => {
@@ -953,6 +963,6 @@ describe("push-to-create", () => {
   it("has no open merge requests until merge requests exist (#139)", () => {
     const { store } = clocked();
     store.createTask(PROJECT, ada, { title: "Fix it" });
-    expect(store.hasOpenMergeRequest(PROJECT, ada, { task: 1 })).toBe(false);
+    expect(store.hasOpenMergeRequest(PROJECT, ada, { task: 1 })).toBeFalsy();
   });
 });

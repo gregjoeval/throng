@@ -1,37 +1,29 @@
-import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep, type WorkflowStepConfig } from "cloudflare:workers";
+import { WorkflowEntrypoint } from "cloudflare:workers";
+import type { WorkflowEvent, WorkflowStep, WorkflowStepConfig } from "cloudflare:workers";
 import { parseConfig } from "./config";
-import { conflictFiles, parseMergeTree, type ConflictDetails } from "./conflicts";
+import { conflictFiles, parseMergeTree } from "./conflicts";
+import type { ConflictDetails } from "./conflicts";
 import { LANDING_ROLES, sandboxName } from "./grants";
-import {
-  failedChecks,
-  mergeAuthor,
-  mergeCommitMessage,
-  retestConfig,
-  type LandingOutcome,
-  type LandingParams,
-  type Signer,
-} from "./landing";
+import { failedChecks, mergeAuthor, mergeCommitMessage, retestConfig } from "./landing";
+import type { LandingOutcome, LandingParams, Signer } from "./landing";
 import { landingLogKey, logNames } from "./logs";
-import { buildResult, scorePlan, scoreTimeoutMs, type RawScore } from "./results";
-import {
-  conflictCheckScript,
-  landScript,
-  parseResult,
-  retestScript,
-  type ConflictCheckResult,
-  type LandResult,
-  type MergePlan,
-} from "./scripts";
-import { attemptRef } from "./task-store";
+import { buildResult, scorePlan, scoreTimeoutMs } from "./results";
+import type { RawScore } from "./results";
+import { conflictCheckScript, landScript, parseResult, retestScript } from "./scripts";
+import type { ConflictCheckResult, LandResult, MergePlan } from "./scripts";
+import { attemptRef } from "./task-refs";
 import { runInSandbox, STEP_RETRIES, storeLogs } from "./workflows";
 
-/** A step that kept failing on infrastructure; the landing ends `errored` naming it. */
+/**
+ * A step that kept failing on infrastructure; the landing ends `errored` naming it. Wraps the error
+ * the step threw as its `cause`, and takes its message from it.
+ */
 class StepFailed extends Error {
   constructor(
     readonly step: string,
     cause: unknown,
   ) {
-    super(String(cause).slice(0, 2000));
+    super(String(cause).slice(0, 2000), { cause });
   }
 }
 
@@ -71,8 +63,9 @@ export class LandingWorkflow extends WorkflowEntrypoint<Env, LandingParams> {
     let outcome: LandingOutcome | null;
     try {
       outcome = await this.#land(instanceId, params, step);
-    } catch (cause) {
-      const failed = cause instanceof StepFailed ? cause : new StepFailed("landing", cause);
+    } catch (error) {
+      // A step's failure arrives already wrapped; anything else failed the landing itself.
+      const failed = error instanceof StepFailed ? error : new StepFailed("landing", error);
       outcome = { kind: "errored", details: { step: failed.step, error: failed.message } };
     }
 
@@ -184,15 +177,18 @@ export class LandingWorkflow extends WorkflowEntrypoint<Env, LandingParams> {
       return result;
     });
     switch (landed.kind) {
-      case "landed":
+      case "landed": {
         return { kind: "landed", sha: landed.sha };
-      case "moved":
+      }
+      case "moved": {
         return { kind: "errored", details: { step: "land", error: `main moved from ${merge.main}; the lease failed` } };
-      case "mismatch":
+      }
+      case "mismatch": {
         return {
           kind: "errored",
           details: { step: "land", error: `the merge gave tree ${landed.tree}, not the checked ${merge.tree}` },
         };
+      }
     }
   }
 
@@ -205,8 +201,8 @@ export class LandingWorkflow extends WorkflowEntrypoint<Env, LandingParams> {
   ): Promise<T> {
     try {
       return await step.do(name, config, fn);
-    } catch (cause) {
-      throw new StepFailed(name, cause);
+    } catch (error) {
+      throw new StepFailed(name, error);
     }
   }
 

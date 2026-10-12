@@ -5,7 +5,7 @@
 
 const FLUSH = "0000";
 /** The largest pkt-line git sends: 4 bytes of length and 65516 of payload. */
-const MAX_PKT = 65520;
+const MAX_PKT = 65_520;
 /** A side-band-64k packet carries at most this much data after its band byte. */
 const MAX_BAND_DATA = MAX_PKT - 5;
 /** Commands one push may carry before the proxy gives up on it. */
@@ -13,8 +13,8 @@ export const MAX_COMMANDS = 1000;
 /** Bytes the proxy reads looking for the end of the command list before it gives up. */
 const MAX_COMMAND_BYTES = 1024 * 1024;
 
-const ZERO_ID = /^0+$/;
-const OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+const ZERO_ID = /^0+$/u;
+const OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -178,7 +178,7 @@ export function updatedRefs(response: Uint8Array, sideband: boolean): string[] {
     const report = sideband ? band(response, 1) : response;
     const refs: string[] = [];
     for (const line of pktLines(report)) {
-      const text = decoder.decode(line).replace(/\n$/, "");
+      const text = decoder.decode(line).replace(/\n$/u, "");
       if (text.startsWith("unpack ") && text !== "unpack ok") return [];
       if (text.startsWith("ok ")) refs.push(text.slice(3));
     }
@@ -208,7 +208,7 @@ export function readReport(response: Uint8Array, sideband: boolean): PushReport 
     }
     report = concat(parts);
   }
-  const lines = [...pktLines(report)].map((line) => decoder.decode(line).replace(/\n$/, ""));
+  const lines = [...pktLines(report)].map((line) => decoder.decode(line).replace(/\n$/u, ""));
   return { lines, other };
 }
 
@@ -229,7 +229,7 @@ export function writeReport(report: PushReport, messages: string[], sideband: bo
 /** `report` with every ref it names (`ok`, `ng`, `option refname`) passed through `rename`. */
 export function renameRefs(report: PushReport, rename: (ref: string) => string): PushReport {
   const lines = report.lines.map((line) => {
-    const match = /^(ok |ng |option refname )(\S+)(.*)$/.exec(line);
+    const match = /^(ok |ng |option refname )(\S+)(.*)$/u.exec(line);
     return match === null ? line : `${match[1]}${rename(match[2] ?? "")}${match[3]}`;
   });
   return { ...report, lines };
@@ -258,14 +258,14 @@ function* pktLines(bytes: Uint8Array): Generator<Uint8Array> {
 
 function pktLength(header: Uint8Array): number {
   const text = decoder.decode(header);
-  if (!/^[0-9a-f]{4}$/.test(text)) throw new ProtocolError("malformed pkt-line length");
+  if (!/^[0-9a-f]{4}$/u.test(text)) throw new ProtocolError("malformed pkt-line length");
   const length = parseInt(text, 16);
   if (length > 0 && length < 4) throw new ProtocolError(`unexpected pkt-line ${text}`);
   return length;
 }
 
 function oneLine(text: string): string {
-  return text.replace(/\s+/g, " ").trim();
+  return text.replace(/\s+/gu, " ").trim();
 }
 
 export function concat(parts: Uint8Array[]): Uint8Array {

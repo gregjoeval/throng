@@ -1,8 +1,10 @@
-import { DatabaseSync, type SQLInputValue } from "node:sqlite";
+import { DatabaseSync } from "node:sqlite";
+import type { SQLInputValue } from "node:sqlite";
 import type { LandingRunner } from "../../src/landing.ts";
 import type { Repos } from "../../src/repos.ts";
 import type { ScoringRunner } from "../../src/scoring.ts";
-import { runTaskMethod, TaskStore, type Sql } from "../../src/task-store.ts";
+import { runTaskMethod, TaskStore } from "../../src/task-store.ts";
+import type { Sql } from "../../src/task-store.ts";
 import type { TaskBackend } from "../../src/tasks.ts";
 
 /** `Sql` over in-memory SQLite, standing in for a Durable Object's storage. */
@@ -19,10 +21,10 @@ export function testSql(): Sql & { db: DatabaseSync } {
         const result = fn();
         db.exec(`RELEASE ${savepoint}`);
         return result;
-      } catch (err) {
+      } catch (error) {
         db.exec(`ROLLBACK TO ${savepoint}`);
         db.exec(`RELEASE ${savepoint}`);
-        throw err;
+        throw error;
       } finally {
         depth--;
       }

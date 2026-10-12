@@ -5,7 +5,8 @@
 
 import { Hono } from "hono";
 import type { AccessBindings } from "./access.ts";
-import { apiRoutes, type ApiOptions } from "./api.ts";
+import { apiRoutes } from "./api.ts";
+import type { ApiOptions } from "./api.ts";
 import { rejectForwardedIdentity } from "./auth.ts";
 
 type Options = Omit<ApiOptions, "trustForwardedIdentity">;

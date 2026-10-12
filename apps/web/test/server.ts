@@ -1,5 +1,5 @@
 import type { InferResponseType } from "hono/client";
-import { HttpResponse, http } from "msw";
+import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
 import type { client } from "@/lib/api";
 

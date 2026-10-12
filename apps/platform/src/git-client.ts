@@ -34,7 +34,7 @@ export class GitClientError extends Error {
   override readonly name = "GitClientError";
 }
 
-const OBJECT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+const OBJECT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
 /** At most this many of the target's ref tips are offered to the source as haves. */
 const MAX_HAVES = 256;
 const AGENT = "agent=throng";
@@ -255,7 +255,7 @@ async function post(
 }
 
 async function request(fetcher: typeof fetch, remote: GitRemote, path: string, init: RequestInit): Promise<Response> {
-  const url = `${remote.url.replace(/\/+$/, "")}/${path}`;
+  const url = `${remote.url.replace(/\/+$/u, "")}/${path}`;
   const headers = new Headers(init.headers);
   headers.set("Authorization", `Bearer ${remote.token}`);
   headers.set("User-Agent", "throng");
@@ -295,7 +295,7 @@ class PktReader {
       throw new GitClientError("the response ended inside a pkt-line");
     }
     const header = decoder.decode(this.#bytes.subarray(this.#at, this.#at + 4));
-    if (!/^[0-9a-f]{4}$/.test(header)) throw new GitClientError("malformed pkt-line length");
+    if (!/^[0-9a-f]{4}$/u.test(header)) throw new GitClientError("malformed pkt-line length");
     const length = parseInt(header, 16);
     this.#at += 4;
     if (length === 0) return "flush";

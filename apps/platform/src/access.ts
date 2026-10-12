@@ -2,8 +2,10 @@
 // `Cf-Access-Jwt-Assertion`; the Worker checks it itself rather than trusting the edge.
 
 import { createMiddleware } from "hono/factory";
-import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey } from "jose";
-import { userForEmail, type Database, type User } from "./users.ts";
+import { createRemoteJWKSet, jwtVerify } from "jose";
+import type { JWTVerifyGetKey } from "jose";
+import { userForEmail } from "./users.ts";
+import type { Database, User } from "./users.ts";
 
 /** What the Access middleware needs from the Worker's env. */
 export interface AccessBindings {

@@ -32,24 +32,25 @@ import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { ARCHIVE_REF_PREFIX, archiveRef } from "../src/archive.ts";
 import { originRepo } from "../src/repos.ts";
-import { basicAuthHeader, type Commit, parseCommit } from "./e2e-git.ts";
+import { basicAuthHeader, parseCommit } from "./e2e-git.ts";
+import type { Commit } from "./e2e-git.ts";
 
 const run = promisify(execFile);
 const FIXTURE = new URL("../fixtures/fixture-worker/", import.meta.url).pathname;
 const WRANGLER_CONFIG = new URL("../wrangler.jsonc", import.meta.url).pathname;
-const POLL_MS = 1_000;
+const POLL_MS = 1000;
 /** The fixture's own tests, as a check. */
 const TEST_CHECK = `checks:
   - name: test
     command: npm test
 `;
-const CHECK_TIMEOUT_MS = 10 * 60 * 1_000;
+const CHECK_TIMEOUT_MS = 10 * 60 * 1000;
 
-const baseUrl = requireEnv("THRONG_URL").replace(/\/$/, "");
+const baseUrl = requireEnv("THRONG_URL").replace(/\/$/u, "");
 const e2eSecret = requireEnv("SPIKE_TOKEN");
 const projectPrefix = process.env.E2E_PROJECT_PREFIX || "e2e";
 assert(
-  /^e2e[a-z0-9]*$/.test(projectPrefix),
+  /^e2e[a-z0-9]*$/u.test(projectPrefix),
   `E2E_PROJECT_PREFIX must be lowercase alphanumeric and start with e2e: ${projectPrefix}`,
 );
 
@@ -196,9 +197,9 @@ async function main(): Promise<void> {
       try {
         await scenario();
         console.log(`== ${name}: PASS`);
-      } catch (cause) {
+      } catch (error) {
         failed = true;
-        console.error(`== ${name}: FAIL`, cause);
+        console.error(`== ${name}: FAIL`, error);
       }
     }
   } finally {
@@ -250,10 +251,8 @@ async function zeroconfig(): Promise<void> {
   const sibling = await throng<Attempt>(p, "GET", `/attempts/${a2}`);
   assert(sibling.state === "closed", `selecting ${a1} left ${a2} ${sibling.state}`);
 
-  const merged = await mergeRequestUntil(p, t1, (mr) => mr.state === "merged");
+  const mainSha = await mergedSha(p, t1);
   timeline.mark("t1 merged");
-  const mainSha = merged.mergeSha;
-  assert(mainSha !== null, "a merged merge request has no mergeSha");
   const onMain = await api<{ sha: string }>("GET", `/e2e/repos/${originRepo(p.project)}/head`);
   assert(onMain.sha === mainSha, `main is ${onMain.sha}, expected the merge commit ${mainSha}`);
 
@@ -308,9 +307,8 @@ async function conflict(): Promise<void> {
   timeline.mark("both pushed and opened");
 
   await throng(p, "POST", `/tasks/${t1}/selection`, { attempt: a1 });
-  const landed = await mergeRequestUntil(p, t1, (mr) => mr.state === "merged");
+  const mainSha = await mergedSha(p, t1);
   timeline.mark("t1 merged");
-  const mainSha = landed.mergeSha!;
 
   await throng(p, "POST", `/tasks/${t2}/selection`, { attempt: a2 });
   timeline.mark("t2a1 selected");
@@ -364,7 +362,7 @@ async function conflict(): Promise<void> {
     p,
     a2,
     "src/greeting.js",
-    (s) => s.replace(/<<<<<<<[\s\S]*>>>>>>> [^\n]*\n/, 'export const GREETING = "hello from a1 and a2";\n'),
+    (s) => s.replace(/<<<<<<<[\s\S]*>>>>>>> [^\n]*\n/u, 'export const GREETING = "hello from a1 and a2";\n'),
     "a2: merge main",
   );
   timeline.mark("t2a1 merged main and pushed");
@@ -374,14 +372,14 @@ async function conflict(): Promise<void> {
   const approved = await throng<MergeRequest>(p, "POST", `/tasks/${t2}/merge-request/approve`);
   assert(approved.approvedHead === resolved, `approved ${approved.approvedHead}, expected ${resolved}`);
   timeline.mark("t2 approved");
-  const merged = await mergeRequestUntil(p, t2, (mr) => mr.state === "merged");
+  const newMainSha = await mergedSha(p, t2);
   timeline.mark("t2 merged");
-  const commit = await readCommit(p, merged.mergeSha!);
+  const commit = await readCommit(p, newMainSha);
   assert(
     JSON.stringify(commit.parents) === JSON.stringify([mainSha, resolved]),
     `expected parents [t1's merge, t2a1's head], got ${JSON.stringify(commit.parents)}`,
   );
-  const greeting = await git(p.work, "show", `${merged.mergeSha}:src/greeting.js`);
+  const greeting = await git(p.work, "show", `${newMainSha}:src/greeting.js`);
   assert(greeting.includes("hello from a1 and a2"), "main does not contain the resolution");
 
   const journal = await settle(p.project);
@@ -468,7 +466,7 @@ writeFileSync(process.env.THRONG_METRICS, JSON.stringify({ coverage: 87.5, stray
   const sha = await commitAndPush(work, fork, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
   timeline.mark("attempt pushed");
 
-  const result = (await scored(project, sha)).result!;
+  const result = await scored(project, sha);
   assert(result.gate === "passed", `expected the gate to pass: ${JSON.stringify(result.checks)}`);
   const [test, coverage] = result.checks;
   assert(
@@ -503,7 +501,7 @@ async function failing(): Promise<void> {
   const sha = await commitAndPush(work, fork, "src/greeting.js", (s) => s.replace('"hello"', '"hi"'), "a1: hi");
   timeline.mark("attempt pushed");
 
-  const result = (await scored(project, sha)).result!;
+  const result = await scored(project, sha);
   assert(result.gate === "failed", "expected the gate to fail");
   assert(
     result.checks.map((c) => c.outcome).join() === "failed,passed",
@@ -525,10 +523,10 @@ async function invalid(): Promise<void> {
   const sha = await commitAndPush(work, fork, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
   timeline.mark("attempt pushed");
 
-  const result = (await scored(project, sha)).result!;
+  const result = await scored(project, sha);
   assert(result.config.kind === "invalid" && result.gate === "failed", `expected an invalid config to fail the gate`);
   assert(
-    result.checks.length === 1 && result.checks[0]!.name === "config",
+    result.checks.length === 1 && result.checks[0]?.name === "config",
     `expected one config entry, got ${JSON.stringify(result.checks)}`,
   );
   assert(result.builtin.filesChanged === 1, "the built-in metrics were not recorded");
@@ -551,7 +549,7 @@ async function preview(): Promise<void> {
   const sha = await commitAndPush(work, fork, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
   timeline.mark("attempt pushed");
 
-  const result = (await scored(project, sha)).result!;
+  const result = await scored(project, sha);
   timeline.mark("scored");
   assert(result.gate === "passed", `expected the gate to pass: ${JSON.stringify(result.checks)}`);
   const deployed = result.preview;
@@ -564,13 +562,13 @@ async function preview(): Promise<void> {
 
   // A new Preview's hostname can take a moment to answer.
   const url = `${deployed.url}?name=e2e`;
-  const deadline = Date.now() + 2 * 60 * 1_000;
+  const deadline = Date.now() + 2 * 60 * 1000;
   let last = "";
   while (Date.now() < deadline) {
-    const response = await fetch(url).catch((cause: unknown) => cause);
+    const response = await fetch(url).catch((error: unknown) => error);
     last = response instanceof Response ? `${response.status} ${await response.text()}` : String(response);
     if (last === "200 hello from a1, built, e2e") break;
-    await new Promise((r) => setTimeout(r, 2_000));
+    await new Promise((r) => setTimeout(r, 2000));
   }
   timeline.mark("preview answered");
   assert(last === "200 hello from a1, built, e2e", `the Preview at ${url} answered ${last}`);
@@ -623,7 +621,7 @@ async function intrusion(): Promise<void> {
   const timeline = new Timeline();
   const { project, work } = await setUpProject(timeline, { ".throng/config.yml": TEST_CHECK });
   const origin = (await git(work, "remote", "get-url", "origin")).trim();
-  const accountId = /"CF_ACCOUNT_ID":\s*"(\w+)"/.exec(await readFile(WRANGLER_CONFIG, "utf8"))?.[1];
+  const accountId = /"CF_ACCOUNT_ID":\s*"(\w+)"/u.exec(await readFile(WRANGLER_CONFIG, "utf8"))?.[1];
   assert(accountId !== undefined, "CF_ACCOUNT_ID not found in wrangler.jsonc");
   const fork = await createAttempt(project, "t1a1", timeline);
 
@@ -650,7 +648,7 @@ test("cannot reach the Cloudflare API", async () => {
   const sha = await commitAndPush(work, fork, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
   timeline.mark("attempt pushed");
 
-  const result = (await scored(project, sha)).result!;
+  const result = await scored(project, sha);
   assert(result.gate === "passed", `expected the probes to be blocked and pass, got ${JSON.stringify(result.checks)}`);
   const log = await api<{ message: string }[]>("GET", `/e2e/repos/${originRepo(project)}/log?ref=main&limit=20`);
   assert(!log.some((c) => c.message === "intrusion"), "the forged commit reached main");
@@ -694,7 +692,7 @@ test("the dependency is installed", () => {
   );
   timeline.mark("attempt pushed");
 
-  const result = (await scored(project, sha)).result!;
+  const result = await scored(project, sha);
   assert(
     result.gate === "passed",
     `expected the dependency to install and the tests to pass: ${JSON.stringify(result.checks)}`,
@@ -754,7 +752,7 @@ async function refs(): Promise<void> {
 
   // Archive pushes are internal: neither project queued any scoring.
   for (const project of [a.project, b.project]) {
-    const kinds = new Set((await settle(project, 5_000)).map((e) => e.kind));
+    const kinds = new Set((await settle(project, 5000)).map((e) => e.kind));
     assert(!kinds.has("scoringQueued"), `${project} queued scoring on an archive push`);
   }
   timeline.print();
@@ -831,8 +829,8 @@ function report(timeline: Timeline, journal: JournalEntry[]): void {
   for (const d of cancelled) console.log(`  ${JSON.stringify(d.detail)}`);
 }
 
-/** Waits for `sha`'s run to finish and reads it back; an errored run fails the scenario. */
-async function scored(project: string, sha: string): Promise<Run> {
+/** Waits for `sha`'s run to finish and returns its result; an errored run fails the scenario. */
+async function scored(project: string, sha: string): Promise<NonNullable<Run["result"]>> {
   const event = await waitFor(
     project,
     (e) => (e.kind === "scored" || e.kind === "scoringErrored") && e.detail.sha === sha,
@@ -841,7 +839,7 @@ async function scored(project: string, sha: string): Promise<Run> {
   const { result } = found;
   assert(found.status === "done" && result !== null, `run ${found.id} ended ${found.status}: ${found.error ?? ""}`);
   console.log(`  gate ${result.gate}: ${JSON.stringify(result.checks.map((c) => [c.name, c.outcome]))}`);
-  return found;
+  return result;
 }
 
 /**
@@ -868,7 +866,7 @@ function e2eUser(): Promise<{ token: string; id: string; user: { id: string; han
 async function revokeE2eToken(): Promise<void> {
   if (e2eUserToken === null || process.env.E2E_KEEP === "1") return;
   const { id } = await e2eUserToken;
-  await api("DELETE", `/e2e/tokens/${id}`).catch((cause) => console.warn("could not revoke the run's token", cause));
+  await api("DELETE", `/e2e/tokens/${id}`).catch((error) => console.warn("could not revoke the run's token", error));
 }
 
 /** Creates the task the scenario expects to be `expected` (numbers are per project, from 1). */
@@ -908,9 +906,9 @@ async function editAndPush(
     try {
       await git(p.work, ...proxyAuth(p), "push", "-q", remote, "HEAD:refs/heads/main");
       break;
-    } catch (cause) {
-      if (Date.now() > deadline) throw cause;
-      await new Promise((r) => setTimeout(r, 2_000));
+    } catch (error) {
+      if (Date.now() > deadline) throw error;
+      await new Promise((r) => setTimeout(r, 2000));
     }
   }
   return (await git(p.work, "rev-parse", "HEAD")).trim();
@@ -962,6 +960,13 @@ async function mergeRequestUntil(
     assert(mr.state !== "merged" && mr.state !== "cancelled", `${task}'s merge request ended ${seen}`);
     return null;
   });
+}
+
+/** Waits for the task's merge request to merge, and returns its merge commit. */
+async function mergedSha(p: RealProject, task: string): Promise<string> {
+  const merged = await mergeRequestUntil(p, task, (mr) => mr.state === "merged");
+  assert(merged.mergeSha !== null, "a merged merge request has no mergeSha");
+  return merged.mergeSha;
 }
 
 /**
@@ -1023,7 +1028,7 @@ function proxyAuth(p: RealProject): string[] {
 
 /** Reports a scenario's journal and deletes what it made. */
 async function finish(project: string, work: string, timeline: Timeline): Promise<void> {
-  report(timeline, await settle(project, 5_000));
+  report(timeline, await settle(project, 5000));
   await cleanUp(project, work);
 }
 
@@ -1051,7 +1056,7 @@ async function waitFor(project: string, match: (e: JournalEntry) => boolean): Pr
 /** Deletes everything the project made: its rows, its Durable Object's storage, its logs and its repos. */
 async function cleanUp(project: string, work: string): Promise<void> {
   if (process.env.E2E_KEEP === "1") return;
-  await api("DELETE", `/e2e/projects/${project}`).catch((cause) => console.warn(`could not delete ${project}`, cause));
+  await api("DELETE", `/e2e/projects/${project}`).catch((error) => console.warn(`could not delete ${project}`, error));
   await rm(work, { recursive: true, force: true });
 }
 

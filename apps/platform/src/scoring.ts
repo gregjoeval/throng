@@ -17,7 +17,8 @@
 import { normaliseResult } from "./casing.ts";
 import { forkRepo } from "./repos.ts";
 import type { ScoringResult } from "./results.ts";
-import { attemptRef, type Sql } from "./task-store.ts";
+import { attemptRef } from "./task-refs.ts";
+import type { Sql } from "./task-store.ts";
 import type { Actor } from "./tokens.ts";
 
 /** Most Sandbox-holding runs (scoring runs and the landing) one project may have running at once. */
@@ -58,14 +59,14 @@ export interface AttemptScoring {
 
 /** The part of a Workflow binding the queue uses; tests pass a fake. */
 export interface ScoringWorkflow {
-  create(options: { id: string; params: ScoringParams }): Promise<unknown>;
-  get(id: string): Promise<{ terminate(): Promise<void> }>;
+  create: (options: { id: string; params: ScoringParams }) => Promise<unknown>;
+  get: (id: string) => Promise<{ terminate: () => Promise<void> }>;
 }
 
 export interface ScoringRunner {
   workflow: ScoringWorkflow;
   /** Destroys a run's Sandboxes once its Workflow is stopped. */
-  teardown(instanceId: string): Promise<void>;
+  teardown: (instanceId: string) => Promise<void>;
 }
 
 /** An attempt's head, as scoring names it. */
@@ -428,14 +429,14 @@ export class ScoringQueue {
     };
     try {
       await runner.workflow.create({ id: run.instance_id, params });
-    } catch (cause) {
+    } catch (error) {
       this.#sql.exec(
         "UPDATE scoring_runs SET status = 'errored', error = ?, finished_at = ? WHERE id = ? AND status = 'running'",
-        String(cause),
+        String(error),
         this.#ms(),
         run.id,
       );
-      this.#journal("scoringErrored", run, { error: String(cause) });
+      this.#journal("scoringErrored", run, { error: String(error) });
       return;
     }
     // A newer head may have cancelled the run while its Workflow was being created.
@@ -451,9 +452,9 @@ export class ScoringQueue {
       const instance = await runner.workflow.get(run.instance_id);
       await instance.terminate();
       await runner.teardown(run.instance_id);
-    } catch (cause) {
+    } catch (error) {
       // The run may already have finished; its report is discarded either way.
-      console.warn({ event: "scoring.stop_failed", instance_id: run.instance_id, error: String(cause) });
+      console.warn({ event: "scoring.stop_failed", instance_id: run.instance_id, error: String(error) });
     }
   }
 

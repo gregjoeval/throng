@@ -5,17 +5,17 @@ const grant = { accountId: "acct", workerName: "fixture" };
 
 describe("previewPathAllowed", () => {
   it("allows the previewed Worker and the subdomain lookup", () => {
-    expect(previewPathAllowed("/client/v4/accounts/acct/workers/scripts/fixture", grant)).toBe(true);
-    expect(previewPathAllowed("/client/v4/accounts/acct/workers/workers/fixture/previews", grant)).toBe(true);
-    expect(previewPathAllowed("/client/v4/accounts/acct/workers/subdomain", grant)).toBe(true);
+    expect(previewPathAllowed("/client/v4/accounts/acct/workers/scripts/fixture", grant)).toBeTruthy();
+    expect(previewPathAllowed("/client/v4/accounts/acct/workers/workers/fixture/previews", grant)).toBeTruthy();
+    expect(previewPathAllowed("/client/v4/accounts/acct/workers/subdomain", grant)).toBeTruthy();
   });
 
   it("refuses other Workers, other accounts, and everything else", () => {
-    expect(previewPathAllowed("/client/v4/accounts/acct/workers/scripts/throng", grant)).toBe(false);
-    expect(previewPathAllowed("/client/v4/accounts/acct/workers/scripts/fixture-other", grant)).toBe(false);
-    expect(previewPathAllowed("/client/v4/accounts/other/workers/scripts/fixture", grant)).toBe(false);
-    expect(previewPathAllowed("/client/v4/user/tokens", grant)).toBe(false);
-    expect(previewPathAllowed("/client/v4/accounts/acct/r2/buckets", grant)).toBe(false);
+    expect(previewPathAllowed("/client/v4/accounts/acct/workers/scripts/throng", grant)).toBeFalsy();
+    expect(previewPathAllowed("/client/v4/accounts/acct/workers/scripts/fixture-other", grant)).toBeFalsy();
+    expect(previewPathAllowed("/client/v4/accounts/other/workers/scripts/fixture", grant)).toBeFalsy();
+    expect(previewPathAllowed("/client/v4/user/tokens", grant)).toBeFalsy();
+    expect(previewPathAllowed("/client/v4/accounts/acct/r2/buckets", grant)).toBeFalsy();
   });
 });
 
@@ -29,7 +29,7 @@ describe("previewName", () => {
     const long = { project: "p".repeat(40), attempt: "t42a3" };
     const name = previewName(long, worker);
     expect(`${name}-${worker}`).toHaveLength(63);
-    expect(name).toMatch(/^t42a3-pppp+-[a-z0-9]{8}$/);
+    expect(name).toMatch(/^t42a3-pppp+-[a-z0-9]{8}$/u);
     expect(previewName(long, worker)).toBe(name);
     expect(previewName({ ...long, attempt: "t42a4" }, worker)).not.toBe(name);
     expect(previewName({ project: "p".repeat(40), attempt: "t1a1" }, worker)).not.toBe(

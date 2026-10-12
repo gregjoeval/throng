@@ -8,7 +8,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { archiveRef } from "../src/archive.ts";
 import { copyRef, GitClientError } from "../src/git-client.ts";
 import { forkRepo, originRepo } from "../src/repos.ts";
-import { TaskStore, type ProjectContext } from "../src/task-store.ts";
+import { TaskStore } from "../src/task-store.ts";
+import type { ProjectContext } from "../src/task-store.ts";
 import type { Actor } from "../src/tokens.ts";
 import { git, gitEnv, LocalGitHost, tryGit } from "./support/git-host.ts";
 import { testSql } from "./support/task-backend.ts";
@@ -51,7 +52,7 @@ async function setup() {
   /** Checks a repo has every object `sha` reaches, so a copy left nothing behind. */
   const complete = async (repo: string, sha: string) => {
     const listed = await tryGit(host.path(repo), env, "rev-list", "--objects", "--missing=print", sha);
-    return listed.ok && listed.stdout.includes(sha) && !/^\?/m.test(listed.stdout);
+    return listed.ok && listed.stdout.includes(sha) && !/^\?/mu.test(listed.stdout);
   };
   return { host, env, seed, push, remote, complete };
 }
@@ -73,7 +74,7 @@ describe("copyRef", () => {
     expect(sha).toBe(head);
     expect(await host.head(ORIGIN, "refs/attempts/t1a1")).toBe(head);
     expect(await host.head(ORIGIN)).toBe(base);
-    expect(await complete(ORIGIN, head)).toBe(true);
+    expect(await complete(ORIGIN, head)).toBeTruthy();
   });
 
   it("force-updates a ref to a commit that doesn't descend from it", async () => {
@@ -90,7 +91,7 @@ describe("copyRef", () => {
     });
     expect(sha).toBe(rewound);
     expect(await host.head(ORIGIN, "refs/attempts/t1a1")).toBe(rewound);
-    expect(await complete(ORIGIN, rewound)).toBe(true);
+    expect(await complete(ORIGIN, rewound)).toBeTruthy();
   });
 
   it("returns null for a missing ref, and pushes nothing when the target is already there", async () => {
@@ -146,7 +147,7 @@ describe("copyRef", () => {
       toRef: "refs/attempts/t1a1",
     }).then(
       () => null,
-      (e: unknown) => e,
+      (error: unknown) => error,
     );
     expect(err).toBeInstanceOf(GitClientError);
     expect((err as Error).message).not.toContain(target.token);
@@ -174,7 +175,7 @@ describe("archive through real git", () => {
 
     expect((await store.reopenAttempt(PROJECT, ada, ref)).state).toBe("draft");
     expect(await host.head(FORK)).toBe(head);
-    expect(await complete(FORK, head)).toBe(true);
+    expect(await complete(FORK, head)).toBeTruthy();
     expect(await host.head(ORIGIN)).toBe(advanced);
   });
 });

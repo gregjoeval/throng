@@ -1,11 +1,12 @@
 // The Repos seam: every Artifacts call goes through this interface. Production wraps the binding
 // (`artifacts.ts`); tests use the in-memory fake (`test/fake-repos.ts`).
 
+import { isAttemptRef } from "./task-refs.ts";
+
 /** Artifacts caps repo names at 63 characters. */
 export const MAX_REPO_NAME = 63;
 
-const PROJECT_ID = /^[a-z0-9]+$/;
-const ATTEMPT = /^t[1-9]\d*a[1-9]\d*$/;
+const PROJECT_ID = /^[a-z0-9]+$/u;
 const ORIGIN_SUFFIX = "main";
 
 /** What a repo name says: a project's origin, or the fork of one of its attempts. */
@@ -18,7 +19,7 @@ export function originRepo(project: string): string {
 
 /** An attempt fork's repo, named after the attempt: `<projectId>-t42a3`. */
 export function forkRepo(project: string, attempt: string): string {
-  if (!ATTEMPT.test(attempt)) throw new Error(`not an attempt: ${attempt}`);
+  if (!isAttemptRef(attempt)) throw new Error(`not an attempt: ${attempt}`);
   return repoName(project, attempt);
 }
 
@@ -29,7 +30,7 @@ export function parseRepoName(name: string): RepoName | null {
   const suffix = name.slice(at + 1);
   if (at === -1 || !PROJECT_ID.test(project)) return null;
   if (suffix === ORIGIN_SUFFIX) return { kind: "origin", project };
-  if (ATTEMPT.test(suffix)) return { kind: "fork", project, attempt: suffix };
+  if (isAttemptRef(suffix)) return { kind: "fork", project, attempt: suffix };
   return null;
 }
 
@@ -70,11 +71,14 @@ export interface Commit {
   committedAt: number;
 }
 
+export const TREE_ENTRY_TYPES = ["tree", "blob", "symlink", "gitlink", "exec"] as const;
+export type TreeEntryType = (typeof TREE_ENTRY_TYPES)[number];
+
 export interface TreeEntry {
   name: string;
   mode: string;
   hash: string;
-  type: "tree" | "blob" | "symlink" | "gitlink" | "exec";
+  type: TreeEntryType;
 }
 
 /** One ref copied from one repo to another: see `Repos.copyRef`. */
@@ -95,33 +99,33 @@ export interface CopyRef {
  */
 export interface Repos {
   /** Creates an empty repo and returns it with a write token for its first push. */
-  create(name: string, opts?: { defaultBranch?: string }): Promise<RepoInfo & { token: string }>;
-  get(name: string): Promise<RepoInfo>;
+  create: (name: string, opts?: { defaultBranch?: string }) => Promise<RepoInfo & { token: string }>;
+  get: (name: string) => Promise<RepoInfo>;
   /** Forks `source`'s default branch into `name`. The fork can take a moment before `get` finds it. */
-  fork(source: string, name: string): Promise<void>;
+  fork: (source: string, name: string) => Promise<void>;
   /** Returns whether the repo existed. */
-  delete(name: string): Promise<boolean>;
+  delete: (name: string) => Promise<boolean>;
   /** Names of the namespace's repos that start with `prefix`, sorted. */
-  list(prefix: string): Promise<string[]>;
+  list: (prefix: string) => Promise<string[]>;
   /** A token for the repo's git remote, valid for `ttl` seconds. */
-  mintToken(name: string, scope: TokenScope, ttl: number): Promise<RepoToken>;
+  mintToken: (name: string, scope: TokenScope, ttl: number) => Promise<RepoToken>;
   /** A file's bytes at `ref`, or null if the ref or path doesn't resolve to a file. */
-  readFile(name: string, args: { ref: string; path: string }): Promise<Blob | null>;
+  readFile: (name: string, args: { ref: string; path: string }) => Promise<Blob | null>;
   /**
    * First-parent history from `ref` (a branch, tag or commit sha), newest first, skipping `offset`
    * commits; empty if the ref doesn't resolve.
    */
-  listCommits(name: string, args: { ref: string; limit: number; offset?: number }): Promise<Commit[]>;
+  listCommits: (name: string, args: { ref: string; limit: number; offset?: number }) => Promise<Commit[]>;
   /** A commit by its 40-character lowercase sha, or null if the repo has no such commit. */
-  readCommit(name: string, hash: string): Promise<Commit | null>;
+  readCommit: (name: string, hash: string) => Promise<Commit | null>;
   /** A tree's immediate children by the tree's sha, or null if the repo has no such object. */
-  readTree(name: string, hash: string): Promise<TreeEntry[] | null>;
+  readTree: (name: string, hash: string) => Promise<TreeEntry[] | null>;
   /** A blob's raw bytes by its sha (the `Blob` is untyped), or null if the repo has no such blob. */
-  readBlob(name: string, hash: string): Promise<Blob | null>;
+  readBlob: (name: string, hash: string) => Promise<Blob | null>;
   /**
    * Points `toRef` in `to` at the commit `fromRef` points at in `from`, copying whatever objects
    * `to` lacks, and returns that commit's sha. Null, with nothing changed, when `fromRef` doesn't
    * exist. `toRef` is force-updated, so it may move to a commit that doesn't descend from it.
    */
-  copyRef(args: CopyRef): Promise<string | null>;
+  copyRef: (args: CopyRef) => Promise<string | null>;
 }

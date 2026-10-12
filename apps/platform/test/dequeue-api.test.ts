@@ -11,9 +11,9 @@ import type { LogStore } from "../src/logs.ts";
 import type { ScoringResult } from "../src/results.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
+import { at } from "./support/defined.ts";
+import type { Json } from "./support/json.ts";
 import { testTaskBackends } from "./support/task-backend.ts";
-
-type Json = Record<string, any>;
 
 const verify: AccessVerifier = async (token) => (token.startsWith("as:") ? { email: token.slice(3) } : null);
 const now = () => new Date("2026-10-10T12:00:00.000Z");
@@ -56,6 +56,8 @@ const file = (word: string, gone: string | null) => ({
 });
 
 const workflow = { create: async () => ({}), get: async () => ({ terminate: async () => {} }) };
+
+const JSON_TYPE = { "Content-Type": "application/json" };
 
 /**
  * A project whose task t1 has one attempt, t1a1, selected and landing: main and the attempt both
@@ -105,7 +107,7 @@ async function setup() {
 
   const tasks = store(id);
   await tasks.drain(id);
-  const run = tasks.scoring.listRuns({ task: 1, attempt: 1 }).at(-1)!;
+  const run = at(tasks.scoring.listRuns({ task: 1, attempt: 1 }), -1);
   tasks.scoringFinished(run.id, { status: "done", result: passed });
   expect((await call("POST", `${p}/tasks/t1/selection`, ada, { attempt: "t1a1" })).body["state"]).toBe("queued");
   await tasks.drain(id);
@@ -113,12 +115,10 @@ async function setup() {
 
   /** Ends the landing (the first one) the way its Workflow would report it. */
   const finish = async (outcome: LandingOutcome) => {
-    expect(await tasks.landingFinished(1, outcome)).toBe(true);
+    expect(await tasks.landingFinished(1, outcome)).toBeTruthy();
   };
   return { call, request, logs, finish, greg, ada, bob, id, base, head, main, p };
 }
-
-const JSON_TYPE = { "Content-Type": "application/json" };
 
 /** The details the Landing Workflow reports for the spike's conflict, plus a file deleted on main. */
 function greetingConflict({ base, head, main }: { base: string; head: string; main: string }): ConflictDetails {
@@ -266,7 +266,7 @@ describe("GET …/tasks/{t}/merge-request/dequeue/files/{path}/diff", () => {
       headers: { Accept: "text/x-diff" },
     });
     expect(res.headers.get("Content-Type")).toBe("text/x-diff; charset=utf-8");
-    expect(await res.text()).toMatch(/^diff --git a\/src\/greeting.js b\/src\/greeting.js\n/);
+    expect(await res.text()).toMatch(/^diff --git a\/src\/greeting.js b\/src\/greeting.js\n/u);
   });
 
   it("shows a file deleted on main as deleted", async () => {

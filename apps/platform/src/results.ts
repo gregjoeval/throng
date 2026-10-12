@@ -2,7 +2,8 @@
 // that turn the project's config and the score script's raw output into it. Metrics parsing and the
 // gate live here so they're tested without a container.
 
-import { DEFAULT_CHECK_TIMEOUT_MS, type ConfigResult } from "./config.ts";
+import { DEFAULT_CHECK_TIMEOUT_MS } from "./config.ts";
+import type { ConfigResult } from "./config.ts";
 import type { PreviewScriptResult } from "./scripts.ts";
 
 export const CHECK_OUTCOMES = ["passed", "failed", "timedOut", "skipped"] as const;
@@ -46,12 +47,15 @@ export type PreviewResult =
   | { status: "failed" }
   | { status: "errored"; error: string };
 
+export const GATES = ["passed", "failed"] as const;
+export type Gate = (typeof GATES)[number];
+
 export interface ScoringResult {
   /** `git merge-base <head> origin/main` at scoring time; null when they share no history. */
   base: string | null;
   config: { kind: "none" } | { kind: "valid" } | { kind: "invalid"; error: string };
   /** Passed when every required check passed, including when there are none. */
-  gate: "passed" | "failed";
+  gate: Gate;
   checks: CheckResult[];
   builtin: BuiltinMetrics;
   preview: PreviewResult;
@@ -113,9 +117,9 @@ export function checkOutcome(exit: number | null, durationMs: number, timeoutMs:
 export function parseShortstat(line: string): Omit<BuiltinMetrics, "durationMs"> {
   const count = (pattern: RegExp) => Number(pattern.exec(line)?.[1] ?? 0);
   return {
-    filesChanged: count(/(\d+) files? changed/),
-    additions: count(/(\d+) insertions?\(\+\)/),
-    deletions: count(/(\d+) deletions?\(-\)/),
+    filesChanged: count(/(\d+) files? changed/u),
+    additions: count(/(\d+) insertions?\(\+\)/u),
+    deletions: count(/(\d+) deletions?\(-\)/u),
   };
 }
 
@@ -155,7 +159,7 @@ export function parseMetrics(
 }
 
 /** Passed when every required check passed; no checks at all passes. */
-export function gateFor(checks: CheckResult[]): "passed" | "failed" {
+export function gateFor(checks: CheckResult[]): Gate {
   return checks.every((c) => !c.required || c.outcome === "passed") ? "passed" : "failed";
 }
 

@@ -1,8 +1,8 @@
-import { HeadContent, Outlet, ScriptOnce, Scripts, createRootRoute } from "@tanstack/react-router";
+import { createRootRoute, HeadContent, Outlet, ScriptOnce, Scripts } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 import { AppHeader } from "@/components/app-header";
 import { ErrorState, NotFound } from "@/components/states";
-import { themeScript } from "@/lib/theme";
+import { THEME_SCRIPT } from "@/lib/theme";
 import appCss from "@/styles.css?url";
 
 export const Route = createRootRoute({
@@ -25,7 +25,7 @@ function Shell({ children }: { children: ReactNode }) {
   return (
     <html lang="en" suppressHydrationWarning>
       <head>
-        <ScriptOnce>{themeScript}</ScriptOnce>
+        <ScriptOnce>{THEME_SCRIPT}</ScriptOnce>
         <HeadContent />
       </head>
       <body className="min-h-screen bg-background text-foreground antialiased">

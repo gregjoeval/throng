@@ -1,7 +1,9 @@
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from "jose";
 import { beforeAll, describe, expect, it } from "vitest";
-import { accessVerifier, type AccessVerifier } from "@/server/access";
-import { forwardToPlatform, isApiRequest, type Platform } from "@/server/forward";
+import { accessVerifier } from "@/server/access";
+import type { AccessVerifier } from "@/server/access";
+import { forwardToPlatform, isApiRequest } from "@/server/forward";
+import type { Platform } from "@/server/forward";
 
 const TEAM = "throng.cloudflareaccess.com";
 const AUD = "test-aud";
@@ -54,12 +56,13 @@ describe("forwardToPlatform", () => {
     );
     expect(res.status).toBe(200);
     expect(received).toHaveLength(1);
-    const forwarded = received[0]!;
+    const [forwarded] = received;
+    if (forwarded === undefined) throw new Error("no request was forwarded");
     expect(new URL(forwarded.url).pathname + new URL(forwarded.url).search).toBe("/api/me?x=1");
     expect(forwarded.headers.get("X-Throng-Access-Email")).toBe("ada@example.com");
     expect(forwarded.headers.get("Accept")).toBe("application/json");
     for (const name of ["Authorization", "Cookie", "Cf-Access-Jwt-Assertion"]) {
-      expect(forwarded.headers.has(name)).toBe(false);
+      expect(forwarded.headers.has(name)).toBeFalsy();
     }
   });
 

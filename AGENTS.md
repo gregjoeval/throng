@@ -1,5 +1,7 @@
 # AGENTS.md
 
+Read `CODING_STANDARDS.md` before writing or reviewing code.
+
 ## Agent skills
 
 ### Issue tracker

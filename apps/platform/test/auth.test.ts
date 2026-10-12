@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { describe, expect, it } from "vitest";
-import { basicPassword, bearerAuth, bearerToken, gitAuth, type AuthEnv } from "../src/auth.ts";
+import { basicPassword, bearerAuth, bearerToken, gitAuth } from "../src/auth.ts";
+import type { AuthEnv } from "../src/auth.ts";
 import { mintToken, revokeToken } from "../src/tokens.ts";
 import { userForEmail } from "../src/users.ts";
 import { testDatabase } from "./support/d1.ts";
@@ -41,7 +42,7 @@ describe("bearerAuth", () => {
     for (const header of [undefined, basic("x", plaintext), "Bearer thr_unknown", `Bearer ${plaintext}x`]) {
       const res = await get("/api/x", header);
       expect(res.status).toBe(401);
-      expect(res.headers.get("WWW-Authenticate")).toMatch(/^Bearer/);
+      expect(res.headers.get("WWW-Authenticate")).toMatch(/^Bearer/u);
     }
   });
 
@@ -84,5 +85,11 @@ describe("credential parsing", () => {
     expect(basicPassword(`Basic ${btoa("u:p:q")}`)).toBe("p:q");
     expect(basicPassword(`Basic ${btoa("no-colon")}`)).toBeNull();
     expect(basicPassword("Bearer x")).toBeNull();
+  });
+
+  it("matches the scheme in ASCII only, not by Unicode case folding", () => {
+    // U+017F (long s) case-folds to "s".
+    expect(basicPassword(`Ba\u017Fic ${btoa("u:p")}`)).toBeNull();
+    expect(basicPassword(`BASIC ${btoa("u:p")}`)).toBe("p");
   });
 });

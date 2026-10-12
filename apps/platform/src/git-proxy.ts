@@ -10,8 +10,11 @@
 // `pushToCreate`). See the spec's "Git proxy" and "Push-to-create" sections and
 // `docs/research/git-proxy.md`.
 
-import { Hono, type Context } from "hono";
-import { gitAuth, type AuthEnv, type AuthOptions } from "./auth.ts";
+import { Hono } from "hono";
+import type { Context } from "hono";
+import type { AccessBindings } from "./access.ts";
+import { gitAuth } from "./auth.ts";
+import type { AuthEnv, AuthOptions } from "./auth.ts";
 import { ServiceError } from "./errors.ts";
 import {
   commandList,
@@ -25,35 +28,32 @@ import {
   updatedRefs,
   writeReport,
   zeroId,
-  type PushReport,
-  type PushRequest,
-  type RefUpdate,
 } from "./pkt-line.ts";
+import type { PushReport, PushRequest, RefUpdate } from "./pkt-line.ts";
 import { resolveProject } from "./projects.ts";
-import { forkRepo, originRepo, type Repos, type TokenScope } from "./repos.ts";
-import {
-  attemptRef,
-  parseAttemptRef,
-  taskRef,
-  type AttemptInput,
-  type BranchRoute,
-  type ProjectContext,
-  type PushNotice,
-  type PushRecord,
-  type StoredAttempt,
-  type StoredTask,
-  type TaskMethod,
+import { forkRepo, originRepo } from "./repos.ts";
+import type { Repos, TokenScope } from "./repos.ts";
+import { headAttemptRef } from "./scoring.ts";
+import type { ScoringRequest } from "./scoring.ts";
+import { attemptRef, parseAttemptRef, taskRef } from "./task-refs.ts";
+import type {
+  AttemptInput,
+  BranchRoute,
+  ProjectContext,
+  PushNotice,
+  PushRecord,
+  StoredAttempt,
+  StoredTask,
+  TaskMethod,
 } from "./task-store.ts";
-import { headAttemptRef, type ScoringRequest } from "./scoring.ts";
 import type { TaskBackend } from "./tasks.ts";
-import type { AccessBindings } from "./access.ts";
 
 /** How long a minted Artifacts token lives. */
 export const UPSTREAM_TOKEN_TTL_SECONDS = 60 * 60;
 /** A cached token is replaced once it has less than this left, so no request carries a dying one. */
 export const UPSTREAM_TOKEN_MARGIN_MS = 5 * 60 * 1000;
 
-const REMOTE_PATH = /^\/git\/([^/]+)\/([^/]+?)(?:\/([^/]+?))?\.git\/(info\/refs|git-upload-pack|git-receive-pack)$/;
+const REMOTE_PATH = /^\/git\/([^/]+)\/([^/]+?)(?:\/([^/]+?))?\.git\/(info\/refs|git-upload-pack|git-receive-pack)$/u;
 const SERVICES = ["git-upload-pack", "git-receive-pack"] as const;
 type Service = (typeof SERVICES)[number];
 
@@ -129,9 +129,9 @@ export function gitRoutes(options: GitProxyOptions) {
     try {
       const prefix = pushed === null ? null : { bytes: pushed.consumed, length: contentLength(c) };
       upstream = await forward(c, target, scope, prefix, { repos, tokens, fetch: upstreamFetch });
-    } catch (err) {
-      if ((err as { code?: unknown }).code === "NOT_FOUND") return text(404, `No repository at ${c.req.path}`);
-      throw err;
+    } catch (error) {
+      if ((error as { code?: unknown }).code === "NOT_FOUND") return text(404, `No repository at ${c.req.path}`);
+      throw error;
     }
     if (upstream.status === 401 || upstream.status === 403 || (upstream.status >= 300 && upstream.status < 400)) {
       tokens.forget(target.repo, scope);
@@ -253,8 +253,8 @@ async function pushToCreate(
   const { project } = target;
   const actor = c.var.actor;
   // A fork that can't be made fails here; the store has already freed the branch.
-  const routed = await backend.call("routeBranchPush", [project, actor, { branch }]).catch((err: unknown) => {
-    console.error({ event: "git.push_to_create_failed", branch, error: String(err) });
+  const routed = await backend.call("routeBranchPush", [project, actor, { branch }]).catch((error: unknown) => {
+    console.error({ event: "git.push_to_create_failed", branch, error: String(error) });
     return null;
   });
   if (routed === null) return text(502, `Couldn't make a fork for ${branch}. Try again.`);
@@ -300,8 +300,8 @@ async function pushToCreate(
     let report: PushReport;
     try {
       report = readReport(new Uint8Array(await response.arrayBuffer()), sideband);
-    } catch (err) {
-      if (!(err instanceof ProtocolError)) throw err;
+    } catch (error) {
+      if (!(error instanceof ProtocolError)) throw error;
       report = { lines: ["unpack ok", `ng ${MAIN} the repository host's reply couldn't be read`], other: [] };
     }
     const landed = report.lines.includes("unpack ok") && report.lines.includes(`ok ${MAIN}`);
@@ -343,9 +343,9 @@ async function pushToCreate(
       status: 200,
       headers: { "Content-Type": "application/x-git-receive-pack-result", "Cache-Control": "no-cache" },
     });
-  } catch (err) {
+  } catch (error) {
     await abandon();
-    console.error({ event: "git.push_to_create_failed", repo: fork, branch, error: String(err) });
+    console.error({ event: "git.push_to_create_failed", repo: fork, branch, error: String(error) });
     return text(502, `The push of ${branch} to ${name} failed. Try again.`);
   }
 }
@@ -357,8 +357,8 @@ async function forkReady(repos: Repos, name: string): Promise<void> {
     try {
       await repos.get(name);
       return;
-    } catch (err) {
-      if (Date.now() - began > FORK_READY_TIMEOUT_MS) throw err;
+    } catch (error) {
+      if (Date.now() - began > FORK_READY_TIMEOUT_MS) throw error;
       await new Promise((resolve) => setTimeout(resolve, FORK_READY_POLL_MS));
     }
   }
@@ -366,7 +366,7 @@ async function forkReady(repos: Repos, name: string): Promise<void> {
 
 /** `report` with the fork's `main` turned from `ok` to `ng` for `reason`. */
 function refuse(report: PushReport, reason: string): PushReport {
-  const line = `ng ${MAIN} ${reason.replace(/\s+/g, " ").trim()}`;
+  const line = `ng ${MAIN} ${reason.replace(/\s+/gu, " ").trim()}`;
   return { ...report, lines: report.lines.map((l) => (l === `ok ${MAIN}` ? line : l)) };
 }
 
@@ -444,10 +444,10 @@ async function readCommands(c: GitContext): Promise<PushRequest | Response> {
   const reader = body.getReader();
   try {
     return await readPushRequest(reader);
-  } catch (err) {
-    if (!(err instanceof ProtocolError)) throw err;
+  } catch (error) {
+    if (!(error instanceof ProtocolError)) throw error;
     await reader.cancel().catch(() => {});
-    return text(400, `Push rejected: ${err.message}.`);
+    return text(400, `Push rejected: ${error.message}.`);
   } finally {
     reader.releaseLock();
   }
@@ -526,8 +526,8 @@ function replay(
     if (rest === null) return writer.close();
     writer.releaseLock();
     return rest.pipeTo(writable);
-  })().catch((cause: unknown) => {
-    console.error({ event: "git.replay_failed", error: String(cause) });
+  })().catch((error: unknown) => {
+    console.error({ event: "git.replay_failed", error: String(error) });
   });
   return readable;
 }
@@ -543,7 +543,10 @@ function passThrough(length: number | null): ByteStream {
   return new TransformStream<Uint8Array, Uint8Array>();
 }
 
-type ByteStream = { readable: ReadableStream<Uint8Array>; writable: WritableStream<Uint8Array> };
+interface ByteStream {
+  readable: ReadableStream<Uint8Array>;
+  writable: WritableStream<Uint8Array>;
+}
 
 /** The Workers-only streams, looked up at runtime so the module also loads in Node. */
 interface WorkersStreams {
@@ -576,9 +579,9 @@ async function recordForkPush(
   let report: PushReport;
   try {
     report = readReport(bytes, sideband);
-  } catch (err) {
-    if (!(err instanceof ProtocolError)) throw err;
-    console.error({ event: "git.report_unreadable", repo: target.repo, error: err.message });
+  } catch (error) {
+    if (!(error instanceof ProtocolError)) throw error;
+    console.error({ event: "git.report_unreadable", repo: target.repo, error: error.message });
     return bytes;
   }
   const ok = new Set(updatedRefs(bytes, sideband));
@@ -587,7 +590,7 @@ async function recordForkPush(
 
   const recorded = await backend
     .call("recordPush", [target.project, c.var.actor, { ...attempt, updates }])
-    .catch((cause: unknown) => ({ ok: false, message: String(cause) }) as const);
+    .catch((error: unknown) => ({ ok: false, message: String(error) }) as const);
   if (!recorded.ok) {
     // The push landed either way; only its journal entry and scoring are missing.
     console.error({ event: "git.record_push_failed", repo: target.repo, error: recorded.message });
@@ -660,19 +663,18 @@ export class UpstreamTokens {
   async #mint(repos: Repos, repo: string, scope: TokenScope): Promise<CachedToken> {
     const { remote } = await repos.get(repo);
     const minted = await repos.mintToken(repo, scope, UPSTREAM_TOKEN_TTL_SECONDS);
-    return { remote: remote.replace(/\/+$/, ""), token: minted.token, expiresAt: Date.parse(minted.expiresAt) };
+    return { remote: remote.replace(/\/+$/u, ""), token: minted.token, expiresAt: Date.parse(minted.expiresAt) };
   }
 
   /** Forgets settled tokens past their expiry, so the cache doesn't grow with every repo ever served. */
   #prune(): void {
     const now = this.#now().getTime();
     for (const [key, entry] of this.#cache) {
-      void entry.then(
-        (t) => {
-          if (t.expiresAt <= now && this.#cache.get(key) === entry) this.#cache.delete(key);
-        },
-        () => {},
-      );
+      const forgetIfExpired = async () => {
+        const token = await entry.catch(() => null);
+        if (token !== null && token.expiresAt <= now && this.#cache.get(key) === entry) this.#cache.delete(key);
+      };
+      void forgetIfExpired();
     }
   }
 }

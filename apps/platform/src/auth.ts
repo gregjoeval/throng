@@ -3,10 +3,12 @@
 // Handlers read `c.var.actor` (`{user, agent}`) and `c.var.token` (null under an Access session).
 
 import { createMiddleware } from "hono/factory";
-import { verifierFromEnv, type AccessBindings, type AccessVerifier } from "./access.ts";
+import { verifierFromEnv } from "./access.ts";
+import type { AccessBindings, AccessVerifier } from "./access.ts";
 import { errorBody } from "./errors.ts";
 import { FORWARDED_EMAIL_HEADER } from "./forwarded.ts";
-import { authenticateToken, type Actor, type Token } from "./tokens.ts";
+import { authenticateToken } from "./tokens.ts";
+import type { Actor, Token } from "./tokens.ts";
 import { userForEmail } from "./users.ts";
 
 export interface AuthEnv {
@@ -29,15 +31,18 @@ export interface AuthOptions {
 const BEARER_CHALLENGE = { "WWW-Authenticate": 'Bearer realm="throng"' };
 const BASIC_CHALLENGE = { "WWW-Authenticate": 'Basic realm="throng"' };
 
-/** The token in an `Authorization: Bearer <token>` header, or null. */
+/**
+ * The token in an `Authorization: Bearer <token>` header, or null. The scheme is case-insensitive,
+ * spelled out rather than flagged `i`: with `u`, `i` also folds Unicode, so `Baſic` would match `Basic`.
+ */
 export function bearerToken(header: string | undefined): string | null {
-  const match = /^Bearer[ ]+(\S+)[ ]*$/i.exec(header ?? "");
+  const match = /^[Bb][Ee][Aa][Rr][Ee][Rr][ ]+(\S+)[ ]*$/u.exec(header ?? "");
   return match?.[1] ?? null;
 }
 
 /** The password in an `Authorization: Basic <base64(user:password)>` header, or null. */
 export function basicPassword(header: string | undefined): string | null {
-  const match = /^Basic[ ]+([A-Za-z0-9+/=]+)[ ]*$/i.exec(header ?? "");
+  const match = /^[Bb][Aa][Ss][Ii][Cc][ ]+([A-Za-z0-9+/=]+)[ ]*$/u.exec(header ?? "");
   if (match?.[1] === undefined) return null;
   let decoded: string;
   try {

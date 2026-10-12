@@ -5,16 +5,27 @@
 
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import type { AccessBindings } from "./access.ts";
+import {
+  diffContent,
+  diffResponse,
+  FileDiffSchema,
+  json,
+  ProjectPathSchema,
+  TAIL,
+  tailedRoutes,
+} from "./api-shared.ts";
 import type { AuthEnv, bearerOrForwarded } from "./auth.ts";
-import { diffContent, diffResponse, FileDiffSchema, ProjectPathSchema, TAIL, tailedRoutes } from "./api-shared.ts";
 import { CONFLICT_CAPS, CONFLICT_TYPES } from "./conflicts.ts";
-import { diffFile, type FileSide } from "./diff.ts";
+import { diffFile } from "./diff.ts";
+import type { FileSide } from "./diff.ts";
 import { errorBody, errorResponse, ServiceError } from "./errors.ts";
-import { CHECK_OUTCOMES } from "./results.ts";
+import { LOG_CONTENT_TYPE } from "./logs.ts";
+import type { LogStore } from "./logs.ts";
 import { DEQUEUE_REASONS } from "./merge-requests.ts";
-import { LOG_CONTENT_TYPE, type LogStore } from "./logs.ts";
 import type { Repos } from "./repos.ts";
-import { taskService, type TaskBackend } from "./tasks.ts";
+import { CHECK_OUTCOMES } from "./results.ts";
+import { taskService } from "./tasks.ts";
+import type { TaskBackend } from "./tasks.ts";
 
 export interface DequeueOptions {
   auth: ReturnType<typeof bearerOrForwarded>;
@@ -112,7 +123,6 @@ const DequeueSchema = z
 const SIDES = ["main", "attempt"] as const;
 
 const security: Record<string, string[]>[] = [{ bearer: [] }, { web: [] }];
-const json = <T>(schema: T) => ({ content: { "application/json": { schema } } });
 const errors = {
   400: errorResponse("The task reference or the query is invalid."),
   401: errorResponse("No valid bearer token."),

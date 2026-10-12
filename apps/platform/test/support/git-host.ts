@@ -5,7 +5,8 @@
 
 import { execFile, spawn } from "node:child_process";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
-import { createServer, type IncomingMessage, type Server } from "node:http";
+import { createServer } from "node:http";
+import type { IncomingMessage, Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -50,8 +51,8 @@ export async function tryGit(
   try {
     const { stdout, stderr } = await exec(GIT, args, { cwd, env, maxBuffer: 16 * 1024 * 1024 });
     return { ok: true, stdout, stderr };
-  } catch (err) {
-    const { stdout = "", stderr = "" } = err as { stdout?: string; stderr?: string };
+  } catch (error) {
+    const { stdout = "", stderr = "" } = error as { stdout?: string; stderr?: string };
     return { ok: false, stdout, stderr };
   }
 }
@@ -60,6 +61,12 @@ interface Minted {
   repo: string;
   scope: TokenScope;
   expiresAt: number;
+}
+
+interface HostResponse {
+  status: number;
+  headers: Record<string, string>;
+  body: Buffer;
 }
 
 export class LocalGitHost implements Repos {
@@ -83,16 +90,20 @@ export class LocalGitHost implements Repos {
     const root = await mkdtemp(join(tmpdir(), "throng-git-host-"));
     let host: LocalGitHost | undefined;
     const server = createServer((req, res) => {
-      void host!.#handle(req).then(
-        ({ status, headers, body }) => {
-          res.writeHead(status, headers);
-          res.end(body);
-        },
-        (err: unknown) => {
+      const respond = async () => {
+        if (host === undefined) throw new Error("a request arrived before the git host started");
+        let response: HostResponse;
+        try {
+          response = await host.#handle(req);
+        } catch (error: unknown) {
           res.writeHead(500, { "Content-Type": "text/plain" });
-          res.end(String(err));
-        },
-      );
+          res.end(String(error));
+          return;
+        }
+        res.writeHead(response.status, response.headers);
+        res.end(response.body);
+      };
+      void respond();
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     host = new LocalGitHost(root, server);
@@ -199,7 +210,7 @@ export class LocalGitHost implements Repos {
     if (!found.ok) return [];
     return found.stdout
       .split("\x1e")
-      .map((entry) => entry.replace(/^\n/, ""))
+      .map((entry) => entry.replace(/^\n/u, ""))
       .filter((entry) => entry !== "")
       .map((entry) => {
         const [
@@ -255,13 +266,13 @@ export class LocalGitHost implements Repos {
   }
 
   /** Checks the bearer as Artifacts would, then runs `git http-backend` as a CGI. */
-  async #handle(req: IncomingMessage): Promise<{ status: number; headers: Record<string, string>; body: Buffer }> {
+  async #handle(req: IncomingMessage): Promise<HostResponse> {
     const url = new URL(req.url ?? "/", this.origin);
-    const bearer = /^Bearer (\S+)$/.exec(req.headers.authorization ?? "")?.[1] ?? null;
+    const bearer = /^Bearer (\S+)$/u.exec(req.headers.authorization ?? "")?.[1] ?? null;
     this.requests.push({ method: req.method ?? "GET", path: url.pathname + url.search, bearer });
     const body = await readAll(req);
 
-    const repo = /^\/([^/]+)\.git\//.exec(url.pathname)?.[1];
+    const repo = /^\/([^/]+)\.git\//u.exec(url.pathname)?.[1];
     const write = url.pathname.endsWith("/git-receive-pack") || url.searchParams.get("service") === "git-receive-pack";
     const minted = bearer === null ? undefined : this.#tokens.get(bearer);
     if (
@@ -348,8 +359,8 @@ export async function serve(
       }
       recorded.body = Buffer.concat(chunks);
       res.end();
-    })().catch((err: unknown) => {
-      res.destroy(err as Error);
+    })().catch((error: unknown) => {
+      res.destroy(error as Error);
     });
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));

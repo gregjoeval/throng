@@ -11,7 +11,7 @@ export interface Commit {
   trailers: Record<string, string[]>;
 }
 
-const TRAILER = /^([A-Za-z][A-Za-z0-9-]*): (.+)$/;
+const TRAILER = /^([A-Za-z][A-Za-z0-9-]*): (.+)$/u;
 
 /** Parses `git cat-file -p <commit>`. Trailers are read from the message's last paragraph. */
 export function parseCommit(raw: string): Commit {
@@ -24,9 +24,9 @@ export function parseCommit(raw: string): Commit {
     const [key, value] = [line.slice(0, space), line.slice(space + 1)];
     if (key === "tree") commit.tree = value;
     else if (key === "parent") commit.parents.push(value);
-    else if (key === "author" || key === "committer") commit[key] = value.replace(/ \d+ [+-]\d{4}$/, "");
+    else if (key === "author" || key === "committer") commit[key] = value.replace(/ \d+ [+-]\d{4}$/u, "");
   }
-  const paragraphs = message.split(/\n{2,}/);
+  const paragraphs = message.split(/\n{2,}/u);
   commit.subject = paragraphs[0]?.split("\n")[0] ?? "";
   const last = paragraphs.length > 1 ? (paragraphs.at(-1) ?? "").split("\n") : [];
   if (last.length > 0 && last.every((line) => TRAILER.test(line))) {

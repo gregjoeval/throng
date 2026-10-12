@@ -1,16 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { ServiceError } from "../src/errors.ts";
 import type { CheckResult, ScoringResult } from "../src/results.ts";
-import {
-  SCORING_CAP,
-  type ScoringOutcome,
-  type ScoringParams,
-  type ScoringRequest,
-  type ScoringWorkflow,
-} from "../src/scoring.ts";
-import { TaskStore, type AttemptInput, type ProjectContext } from "../src/task-store.ts";
+import { SCORING_CAP } from "../src/scoring.ts";
+import type { ScoringOutcome, ScoringParams, ScoringRequest, ScoringWorkflow } from "../src/scoring.ts";
+import { TaskStore } from "../src/task-store.ts";
+import type { AttemptInput, ProjectContext } from "../src/task-store.ts";
 import type { Actor } from "../src/tokens.ts";
 import { FakeRepos } from "./fake-repos.ts";
+import { at, defined } from "./support/defined.ts";
 import { testSql } from "./support/task-backend.ts";
 
 const PROJECT: ProjectContext = { id: "abc123", owner: "owner001" };
@@ -41,7 +38,7 @@ class FakeWorkflow implements ScoringWorkflow {
     return {};
   }
 
-  async get(id: string): Promise<{ terminate(): Promise<void> }> {
+  async get(id: string): Promise<{ terminate: () => Promise<void> }> {
     return { terminate: async () => void this.terminated.push(id) };
   }
 }
@@ -80,16 +77,19 @@ function setup() {
     return made.map((a) => ({ task: a.task, number: a.number }));
   };
 
-  return { repos, base, store, workflow, tornDown, journal, runs, commit, pushed, drafts };
+  /** A task by ada with one draft attempt by ada. */
+  const draft = async (): Promise<AttemptInput> => at(await drafts(), 0);
+
+  return { repos, base, store, workflow, tornDown, journal, runs, commit, pushed, drafts, draft };
 }
 
 async function code(promise: Promise<unknown>): Promise<string> {
-  const err = await promise.then(
+  const rejection = await promise.then(
     () => null,
-    (e: unknown) => e,
+    (error: unknown) => error,
   );
-  expect(err).toBeInstanceOf(ServiceError);
-  return (err as ServiceError).code;
+  expect(rejection).toBeInstanceOf(ServiceError);
+  return (rejection as ServiceError).code;
 }
 
 function result(overrides: Partial<ScoringResult> = {}): ScoringResult {
@@ -112,21 +112,21 @@ const done = (overrides: Partial<ScoringResult> = {}): ScoringOutcome => ({
 const errored = (): ScoringOutcome => ({ status: "errored", error: "sandbox lost" });
 
 function queued(request: ScoringRequest | null): ScoringRequest & { queued: true } {
-  expect(request?.queued).toBe(true);
+  expect(request?.queued).toBeTruthy();
   return request as ScoringRequest & { queued: true };
 }
 
 describe("scoring triggers", () => {
   it("scores the head when an attempt is opened", async () => {
-    const { store, workflow, runs, base, drafts } = setup();
-    const [ref] = await drafts();
-    await store.openAttempt(PROJECT, adaAgent, ref!);
+    const { store, workflow, runs, base, draft } = setup();
+    const ref = await draft();
+    await store.openAttempt(PROJECT, adaAgent, ref);
 
-    expect(runs(ref!)).toMatchObject([
+    expect(runs(ref)).toMatchObject([
       { sha: base.hash, trigger: "open", status: "queued", user_id: ada.user.id, agent: "claude" },
     ]);
     await store.scoring.drain();
-    expect(runs(ref!)).toMatchObject([{ status: "running" }]);
+    expect(runs(ref)).toMatchObject([{ status: "running" }]);
     expect(workflow.created).toEqual([
       {
         id: `abc123-t1a1-${base.hash.slice(0, 12)}-1`,
@@ -136,64 +136,64 @@ describe("scoring triggers", () => {
   });
 
   it("scores a push while open, but not a push to a draft", async () => {
-    const { runs, commit, pushed, drafts, store } = setup();
-    const [ref] = await drafts();
-    const draftHead = commit(ref!, "draft work\n");
-    expect(pushed(ref!, draftHead)).toBeNull();
-    expect(runs(ref!)).toEqual([]);
+    const { runs, commit, pushed, draft, store } = setup();
+    const ref = await draft();
+    const draftHead = commit(ref, "draft work\n");
+    expect(pushed(ref, draftHead)).toBeNull();
+    expect(runs(ref)).toEqual([]);
 
-    await store.openAttempt(PROJECT, ada, ref!);
-    const openHead = commit(ref!, "open work\n");
-    const request = queued(pushed(ref!, openHead));
+    await store.openAttempt(PROJECT, ada, ref);
+    const openHead = commit(ref, "open work\n");
+    const request = queued(pushed(ref, openHead));
     expect(request.run).toMatchObject({ sha: openHead, trigger: "push" });
-    expect(runs(ref!).map((r) => [r.sha, r.trigger, r.status])).toEqual([
+    expect(runs(ref).map((r) => [r.sha, r.trigger, r.status])).toEqual([
       [draftHead, "open", "cancelled"],
       [openHead, "push", "queued"],
     ]);
   });
 
   it("ignores pushes that don't move the fork's main", async () => {
-    const { store, runs, commit, drafts } = setup();
-    const [ref] = await drafts();
-    await store.openAttempt(PROJECT, ada, ref!);
-    const before = runs(ref!).length;
-    const other = commit(ref!, "elsewhere\n");
+    const { store, runs, commit, draft } = setup();
+    const ref = await draft();
+    await store.openAttempt(PROJECT, ada, ref);
+    const before = runs(ref).length;
+    const other = commit(ref, "elsewhere\n");
     const zero = "0".repeat(40);
     store.recordPush(PROJECT, ada, {
-      ...ref!,
+      ...ref,
       updates: [
         { ref: "refs/heads/wip", before: zero, after: other },
         { ref: "refs/heads/main", before: other, after: zero },
       ],
     });
-    expect(runs(ref!)).toHaveLength(before);
+    expect(runs(ref)).toHaveLength(before);
   });
 
   it("scores now on the author's request, for drafts only", async () => {
-    const { store, runs, base, drafts } = setup();
-    const [ref] = await drafts();
-    expect(await code(store.scoreNow(PROJECT, bob, ref!))).toBe("forbidden");
+    const { store, runs, base, draft } = setup();
+    const ref = await draft();
+    expect(await code(store.scoreNow(PROJECT, bob, ref))).toBe("forbidden");
 
-    const request = queued(await store.scoreNow(PROJECT, adaAgent, ref!));
+    const request = queued(await store.scoreNow(PROJECT, adaAgent, ref));
     expect(request.run).toMatchObject({ sha: base.hash, trigger: "scoreNow", agent: "claude" });
 
-    await store.openAttempt(PROJECT, ada, ref!);
-    expect(await code(store.scoreNow(PROJECT, ada, ref!))).toBe("invalidState");
-    expect(runs(ref!)).toHaveLength(1);
+    await store.openAttempt(PROJECT, ada, ref);
+    expect(await code(store.scoreNow(PROJECT, ada, ref))).toBe("invalidState");
+    expect(runs(ref)).toHaveLength(1);
   });
 
   it("rescores for the author, the task creator or the project owner, on open attempts only", async () => {
     const { store, runs } = setup();
     const task = store.createTask(PROJECT, cat, { title: "Cat's task" });
-    const [made] = await store.createAttempts(PROJECT, ada, { task: task.number });
-    const ref = { task: made!.task, number: made!.number };
+    const made = at(await store.createAttempts(PROJECT, ada, { task: task.number }), 0);
+    const ref = { task: made.task, number: made.number };
     expect(await code(store.rescore(PROJECT, ada, ref))).toBe("invalidState");
 
     await store.openAttempt(PROJECT, ada, ref);
     expect(await code(store.rescore(PROJECT, bob, ref))).toBe("forbidden");
     for (const who of [ada, cat, owner]) {
       await store.scoring.drain();
-      store.scoring.finish(runs(ref).at(-1)!.id, done());
+      store.scoring.finish(at(runs(ref), -1).id, done());
       const request = queued(await store.rescore(PROJECT, who, ref));
       expect(request.run).toMatchObject({ trigger: "rescore", user_id: who.user.id });
     }
@@ -205,8 +205,8 @@ describe("scoring triggers", () => {
     void repos.create(ORIGIN);
     const store = new TaskStore({ sql: testSql(), repos });
     const task = store.createTask(PROJECT, ada, { title: "Empty" });
-    const [made] = await store.createAttempts(PROJECT, ada, { task: task.number });
-    const ref = { task: made!.task, number: made!.number };
+    const made = at(await store.createAttempts(PROJECT, ada, { task: task.number }), 0);
+    const ref = { task: made.task, number: made.number };
     expect(await code(store.scoreNow(PROJECT, ada, ref))).toBe("invalidState");
     expect((await store.openAttempt(PROJECT, ada, ref)).state).toBe("open");
     expect(store.scoring.listRuns({ task: ref.task, attempt: ref.number })).toEqual([]);
@@ -215,26 +215,26 @@ describe("scoring triggers", () => {
 
 describe("the scoring queue", () => {
   it("journals every push, force-pushes back to an earlier commit included, and scores each head once", async () => {
-    const { store, runs, commit, pushed, drafts, journal } = setup();
-    const [ref] = await drafts();
-    await store.openAttempt(PROJECT, ada, ref!);
+    const { store, runs, commit, pushed, draft, journal } = setup();
+    const ref = await draft();
+    await store.openAttempt(PROJECT, ada, ref);
     await store.scoring.drain();
-    const a = commit(ref!, "a\n");
-    const b = commit(ref!, "b\n");
-    queued(pushed(ref!, a));
-    expect(pushed(ref!, a)).toMatchObject({ queued: false, reason: "already queued" });
+    const a = commit(ref, "a\n");
+    const b = commit(ref, "b\n");
+    queued(pushed(ref, a));
+    expect(pushed(ref, a)).toMatchObject({ queued: false, reason: "already queued" });
     await store.scoring.drain();
-    store.scoring.finish(runs(ref!).at(-1)!.id, done());
+    store.scoring.finish(at(runs(ref), -1).id, done());
 
-    queued(pushed(ref!, b));
+    queued(pushed(ref, b));
     // Back to a, which already has a finished run: b's run is superseded and a isn't scored again.
-    expect(pushed(ref!, a)).toMatchObject({ queued: false, reason: "already scored" });
+    expect(pushed(ref, a)).toMatchObject({ queued: false, reason: "already scored" });
     expect(
       journal()
         .filter((e) => e.kind === "pushed")
         .map((e) => e.after),
     ).toEqual([a, a, b, a]);
-    expect(runs(ref!).map((r) => [r.sha, r.status])).toEqual([
+    expect(runs(ref).map((r) => [r.sha, r.status])).toEqual([
       [expect.any(String), "cancelled"],
       [a, "done"],
       [b, "cancelled"],
@@ -246,7 +246,7 @@ describe("the scoring queue", () => {
     const refs = await drafts(SCORING_CAP + 1);
     for (const ref of refs) await store.openAttempt(PROJECT, ada, ref);
     await store.scoring.drain();
-    const waiting = refs.at(-1)!;
+    const waiting = at(refs, -1);
     expect(runs(waiting)).toMatchObject([{ status: "queued" }]);
 
     const first = commit(waiting, "one\n");
@@ -254,30 +254,30 @@ describe("the scoring queue", () => {
     pushed(waiting, first);
     pushed(waiting, second);
     expect(runs(waiting).map((r) => r.status)).toEqual(["cancelled", "cancelled", "queued"]);
-    expect(runs(waiting).at(-1)!.sha).toBe(second);
+    expect(at(runs(waiting), -1).sha).toBe(second);
   });
 
   it("cancels a running run, its Workflow and its Sandboxes, when a newer head arrives", async () => {
-    const { store, workflow, tornDown, runs, commit, pushed, drafts, journal } = setup();
-    const [ref] = await drafts();
-    await store.openAttempt(PROJECT, ada, ref!);
+    const { store, workflow, tornDown, runs, commit, pushed, draft, journal } = setup();
+    const ref = await draft();
+    await store.openAttempt(PROJECT, ada, ref);
     await store.scoring.drain();
-    const [running] = runs(ref!);
+    const running = at(runs(ref), 0);
 
-    const head = commit(ref!, "newer\n");
-    pushed(ref!, head);
+    const head = commit(ref, "newer\n");
+    pushed(ref, head);
     await store.scoring.drain();
-    expect(workflow.terminated).toEqual([running!.instance_id]);
-    expect(tornDown).toEqual([running!.instance_id]);
-    expect(runs(ref!).map((r) => [r.sha, r.status])).toEqual([
-      [running!.sha, "cancelled"],
+    expect(workflow.terminated).toEqual([running.instance_id]);
+    expect(tornDown).toEqual([running.instance_id]);
+    expect(runs(ref).map((r) => [r.sha, r.status])).toEqual([
+      [running.sha, "cancelled"],
       [head, "running"],
     ]);
     expect(journal().find((e) => e.kind === "scoringCancelled")).toMatchObject({ run: 1, superseded_by: head });
 
     // A late report from the cancelled run is discarded, and a second drain stops nothing more.
-    expect(store.scoring.finish(running!.id, done())).toBe(false);
-    expect(store.scoring.getRun(running!.id)?.status).toBe("cancelled");
+    expect(store.scoring.finish(running.id, done())).toBeFalsy();
+    expect(store.scoring.getRun(running.id)?.status).toBe("cancelled");
     await store.scoring.drain();
     expect(workflow.terminated).toHaveLength(1);
   });
@@ -288,9 +288,9 @@ describe("the scoring queue", () => {
     for (const ref of refs) await store.openAttempt(PROJECT, ada, ref);
     await store.scoring.drain();
     expect(workflow.created.map((c) => c.params.attempt)).toEqual(["t1a1", "t1a2", "t1a3"]);
-    expect(refs.map((r) => runs(r)[0]!.status)).toEqual(["running", "running", "running", "queued", "queued"]);
+    expect(refs.map((r) => at(runs(r), 0).status)).toEqual(["running", "running", "running", "queued", "queued"]);
 
-    expect(store.scoring.finish(runs(refs[1]!)[0]!.id, done())).toBe(true);
+    expect(store.scoring.finish(at(runs(at(refs, 1)), 0).id, done())).toBeTruthy();
     await store.scoring.drain();
     expect(workflow.created.map((c) => c.params.attempt)).toEqual(["t1a1", "t1a2", "t1a3", "t1a4"]);
     expect(journal().find((e) => e.kind === "scored")).toMatchObject({
@@ -299,22 +299,22 @@ describe("the scoring queue", () => {
       summary: "no checks configured",
     });
 
-    store.scoring.finish(runs(refs[0]!)[0]!.id, errored());
+    store.scoring.finish(at(runs(at(refs, 0)), 0).id, errored());
     await store.scoring.drain();
-    expect(refs.map((r) => runs(r)[0]!.status)).toEqual(["errored", "done", "running", "running", "running"]);
+    expect(refs.map((r) => at(runs(r), 0).status)).toEqual(["errored", "done", "running", "running", "running"]);
   });
 
   it("skips a head that already has a done run, unless it's a rescore", async () => {
-    const { store, workflow, runs, base, drafts } = setup();
-    const [ref] = await drafts();
-    await store.openAttempt(PROJECT, ada, ref!);
+    const { store, workflow, runs, base, draft } = setup();
+    const ref = await draft();
+    await store.openAttempt(PROJECT, ada, ref);
     await store.scoring.drain();
-    store.scoring.finish(runs(ref!)[0]!.id, done());
+    store.scoring.finish(at(runs(ref), 0).id, done());
 
-    store.draftAttempt(PROJECT, ada, ref!);
-    await store.openAttempt(PROJECT, ada, ref!);
-    expect(runs(ref!)).toHaveLength(1);
-    expect(await store.rescore(PROJECT, ada, ref!)).toMatchObject({ queued: true, run: { sha: base.hash } });
+    store.draftAttempt(PROJECT, ada, ref);
+    await store.openAttempt(PROJECT, ada, ref);
+    expect(runs(ref)).toHaveLength(1);
+    expect(await store.rescore(PROJECT, ada, ref)).toMatchObject({ queued: true, run: { sha: base.hash } });
     await store.scoring.drain();
     expect(workflow.created.map((c) => c.id)).toEqual([
       `abc123-t1a1-${base.hash.slice(0, 12)}-1`,
@@ -323,43 +323,43 @@ describe("the scoring queue", () => {
   });
 
   it("scores an errored head again when it's requested again", async () => {
-    const { store, runs, drafts } = setup();
-    const [ref] = await drafts();
-    await store.scoreNow(PROJECT, ada, ref!);
+    const { store, runs, draft } = setup();
+    const ref = await draft();
+    await store.scoreNow(PROJECT, ada, ref);
     await store.scoring.drain();
-    store.scoring.finish(runs(ref!)[0]!.id, errored());
-    expect(await store.scoreNow(PROJECT, ada, ref!)).toMatchObject({ queued: true });
+    store.scoring.finish(at(runs(ref), 0).id, errored());
+    expect(await store.scoreNow(PROJECT, ada, ref)).toMatchObject({ queued: true });
   });
 
   it("ends a run errored when its Workflow can't be created", async () => {
-    const { store, workflow, runs, drafts, journal } = setup();
-    const [ref] = await drafts();
-    await store.openAttempt(PROJECT, ada, ref!);
+    const { store, workflow, runs, draft, journal } = setup();
+    const ref = await draft();
+    await store.openAttempt(PROJECT, ada, ref);
     workflow.failNext = true;
     await store.scoring.drain();
-    expect(runs(ref!)).toMatchObject([{ status: "errored" }]);
+    expect(runs(ref)).toMatchObject([{ status: "errored" }]);
     expect(journal().find((e) => e.kind === "scoringErrored")).toMatchObject({
-      error: expect.stringMatching(/unavailable/),
+      error: expect.stringMatching(/unavailable/u),
     });
   });
 
   it("doesn't let a head read before a push replace the head that push queued", async () => {
-    const { store, repos, runs, base, commit, drafts } = setup();
-    const [ref] = await drafts();
-    const newer = commit(ref!, "pushed while opening\n");
+    const { store, repos, runs, base, commit, draft } = setup();
+    const ref = await draft();
+    const newer = commit(ref, "pushed while opening\n");
     // Opening reads the fork's head; a push lands while that read is in flight.
     const listCommits = repos.listCommits.bind(repos);
     repos.listCommits = async (name, opts) => {
       const [head, ...rest] = await listCommits(name, opts);
       store.recordPush(PROJECT, ada, {
-        ...ref!,
+        ...ref,
         updates: [{ ref: "refs/heads/main", before: base.hash, after: newer }],
       });
-      return [{ ...head!, hash: base.hash }, ...rest];
+      return [{ ...defined(head, "a head commit"), hash: base.hash }, ...rest];
     };
     // The attempt is open by the time the push is recorded, so it queues the newer head.
-    await store.openAttempt(PROJECT, ada, ref!);
-    expect(runs(ref!).map((r) => [r.sha, r.trigger, r.status])).toEqual([[newer, "push", "queued"]]);
+    await store.openAttempt(PROJECT, ada, ref);
+    expect(runs(ref).map((r) => [r.sha, r.trigger, r.status])).toEqual([[newer, "push", "queued"]]);
   });
 
   it("cancels an attempt's runs when it returns to draft, closes, merges or is made obsolete", async () => {
@@ -367,14 +367,14 @@ describe("the scoring queue", () => {
     const refs = await drafts(4);
     for (const ref of refs) await store.openAttempt(PROJECT, ada, ref);
     await store.scoring.drain();
-    expect(refs.map((r) => runs(r)[0]!.status)).toEqual(["running", "running", "running", "queued"]);
+    expect(refs.map((r) => at(runs(r), 0).status)).toEqual(["running", "running", "running", "queued"]);
 
-    store.draftAttempt(PROJECT, ada, refs[0]!);
-    await store.closeAttempt(PROJECT, ada, refs[1]!);
-    await store.obsoleteAttempt(PROJECT, owner, refs[3]!);
-    await store.markMerged(PROJECT, owner, { ...refs[2]!, sha: "f00" });
+    store.draftAttempt(PROJECT, ada, at(refs, 0));
+    await store.closeAttempt(PROJECT, ada, at(refs, 1));
+    await store.obsoleteAttempt(PROJECT, owner, at(refs, 3));
+    await store.markMerged(PROJECT, owner, { ...at(refs, 2), sha: "f00" });
     await store.scoring.drain();
-    expect(refs.map((r) => runs(r)[0]!.status)).toEqual(["cancelled", "cancelled", "cancelled", "cancelled"]);
+    expect(refs.map((r) => at(runs(r), 0).status)).toEqual(["cancelled", "cancelled", "cancelled", "cancelled"]);
     expect(workflow.terminated).toHaveLength(3);
     expect(
       journal()
@@ -389,110 +389,110 @@ describe("the scoring queue", () => {
     repos.commit(ORIGIN, { files: { a: "a" } });
     const store = new TaskStore({ sql: testSql(), repos });
     const task = store.createTask(PROJECT, ada, { title: "t" });
-    const [a] = await store.createAttempts(PROJECT, ada, { task: task.number });
-    await store.openAttempt(PROJECT, ada, { task: a!.task, number: a!.number });
+    const a = at(await store.createAttempts(PROJECT, ada, { task: task.number }), 0);
+    await store.openAttempt(PROJECT, ada, { task: a.task, number: a.number });
     await store.scoring.drain();
-    expect(store.scoring.listRuns({ task: a!.task, attempt: a!.number })).toMatchObject([{ status: "queued" }]);
+    expect(store.scoring.listRuns({ task: a.task, attempt: a.number })).toMatchObject([{ status: "queued" }]);
   });
 });
 
 describe("results", () => {
   it("stores a done run's result and journals scored with its gate and a summary", async () => {
-    const { store, runs, drafts, journal } = setup();
-    const [ref] = await drafts();
-    await store.openAttempt(PROJECT, ada, ref!);
+    const { store, runs, draft, journal } = setup();
+    const ref = await draft();
+    await store.openAttempt(PROJECT, ada, ref);
     await store.scoring.drain();
     const checks: CheckResult[] = [
       { name: "test", required: true, outcome: "passed", durationMs: 9, metrics: { coverage: 80 }, notes: [] },
       { name: "lint", required: false, outcome: "failed", durationMs: 1, metrics: {}, notes: [] },
     ];
-    expect(store.scoring.finish(runs(ref!)[0]!.id, done({ config: { kind: "valid" }, checks }))).toBe(true);
+    expect(store.scoring.finish(at(runs(ref), 0).id, done({ config: { kind: "valid" }, checks }))).toBeTruthy();
 
-    const [run] = runs(ref!);
+    const run = at(runs(ref), 0);
     expect(run).toMatchObject({ status: "done", superseded: false, error: null });
-    expect(run!.result).toEqual(result({ config: { kind: "valid" }, checks }));
-    expect(store.getAttempt(PROJECT, ada, ref!).scoring).toEqual({ status: "done", sha: run!.sha });
+    expect(run.result).toEqual(result({ config: { kind: "valid" }, checks }));
+    expect(store.getAttempt(PROJECT, ada, ref).scoring).toEqual({ status: "done", sha: run.sha });
     expect(journal().find((e) => e.kind === "scored")).toMatchObject({ gate: "passed", summary: "1 passed, 1 failed" });
   });
 
   it("reads a result stored before runs kept logs as having none", async () => {
-    const { store, runs, drafts } = setup();
-    const [ref] = await drafts();
-    await store.openAttempt(PROJECT, ada, ref!);
+    const { store, runs, draft } = setup();
+    const ref = await draft();
+    await store.openAttempt(PROJECT, ada, ref);
     await store.scoring.drain();
     const { logs: _logs, ...older } = result();
-    store.scoring.finish(runs(ref!)[0]!.id, { status: "done", result: older as ScoringResult });
+    store.scoring.finish(at(runs(ref), 0).id, { status: "done", result: older as ScoringResult });
 
-    expect(runs(ref!)[0]!.result).toEqual(result({ logs: [] }));
+    expect(at(runs(ref), 0).result).toEqual(result({ logs: [] }));
   });
 
   it("keeps an errored run's error, with no result", async () => {
-    const { store, runs, drafts, journal } = setup();
-    const [ref] = await drafts();
-    await store.scoreNow(PROJECT, ada, ref!);
+    const { store, runs, draft, journal } = setup();
+    const ref = await draft();
+    await store.scoreNow(PROJECT, ada, ref);
     await store.scoring.drain();
-    store.scoring.finish(runs(ref!)[0]!.id, errored());
-    expect(runs(ref!)[0]).toMatchObject({ status: "errored", error: "sandbox lost", result: null });
-    expect(store.getAttempt(PROJECT, ada, ref!).scoring.status).toBe("errored");
+    store.scoring.finish(at(runs(ref), 0).id, errored());
+    expect(runs(ref)[0]).toMatchObject({ status: "errored", error: "sandbox lost", result: null });
+    expect(store.getAttempt(PROJECT, ada, ref).scoring.status).toBe("errored");
     expect(journal().find((e) => e.kind === "scoringErrored")).toMatchObject({ error: "sandbox lost" });
   });
 
   it("marks results for older heads superseded, and keeps them for history", async () => {
-    const { store, runs, commit, pushed, drafts } = setup();
-    const [ref] = await drafts();
-    await store.openAttempt(PROJECT, ada, ref!);
+    const { store, runs, commit, pushed, draft } = setup();
+    const ref = await draft();
+    await store.openAttempt(PROJECT, ada, ref);
     await store.scoring.drain();
-    store.scoring.finish(runs(ref!)[0]!.id, done());
-    const newer = commit(ref!, "newer\n");
-    pushed(ref!, newer);
+    store.scoring.finish(at(runs(ref), 0).id, done());
+    const newer = commit(ref, "newer\n");
+    pushed(ref, newer);
 
-    expect(runs(ref!).map((r) => [r.status, r.superseded])).toEqual([
+    expect(runs(ref).map((r) => [r.status, r.superseded])).toEqual([
       ["done", true],
       ["queued", false],
     ]);
-    expect(runs(ref!)[0]!.result).not.toBeNull();
-    expect(store.getAttempt(PROJECT, ada, ref!).scoring).toEqual({ status: "queued", sha: newer });
+    expect(at(runs(ref), 0).result).not.toBeNull();
+    expect(store.getAttempt(PROJECT, ada, ref).scoring).toEqual({ status: "queued", sha: newer });
   });
 
   it("supersedes a draft's result when it's pushed, though the push isn't scored", async () => {
-    const { store, runs, commit, pushed, drafts } = setup();
-    const [ref] = await drafts();
-    await store.scoreNow(PROJECT, ada, ref!);
+    const { store, runs, commit, pushed, draft } = setup();
+    const ref = await draft();
+    await store.scoreNow(PROJECT, ada, ref);
     await store.scoring.drain();
-    store.scoring.finish(runs(ref!)[0]!.id, done());
-    const newer = commit(ref!, "draft work\n");
-    expect(pushed(ref!, newer)).toBeNull();
-    expect(runs(ref!)).toMatchObject([{ status: "done", superseded: true }]);
-    expect(store.getAttempt(PROJECT, ada, ref!).scoring).toEqual({ status: "none", sha: newer });
+    store.scoring.finish(at(runs(ref), 0).id, done());
+    const newer = commit(ref, "draft work\n");
+    expect(pushed(ref, newer)).toBeNull();
+    expect(runs(ref)).toMatchObject([{ status: "done", superseded: true }]);
+    expect(store.getAttempt(PROJECT, ada, ref).scoring).toEqual({ status: "none", sha: newer });
   });
 
   it("makes an older head current again when a force-push returns to it", async () => {
-    const { store, runs, commit, pushed, drafts, base } = setup();
-    const [ref] = await drafts();
-    await store.openAttempt(PROJECT, ada, ref!);
+    const { store, runs, commit, pushed, draft, base } = setup();
+    const ref = await draft();
+    await store.openAttempt(PROJECT, ada, ref);
     await store.scoring.drain();
-    store.scoring.finish(runs(ref!)[0]!.id, done());
-    pushed(ref!, commit(ref!, "b\n"));
-    pushed(ref!, base.hash);
-    expect(runs(ref!).map((r) => [r.sha, r.status, r.superseded])).toEqual([
+    store.scoring.finish(at(runs(ref), 0).id, done());
+    pushed(ref, commit(ref, "b\n"));
+    pushed(ref, base.hash);
+    expect(runs(ref).map((r) => [r.sha, r.status, r.superseded])).toEqual([
       [base.hash, "done", false],
       [expect.any(String), "cancelled", true],
     ]);
-    expect(store.getAttempt(PROJECT, ada, ref!).scoring).toEqual({ status: "done", sha: base.hash });
+    expect(store.getAttempt(PROJECT, ada, ref).scoring).toEqual({ status: "done", sha: base.hash });
   });
 
   it("exposes scoring on the attempt: none, queued, running, then done for its head", async () => {
-    const { store, runs, drafts, base } = setup();
-    const [ref] = await drafts();
-    const status = () => store.getAttempt(PROJECT, ada, ref!).scoring;
+    const { store, runs, draft, base } = setup();
+    const ref = await draft();
+    const status = () => store.getAttempt(PROJECT, ada, ref).scoring;
     expect(status()).toEqual({ status: "none", sha: null });
-    await store.openAttempt(PROJECT, ada, ref!);
+    await store.openAttempt(PROJECT, ada, ref);
     expect(status()).toEqual({ status: "queued", sha: base.hash });
     await store.scoring.drain();
     expect(status()).toEqual({ status: "running", sha: base.hash });
-    store.scoring.finish(runs(ref!)[0]!.id, done());
+    store.scoring.finish(at(runs(ref), 0).id, done());
     expect(status()).toEqual({ status: "done", sha: base.hash });
-    store.draftAttempt(PROJECT, ada, ref!);
+    store.draftAttempt(PROJECT, ada, ref);
     expect(status()).toEqual({ status: "done", sha: base.hash });
   });
 

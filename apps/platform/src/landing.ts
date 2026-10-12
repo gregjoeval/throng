@@ -4,7 +4,7 @@
 import type { ConfigResult } from "./config.ts";
 import type { ConflictDetails } from "./conflicts.ts";
 import type { ScoringResult } from "./results.ts";
-import { attemptRef, taskRef } from "./task-store.ts";
+import { attemptRef, taskRef } from "./task-refs.ts";
 
 /** Commits name people by a no-reply address, never their real email. */
 export const NOREPLY_DOMAIN = "users.noreply.throng";
@@ -47,7 +47,7 @@ export interface MergeCommitInput {
 
 /** `Merge t42a3: <task title>` with the Throng trailers, `Approved-by` and a `Co-authored-by` per agent alias. */
 export function mergeCommitMessage({ task, attempt, title, approver, coAuthors }: MergeCommitInput): string {
-  const subject = `Merge ${attemptRef(task, attempt)}: ${title.replace(/\s+/g, " ").trim()}`;
+  const subject = `Merge ${attemptRef(task, attempt)}: ${title.replace(/\s+/gu, " ").trim()}`;
   const trailers = [
     `Throng-Task: ${taskRef(task)}`,
     `Throng-Attempt: ${attemptRef(task, attempt)}`,
@@ -129,12 +129,12 @@ export function failedChecks(result: ScoringResult, stored: string[]): FailedChe
 
 /** The part of the Landing Workflow binding the DO uses; tests pass a fake. */
 export interface LandingWorkflowBinding {
-  create(options: { id: string; params: LandingParams }): Promise<unknown>;
-  get(id: string): Promise<{ terminate(): Promise<void> }>;
+  create: (options: { id: string; params: LandingParams }) => Promise<unknown>;
+  get: (id: string) => Promise<{ terminate: () => Promise<void> }>;
 }
 
 export interface LandingRunner {
   workflow: LandingWorkflowBinding;
   /** Destroys a landing's Sandboxes once its Workflow is stopped. */
-  teardown(instanceId: string): Promise<void>;
+  teardown: (instanceId: string) => Promise<void>;
 }

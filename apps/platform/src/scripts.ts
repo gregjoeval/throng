@@ -2,10 +2,12 @@
 // on a fresh container. The last stdout line is the result: `THRONG_RESULT <json>`.
 
 import { CONFIG_PATH, MAX_CONFIG_BYTES } from "./config.ts";
-import { CONFLICT_CAPS, MERGE_LABELS, type ConflictCaps, type Remerge } from "./conflicts.ts";
+import { CONFLICT_CAPS, MERGE_LABELS } from "./conflicts.ts";
+import type { ConflictCaps, Remerge } from "./conflicts.ts";
 import { THRONG_COMMITTER } from "./landing.ts";
 import { PREVIEW_LOG, setupLogName } from "./logs.ts";
-import { MAX_METRICS_BYTES, SETUP_TIMEOUT_MS, type ScorePlan } from "./results.ts";
+import { MAX_METRICS_BYTES, SETUP_TIMEOUT_MS } from "./results.ts";
+import type { ScorePlan } from "./results.ts";
 
 export const RESULT_PREFIX = "THRONG_RESULT ";
 

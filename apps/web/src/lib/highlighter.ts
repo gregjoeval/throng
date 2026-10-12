@@ -8,12 +8,15 @@
 export const themes = { light: "github-light", dark: "github-dark" } as const;
 
 /** The language unknown code falls back to. */
-export const plainText = "text";
+export const PLAIN_TEXT = "text";
 
 /** An inclusive, 1-based range of lines. */
-export type LineRange = { start: number; end: number };
+export interface LineRange {
+  start: number;
+  end: number;
+}
 
-export type HighlightOptions = {
+export interface HighlightOptions {
   /** A Shiki language id or alias. Unknown languages fall back to plain text. */
   lang?: string;
   /** A file path to pick the language from when `lang` is absent. */
@@ -22,7 +25,7 @@ export type HighlightOptions = {
   lineNumbers?: boolean;
   /** Lines to mark with the `highlighted` class. */
   highlightLines?: LineRange;
-};
+}
 
 type Shiki = typeof import("./shiki");
 

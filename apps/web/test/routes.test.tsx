@@ -1,8 +1,8 @@
 import { QueryClient } from "@tanstack/react-query";
-import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
+import { createMemoryHistory, RouterProvider } from "@tanstack/react-router";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { HttpResponse, http } from "msw";
+import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
 import { buildPath } from "@/lib/paths";
 import { getRouter } from "@/router";
@@ -20,19 +20,19 @@ async function renderApp(path: string) {
 
 const header = () => screen.getByRole("banner");
 const openSwitcher = async (user: ReturnType<typeof userEvent.setup>) =>
-  user.click(within(header()).getByRole("button", { name: /select a project|\//i }));
+  user.click(within(header()).getByRole("button", { name: /Select a project|\//u }));
 
 describe("the app shell", () => {
   it("shows the signed-in user, a sign-out link to Access and the theme toggle", async () => {
     await renderApp("/");
     expect(await within(header()).findByText(me.user.handle)).toBeInTheDocument();
     expect(within(header()).getByRole("link", { name: "Sign out" })).toHaveAttribute("href", "/cdn-cgi/access/logout");
-    expect(within(header()).getByRole("button", { name: /switch to (dark|light) theme/i })).toBeInTheDocument();
+    expect(within(header()).getByRole("button", { name: /Switch to (dark|light) theme/u })).toBeInTheDocument();
   });
 
   it("lists the user's projects on the home page", async () => {
     await renderApp("/");
-    const links = await screen.findAllByRole("link", { name: /^ada\// });
+    const links = await screen.findAllByRole("link", { name: /^ada\//u });
     expect(links.map((link) => link.getAttribute("href"))).toEqual(["/ada/alpha", "/ada/beta"]);
   });
 
@@ -121,7 +121,7 @@ describe("views", () => {
     [`/ada/alpha/commit/${"a".repeat(40)}`, "The commit and its diff"],
   ])("renders %s", async (path, text) => {
     await renderApp(path);
-    expect(await screen.findByText(new RegExp(text))).toBeInTheDocument();
+    expect(await screen.findByText(new RegExp(text, "u"))).toBeInTheDocument();
   });
 
   it("decodes paths with spaces and unicode into breadcrumbs that link back", async () => {

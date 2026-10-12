@@ -1,5 +1,6 @@
 import { useMemo } from "react";
-import { type Components, defaultUrlTransform, MarkdownHooks, type UrlTransform } from "react-markdown";
+import { defaultUrlTransform, MarkdownHooks } from "react-markdown";
+import type { Components, UrlTransform } from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import { loadShiki } from "@/lib/highlighter";
@@ -27,29 +28,29 @@ function rehypeShiki() {
 const remarkPlugins = [remarkGfm];
 const rehypePlugins = [rehypeSanitize, rehypeShiki];
 
-const scheme = /^[a-z][a-z\d+.-]*:/i;
+const SCHEME = /^[A-Za-z][A-Za-z\d+.-]*:/u;
 
 /** Resolves a relative URL against `base`. Absolute URLs and fragments are left alone. */
 export function resolveUrl(url: string, base: string | undefined): string {
-  if (!base || url === "" || scheme.test(url) || url.startsWith("#") || url.startsWith("//")) {
+  if (!base || url === "" || SCHEME.test(url) || url.startsWith("#") || url.startsWith("//")) {
     return url;
   }
   const resolved = new URL(url, new URL(base, "https://base.invalid"));
-  return scheme.test(base) ? resolved.href : resolved.pathname + resolved.search + resolved.hash;
+  return SCHEME.test(base) ? resolved.href : resolved.pathname + resolved.search + resolved.hash;
 }
 
 const components: Components = {
   a: ({ node: _node, ...props }) => <a {...props} rel="noopener noreferrer" />,
 };
 
-export type MarkdownProps = {
+export interface MarkdownProps {
   children: string;
   /** The URL relative links resolve against, e.g. the README's directory in the file browser. End it with `/`. */
   baseUrl?: string;
   /** The URL relative images resolve against, e.g. the `/raw` directory. Defaults to `baseUrl`. */
   imageBaseUrl?: string;
   className?: string;
-};
+}
 
 /** GitHub-flavoured Markdown, sanitized, with code blocks highlighted by Shiki. */
 export function Markdown({ children, baseUrl, imageBaseUrl, className }: MarkdownProps) {

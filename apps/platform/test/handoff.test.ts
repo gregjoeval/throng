@@ -11,12 +11,15 @@ import { ServiceError } from "../src/errors.ts";
 import { gitRoutes } from "../src/git-proxy.ts";
 import { projectService } from "../src/projects.ts";
 import { forkRepo, originRepo } from "../src/repos.ts";
-import { TaskStore, type AttemptState, type ProjectContext } from "../src/task-store.ts";
-import { mintToken, type Actor } from "../src/tokens.ts";
+import { TaskStore } from "../src/task-store.ts";
+import type { AttemptState, ProjectContext } from "../src/task-store.ts";
+import { mintToken } from "../src/tokens.ts";
+import type { Actor } from "../src/tokens.ts";
 import { userForEmail } from "../src/users.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
 import { git, gitEnv, LocalGitHost, serve, tryGit } from "./support/git-host.ts";
+import type { Json } from "./support/json.ts";
 import { testSql, testTaskBackends } from "./support/task-backend.ts";
 
 const PROJECT: ProjectContext = { id: "abc123", owner: "owner001" };
@@ -56,9 +59,9 @@ async function attemptIn(store: TaskStore, state: AttemptState) {
 function code(fn: () => unknown): string {
   try {
     fn();
-  } catch (err) {
-    expect(err).toBeInstanceOf(ServiceError);
-    return (err as ServiceError).code;
+  } catch (error) {
+    if (error instanceof ServiceError) return error.code;
+    throw error;
   }
   throw new Error("expected a ServiceError");
 }
@@ -182,7 +185,7 @@ async function e2eSetup() {
       },
       bindings,
     );
-    return { status: res.status, body: (await res.json()) as Record<string, any> };
+    return { status: res.status, body: (await res.json()) as Json };
   };
 
   let clones = 0;
@@ -208,7 +211,7 @@ describe("hand-off through the API and the git proxy", () => {
     const { host, env, adaClaude, ada, bob, handOff, clone, commit, fork } = await e2eSetup();
     const adaDir = await clone(ada.token);
     await commit(adaDir, "first");
-    expect((await tryGit(adaDir, env, "push", "origin", "HEAD:main")).ok).toBe(true);
+    expect((await tryGit(adaDir, env, "push", "origin", "HEAD:main")).ok).toBeTruthy();
 
     const handed = await handOff(adaClaude.token, "bob");
     expect(handed.status).toBe(200);
@@ -218,13 +221,13 @@ describe("hand-off through the API and the git proxy", () => {
     const before = await host.head(fork);
     await commit(adaDir, "second");
     const refused = await tryGit(adaDir, env, "push", "origin", "HEAD:main");
-    expect(refused.ok).toBe(false);
-    expect(refused.stderr).toMatch(/only the author of t1a1 may/);
+    expect(refused.ok).toBeFalsy();
+    expect(refused.stderr).toMatch(/only the author of t1a1 may/u);
     expect(await host.head(fork)).toBe(before);
 
     const bobDir = await clone(bob.token);
     const sha = await commit(bobDir, "bob");
-    expect((await tryGit(bobDir, env, "push", "origin", "HEAD:main")).ok).toBe(true);
+    expect((await tryGit(bobDir, env, "push", "origin", "HEAD:main")).ok).toBeTruthy();
     expect(await host.head(fork)).toBe(sha);
   });
 

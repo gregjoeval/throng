@@ -48,7 +48,7 @@ const MODES: Record<TreeEntry["type"], string> = {
   gitlink: "160000",
 };
 
-const SHA = /^[0-9a-f]{40}$/;
+const SHA = /^[0-9a-f]{40}$/u;
 
 /**
  * An in-memory `Repos` for tests. It records every call and holds each repo's metadata, minted

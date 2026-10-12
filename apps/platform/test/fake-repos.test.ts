@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { FakeRepos } from "./fake-repos.ts";
+import { defined } from "./support/defined.ts";
 
 describe("FakeRepos", () => {
   it("creates an origin and forks it for an attempt", async () => {
@@ -30,8 +31,8 @@ describe("FakeRepos", () => {
   it("deletes a repo once", async () => {
     const repos = new FakeRepos();
     await repos.create("k3x9q2-main");
-    expect(await repos.delete("k3x9q2-main")).toBe(true);
-    expect(await repos.delete("k3x9q2-main")).toBe(false);
+    expect(await repos.delete("k3x9q2-main")).toBeTruthy();
+    expect(await repos.delete("k3x9q2-main")).toBeFalsy();
     await expect(repos.get("k3x9q2-main")).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
 
@@ -89,7 +90,7 @@ describe("FakeRepos", () => {
       ["bin", "tree", "40000"],
       ["src", "tree", "40000"],
     ]);
-    expect(await (await repos.readBlob("k3x9q2-main", readme!.hash))?.text()).toBe("hello\n");
+    expect(await (await repos.readBlob("k3x9q2-main", defined(readme, "README.md").hash))?.text()).toBe("hello\n");
     expect(await (await repos.readFile("k3x9q2-main", { ref: "main", path: "src/a.ts" }))?.text()).toBe("a\n");
     expect(await repos.readCommit("k3x9q2-main", first.hash)).toEqual(first);
 

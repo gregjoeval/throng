@@ -29,14 +29,17 @@ export function buildPath(location: ProjectLocation): string {
   const base = `/${segment(location.owner)}/${segment(location.project)}`;
   let path: string;
   switch (location.view) {
-    case "home":
+    case "home": {
       return base;
-    case "commit":
+    }
+    case "commit": {
       path = `${base}/commit/${segment(location.sha)}`;
       break;
-    case "commits":
+    }
+    case "commits": {
       path = `${base}/commits/${segment(location.ref)}`;
       break;
+    }
     default: {
       const rest = splitPath(location.path).map(segment).join("/");
       path = `${base}/${location.view}/${segment(location.ref)}${rest === "" ? "" : `/${rest}`}`;

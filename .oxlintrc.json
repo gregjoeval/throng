@@ -1,5 +1,78 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "categories": { "correctness": "error", "suspicious": "warn" },
+  "plugins": ["typescript", "unicorn", "oxc", "import", "promise"],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "warn"
+  },
+  "rules": {
+    "typescript/array-type": "error",
+    "typescript/consistent-type-assertions": "error",
+    "import/no-unassigned-import": [
+      "error",
+      {
+        "allow": ["**/*.css", "@testing-library/jest-dom/vitest"]
+      }
+    ],
+    "promise/always-return": "error",
+    "import/no-cycle": "error",
+    "typescript/method-signature-style": "error",
+    "import/consistent-type-specifier-style": "error",
+    "sort-imports": [
+      "error",
+      {
+        "ignoreDeclarationSort": true,
+        "ignoreCase": true
+      }
+    ],
+    "unicorn/switch-case-braces": "error",
+    "unicorn/numeric-separators-style": [
+      "error",
+      {
+        "hexadecimal": {
+          "onlyIfContainsSeparator": true
+        }
+      }
+    ],
+    // Off: it wants uppercase hex digits (0xFF), while oxfmt prints them lowercase (0xff), and oxlint's
+    // version of the rule takes no options to agree with oxfmt.
+    "unicorn/number-literal-case": "off",
+    "unicorn/catch-error-name": "error",
+    "typescript/consistent-type-definitions": "error",
+    "typescript/no-explicit-any": "error",
+    "no-nested-ternary": "error",
+    "no-use-before-define": [
+      "error",
+      {
+        "functions": false,
+        "classes": false
+      }
+    ],
+    "require-unicode-regexp": "error",
+    "typescript/no-non-null-assertion": "error"
+  },
+  "overrides": [
+    {
+      "files": ["**/test/**", "**/*.test.{ts,tsx,js}"],
+      "plugins": ["vitest"],
+      "rules": {
+        "vitest/valid-expect": "off",
+        "vitest/require-to-throw-message": "off",
+        "vitest/no-conditional-expect": "error",
+        "vitest/prefer-to-be-truthy": "error",
+        "vitest/prefer-to-be-falsy": "error",
+        "vitest/prefer-to-contain": "error",
+        "vitest/prefer-each": "error"
+      }
+    },
+    {
+      "files": ["apps/web/**"],
+      "plugins": ["react"],
+      "rules": {
+        "react/react-in-jsx-scope": "off",
+        "react/set-state-in-effect": "error"
+      }
+    }
+  ],
   "ignorePatterns": ["**/worker-configuration.d.ts", "**/routeTree.gen.ts", "**/dist"]
 }

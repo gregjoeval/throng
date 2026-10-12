@@ -33,7 +33,7 @@ export function previewName({ project, attempt }: { project: string; attempt: st
   const full = `${attempt}-p${project}`;
   const room = MAX_LABEL - workerName.length - 1;
   if (full.length <= room) return full;
-  const start = full.slice(0, Math.max(0, room - HASH_LENGTH - 1)).replace(/-+$/, "");
+  const start = full.slice(0, Math.max(0, room - HASH_LENGTH - 1)).replace(/-+$/u, "");
   return `${start}-${hash(full)}`;
 }
 

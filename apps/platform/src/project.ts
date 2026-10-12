@@ -1,17 +1,13 @@
 import { DurableObject } from "cloudflare:workers";
-import { LANDING_ROLES, sandboxName, SCORING_ROLES, type SandboxRole } from "./grants";
 import { reposFor } from "./artifacts";
 import { camelKeys } from "./casing";
+import { LANDING_ROLES, sandboxName, SCORING_ROLES } from "./grants";
+import type { SandboxRole } from "./grants";
 import type { LandingOutcome } from "./landing";
 import type { ScoringOutcome, ScoringRequest, StoredRun } from "./scoring";
-import {
-  parseAttemptRef,
-  runTaskMethod,
-  TaskStore,
-  type ProjectContext,
-  type Sql,
-  type TaskOutcome,
-} from "./task-store";
+import { parseAttemptRef } from "./task-refs";
+import { runTaskMethod, TaskStore } from "./task-store";
+import type { ProjectContext, Sql, TaskOutcome } from "./task-store";
 
 export interface JournalEntry {
   id: number;
@@ -142,8 +138,8 @@ export class ProjectCoordinator extends DurableObject<Env> {
     try {
       if (this.#project === null) await this.#tasks.scoring.drain();
       else await this.#tasks.drain(this.#project);
-    } catch (cause) {
-      console.error({ event: "project.drain_failed", error: String(cause) });
+    } catch (error) {
+      console.error({ event: "project.drain_failed", error: String(error) });
     }
   }
 

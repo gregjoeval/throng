@@ -1,9 +1,11 @@
 // The platform API from the browser: a typed `hc` client over same-origin `/api/*`, which throng-web
 // forwards to the platform with the signed-in user attached (see `src/server/forward.ts`).
 
-import { queryOptions, type QueryKey } from "@tanstack/react-query";
+import { queryOptions } from "@tanstack/react-query";
+import type { QueryKey } from "@tanstack/react-query";
 import type { AppType } from "@throng/platform/app";
-import { hc, parseResponse, type ClientResponse } from "hono/client";
+import { hc, parseResponse } from "hono/client";
+import type { ClientResponse } from "hono/client";
 
 /**
  * Same-origin, so the browser's Access session rides along. Calls go through the global `fetch` at

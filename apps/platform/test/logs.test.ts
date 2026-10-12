@@ -41,8 +41,8 @@ describe("log names", () => {
   });
 
   it("can't collide: setup and preview logs use a dot, which check names can't", () => {
-    for (const name of [setupLogName(1), PREVIEW_LOG, "test", "bundle_kb", "a-b"]) expect(isLogName(name)).toBe(true);
-    for (const name of ["", "../x", "a/b", ".hidden", "Test", "a b"]) expect(isLogName(name)).toBe(false);
+    for (const name of [setupLogName(1), PREVIEW_LOG, "test", "bundle_kb", "a-b"]) expect(isLogName(name)).toBeTruthy();
+    for (const name of ["", "../x", "a/b", ".hidden", "Test", "a b"]) expect(isLogName(name)).toBeFalsy();
   });
 });
 
@@ -78,7 +78,7 @@ describe("readLogScript", () => {
     const { stdout } = read({ test: log }, "test");
     expect(stdout.length).toBeLessThanOrEqual(MAX_LOG_BYTES);
     expect(stdout.length).toBeGreaterThan(MAX_LOG_BYTES - 1024);
-    expect(stdout).toMatch(/^h+\n\[throng: truncated \d+ of 10485760 bytes\]\nt+$/);
+    expect(stdout).toMatch(/^h+\n\[throng: truncated \d+ of 10485760 bytes\]\nt+$/u);
   });
 });
 

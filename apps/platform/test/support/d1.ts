@@ -1,5 +1,6 @@
 import { readdirSync, readFileSync } from "node:fs";
-import { DatabaseSync, type SQLInputValue } from "node:sqlite";
+import { DatabaseSync } from "node:sqlite";
+import type { SQLInputValue } from "node:sqlite";
 import type { Database, Statement } from "../../src/users.ts";
 
 const MIGRATIONS = new URL("../../migrations/", import.meta.url);

@@ -3,9 +3,9 @@ import type { AccessVerifier } from "../src/access.ts";
 import { apiRoutes } from "../src/api.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
+import { at } from "./support/defined.ts";
+import type { Json } from "./support/json.ts";
 import { testTaskBackends } from "./support/task-backend.ts";
-
-type Json = Record<string, any>;
 
 /** Access sessions are `as:<email>`. */
 const verify: AccessVerifier = async (token) => (token.startsWith("as:") ? { email: token.slice(3) } : null);
@@ -328,7 +328,7 @@ describe("merge request routes", () => {
 
     const tasks = store(project["id"]);
     await tasks.scoring.drain();
-    const run = tasks.scoring.listRuns({ task: 1, attempt: 2 }).at(-1)!;
+    const run = at(tasks.scoring.listRuns({ task: 1, attempt: 2 }), -1);
     tasks.scoringFinished(run.id, {
       status: "done",
       result: {

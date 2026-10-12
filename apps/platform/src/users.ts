@@ -2,13 +2,13 @@
 
 /** The slice of D1 this module uses, so tests can run the same SQL on local SQLite. */
 export interface Database {
-  prepare(sql: string): Statement;
+  prepare: (sql: string) => Statement;
 }
 
 export interface Statement {
-  bind(...values: unknown[]): Statement;
-  first<T = Record<string, unknown>>(): Promise<T | null>;
-  all<T = Record<string, unknown>>(): Promise<{ results: T[] }>;
+  bind: (...values: unknown[]) => Statement;
+  first: <T = Record<string, unknown>>() => Promise<T | null>;
+  all: <T = Record<string, unknown>>() => Promise<{ results: T[] }>;
 }
 
 export interface User {
@@ -55,13 +55,13 @@ export async function userForEmail(db: Database, email: string, newId: () => str
         .bind(id, handle, email)
         .first<User>();
       if (created !== null) return created;
-    } catch (err) {
+    } catch (error) {
       // Collisions are expected; anything else is a real failure. An email collision means another
       // request created this user first, which the next lookup finds.
-      const column = /UNIQUE constraint failed: users\.(\w+)/.exec(String(err))?.[1];
+      const column = /UNIQUE constraint failed: users\.(\w+)/u.exec(String(error))?.[1];
       if (column === "id") id = newId();
       else if (column === "handle") suffix++;
-      else if (column !== "email") throw err;
+      else if (column !== "email") throw error;
     }
   }
   throw new Error(`could not create a user for ${email}`);
@@ -70,5 +70,5 @@ export async function userForEmail(db: Database, email: string, newId: () => str
 /** A handle from the email's local part, kept to lowercase letters, digits and single dashes. */
 function handleBase(email: string): string {
   const local = email.slice(0, email.lastIndexOf("@")).toLowerCase();
-  return local.replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "user";
+  return local.replace(/[^a-z0-9]+/gu, "-").replace(/^-|-$/gu, "") || "user";
 }

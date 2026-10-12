@@ -7,36 +7,38 @@
 // handles when it answers.
 
 import { archiveRef } from "./archive.ts";
-import { CONFIG_PATH, loadConfig, type ConfigResult } from "./config.ts";
-import { ServiceError, type ErrorCode } from "./errors.ts";
-import type { LandingOutcome, LandingParams, LandingRunner } from "./landing.ts";
-import { Landings, type StoredLanding } from "./landings.ts";
 import { migrateValues, normaliseLandingOutcome } from "./casing.ts";
+import { CONFIG_PATH, loadConfig } from "./config.ts";
+import type { ConfigResult } from "./config.ts";
+import { ServiceError } from "./errors.ts";
+import type { ErrorCode } from "./errors.ts";
+import type { LandingOutcome, LandingParams, LandingRunner } from "./landing.ts";
+import { Landings } from "./landings.ts";
+import type { StoredLanding } from "./landings.ts";
 import { isLogName, landingLogKey, logKey, missingLog } from "./logs.ts";
-import {
-  dequeueCause,
-  MergeRequests,
-  type Dequeue,
-  type DequeueCause,
-  type DequeueReason,
-  type MergeRequestEvent,
-  type MergeRequestState,
-  type StoredMergeRequest,
+import { dequeueCause, MergeRequests } from "./merge-requests.ts";
+import type {
+  Dequeue,
+  DequeueCause,
+  DequeueReason,
+  MergeRequestEvent,
+  MergeRequestState,
+  StoredMergeRequest,
 } from "./merge-requests.ts";
 import { isZeroId } from "./pkt-line.ts";
-import { forkRepo, originRepo, type Repos } from "./repos.ts";
-import {
-  headAttemptRef,
-  SCORING_CAP,
-  ScoringQueue,
-  type AttemptScoring,
-  type ScoredAttempt,
-  type ScoringOutcome,
-  type ScoringRequest,
-  type ScoringRunner,
-  type ScoringTrigger,
-  type StoredRun,
+import { forkRepo, originRepo } from "./repos.ts";
+import type { Repos } from "./repos.ts";
+import { headAttemptRef, SCORING_CAP, ScoringQueue } from "./scoring.ts";
+import type {
+  AttemptScoring,
+  ScoredAttempt,
+  ScoringOutcome,
+  ScoringRequest,
+  ScoringRunner,
+  ScoringTrigger,
+  StoredRun,
 } from "./scoring.ts";
+import { attemptRef, reservedTask, taskRef } from "./task-refs.ts";
 import type { Actor } from "./tokens.ts";
 
 /** Active attempts a task may have when neither the project config nor the task overrides it. */
@@ -130,39 +132,9 @@ export type TaskEvent =
 /** The slice of SQLite the store needs: Durable Object storage in production, `node:sqlite` in tests. */
 export interface Sql {
   /** Runs one statement and returns its rows. */
-  exec<T>(query: string, ...bindings: unknown[]): T[];
+  exec: <T>(query: string, ...bindings: unknown[]) => T[];
   /** Runs `fn` atomically: its writes all commit, or none do if it throws. */
-  transaction<T>(fn: () => T): T;
-}
-
-// ---------------------------------------------------------------------------------------------
-// References
-
-const TASK_REF = /^t?([1-9]\d*)$/;
-const ATTEMPT_REF = /^t?([1-9]\d*)a([1-9]\d*)$/;
-const RESERVED_BRANCH = /^t([1-9]\d*)\//;
-
-/** A task reference, `t42` or `42`, as its number; null when it isn't one. */
-export function parseTaskRef(ref: string): number | null {
-  const match = TASK_REF.exec(ref);
-  return match === null ? null : safeNumber(match[1]);
-}
-
-/** An attempt reference, `t42a3` (or `42a3`), as its task and attempt numbers; null when it isn't one. */
-export function parseAttemptRef(ref: string): { task: number; number: number } | null {
-  const match = ATTEMPT_REF.exec(ref);
-  if (match === null) return null;
-  const task = safeNumber(match[1]);
-  const number = safeNumber(match[2]);
-  return task === null || number === null ? null : { task, number };
-}
-
-export function taskRef(task: number): string {
-  return `t${task}`;
-}
-
-export function attemptRef(task: number, number: number): string {
-  return `t${task}a${number}`;
+  transaction: <T>(fn: () => T) => T;
 }
 
 /** What `recordPush` did: the scoring it queued, and what to tell the pusher of their merge request. */
@@ -188,20 +160,6 @@ function fileCount(dequeue: Dequeue): number | null {
 /** An attempt as the scoring queue keys it. */
 function scoredAttempt({ task, number }: AttemptInput): ScoredAttempt {
   return { task, attempt: number };
-}
-
-/**
- * The task a branch is reserved for: `t<n>/<anything>` belongs to task `t<n>` and never creates a
- * task of its own. Null for any other branch.
- */
-export function reservedTask(branch: string): number | null {
-  const match = RESERVED_BRANCH.exec(branch);
-  return match === null ? null : safeNumber(match[1]);
-}
-
-function safeNumber(digits: string | undefined): number | null {
-  const n = Number(digits);
-  return Number.isSafeInteger(n) ? n : null;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -580,10 +538,10 @@ export class TaskStore {
         }
         return numbers.map((number) => this.#attempt({ task: current.number, number }));
       });
-    } catch (err) {
+    } catch (error) {
       // A failed fork cleans up after itself; past that, every fork exists and must go.
       if (forked) await this.#deleteForks(project, current.number, numbers);
-      throw err;
+      throw error;
     } finally {
       const left = (this.#reserved.get(current.number) ?? count) - count;
       if (left > 0) this.#reserved.set(current.number, left);
@@ -779,9 +737,9 @@ export class TaskStore {
         this.#journal(actor, "reopened", current.task, current.number);
         return this.#attempt(current);
       });
-    } catch (err) {
+    } catch (error) {
       if (forked) await this.#deleteForks(project, current.task, [current.number]);
-      throw err;
+      throw error;
     } finally {
       const left = (this.#reserved.get(parent.number) ?? 1) - 1;
       if (left > 0) this.#reserved.set(parent.number, left);
@@ -992,10 +950,10 @@ export class TaskStore {
     });
     try {
       await this.#fork(project, route.task, [route.number]);
-    } catch (err) {
+    } catch (error) {
       // A failed fork deletes what it made; only the branch is left to free.
       this.#dropBranchPush(route);
-      throw err;
+      throw error;
     }
     return route;
   }
@@ -1395,10 +1353,10 @@ export class TaskStore {
     if (started === null) return;
     try {
       await runner.workflow.create({ id: started.instance_id, params: started.params });
-    } catch (cause) {
+    } catch (error) {
       await this.landingFinished(started.id, {
         kind: "errored",
-        details: { step: "start", error: String(cause).slice(0, 2000) },
+        details: { step: "start", error: String(error).slice(0, 2000) },
       });
       await this.#drainLandings(project);
       return;
@@ -1450,9 +1408,9 @@ export class TaskStore {
       const instance = await runner.workflow.get(landing.instance_id);
       await instance.terminate();
       await runner.teardown(landing.instance_id);
-    } catch (cause) {
+    } catch (error) {
       // It may already have ended; its report is discarded either way.
-      console.warn({ event: "landing.stop_failed", instance_id: landing.instance_id, error: String(cause) });
+      console.warn({ event: "landing.stop_failed", instance_id: landing.instance_id, error: String(error) });
     }
   }
 
@@ -1633,8 +1591,8 @@ export class TaskStore {
     try {
       const [commit] = await this.#repos.listCommits(forkRepo(project.id, attempt.fork), { ref: "main", limit: 1 });
       head = commit?.hash ?? null;
-    } catch (cause) {
-      console.error({ event: "scoring.head_unreadable", attempt: attempt.fork, trigger, error: String(cause) });
+    } catch (error) {
+      console.error({ event: "scoring.head_unreadable", attempt: attempt.fork, trigger, error: String(error) });
       return null;
     }
     return head === null ? null : this.#request(project, actor, attempt, head, trigger, readSince);
@@ -1736,8 +1694,8 @@ export class TaskStore {
             to: origin,
             toRef: archiveRef(attempt.fork),
           });
-        } catch (cause) {
-          console.error({ event: "attempt.archive_failed", repo: fork, error: String(cause) });
+        } catch (error) {
+          console.error({ event: "attempt.archive_failed", repo: fork, error: String(error) });
           return;
         }
         if (sha !== null) {
@@ -1764,9 +1722,9 @@ export class TaskStore {
     const fork = forkRepo(project.id, attempt.fork);
     try {
       await this.#repos.fork(origin, fork);
-    } catch (err) {
-      if ((err as { code?: unknown }).code === "ALREADY_EXISTS") return false;
-      throw err;
+    } catch (error) {
+      if ((error as { code?: unknown }).code === "ALREADY_EXISTS") return false;
+      throw error;
     }
     if (attempt.archived_sha === null) return true;
     try {
@@ -1779,9 +1737,9 @@ export class TaskStore {
           expect: attempt.archived_sha ?? undefined,
         }),
       );
-    } catch (cause) {
+    } catch (error) {
       await this.#deleteForks(project, attempt.task, [attempt.number]);
-      console.error({ event: "attempt.restore_failed", repo: fork, error: String(cause) });
+      console.error({ event: "attempt.restore_failed", repo: fork, error: String(error) });
       throw new ServiceError("internal", `couldn't restore ${attempt.fork} from its archive; it is still closed`);
     }
     return true;
@@ -1792,9 +1750,9 @@ export class TaskStore {
     for (let attempt = 0; ; attempt++) {
       try {
         return await work();
-      } catch (err) {
-        const code = (err as { code?: unknown }).code;
-        if (attempt >= FORK_READY_RETRIES || (code !== "FORK_IN_PROGRESS" && code !== "NOT_FOUND")) throw err;
+      } catch (error) {
+        const code = (error as { code?: unknown }).code;
+        if (attempt >= FORK_READY_RETRIES || (code !== "FORK_IN_PROGRESS" && code !== "NOT_FOUND")) throw error;
         await new Promise((resolve) => setTimeout(resolve, FORK_READY_BACKOFF_MS * 2 ** attempt));
       }
     }
@@ -1849,8 +1807,8 @@ export class TaskStore {
     await Promise.all(
       numbers.map((n) => {
         const name = forkRepo(project.id, attemptRef(task, n));
-        return this.#repos.delete(name).catch((cause: unknown) => {
-          console.error({ event: "attempt.orphan_fork", repo: name, error: String(cause) });
+        return this.#repos.delete(name).catch((error: unknown) => {
+          console.error({ event: "attempt.orphan_fork", repo: name, error: String(error) });
         });
       }),
     );
@@ -2005,9 +1963,9 @@ export async function runTaskMethod(store: TaskStore, method: string, args: unkn
   try {
     const fn = store[method as TaskMethod] as (...a: unknown[]) => unknown;
     return { ok: true, value: await fn.apply(store, args) };
-  } catch (err) {
-    if (err instanceof ServiceError) return { ok: false, code: err.code, message: err.message };
-    throw err;
+  } catch (error) {
+    if (error instanceof ServiceError) return { ok: false, code: error.code, message: error.message };
+    throw error;
   }
 }
 
@@ -2031,9 +1989,9 @@ export function attemptLimitFromConfig(result: ConfigResult): number {
  * after its branch.
  */
 export function taskFromCommit(message: string, branch: string): { title: string; body: string } {
-  const text = message.replace(/\r\n/g, "\n").trim();
-  const split = text.search(/\n[ \t]*\n/);
-  const subject = (split === -1 ? text : text.slice(0, split)).replace(/\s+/g, " ").trim();
+  const text = message.replace(/\r\n/gu, "\n").trim();
+  const split = text.search(/\n[ \t]*\n/u);
+  const subject = (split === -1 ? text : text.slice(0, split)).replace(/\s+/gu, " ").trim();
   const body = split === -1 ? "" : text.slice(split).trim();
   return { title: (subject || branch).slice(0, MAX_TITLE).trim(), body };
 }

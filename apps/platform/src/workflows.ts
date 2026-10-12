@@ -1,33 +1,20 @@
-import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
+import { WorkflowEntrypoint } from "cloudflare:workers";
+import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import { reposFor } from "./artifacts";
-import { loadConfig, type ConfigResult } from "./config";
-import {
-  GRANT_SOURCES,
-  ROLE_GRANTS,
-  sandboxName,
-  SCORING_ROLES,
-  type RoleGrants,
-  type RunGrants,
-  type SandboxRole,
-} from "./grants";
+import { loadConfig } from "./config";
+import type { ConfigResult } from "./config";
+import { GRANT_SOURCES, ROLE_GRANTS, sandboxName, SCORING_ROLES } from "./grants";
+import type { RoleGrants, RunGrants, SandboxRole } from "./grants";
 import { LOG_CONTENT_TYPE, logKey, logNames, MISSING_LOG_EXIT, PREVIEW_LOG, readLogScript, withNotes } from "./logs";
 import { roleAccess } from "./network";
 import { previewName } from "./preview";
 import { forkRepo, originRepo } from "./repos";
-import {
-  buildResult,
-  previewPlan,
-  scorePlan,
-  scoreTimeoutMs,
-  withPreview,
-  type RawScore,
-  type PreviewPlan,
-  type ScorePlan,
-  type ScoringResult,
-} from "./results";
+import { buildResult, previewPlan, scorePlan, scoreTimeoutMs, withPreview } from "./results";
+import type { PreviewPlan, RawScore, ScorePlan, ScoringResult } from "./results";
 import type { RunResult } from "./sandbox";
 import type { ScoringOutcome, ScoringParams } from "./scoring";
-import { parseResult, PREVIEW_BUILD_TIMEOUT_MS, previewScript, scoreScript, type PreviewScriptResult } from "./scripts";
+import { parseResult, PREVIEW_BUILD_TIMEOUT_MS, previewScript, scoreScript } from "./scripts";
+import type { PreviewScriptResult } from "./scripts";
 
 const TOKEN_TTL_SECONDS = 30 * 60;
 /** The preview step: fetching, installing and the build step at its timeout, then the deploy. */
@@ -69,8 +56,8 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
         result = { ...withPreview(scored, deployed), logs: [...scored.logs, ...logs] };
       }
       outcome = { status: "done", result };
-    } catch (cause) {
-      outcome = { status: "errored", error: String(cause).slice(0, 4000) };
+    } catch (error) {
+      outcome = { status: "errored", error: String(error).slice(0, 4000) };
     }
 
     await step.do("teardown", async () => {
@@ -165,16 +152,16 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
         console.log({ event: "scoring.preview_failed", stage: deployed.stage, output: deployed.output.slice(-2000) });
       }
       return { deployed, logs };
-    } catch (cause) {
-      const error = String(cause).slice(0, 2000);
-      console.warn({ event: "scoring.preview_errored", error });
+    } catch (error) {
+      const message = String(error).slice(0, 2000);
+      console.warn({ event: "scoring.preview_errored", error: message });
       // A lost Sandbox can't give its log back either; that still mustn't end the run.
       const logs = await step
         .do("preview logs", { retries: STEP_RETRIES }, () =>
           storeLogs(this.env, sandboxName(instanceId, "preview"), [PREVIEW_LOG], (log) => logKey(params, log)),
         )
         .catch(() => []);
-      return { deployed: { error }, logs };
+      return { deployed: { error: message }, logs };
     }
   }
 }
@@ -260,8 +247,8 @@ export async function storeLogs(
       if (log === null) continue;
       await env.LOGS.put(key(name), log, { httpMetadata: { contentType: LOG_CONTENT_TYPE } });
       stored.push(name);
-    } catch (cause) {
-      console.error({ event: "sandbox.log_not_stored", sandbox: sandboxId, name, error: String(cause) });
+    } catch (error) {
+      console.error({ event: "sandbox.log_not_stored", sandbox: sandboxId, name, error: String(error) });
     }
   }
   return stored;

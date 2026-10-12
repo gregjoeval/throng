@@ -3,9 +3,10 @@
 // way. `loadConfig` always reads it from the origin's `main`, so an attempt can't change its own
 // checks.
 
-import { z } from "zod";
 import { parseDocument } from "yaml";
-import { originRepo, type Repos } from "./repos.ts";
+import { z } from "zod";
+import { originRepo } from "./repos.ts";
+import type { Repos } from "./repos.ts";
 
 export const CONFIG_PATH = ".throng/config.yml";
 /** Larger configs are rejected rather than parsed. */
@@ -13,13 +14,16 @@ export const MAX_CONFIG_BYTES = 64 * 1024;
 export const DEFAULT_CHECK_TIMEOUT_MS = 10 * 60 * 1000;
 export const MAX_CHECK_TIMEOUT_MS = 30 * 60 * 1000;
 /** Check and metric names. */
-export const CONFIG_NAME = /^[a-z0-9][a-z0-9_-]*$/;
+export const CONFIG_NAME = /^[a-z0-9][a-z0-9_-]*$/u;
+/** A metric's stored `order`: `asc` when lower values are better, `desc` when higher are. */
+export const METRIC_ORDERS = ["asc", "desc"] as const;
+export type MetricOrder = (typeof METRIC_ORDERS)[number];
 
 export interface MetricConfig {
   name: string;
   unit: string | null;
   /** Which way is better: `asc` when lower values are better, `desc` when higher are. */
-  order: "asc" | "desc";
+  order: MetricOrder;
 }
 
 export interface CheckConfig {
@@ -51,10 +55,17 @@ export type ConfigResult =
   /** One line per problem, each prefixed with its path, e.g. `checks[0].name: …`. */
   | { kind: "invalid"; error: string };
 
-const ORDERS = { ascending: "asc", asc: "asc", descending: "desc", desc: "desc" } as const;
-const DURATION = /^(\d+)(s|m|h)$/;
+/** The `order` spellings a config may use, and the stored order each one means. */
+const ORDER_ALIASES = ["ascending", "asc", "descending", "desc"] as const;
+const ORDERS: Record<(typeof ORDER_ALIASES)[number], MetricOrder> = {
+  ascending: "asc",
+  asc: "asc",
+  descending: "desc",
+  desc: "desc",
+};
+const DURATION = /^(\d+)(s|m|h)$/u;
 const UNIT_MS = { s: 1000, m: 60 * 1000, h: 60 * 60 * 1000 } as const;
-const HOST = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
+const HOST = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/u;
 
 const name = (what: string) =>
   z.string({ error: `${what} must be a string` }).regex(CONFIG_NAME, `${what} must match ${CONFIG_NAME.source}`);
@@ -63,7 +74,7 @@ const command = z.string({ error: "must be a string" }).trim().min(1, "must not 
 const MetricSchema = z.strictObject({
   name: name("metric name"),
   unit: z.string({ error: "unit must be a string" }).optional(),
-  order: z.enum(Object.keys(ORDERS) as [keyof typeof ORDERS], {
+  order: z.enum(ORDER_ALIASES, {
     error: (issue) =>
       issue.input === undefined
         ? "order is required: ascending, asc, descending or desc"
@@ -155,8 +166,8 @@ export function parseConfig(text: string | null): ConfigResult {
   let value: unknown;
   try {
     value = doc.toJS({ maxAliasCount: 100 });
-  } catch (cause) {
-    return { kind: "invalid", error: `yaml: ${cause instanceof Error ? cause.message : String(cause)}` };
+  } catch (error) {
+    return { kind: "invalid", error: `yaml: ${error instanceof Error ? error.message : String(error)}` };
   }
   const parsed = ConfigSchema.safeParse(value ?? {});
   if (!parsed.success) {

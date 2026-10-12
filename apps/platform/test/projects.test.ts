@@ -28,7 +28,7 @@ function ids(...list: string[]): () => string {
 async function failure(promise: Promise<unknown>): Promise<ServiceError> {
   const err = await promise.then(
     () => null,
-    (e: unknown) => e,
+    (error: unknown) => error,
   );
   expect(err).toBeInstanceOf(ServiceError);
   return err as ServiceError;
@@ -39,7 +39,7 @@ describe("projectService.create", () => {
     const { repos, ada, service } = await setup();
     const project = await service.create(ada, { handle: "throng" });
     expect(project).toEqual({
-      id: expect.stringMatching(/^[a-z0-9]{6}$/),
+      id: expect.stringMatching(/^[a-z0-9]{6}$/u),
       handle: "throng",
       owner: { id: ada.user.id, handle: "ada" },
       createdAt: expect.any(String),

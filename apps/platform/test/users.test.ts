@@ -7,7 +7,7 @@ describe("userForEmail", () => {
     const db = testDatabase();
     const first = await userForEmail(db, "greg@example.com");
     expect(first).toMatchObject({ handle: "greg", email: "greg@example.com" });
-    expect(first.id).toMatch(/^[a-z0-9]{8}$/);
+    expect(first.id).toMatch(/^[a-z0-9]{8}$/u);
     expect(await userForEmail(db, "greg@example.com")).toEqual(first);
   });
 
@@ -34,6 +34,6 @@ describe("userForEmail", () => {
 
 describe("randomUserId", () => {
   it("is 8 lowercase alphanumeric characters", () => {
-    for (let i = 0; i < 100; i++) expect(randomUserId()).toMatch(/^[a-z0-9]{8}$/);
+    for (let i = 0; i < 100; i++) expect(randomUserId()).toMatch(/^[a-z0-9]{8}$/u);
   });
 });

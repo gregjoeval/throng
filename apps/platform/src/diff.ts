@@ -313,6 +313,7 @@ function pairRenames(changes: Change[]): Change[] {
   return result.filter((c) => !taken.has(c)).toSorted((a, b) => byteOrder(pathOf(a), pathOf(b)));
 }
 
+const GITLINK_MODE = "160000";
 const EMPTY_BLOB = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
 
 function renameable(s: FileSide): boolean {
@@ -334,7 +335,6 @@ function byteOrder(a: string, b: string): number {
 
 // --- One file --------------------------------------------------------------------------------
 
-const GITLINK_MODE = "160000";
 const ZERO_HASH = "0".repeat(40);
 
 /** A file's diff before rendering: its headers, and its hunks each already formatted. */

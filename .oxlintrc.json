@@ -37,7 +37,14 @@
     "unicorn/catch-error-name": "error",
     "typescript/consistent-type-definitions": "error",
     "typescript/no-explicit-any": "error",
-    "no-nested-ternary": "error"
+    "no-nested-ternary": "error",
+    "no-use-before-define": [
+      "error",
+      {
+        "functions": false,
+        "classes": false
+      }
+    ]
   },
   "overrides": [
     {

@@ -26,6 +26,9 @@ export const MAX_COMMITS_PAGE = 100;
 /** Head lookups for `/refs` run at most this many at a time. */
 const HEAD_CONCURRENCY = 6;
 
+const TEXT_TYPE = "text/plain; charset=utf-8";
+const BINARY_TYPE = "application/octet-stream";
+
 const SHA = /^[0-9a-f]{40}$/i;
 
 export interface BrowseDeps {
@@ -303,9 +306,6 @@ export function commitInfo(c: Commit): CommitInfo {
 function isoSeconds(seconds: number): string {
   return new Date(seconds * 1000).toISOString();
 }
-
-const TEXT_TYPE = "text/plain; charset=utf-8";
-const BINARY_TYPE = "application/octet-stream";
 
 /**
  * Types for extensions a browser can show as they are. Anything else (HTML and scripts included)

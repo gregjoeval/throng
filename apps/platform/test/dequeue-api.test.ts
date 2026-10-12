@@ -56,6 +56,8 @@ const file = (word: string, gone: string | null) => ({
 
 const workflow = { create: async () => ({}), get: async () => ({ terminate: async () => {} }) };
 
+const JSON_TYPE = { "Content-Type": "application/json" };
+
 /**
  * A project whose task t1 has one attempt, t1a1, selected and landing: main and the attempt both
  * changed `src/greeting.js` from the same base, as in the spike's conflict.
@@ -116,8 +118,6 @@ async function setup() {
   };
   return { call, request, logs, finish, greg, ada, bob, id, base, head, main, p };
 }
-
-const JSON_TYPE = { "Content-Type": "application/json" };
 
 /** The details the Landing Workflow reports for the spike's conflict, plus a file deleted on main. */
 function greetingConflict({ base, head, main }: { base: string; head: string; main: string }): ConflictDetails {

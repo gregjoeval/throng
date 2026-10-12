@@ -476,6 +476,11 @@ type Bearer = ReturnType<typeof bearerAuth>;
 
 const json = <T>(schema: T) => ({ content: { "application/json": { schema } } });
 
+const AUTHOR_ONLY = "Only the attempt's author, or their agents, may.";
+const OWNER_ONLY = "Only the project owner may.";
+const TASK_MANAGERS = "Only the project owner or the task's creator may.";
+const RESCORERS = "Only the attempt's author (or their agents), the task's creator or the project owner may.";
+
 /** A task transition route: `POST …/tasks/{t}/<verb>`. */
 function taskTransition<V extends string>(
   bearer: Bearer,
@@ -612,11 +617,6 @@ function scoringRoute<V extends string>(
     ok: { description: "The run now covering the attempt's head.", schema: ScoringSchema },
   });
 }
-
-const AUTHOR_ONLY = "Only the attempt's author, or their agents, may.";
-const OWNER_ONLY = "Only the project owner may.";
-const TASK_MANAGERS = "Only the project owner or the task's creator may.";
-const RESCORERS = "Only the attempt's author (or their agents), the task's creator or the project owner may.";
 
 /** A token row as the API shows it. */
 function publicToken({ id, agent, expires_at, revoked_at, created_at }: Token): z.infer<typeof TokenSchema> {

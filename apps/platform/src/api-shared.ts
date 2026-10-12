@@ -62,6 +62,9 @@ export const CommitDiffSchema = z
   })
   .openapi("CommitDiff");
 
+/** A route's JSON body or response, as `request.body` or a `responses` entry. */
+export const json = <T>(schema: T) => ({ content: { "application/json": { schema } } });
+
 /** A diff route's 200: JSON, or the unified patch for `Accept: text/x-diff`. */
 export function diffContent<T>(schema: T) {
   return {
@@ -71,16 +74,16 @@ export function diffContent<T>(schema: T) {
 }
 
 /**
- * Answers a diff as the unified patch when the client asked for `text/x-diff`, otherwise as `json`.
+ * Answers a diff as the unified patch when the client asked for `text/x-diff`, otherwise as the JSON `body`.
  * Either way the answer varies by `Accept`.
  */
-export function diffResponse(c: Context, patch: () => string, json: () => unknown): Response {
+export function diffResponse(c: Context, patch: () => string, body: () => unknown): Response {
   c.header("Vary", "Accept");
   if (wantsPatch(c.req.header("Accept"))) {
     c.header("Content-Type", "text/x-diff; charset=utf-8");
     return c.body(patch(), 200);
   }
-  return c.json(json(), 200);
+  return c.json(body(), 200);
 }
 
 /** Whether the client asked for the unified patch rather than JSON. */

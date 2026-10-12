@@ -9,7 +9,15 @@
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import type { Context } from "hono";
 import type { AccessBindings } from "./access.ts";
-import { CommitDiffSchema, diffContent, diffResponse, ProjectPathSchema, TAIL, tailedRoutes } from "./api-shared.ts";
+import {
+  CommitDiffSchema,
+  diffContent,
+  diffResponse,
+  json,
+  ProjectPathSchema,
+  TAIL,
+  tailedRoutes,
+} from "./api-shared.ts";
 import type { AuthEnv, bearerOrForwarded } from "./auth.ts";
 import { browseService, DEFAULT_COMMITS_PAGE, MAX_COMMITS_PAGE, MAX_TEXT_BYTES } from "./browse.ts";
 import type { BrowseService, Resolved } from "./browse.ts";
@@ -156,7 +164,6 @@ const PageQuerySchema = z.object({
 });
 
 const security: Record<string, string[]>[] = [{ bearer: [] }, { access: [] }];
-const json = <T>(schema: T) => ({ content: { "application/json": { schema } } });
 
 const refErrors = {
   304: { description: "Not modified: the ref still resolves to the sha in `If-None-Match`." },

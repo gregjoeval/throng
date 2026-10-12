@@ -7,7 +7,7 @@
 
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import type { AccessBindings } from "./access.ts";
-import { ProjectPathSchema } from "./api-shared.ts";
+import { json, ProjectPathSchema } from "./api-shared.ts";
 import { bearerAuth, bearerOrAccess, bearerOrForwarded } from "./auth.ts";
 import type { AuthEnv, AuthOptions } from "./auth.ts";
 import { browseRoutes } from "./browse-api.ts";
@@ -473,8 +473,6 @@ function noLogs(): LogStore {
 }
 
 type Bearer = ReturnType<typeof bearerAuth>;
-
-const json = <T>(schema: T) => ({ content: { "application/json": { schema } } });
 
 const AUTHOR_ONLY = "Only the attempt's author, or their agents, may.";
 const OWNER_ONLY = "Only the project owner may.";

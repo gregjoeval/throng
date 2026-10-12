@@ -121,8 +121,8 @@ export async function diffCommit(
  * trees are content-addressed, so one entry serves every repo that has both trees.
  */
 export interface DiffCache {
-  match(key: Request): Promise<Response | undefined>;
-  put(key: Request, res: Response): Promise<void>;
+  match: (key: Request) => Promise<Response | undefined>;
+  put: (key: Request, res: Response) => Promise<void>;
 }
 
 /** How long a cached tree diff is kept; it never goes stale, so this only bounds the cache. */

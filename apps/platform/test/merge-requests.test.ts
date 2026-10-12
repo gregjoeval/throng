@@ -25,7 +25,7 @@ class FakeWorkflow implements ScoringWorkflow {
   async create(_options: { id: string; params: ScoringParams }): Promise<unknown> {
     return {};
   }
-  async get(_id: string): Promise<{ terminate(): Promise<void> }> {
+  async get(_id: string): Promise<{ terminate: () => Promise<void> }> {
     return { terminate: async () => {} };
   }
 }

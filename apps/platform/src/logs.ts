@@ -19,8 +19,8 @@ const LOG_NAME = /^[a-z0-9][a-z0-9_-]*(\.[a-z0-9_-]+)?$/;
 
 /** The part of the logs R2 bucket Throng uses; tests pass one in memory. */
 export interface LogStore {
-  get(key: string): Promise<{ body: ReadableStream } | null>;
-  put(key: string, value: string): Promise<unknown>;
+  get: (key: string) => Promise<{ body: ReadableStream } | null>;
+  put: (key: string, value: string) => Promise<unknown>;
 }
 
 /** What R2 and the log endpoint serve a log as. */

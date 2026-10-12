@@ -28,7 +28,7 @@ const { LandingWorkflow } = (await import(WORKFLOW_MODULE)) as {
   LandingWorkflow: new (
     ctx: unknown,
     env: unknown,
-  ) => { run(event: unknown, step: unknown): Promise<LandingOutcome | null> };
+  ) => { run: (event: unknown, step: unknown) => Promise<LandingOutcome | null> };
 };
 
 const HEAD = "a".repeat(40);

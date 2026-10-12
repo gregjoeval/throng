@@ -68,23 +68,23 @@ function e2eRepo(name: string): boolean {
 
 /** The part of the logs R2 bucket cleanup needs. */
 export interface LogBucket {
-  list(options: {
+  list: (options: {
     prefix: string;
     cursor?: string;
-  }): Promise<{ objects: { key: string }[]; truncated: boolean; cursor?: string }>;
-  delete(keys: string[]): Promise<void>;
+  }) => Promise<{ objects: { key: string }[]; truncated: boolean; cursor?: string }>;
+  delete: (keys: string[]) => Promise<void>;
 }
 
 /** The project Durable Object's calls the e2e routes make. */
 export interface E2eProjectStub {
-  note(kind: string, detail: Record<string, unknown>): Promise<void> | void;
-  journal(since: number): Promise<unknown>;
+  note: (kind: string, detail: Record<string, unknown>) => Promise<void> | void;
+  journal: (since: number) => Promise<unknown>;
   /** Queues scoring of a commit pushed straight to an attempt's fork. */
-  score(project: string, attempt: string, sha: string): Promise<unknown>;
+  score: (project: string, attempt: string, sha: string) => Promise<unknown>;
   /** One scoring run, or null. */
-  run(id: number): Promise<unknown>;
+  run: (id: number) => Promise<unknown>;
   /** Deletes all of the project's Durable Object storage. */
-  destroy(): Promise<void>;
+  destroy: () => Promise<void>;
 }
 
 export interface E2eDeps<E> {

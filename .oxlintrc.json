@@ -15,7 +15,8 @@
       }
     ],
     "promise/always-return": "error",
-    "import/no-cycle": "error"
+    "import/no-cycle": "error",
+    "typescript/method-signature-style": "error"
   },
   "overrides": [
     {

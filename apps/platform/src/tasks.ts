@@ -29,7 +29,7 @@ import type { Database } from "./users.ts";
 
 /** A project's Durable Object, as the services call it: one store method per call. */
 export interface TaskBackend {
-  call(method: TaskMethod, args: unknown[]): Promise<TaskOutcome>;
+  call: (method: TaskMethod, args: unknown[]) => Promise<TaskOutcome>;
 }
 
 export interface TaskServiceDeps {

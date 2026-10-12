@@ -59,14 +59,14 @@ export interface AttemptScoring {
 
 /** The part of a Workflow binding the queue uses; tests pass a fake. */
 export interface ScoringWorkflow {
-  create(options: { id: string; params: ScoringParams }): Promise<unknown>;
-  get(id: string): Promise<{ terminate(): Promise<void> }>;
+  create: (options: { id: string; params: ScoringParams }) => Promise<unknown>;
+  get: (id: string) => Promise<{ terminate: () => Promise<void> }>;
 }
 
 export interface ScoringRunner {
   workflow: ScoringWorkflow;
   /** Destroys a run's Sandboxes once its Workflow is stopped. */
-  teardown(instanceId: string): Promise<void>;
+  teardown: (instanceId: string) => Promise<void>;
 }
 
 /** An attempt's head, as scoring names it. */

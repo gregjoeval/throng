@@ -41,7 +41,7 @@ class FakeWorkflow implements ScoringWorkflow {
     return {};
   }
 
-  async get(id: string): Promise<{ terminate(): Promise<void> }> {
+  async get(id: string): Promise<{ terminate: () => Promise<void> }> {
     return { terminate: async () => void this.terminated.push(id) };
   }
 }

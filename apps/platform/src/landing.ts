@@ -129,12 +129,12 @@ export function failedChecks(result: ScoringResult, stored: string[]): FailedChe
 
 /** The part of the Landing Workflow binding the DO uses; tests pass a fake. */
 export interface LandingWorkflowBinding {
-  create(options: { id: string; params: LandingParams }): Promise<unknown>;
-  get(id: string): Promise<{ terminate(): Promise<void> }>;
+  create: (options: { id: string; params: LandingParams }) => Promise<unknown>;
+  get: (id: string) => Promise<{ terminate: () => Promise<void> }>;
 }
 
 export interface LandingRunner {
   workflow: LandingWorkflowBinding;
   /** Destroys a landing's Sandboxes once its Workflow is stopped. */
-  teardown(instanceId: string): Promise<void>;
+  teardown: (instanceId: string) => Promise<void>;
 }

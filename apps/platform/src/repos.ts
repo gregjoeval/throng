@@ -95,33 +95,33 @@ export interface CopyRef {
  */
 export interface Repos {
   /** Creates an empty repo and returns it with a write token for its first push. */
-  create(name: string, opts?: { defaultBranch?: string }): Promise<RepoInfo & { token: string }>;
-  get(name: string): Promise<RepoInfo>;
+  create: (name: string, opts?: { defaultBranch?: string }) => Promise<RepoInfo & { token: string }>;
+  get: (name: string) => Promise<RepoInfo>;
   /** Forks `source`'s default branch into `name`. The fork can take a moment before `get` finds it. */
-  fork(source: string, name: string): Promise<void>;
+  fork: (source: string, name: string) => Promise<void>;
   /** Returns whether the repo existed. */
-  delete(name: string): Promise<boolean>;
+  delete: (name: string) => Promise<boolean>;
   /** Names of the namespace's repos that start with `prefix`, sorted. */
-  list(prefix: string): Promise<string[]>;
+  list: (prefix: string) => Promise<string[]>;
   /** A token for the repo's git remote, valid for `ttl` seconds. */
-  mintToken(name: string, scope: TokenScope, ttl: number): Promise<RepoToken>;
+  mintToken: (name: string, scope: TokenScope, ttl: number) => Promise<RepoToken>;
   /** A file's bytes at `ref`, or null if the ref or path doesn't resolve to a file. */
-  readFile(name: string, args: { ref: string; path: string }): Promise<Blob | null>;
+  readFile: (name: string, args: { ref: string; path: string }) => Promise<Blob | null>;
   /**
    * First-parent history from `ref` (a branch, tag or commit sha), newest first, skipping `offset`
    * commits; empty if the ref doesn't resolve.
    */
-  listCommits(name: string, args: { ref: string; limit: number; offset?: number }): Promise<Commit[]>;
+  listCommits: (name: string, args: { ref: string; limit: number; offset?: number }) => Promise<Commit[]>;
   /** A commit by its 40-character lowercase sha, or null if the repo has no such commit. */
-  readCommit(name: string, hash: string): Promise<Commit | null>;
+  readCommit: (name: string, hash: string) => Promise<Commit | null>;
   /** A tree's immediate children by the tree's sha, or null if the repo has no such object. */
-  readTree(name: string, hash: string): Promise<TreeEntry[] | null>;
+  readTree: (name: string, hash: string) => Promise<TreeEntry[] | null>;
   /** A blob's raw bytes by its sha (the `Blob` is untyped), or null if the repo has no such blob. */
-  readBlob(name: string, hash: string): Promise<Blob | null>;
+  readBlob: (name: string, hash: string) => Promise<Blob | null>;
   /**
    * Points `toRef` in `to` at the commit `fromRef` points at in `from`, copying whatever objects
    * `to` lacks, and returns that commit's sha. Null, with nothing changed, when `fromRef` doesn't
    * exist. `toRef` is force-updated, so it may move to a commit that doesn't descend from it.
    */
-  copyRef(args: CopyRef): Promise<string | null>;
+  copyRef: (args: CopyRef) => Promise<string | null>;
 }

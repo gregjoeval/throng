@@ -131,9 +131,9 @@ export type TaskEvent =
 /** The slice of SQLite the store needs: Durable Object storage in production, `node:sqlite` in tests. */
 export interface Sql {
   /** Runs one statement and returns its rows. */
-  exec<T>(query: string, ...bindings: unknown[]): T[];
+  exec: <T>(query: string, ...bindings: unknown[]) => T[];
   /** Runs `fn` atomically: its writes all commit, or none do if it throws. */
-  transaction<T>(fn: () => T): T;
+  transaction: <T>(fn: () => T) => T;
 }
 
 /** What `recordPush` did: the scoring it queued, and what to tell the pusher of their merge request. */

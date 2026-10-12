@@ -28,6 +28,15 @@ export const PROJECTION_RETRY_MS = 60_000;
  */
 export const MAX_PROJECTION_RETRY_MS = 60 * 60_000;
 
+// The projected fields (a task's title, creator, state, created_at and closed_at; an attempt's author,
+// state, created_at and closed_at) are listed in several places that must stay in step. Adding or
+// dropping one means changing each of:
+// - the `UPDATE OF` column lists and `WHEN` clauses of the `*_updated` triggers below;
+// - the SELECTs in `Projection.pending`;
+// - the INSERT columns, SET lists and binds in `deliver`;
+// - `StoredProjectedTask` and `StoredProjectedAttempt`;
+// - the D1 tables in `migrations/0005_task_projection.sql`, through a new migration once it has shipped;
+// - and what `my-listings.ts` reads, with `MyTask`/`MyAttempt` and their schemas in `api.ts`.
 const SCHEMA = [
   // One row: when this store's outbox was created, which outranks every earlier store of the project.
   `CREATE TABLE IF NOT EXISTS projection_epoch (epoch INTEGER NOT NULL)`,

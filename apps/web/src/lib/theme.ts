@@ -1,12 +1,13 @@
 export type Theme = "light" | "dark";
 
 const STORAGE_KEY = "theme";
+const DARK_QUERY = "(prefers-color-scheme: dark)";
 
 /** Runs in the document head before hydration: applies the saved theme, else the OS preference. */
-export const themeScript = `(() => {
+export const THEME_SCRIPT = `(() => {
   try {
     const saved = localStorage.getItem(${JSON.stringify(STORAGE_KEY)});
-    const dark = saved ? saved === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+    const dark = saved ? saved === "dark" : matchMedia(${JSON.stringify(DARK_QUERY)}).matches;
     document.documentElement.classList.toggle("dark", dark);
   } catch {}
 })();`;
@@ -46,7 +47,7 @@ function followSystem(event: MediaQueryListEvent) {
 }
 
 function systemQuery(): MediaQueryList | null {
-  return typeof matchMedia === "function" ? matchMedia("(prefers-color-scheme: dark)") : null;
+  return typeof matchMedia === "function" ? matchMedia(DARK_QUERY) : null;
 }
 
 /** The query `followSystem` listens on while anyone is subscribed. */

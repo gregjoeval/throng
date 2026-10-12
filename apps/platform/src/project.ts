@@ -10,6 +10,11 @@ import { parseAttemptRef } from "./task-refs";
 import { runTaskMethod, TaskStore } from "./task-store";
 import type { ProjectContext, Sql, TaskOutcome } from "./task-store";
 
+/** Where the project's id is kept, for alarms, which carry no call that names it. */
+const PROJECT_KEY = "project";
+/** How long a failed publish to the D1 projection waits before it is tried again. */
+const PROJECTION_RETRY_MS = 60_000;
+
 export interface JournalEntry {
   id: number;
   at: number;
@@ -22,7 +27,8 @@ export interface JournalEntry {
  * rows, per-project counters and journal events for every transition, and for its scoring runs
  * (`scoring.ts`), merge requests and the landings of its merge queue. After every store call and
  * report it drains: stopping and starting Landing Workflows, starting Follow Workflows, then scoring runs.
- * The journal also records the hops the e2e suite reads timings back from.
+ * Then, when its tasks or attempts changed, an alarm publishes them to the D1 projection, trying
+ * again until it lands. The journal also records the hops the e2e suite reads timings back from.
  */
 export class ProjectCoordinator extends DurableObject<Env> {
   readonly #sql: SqlStorage;
@@ -137,8 +143,22 @@ export class ProjectCoordinator extends DurableObject<Env> {
     );
   }
 
+  /** Publishes changed tasks and attempts to the D1 projection; a failure tries again later. */
+  override async alarm(): Promise<void> {
+    const project = this.ctx.storage.kv.get<string>(PROJECT_KEY);
+    if (project === undefined) return;
+    try {
+      // Changes made while a publish awaited D1 go out in the next one.
+      while (await this.#tasks.projection.publish(this.env.DB, project));
+    } catch (error) {
+      console.error({ event: "project.projection_failed", project, error: String(error) });
+      await this.ctx.storage.setAlarm(Date.now() + PROJECTION_RETRY_MS);
+    }
+  }
+
   /** E2e cleanup only: deletes all of this project's storage, so nothing of an e2e run is left. */
   async destroy(): Promise<void> {
+    await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
   }
 
@@ -153,12 +173,18 @@ export class ProjectCoordinator extends DurableObject<Env> {
    * is remembered for calls that can't tell.
    */
   async #drain(project: string | undefined): Promise<void> {
-    if (project !== undefined) this.#project = project;
+    if (project !== undefined && project !== this.#project) {
+      this.#project = project;
+      this.ctx.storage.kv.put(PROJECT_KEY, project);
+    }
     try {
       if (this.#project === null) await this.#tasks.scoring.drain();
       else await this.#tasks.drain(this.#project);
     } catch (error) {
       console.error({ event: "project.drain_failed", error: String(error) });
+    }
+    if (this.#project !== null && this.#tasks.projection.hasChanges()) {
+      await this.ctx.storage.setAlarm(Date.now());
     }
   }
 

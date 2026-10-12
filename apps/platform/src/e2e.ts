@@ -114,7 +114,7 @@ export interface E2eDeps<E> {
 }
 
 /**
- * Deletes everything an e2e project made: its D1 row (nothing else in D1 refers to a project), its
+ * Deletes everything an e2e project made: its D1 row (its projected tasks and attempts go with it), its
  * Durable Object's storage, its logs in R2, and its repos.
  */
 export async function deleteE2eProject<E>(deps: E2eDeps<E>, env: E, id: string): Promise<void> {

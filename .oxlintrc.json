@@ -33,7 +33,8 @@
           "onlyIfContainsSeparator": true
         }
       }
-    ]
+    ],
+    "unicorn/catch-error-name": "error"
   },
   "overrides": [
     {

@@ -56,8 +56,8 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
         result = { ...withPreview(scored, deployed), logs: [...scored.logs, ...logs] };
       }
       outcome = { status: "done", result };
-    } catch (cause) {
-      outcome = { status: "errored", error: String(cause).slice(0, 4000) };
+    } catch (error) {
+      outcome = { status: "errored", error: String(error).slice(0, 4000) };
     }
 
     await step.do("teardown", async () => {
@@ -152,16 +152,16 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
         console.log({ event: "scoring.preview_failed", stage: deployed.stage, output: deployed.output.slice(-2000) });
       }
       return { deployed, logs };
-    } catch (cause) {
-      const error = String(cause).slice(0, 2000);
-      console.warn({ event: "scoring.preview_errored", error });
+    } catch (error) {
+      const message = String(error).slice(0, 2000);
+      console.warn({ event: "scoring.preview_errored", error: message });
       // A lost Sandbox can't give its log back either; that still mustn't end the run.
       const logs = await step
         .do("preview logs", { retries: STEP_RETRIES }, () =>
           storeLogs(this.env, sandboxName(instanceId, "preview"), [PREVIEW_LOG], (log) => logKey(params, log)),
         )
         .catch(() => []);
-      return { deployed: { error }, logs };
+      return { deployed: { error: message }, logs };
     }
   }
 }
@@ -247,8 +247,8 @@ export async function storeLogs(
       if (log === null) continue;
       await env.LOGS.put(key(name), log, { httpMetadata: { contentType: LOG_CONTENT_TYPE } });
       stored.push(name);
-    } catch (cause) {
-      console.error({ event: "sandbox.log_not_stored", sandbox: sandboxId, name, error: String(cause) });
+    } catch (error) {
+      console.error({ event: "sandbox.log_not_stored", sandbox: sandboxId, name, error: String(error) });
     }
   }
   return stored;

@@ -55,13 +55,13 @@ export async function userForEmail(db: Database, email: string, newId: () => str
         .bind(id, handle, email)
         .first<User>();
       if (created !== null) return created;
-    } catch (err) {
+    } catch (error) {
       // Collisions are expected; anything else is a real failure. An email collision means another
       // request created this user first, which the next lookup finds.
-      const column = /UNIQUE constraint failed: users\.(\w+)/.exec(String(err))?.[1];
+      const column = /UNIQUE constraint failed: users\.(\w+)/.exec(String(error))?.[1];
       if (column === "id") id = newId();
       else if (column === "handle") suffix++;
-      else if (column !== "email") throw err;
+      else if (column !== "email") throw error;
     }
   }
   throw new Error(`could not create a user for ${email}`);

@@ -98,7 +98,7 @@ async function setup() {
 async function code(promise: Promise<unknown> | (() => unknown)): Promise<string> {
   const err = await (typeof promise === "function" ? Promise.resolve().then(promise) : promise).then(
     () => null,
-    (e: unknown) => e,
+    (error: unknown) => error,
   );
   expect(err).toBeInstanceOf(ServiceError);
   return (err as ServiceError).code;

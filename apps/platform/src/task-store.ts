@@ -538,10 +538,10 @@ export class TaskStore {
         }
         return numbers.map((number) => this.#attempt({ task: current.number, number }));
       });
-    } catch (err) {
+    } catch (error) {
       // A failed fork cleans up after itself; past that, every fork exists and must go.
       if (forked) await this.#deleteForks(project, current.number, numbers);
-      throw err;
+      throw error;
     } finally {
       const left = (this.#reserved.get(current.number) ?? count) - count;
       if (left > 0) this.#reserved.set(current.number, left);
@@ -737,9 +737,9 @@ export class TaskStore {
         this.#journal(actor, "reopened", current.task, current.number);
         return this.#attempt(current);
       });
-    } catch (err) {
+    } catch (error) {
       if (forked) await this.#deleteForks(project, current.task, [current.number]);
-      throw err;
+      throw error;
     } finally {
       const left = (this.#reserved.get(parent.number) ?? 1) - 1;
       if (left > 0) this.#reserved.set(parent.number, left);
@@ -950,10 +950,10 @@ export class TaskStore {
     });
     try {
       await this.#fork(project, route.task, [route.number]);
-    } catch (err) {
+    } catch (error) {
       // A failed fork deletes what it made; only the branch is left to free.
       this.#dropBranchPush(route);
-      throw err;
+      throw error;
     }
     return route;
   }
@@ -1353,10 +1353,10 @@ export class TaskStore {
     if (started === null) return;
     try {
       await runner.workflow.create({ id: started.instance_id, params: started.params });
-    } catch (cause) {
+    } catch (error) {
       await this.landingFinished(started.id, {
         kind: "errored",
-        details: { step: "start", error: String(cause).slice(0, 2000) },
+        details: { step: "start", error: String(error).slice(0, 2000) },
       });
       await this.#drainLandings(project);
       return;
@@ -1408,9 +1408,9 @@ export class TaskStore {
       const instance = await runner.workflow.get(landing.instance_id);
       await instance.terminate();
       await runner.teardown(landing.instance_id);
-    } catch (cause) {
+    } catch (error) {
       // It may already have ended; its report is discarded either way.
-      console.warn({ event: "landing.stop_failed", instance_id: landing.instance_id, error: String(cause) });
+      console.warn({ event: "landing.stop_failed", instance_id: landing.instance_id, error: String(error) });
     }
   }
 
@@ -1591,8 +1591,8 @@ export class TaskStore {
     try {
       const [commit] = await this.#repos.listCommits(forkRepo(project.id, attempt.fork), { ref: "main", limit: 1 });
       head = commit?.hash ?? null;
-    } catch (cause) {
-      console.error({ event: "scoring.head_unreadable", attempt: attempt.fork, trigger, error: String(cause) });
+    } catch (error) {
+      console.error({ event: "scoring.head_unreadable", attempt: attempt.fork, trigger, error: String(error) });
       return null;
     }
     return head === null ? null : this.#request(project, actor, attempt, head, trigger, readSince);
@@ -1694,8 +1694,8 @@ export class TaskStore {
             to: origin,
             toRef: archiveRef(attempt.fork),
           });
-        } catch (cause) {
-          console.error({ event: "attempt.archive_failed", repo: fork, error: String(cause) });
+        } catch (error) {
+          console.error({ event: "attempt.archive_failed", repo: fork, error: String(error) });
           return;
         }
         if (sha !== null) {
@@ -1722,9 +1722,9 @@ export class TaskStore {
     const fork = forkRepo(project.id, attempt.fork);
     try {
       await this.#repos.fork(origin, fork);
-    } catch (err) {
-      if ((err as { code?: unknown }).code === "ALREADY_EXISTS") return false;
-      throw err;
+    } catch (error) {
+      if ((error as { code?: unknown }).code === "ALREADY_EXISTS") return false;
+      throw error;
     }
     if (attempt.archived_sha === null) return true;
     try {
@@ -1737,9 +1737,9 @@ export class TaskStore {
           expect: attempt.archived_sha ?? undefined,
         }),
       );
-    } catch (cause) {
+    } catch (error) {
       await this.#deleteForks(project, attempt.task, [attempt.number]);
-      console.error({ event: "attempt.restore_failed", repo: fork, error: String(cause) });
+      console.error({ event: "attempt.restore_failed", repo: fork, error: String(error) });
       throw new ServiceError("internal", `couldn't restore ${attempt.fork} from its archive; it is still closed`);
     }
     return true;
@@ -1750,9 +1750,9 @@ export class TaskStore {
     for (let attempt = 0; ; attempt++) {
       try {
         return await work();
-      } catch (err) {
-        const code = (err as { code?: unknown }).code;
-        if (attempt >= FORK_READY_RETRIES || (code !== "FORK_IN_PROGRESS" && code !== "NOT_FOUND")) throw err;
+      } catch (error) {
+        const code = (error as { code?: unknown }).code;
+        if (attempt >= FORK_READY_RETRIES || (code !== "FORK_IN_PROGRESS" && code !== "NOT_FOUND")) throw error;
         await new Promise((resolve) => setTimeout(resolve, FORK_READY_BACKOFF_MS * 2 ** attempt));
       }
     }
@@ -1807,8 +1807,8 @@ export class TaskStore {
     await Promise.all(
       numbers.map((n) => {
         const name = forkRepo(project.id, attemptRef(task, n));
-        return this.#repos.delete(name).catch((cause: unknown) => {
-          console.error({ event: "attempt.orphan_fork", repo: name, error: String(cause) });
+        return this.#repos.delete(name).catch((error: unknown) => {
+          console.error({ event: "attempt.orphan_fork", repo: name, error: String(error) });
         });
       }),
     );
@@ -1963,9 +1963,9 @@ export async function runTaskMethod(store: TaskStore, method: string, args: unkn
   try {
     const fn = store[method as TaskMethod] as (...a: unknown[]) => unknown;
     return { ok: true, value: await fn.apply(store, args) };
-  } catch (err) {
-    if (err instanceof ServiceError) return { ok: false, code: err.code, message: err.message };
-    throw err;
+  } catch (error) {
+    if (error instanceof ServiceError) return { ok: false, code: error.code, message: error.message };
+    throw error;
   }
 }
 

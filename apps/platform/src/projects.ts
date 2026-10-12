@@ -97,15 +97,15 @@ export function projectService({ db, repos, newId = randomProjectId }: ProjectDe
           .bind(id, owner.id, input.handle, owner.handle)
           .first<ProjectRow>();
         if (row === null) throw new Error("project insert returned no row");
-      } catch (err) {
-        await repos.delete(originRepo(id)).catch((cause: unknown) => {
-          console.error({ event: "project.orphan_repo", repo: originRepo(id), error: String(cause) });
+      } catch (error) {
+        await repos.delete(originRepo(id)).catch((deleteError: unknown) => {
+          console.error({ event: "project.orphan_repo", repo: originRepo(id), error: String(deleteError) });
         });
         // Another request took the handle between the check and the insert.
-        if (/UNIQUE constraint failed: projects\.(owner_id|handle)/.test(String(err))) {
+        if (/UNIQUE constraint failed: projects\.(owner_id|handle)/.test(String(error))) {
           throw duplicate(owner.handle, input.handle);
         }
-        throw err;
+        throw error;
       }
       console.log({ event: "project.created", project: id, owner: owner.id, agent: actor.agent });
       return project(row);
@@ -146,8 +146,8 @@ async function createOrigin(db: Database, repos: Repos, newId: () => string): Pr
     try {
       await repos.create(originRepo(id), { defaultBranch: "main" });
       return id;
-    } catch (err) {
-      if ((err as { code?: unknown }).code !== "ALREADY_EXISTS") throw err;
+    } catch (error) {
+      if ((error as { code?: unknown }).code !== "ALREADY_EXISTS") throw error;
     }
   }
   throw new Error("could not draw an unused project id");

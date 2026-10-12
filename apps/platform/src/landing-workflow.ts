@@ -60,8 +60,8 @@ export class LandingWorkflow extends WorkflowEntrypoint<Env, LandingParams> {
     let outcome: LandingOutcome | null;
     try {
       outcome = await this.#land(instanceId, params, step);
-    } catch (cause) {
-      const failed = cause instanceof StepFailed ? cause : new StepFailed("landing", cause);
+    } catch (error) {
+      const failed = error instanceof StepFailed ? error : new StepFailed("landing", error);
       outcome = { kind: "errored", details: { step: failed.step, error: failed.message } };
     }
 
@@ -197,8 +197,8 @@ export class LandingWorkflow extends WorkflowEntrypoint<Env, LandingParams> {
   ): Promise<T> {
     try {
       return await step.do(name, config, fn);
-    } catch (cause) {
-      throw new StepFailed(name, cause);
+    } catch (error) {
+      throw new StepFailed(name, error);
     }
   }
 

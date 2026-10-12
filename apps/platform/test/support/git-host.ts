@@ -51,8 +51,8 @@ export async function tryGit(
   try {
     const { stdout, stderr } = await exec(GIT, args, { cwd, env, maxBuffer: 16 * 1024 * 1024 });
     return { ok: true, stdout, stderr };
-  } catch (err) {
-    const { stdout = "", stderr = "" } = err as { stdout?: string; stderr?: string };
+  } catch (error) {
+    const { stdout = "", stderr = "" } = error as { stdout?: string; stderr?: string };
     return { ok: false, stdout, stderr };
   }
 }
@@ -94,9 +94,9 @@ export class LocalGitHost implements Repos {
         let response: HostResponse;
         try {
           response = await host!.#handle(req);
-        } catch (err: unknown) {
+        } catch (error: unknown) {
           res.writeHead(500, { "Content-Type": "text/plain" });
-          res.end(String(err));
+          res.end(String(error));
           return;
         }
         res.writeHead(response.status, response.headers);
@@ -358,8 +358,8 @@ export async function serve(
       }
       recorded.body = Buffer.concat(chunks);
       res.end();
-    })().catch((err: unknown) => {
-      res.destroy(err as Error);
+    })().catch((error: unknown) => {
+      res.destroy(error as Error);
     });
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));

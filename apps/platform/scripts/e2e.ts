@@ -197,9 +197,9 @@ async function main(): Promise<void> {
       try {
         await scenario();
         console.log(`== ${name}: PASS`);
-      } catch (cause) {
+      } catch (error) {
         failed = true;
-        console.error(`== ${name}: FAIL`, cause);
+        console.error(`== ${name}: FAIL`, error);
       }
     }
   } finally {
@@ -568,7 +568,7 @@ async function preview(): Promise<void> {
   const deadline = Date.now() + 2 * 60 * 1000;
   let last = "";
   while (Date.now() < deadline) {
-    const response = await fetch(url).catch((cause: unknown) => cause);
+    const response = await fetch(url).catch((error: unknown) => error);
     last = response instanceof Response ? `${response.status} ${await response.text()}` : String(response);
     if (last === "200 hello from a1, built, e2e") break;
     await new Promise((r) => setTimeout(r, 2000));
@@ -869,7 +869,7 @@ function e2eUser(): Promise<{ token: string; id: string; user: { id: string; han
 async function revokeE2eToken(): Promise<void> {
   if (e2eUserToken === null || process.env.E2E_KEEP === "1") return;
   const { id } = await e2eUserToken;
-  await api("DELETE", `/e2e/tokens/${id}`).catch((cause) => console.warn("could not revoke the run's token", cause));
+  await api("DELETE", `/e2e/tokens/${id}`).catch((error) => console.warn("could not revoke the run's token", error));
 }
 
 /** Creates the task the scenario expects to be `expected` (numbers are per project, from 1). */
@@ -909,8 +909,8 @@ async function editAndPush(
     try {
       await git(p.work, ...proxyAuth(p), "push", "-q", remote, "HEAD:refs/heads/main");
       break;
-    } catch (cause) {
-      if (Date.now() > deadline) throw cause;
+    } catch (error) {
+      if (Date.now() > deadline) throw error;
       await new Promise((r) => setTimeout(r, 2000));
     }
   }
@@ -1052,7 +1052,7 @@ async function waitFor(project: string, match: (e: JournalEntry) => boolean): Pr
 /** Deletes everything the project made: its rows, its Durable Object's storage, its logs and its repos. */
 async function cleanUp(project: string, work: string): Promise<void> {
   if (process.env.E2E_KEEP === "1") return;
-  await api("DELETE", `/e2e/projects/${project}`).catch((cause) => console.warn(`could not delete ${project}`, cause));
+  await api("DELETE", `/e2e/projects/${project}`).catch((error) => console.warn(`could not delete ${project}`, error));
   await rm(work, { recursive: true, force: true });
 }
 

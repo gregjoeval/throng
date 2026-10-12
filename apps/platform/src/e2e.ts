@@ -226,8 +226,8 @@ export function e2eRoutes<E extends object>(deps: E2eDeps<E>) {
         const { token } = await repos.mintToken(name, "write", PUSH_TOKEN_TTL_SECONDS);
         await deps.project(c.env, project).note("forkReady", { name, forkMs, readyMs, polls });
         return c.json({ remote: fork.remote, token, forkMs, readyMs, polls });
-      } catch (cause) {
-        if (Date.now() - began > FORK_READY_TIMEOUT_MS) throw cause;
+      } catch (error) {
+        if (Date.now() - began > FORK_READY_TIMEOUT_MS) throw error;
         await new Promise((r) => setTimeout(r, 250));
       }
     }

@@ -156,8 +156,8 @@ export function parseConfig(text: string | null): ConfigResult {
   let value: unknown;
   try {
     value = doc.toJS({ maxAliasCount: 100 });
-  } catch (cause) {
-    return { kind: "invalid", error: `yaml: ${cause instanceof Error ? cause.message : String(cause)}` };
+  } catch (error) {
+    return { kind: "invalid", error: `yaml: ${error instanceof Error ? error.message : String(error)}` };
   }
   const parsed = ConfigSchema.safeParse(value ?? {});
   if (!parsed.success) {

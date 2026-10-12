@@ -47,7 +47,7 @@ function setup() {
 async function failure(promise: Promise<unknown> | (() => unknown)): Promise<ServiceError> {
   const err = await (typeof promise === "function" ? Promise.resolve().then(promise) : promise).then(
     () => null,
-    (e: unknown) => e,
+    (error: unknown) => error,
   );
   expect(err).toBeInstanceOf(ServiceError);
   return err as ServiceError;
@@ -687,7 +687,7 @@ describe("archive", () => {
     const fork = repos.fork.bind(repos);
     let racing: Promise<unknown> | undefined;
     repos.fork = async (source, name) => {
-      racing ??= store.createAttempts(PROJECT, bob, { task: 1 }).catch((e: unknown) => e);
+      racing ??= store.createAttempts(PROJECT, bob, { task: 1 }).catch((error: unknown) => error);
       return fork(source, name);
     };
     expect((await store.reopenAttempt(PROJECT, ada, t1a1)).state).toBe("draft");

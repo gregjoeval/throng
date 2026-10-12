@@ -138,8 +138,8 @@ export class ProjectCoordinator extends DurableObject<Env> {
     try {
       if (this.#project === null) await this.#tasks.scoring.drain();
       else await this.#tasks.drain(this.#project);
-    } catch (cause) {
-      console.error({ event: "project.drain_failed", error: String(cause) });
+    } catch (error) {
+      console.error({ event: "project.drain_failed", error: String(error) });
     }
   }
 

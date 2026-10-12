@@ -429,14 +429,14 @@ export class ScoringQueue {
     };
     try {
       await runner.workflow.create({ id: run.instance_id, params });
-    } catch (cause) {
+    } catch (error) {
       this.#sql.exec(
         "UPDATE scoring_runs SET status = 'errored', error = ?, finished_at = ? WHERE id = ? AND status = 'running'",
-        String(cause),
+        String(error),
         this.#ms(),
         run.id,
       );
-      this.#journal("scoringErrored", run, { error: String(cause) });
+      this.#journal("scoringErrored", run, { error: String(error) });
       return;
     }
     // A newer head may have cancelled the run while its Workflow was being created.
@@ -452,9 +452,9 @@ export class ScoringQueue {
       const instance = await runner.workflow.get(run.instance_id);
       await instance.terminate();
       await runner.teardown(run.instance_id);
-    } catch (cause) {
+    } catch (error) {
       // The run may already have finished; its report is discarded either way.
-      console.warn({ event: "scoring.stop_failed", instance_id: run.instance_id, error: String(cause) });
+      console.warn({ event: "scoring.stop_failed", instance_id: run.instance_id, error: String(error) });
     }
   }
 

@@ -30,12 +30,12 @@ describe("the hc client", () => {
 
 describe("apiQuery", () => {
   it("rejects with the status and error body on a failure", async () => {
-    const error = { error: { code: "unauthorized", message: "no session" } };
-    server.use(http.get("*/api/me", () => HttpResponse.json(error, { status: 401 })));
+    const body = { error: { code: "unauthorized", message: "no session" } };
+    server.use(http.get("*/api/me", () => HttpResponse.json(body, { status: 401 })));
     const failure = await query()
       .fetchQuery(apiQuery(["me", "failing"], (init) => client.api.me.$get(undefined, { init })))
-      .catch((e: unknown) => e);
+      .catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(DetailedError);
-    expect(failure).toMatchObject({ statusCode: 401, detail: { data: error } });
+    expect(failure).toMatchObject({ statusCode: 401, detail: { data: body } });
   });
 });

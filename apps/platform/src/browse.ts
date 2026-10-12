@@ -345,9 +345,9 @@ function contentType(name: string): string | null {
 async function missingAsNull<T>(read: Promise<T>): Promise<T | null> {
   try {
     return await read;
-  } catch (err) {
-    if ((err as { code?: unknown }).code === "NOT_FOUND") return null;
-    throw err;
+  } catch (error) {
+    if ((error as { code?: unknown }).code === "NOT_FOUND") return null;
+    throw error;
   }
 }
 

@@ -28,7 +28,7 @@ function ids(...list: string[]): () => string {
 async function failure(promise: Promise<unknown>): Promise<ServiceError> {
   const err = await promise.then(
     () => null,
-    (e: unknown) => e,
+    (error: unknown) => error,
   );
   expect(err).toBeInstanceOf(ServiceError);
   return err as ServiceError;

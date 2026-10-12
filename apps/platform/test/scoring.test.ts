@@ -82,7 +82,7 @@ function setup() {
 async function code(promise: Promise<unknown>): Promise<string> {
   const err = await promise.then(
     () => null,
-    (e: unknown) => e,
+    (error: unknown) => error,
   );
   expect(err).toBeInstanceOf(ServiceError);
   return (err as ServiceError).code;

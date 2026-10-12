@@ -21,10 +21,10 @@ export function testSql(): Sql & { db: DatabaseSync } {
         const result = fn();
         db.exec(`RELEASE ${savepoint}`);
         return result;
-      } catch (err) {
+      } catch (error) {
         db.exec(`ROLLBACK TO ${savepoint}`);
         db.exec(`RELEASE ${savepoint}`);
-        throw err;
+        throw error;
       } finally {
         depth--;
       }

@@ -129,9 +129,9 @@ export function gitRoutes(options: GitProxyOptions) {
     try {
       const prefix = pushed === null ? null : { bytes: pushed.consumed, length: contentLength(c) };
       upstream = await forward(c, target, scope, prefix, { repos, tokens, fetch: upstreamFetch });
-    } catch (err) {
-      if ((err as { code?: unknown }).code === "NOT_FOUND") return text(404, `No repository at ${c.req.path}`);
-      throw err;
+    } catch (error) {
+      if ((error as { code?: unknown }).code === "NOT_FOUND") return text(404, `No repository at ${c.req.path}`);
+      throw error;
     }
     if (upstream.status === 401 || upstream.status === 403 || (upstream.status >= 300 && upstream.status < 400)) {
       tokens.forget(target.repo, scope);
@@ -253,8 +253,8 @@ async function pushToCreate(
   const { project } = target;
   const actor = c.var.actor;
   // A fork that can't be made fails here; the store has already freed the branch.
-  const routed = await backend.call("routeBranchPush", [project, actor, { branch }]).catch((err: unknown) => {
-    console.error({ event: "git.push_to_create_failed", branch, error: String(err) });
+  const routed = await backend.call("routeBranchPush", [project, actor, { branch }]).catch((error: unknown) => {
+    console.error({ event: "git.push_to_create_failed", branch, error: String(error) });
     return null;
   });
   if (routed === null) return text(502, `Couldn't make a fork for ${branch}. Try again.`);
@@ -300,8 +300,8 @@ async function pushToCreate(
     let report: PushReport;
     try {
       report = readReport(new Uint8Array(await response.arrayBuffer()), sideband);
-    } catch (err) {
-      if (!(err instanceof ProtocolError)) throw err;
+    } catch (error) {
+      if (!(error instanceof ProtocolError)) throw error;
       report = { lines: ["unpack ok", `ng ${MAIN} the repository host's reply couldn't be read`], other: [] };
     }
     const landed = report.lines.includes("unpack ok") && report.lines.includes(`ok ${MAIN}`);
@@ -343,9 +343,9 @@ async function pushToCreate(
       status: 200,
       headers: { "Content-Type": "application/x-git-receive-pack-result", "Cache-Control": "no-cache" },
     });
-  } catch (err) {
+  } catch (error) {
     await abandon();
-    console.error({ event: "git.push_to_create_failed", repo: fork, branch, error: String(err) });
+    console.error({ event: "git.push_to_create_failed", repo: fork, branch, error: String(error) });
     return text(502, `The push of ${branch} to ${name} failed. Try again.`);
   }
 }
@@ -357,8 +357,8 @@ async function forkReady(repos: Repos, name: string): Promise<void> {
     try {
       await repos.get(name);
       return;
-    } catch (err) {
-      if (Date.now() - began > FORK_READY_TIMEOUT_MS) throw err;
+    } catch (error) {
+      if (Date.now() - began > FORK_READY_TIMEOUT_MS) throw error;
       await new Promise((resolve) => setTimeout(resolve, FORK_READY_POLL_MS));
     }
   }
@@ -444,10 +444,10 @@ async function readCommands(c: GitContext): Promise<PushRequest | Response> {
   const reader = body.getReader();
   try {
     return await readPushRequest(reader);
-  } catch (err) {
-    if (!(err instanceof ProtocolError)) throw err;
+  } catch (error) {
+    if (!(error instanceof ProtocolError)) throw error;
     await reader.cancel().catch(() => {});
-    return text(400, `Push rejected: ${err.message}.`);
+    return text(400, `Push rejected: ${error.message}.`);
   } finally {
     reader.releaseLock();
   }
@@ -526,8 +526,8 @@ function replay(
     if (rest === null) return writer.close();
     writer.releaseLock();
     return rest.pipeTo(writable);
-  })().catch((cause: unknown) => {
-    console.error({ event: "git.replay_failed", error: String(cause) });
+  })().catch((error: unknown) => {
+    console.error({ event: "git.replay_failed", error: String(error) });
   });
   return readable;
 }
@@ -576,9 +576,9 @@ async function recordForkPush(
   let report: PushReport;
   try {
     report = readReport(bytes, sideband);
-  } catch (err) {
-    if (!(err instanceof ProtocolError)) throw err;
-    console.error({ event: "git.report_unreadable", repo: target.repo, error: err.message });
+  } catch (error) {
+    if (!(error instanceof ProtocolError)) throw error;
+    console.error({ event: "git.report_unreadable", repo: target.repo, error: error.message });
     return bytes;
   }
   const ok = new Set(updatedRefs(bytes, sideband));
@@ -587,7 +587,7 @@ async function recordForkPush(
 
   const recorded = await backend
     .call("recordPush", [target.project, c.var.actor, { ...attempt, updates }])
-    .catch((cause: unknown) => ({ ok: false, message: String(cause) }) as const);
+    .catch((error: unknown) => ({ ok: false, message: String(error) }) as const);
   if (!recorded.ok) {
     // The push landed either way; only its journal entry and scoring are missing.
     console.error({ event: "git.record_push_failed", repo: target.repo, error: recorded.message });

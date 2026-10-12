@@ -147,7 +147,7 @@ describe("copyRef", () => {
       toRef: "refs/attempts/t1a1",
     }).then(
       () => null,
-      (e: unknown) => e,
+      (error: unknown) => error,
     );
     expect(err).toBeInstanceOf(GitClientError);
     expect((err as Error).message).not.toContain(target.token);

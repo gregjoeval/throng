@@ -337,7 +337,7 @@ describe("a merge request leaving the queue while landing", () => {
     push(t1);
     const err = await Promise.resolve()
       .then(() => store.cancelMergeRequest(PROJECT, owner, { task: t1.task }))
-      .catch((e: unknown) => e);
+      .catch((error: unknown) => error);
     expect(err).toBeInstanceOf(ServiceError);
     expect((err as ServiceError).code).toBe("invalidState");
     await drain();

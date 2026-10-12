@@ -307,7 +307,7 @@ describe("git proxy", () => {
 
     for (const token of host.tokens()) {
       for (const response of server.responses) {
-        expect(response.body.includes(token)).toBeFalsy();
+        expect(response.body).not.toContain(token);
         expect(JSON.stringify(response.headers)).not.toContain(token);
       }
     }

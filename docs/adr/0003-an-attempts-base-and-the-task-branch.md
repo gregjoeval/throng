@@ -14,7 +14,7 @@ New attempts start from the task branch, and active attempts **follow it**. When
 
 ## Consequences
 
-- Platform-written merge commits appear on attempts' forks. Authors pull before pushing, and the git proxy says so when a push is rejected because the task branch was merged in.
+- Platform-written merge commits appear on attempts' forks. Authors pull before pushing, and the git proxy says so when a push is rejected because the task branch was merged in. A push the host accepts that drops the merge (a forced push, or push-to-create into an existing attempt) is followed again.
 - Moving the task branch updates a merge request's source too, so the merge request goes to `needsReview` and needs approving again. A landing that has already claimed its push to `main` is left alone.
 - The winning attempt's whole history lands, so the task branch's commits land with it. Selection says so when a task branch exists.
 - An attempt copied from another carries the copied commits as part of its own change.

@@ -176,6 +176,16 @@ describe("/mcp", () => {
     for (const tool of tools) expect(tool.description).toEqual(expect.any(String));
   });
 
+  it("names its tools in snake_case, their parameters in camelCase, and itself in kebab-case (ADR 0002)", async () => {
+    const { tokenFor, connect } = await setup();
+    const client = await connect(await tokenFor("greg@example.com"));
+    expect(client.getServerVersion()?.name).toMatch(/^[a-z0-9]+(?:-[a-z0-9]+)*$/u);
+    const { tools } = await client.listTools();
+    expect(tools.map((t) => t.name).filter((name) => !/^[a-z]+(?:_[a-z]+)*$/u.test(name))).toEqual([]);
+    const params = tools.flatMap((t) => Object.keys(t.inputSchema.properties ?? {}).map((p) => `${t.name}.${p}`));
+    expect(params.filter((p) => !/\.[a-z][a-zA-Z0-9]*$/u.test(p))).toEqual([]);
+  });
+
   it("describes the agent loop in its instructions", async () => {
     const { tokenFor, connect } = await setup();
     const client = await connect(await tokenFor("greg@example.com"));

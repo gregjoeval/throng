@@ -77,6 +77,14 @@ export interface LandingParams {
   startedAt: number;
 }
 
+/**
+ * The alias someone in a landing's params acted under. Params saved by a landing started before the
+ * alias was called an alias name it `agent`; either way, acting as themselves is null.
+ */
+export function actedAlias(acted: { alias?: string | null; agent?: string | null }): string | null {
+  return acted.alias ?? acted.agent ?? null;
+}
+
 /** A required check that didn't pass on the merged tree, and the name of its stored log, if any. */
 export interface FailedCheck {
   name: string;

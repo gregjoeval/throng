@@ -66,8 +66,13 @@ const MintTokenSchema = z
       .min(1)
       .max(40)
       .regex(/^[^\p{C}()]+$/u, "alias must be printable text without parentheses")
+      .nullable()
       .optional()
-      .openapi({ description: "An alias of the caller, e.g. `claude`. Omit to act as themselves." }),
+      .openapi({
+        description:
+          "An alias of the caller, e.g. `claude`, or null for the caller as themselves. Omitted, it is the alias the " +
+          "caller's token acts under, if any.",
+      }),
     expiresIn: z
       .number()
       .int()
@@ -970,7 +975,7 @@ export function apiRoutes(options: ApiOptions = {}) {
         operationId: "createTask",
         tags: ["Tasks"],
         summary: "Create a task in a project",
-        description: "Any signed-in user may. The caller's human is its creator. The task starts open.",
+        description: "Any signed-in user may. The caller is its creator. The task starts open.",
         security: bearerOrWeb,
         middleware: [browser] as const,
         request: { params: ProjectPathSchema, body: { required: true, ...json(CreateTaskSchema) } },

@@ -112,13 +112,13 @@ export interface TokenServiceDeps {
 export function tokenService({ db, now }: TokenServiceDeps) {
   return {
     /**
-     * Mints a token for the actor's user, or for `alias`. An alias mints only for itself. A token (`via`, the
+     * Mints a token for the actor's user, or for `alias` (null: the user as themselves). An alias mints only for itself. A token (`via`, the
      * one the caller authenticated with; null under an Access session) can't mint one that outlives it: without
      * `expiresIn`, the default lifetime is cut to what it has left.
      */
     async mint(
       actor: Actor,
-      input: { alias?: string | undefined; expiresIn?: number | undefined; via: Token | null },
+      input: { alias?: string | null | undefined; expiresIn?: number | undefined; via: Token | null },
     ): Promise<{ token: Token; plaintext: string }> {
       if (actor.alias !== null && input.alias !== undefined && input.alias !== actor.alias) {
         throw new ServiceError("forbidden", "an alias's token can only mint tokens for that alias");

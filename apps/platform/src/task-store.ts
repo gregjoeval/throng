@@ -997,7 +997,7 @@ export class TaskStore {
 
   /**
    * Checks the actor may push task `task`'s task branch (`refs/tasks/t42` in the origin), so the git
-   * proxy may forward the push: the task exists and the actor's human is its creator or the project
+   * proxy may forward the push: the task exists and the actor is its creator or the project
    * owner. The task branch may be pushed in any state.
    */
   authorizeTaskBranchPush(project: ProjectContext, actor: Actor, input: { task: number }): StoredTask {

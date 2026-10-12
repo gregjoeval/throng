@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { parseConfig } from "../src/config.ts";
-import { failedChecks, mergeAuthor, mergeCommitMessage, retestConfig, THRONG_COMMITTER } from "../src/landing.ts";
+import {
+  actedAlias,
+  failedChecks,
+  mergeAuthor,
+  mergeCommitMessage,
+  retestConfig,
+  THRONG_COMMITTER,
+} from "../src/landing.ts";
 import { buildResult } from "../src/results.ts";
 
 const ada = { id: "ada00001", handle: "ada", alias: null };
@@ -53,6 +60,16 @@ describe("mergeCommitMessage", () => {
       coAuthors: [],
     });
     expect(message).toContain("Approved-by: ada (claude) <ada00001+claude@users.noreply.throng>");
+  });
+});
+
+describe("actedAlias", () => {
+  it("reads the alias from params saved before it was called agent, and null for acting as oneself", () => {
+    expect(actedAlias({ alias: "claude" })).toBe("claude");
+    expect(actedAlias({ alias: null })).toBeNull();
+    expect(actedAlias({ agent: "claude" })).toBe("claude");
+    expect(actedAlias({ agent: null })).toBeNull();
+    expect(actedAlias({})).toBeNull();
   });
 });
 

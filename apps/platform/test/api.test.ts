@@ -125,6 +125,11 @@ describe("POST /api/tokens", () => {
     expect((await call("POST", "/tokens", bearer, { expiresIn: 3 * HOUR })).status).toBe(400);
   });
 
+  it("takes a null alias as the caller acting as themselves", async () => {
+    const { mint } = setup();
+    expect((await mint({ alias: null }))["alias"]).toBeNull();
+  });
+
   it("only lets an alias's token mint for that alias", async () => {
     const { call, mint } = setup();
     const alias = { bearer: (await mint({ alias: "claude" }))["token"] };

@@ -84,6 +84,8 @@ describe("the token service", () => {
     });
     const claude = await tokens.mint({ user, alias: null }, { alias: "claude", expiresIn: 60, via: null });
     expect(claude.token).toMatchObject({ alias: "claude", expires_at: at(60).toISOString() });
+    const asThemselves = await tokens.mint({ user, alias: null }, { alias: null, via: null });
+    expect(asThemselves.token.alias).toBeNull();
   });
 
   it("lets an alias mint only for itself, never for its user or another alias", async () => {
@@ -91,6 +93,7 @@ describe("the token service", () => {
     const claude = { user, alias: "claude" };
     const { token: via } = await tokens.mint(claude, { via: null });
     await expect(tokens.mint(claude, { alias: "codex", via })).rejects.toMatchObject({ code: "forbidden" });
+    await expect(tokens.mint(claude, { alias: null, via })).rejects.toMatchObject({ code: "forbidden" });
     expect((await tokens.mint(claude, { via })).token.alias).toBe("claude");
   });
 

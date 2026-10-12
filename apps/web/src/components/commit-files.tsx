@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Diff } from "@/components/diff";
 import type { CommitDiff, DiffFlag, FileDiff } from "@/lib/api";
+import type { Layout } from "@/lib/arena-view";
 
 /** Why a file has no patch, for each flag that leaves one out. */
 const NOTICES: Record<DiffFlag, string> = {
@@ -19,14 +20,17 @@ const LAZY_MARGIN = "800px 0px";
 
 /**
  * The files of a commit diff, or of any answer shaped like one (the compare endpoint's). `idPrefix`
- * keeps the file anchors apart when several diffs share a page, as the arena's lanes do.
+ * keeps the file anchors apart when several diffs share a page, as the arena's lanes do; `layout`
+ * shows the diffs split or unified.
  */
 export function CommitFiles({
   diff,
   idPrefix = "",
+  layout,
 }: {
   diff: Pick<CommitDiff, "files" | "totals" | "truncated">;
   idPrefix?: string;
+  layout?: Layout;
 }) {
   const { files, totals } = diff;
   return (
@@ -54,13 +58,14 @@ export function CommitFiles({
         ))}
       </ul>
       {files.map((file) => (
-        <FileSection key={file.path} file={file} idPrefix={idPrefix} />
+        <FileSection key={file.path} file={file} idPrefix={idPrefix} layout={layout} />
       ))}
     </div>
   );
 }
 
-function FileSection({ file, idPrefix }: { file: FileDiff; idPrefix: string }) {
+/** One file's section: its path, then its diff or why it's left out. */
+export function FileSection({ file, idPrefix, layout }: { file: FileDiff; idPrefix: string; layout?: Layout }) {
   const id = anchor(file.path, idPrefix);
   const titleId = `${id}-title`;
   const [ref, visible] = useNearViewport<HTMLElement>();
@@ -75,7 +80,7 @@ function FileSection({ file, idPrefix }: { file: FileDiff; idPrefix: string }) {
         {file.flags.includes("truncated") && (
           <Notice>This file's diff was cut short: the commit's diff reached its size limit.</Notice>
         )}
-        {visible ? <Diff patch={patch} /> : <div className="h-24" aria-hidden />}
+        {visible ? <Diff patch={patch} layout={layout} /> : <div className="h-24" aria-hidden />}
       </>
     );
   }

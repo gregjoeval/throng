@@ -18,7 +18,7 @@ export class PlatformError extends Error implements ApiError {
   }
 
   /** The error a failed response's body names, or `unavailable` when it names none. */
-  static async from(res: Response): Promise<PlatformError> {
+  static async from(res: Pick<Response, "json">): Promise<PlatformError> {
     const body = (await res.json().catch(() => null)) as { error?: Partial<ApiError> } | null;
     const { code, message } = body?.error ?? {};
     return typeof code === "string" && typeof message === "string"

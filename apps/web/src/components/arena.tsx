@@ -1,24 +1,22 @@
 // The arena (variant D): a rail of attempt cards on the left, and the shown attempts' lanes side by
-// side. Clicking a card toggles its lane; lanes keep the order they were added in.
+// side. Clicking a card toggles its lane; lanes keep the order they were added in. Above the lanes,
+// toggles arrange them by attempt or by file, diff them against their bases or current main, and lay
+// the diffs out split or unified; the URL and `localStorage` remember the choice (`arena-view.ts`).
 
-import { useQuery } from "@tanstack/react-query";
+import { useQueries, useQuery } from "@tanstack/react-query";
+import { getRouteApi } from "@tanstack/react-router";
 import { CheckIcon } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useId, useState } from "react";
 import type { ReactNode } from "react";
-import { GatePill, Lane, VerdictCounts } from "@/components/lane";
+import { FileSection } from "@/components/commit-files";
+import { GatePill, Lane, laneCompareQuery, laneReference, VerdictCounts } from "@/components/lane";
 import { ErrorState, Loading } from "@/components/states";
-import { taskArenaQuery } from "@/lib/api";
-import {
-  bestValues,
-  formatValue,
-  initialLanes,
-  isActiveAttempt,
-  isPassing,
-  metricColumns,
-  sortRail,
-  toggleLane,
-} from "@/lib/arena";
+import { Button } from "@/components/ui/button";
+import { mainHeadQuery, taskArenaQuery } from "@/lib/api";
+import { bestValues, formatValue, isActiveAttempt, isPassing, metricColumns, sortRail, toggleLane } from "@/lib/arena";
 import type { ArenaAttempt, MetricColumn, RailSort } from "@/lib/arena";
+import { arenaView, fileRows, parseArenaSearch, readStoredView, storageKey, storeView } from "@/lib/arena-view";
+import type { ArenaSearch, ArenaView, Arrangement, Layout, Reference } from "@/lib/arena-view";
 import type { Attempt } from "@/lib/tasks";
 
 /** Past this many lanes, each keeps a minimum width and the lanes scroll sideways. */
@@ -45,6 +43,7 @@ export function Arena({ owner, project, task, attempts }: InTask & { attempts: A
     <ArenaLayout
       owner={owner}
       project={project}
+      task={task}
       attempts={arena.data.attempts}
       columns={metricColumns(arena.data.metrics)}
       notes={notes}
@@ -55,56 +54,258 @@ export function Arena({ owner, project, task, attempts }: InTask & { attempts: A
 function ArenaLayout({
   owner,
   project,
+  task,
   attempts,
   columns,
   notes,
-}: {
-  owner: string;
-  project: string;
+}: InTask & {
   attempts: ArenaAttempt[];
   columns: MetricColumn[];
   notes: Map<string, string>;
 }) {
   const active = attempts.filter(isActiveAttempt);
   const closed = attempts.filter((a) => a.state === "closed");
-  const [lanes, toggle] = useLanes(active);
-  const shown = lanes.flatMap((ref) => active.filter((a) => a.ref === ref));
+  const [view, change] = useArenaView(owner, project, task, active);
+  const shown = view.lanes.flatMap((ref) => active.filter((a) => a.ref === ref));
   const sideways = shown.length > SHARED_WIDTH_LANES;
   return (
     <div data-testid="arena" className="grid gap-4 lg:grid-cols-[16rem_minmax(0,1fr)] lg:items-start">
-      <Rail attempts={active} closed={closed} columns={columns} lanes={lanes} onToggle={toggle} />
-      <section aria-label="Lanes" className="min-w-0 overflow-x-auto pb-2">
-        <div
-          className="grid gap-3"
-          style={{
-            gridTemplateColumns: `repeat(${shown.length}, minmax(${sideways ? LANE_MIN_WIDTH : "0"}, 1fr))`,
-          }}
-        >
-          {shown.map((attempt) => (
-            <Lane
-              key={attempt.ref}
-              owner={owner}
-              project={project}
-              attempt={attempt}
-              note={notes.get(attempt.ref) ?? ""}
-            />
-          ))}
-        </div>
-      </section>
+      <Rail
+        attempts={active}
+        closed={closed}
+        columns={columns}
+        lanes={view.lanes}
+        onToggle={(ref) => change({ lanes: toggleLane(view.lanes, ref) })}
+      />
+      <div className="flex min-w-0 flex-col gap-3">
+        <ViewToggles view={view} lanes={shown.length} onChange={change} />
+        <section aria-label="Lanes" className="min-w-0 overflow-x-auto pb-2">
+          <div
+            className="grid gap-3"
+            style={{
+              gridTemplateColumns: `repeat(${shown.length}, minmax(${sideways ? LANE_MIN_WIDTH : "0"}, 1fr))`,
+            }}
+          >
+            {shown.map((attempt) => (
+              <Lane
+                key={attempt.ref}
+                owner={owner}
+                project={project}
+                attempt={attempt}
+                note={notes.get(attempt.ref) ?? ""}
+                reference={view.ref}
+                layout={view.layout}
+                files={view.by === "attempt"}
+              />
+            ))}
+            {view.by === "file" ? (
+              <FileRows owner={owner} project={project} shown={shown} reference={view.ref} layout={view.layout} />
+            ) : null}
+          </div>
+        </section>
+      </div>
     </div>
   );
 }
 
+const taskRoute = getRouteApi("/$owner/$project/tasks/$t");
+
 /**
- * The refs shown as lanes, in the order they were added, and the toggle for a card. Until the viewer
- * toggles one it's `initialLanes`; refs that stop being active drop out, and if none is left the
- * initial lanes come back.
+ * The arena's view and a way to change it. The URL's search params win, then what's stored for the
+ * task, then the defaults. A change goes to both the URL and storage, and on load a stored view the
+ * URL doesn't carry is copied into the URL, so the address always reproduces what's shown.
  */
-function useLanes(active: ArenaAttempt[]): [string[], (ref: string) => void] {
-  const [picked, setPicked] = useState<string[] | null>(null);
-  const live = picked?.filter((ref) => active.some((a) => a.ref === ref)) ?? [];
-  const lanes = live.length === 0 ? initialLanes(active) : live;
-  return [lanes, (ref) => setPicked(toggleLane(lanes, ref))];
+function useArenaView(
+  owner: string,
+  project: string,
+  task: string,
+  active: ArenaAttempt[],
+): [ArenaView, (change: Partial<ArenaView>) => void] {
+  const search = taskRoute.useSearch();
+  const navigate = taskRoute.useNavigate();
+  const key = storageKey(owner, project, task);
+  const [stored] = useState(() => readStoredView(key));
+  const wanted: ArenaSearch = { ...stored, ...parseArenaSearch(search) };
+  const write = (next: ArenaSearch) =>
+    navigate({ search: (previous) => ({ ...previous, ...next }), replace: true, resetScroll: false });
+  const missing = Object.keys(wanted).some((field) => !(field in search));
+  useEffect(() => {
+    if (missing) void write(wanted);
+  });
+  const change = (fields: Partial<ArenaView>) => {
+    const { lanes, ...rest } = fields;
+    const next: ArenaSearch = { ...wanted, ...rest, ...(lanes === undefined ? {} : { lanes: lanes.join(",") }) };
+    storeView(key, next);
+    void write(next);
+  };
+  return [arenaView(wanted, active), change];
+}
+
+const ARRANGEMENT_LABELS: Record<Arrangement, string> = { attempt: "By attempt", file: "By file" };
+const REFERENCE_LABELS: Record<Reference, string> = { base: "Its own base", main: "Current main" };
+const LAYOUT_LABELS: Record<Layout, string> = { split: "Split", unified: "Unified" };
+
+/** How many lanes make unified the better layout. */
+const UNIFIED_LANES = 3;
+
+/** The arrangement, reference and layout toggles, with what each choice means where it needs saying. */
+function ViewToggles({
+  view,
+  lanes,
+  onChange,
+}: {
+  view: ArenaView;
+  lanes: number;
+  onChange: (change: Partial<ArenaView>) => void;
+}) {
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <Segmented
+          label="Arrangement"
+          value={view.by}
+          labels={ARRANGEMENT_LABELS}
+          onChange={(by) => onChange({ by })}
+        />
+        <Segmented label="Reference" value={view.ref} labels={REFERENCE_LABELS} onChange={(ref) => onChange({ ref })} />
+        <Segmented
+          label="Layout"
+          value={view.layout}
+          labels={LAYOUT_LABELS}
+          onChange={(layout) => onChange({ layout })}
+        />
+      </div>
+      {view.ref === "main" ? (
+        <p role="note" className="text-sm text-muted-foreground">
+          Each attempt is diffed against main's current head, so an attempt on an older base shows main's newer commits
+          as removals.
+        </p>
+      ) : null}
+      {lanes >= UNIFIED_LANES && view.layout === "split" ? (
+        <p className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+          Unified fits {lanes} lanes better.
+          <Button size="xs" variant="outline" onClick={() => onChange({ layout: "unified" })}>
+            Use unified
+          </Button>
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+/** A choice of one among a few, as a row of radio buttons. */
+function Segmented<T extends string>({
+  label,
+  value,
+  labels,
+  onChange,
+}: {
+  label: string;
+  value: T;
+  labels: Record<T, string>;
+  onChange: (value: T) => void;
+}) {
+  const name = useId();
+  const options = Object.entries(labels) as [T, string][];
+  return (
+    <fieldset className="flex items-center gap-1 text-sm">
+      <legend className="sr-only">{label}</legend>
+      <span className="flex rounded-md border p-0.5">
+        {options.map(([option, text]) => (
+          <label
+            key={option}
+            className={`cursor-pointer rounded px-2 py-0.5 has-focus-visible:ring-2 has-focus-visible:ring-ring ${option === value ? "bg-muted font-medium text-foreground" : "text-muted-foreground"}`}
+          >
+            <input
+              type="radio"
+              name={name}
+              value={option}
+              checked={option === value}
+              onChange={() => onChange(option)}
+              className="sr-only"
+            />
+            {text}
+          </label>
+        ))}
+      </span>
+    </fieldset>
+  );
+}
+
+/**
+ * The by-file arrangement's rows under the lane headers: one per path any shown lane changed, sorted,
+ * saying how many changed it, with each lane's diff of it or a note that it left the file alone.
+ */
+function FileRows({
+  owner,
+  project,
+  shown,
+  reference,
+  layout,
+}: {
+  owner: string;
+  project: string;
+  shown: ArenaAttempt[];
+  reference: Reference;
+  layout: Layout;
+}) {
+  const sides = shown.map((attempt) => laneReference(attempt, reference));
+  const main = useQuery({ ...mainHeadQuery(owner, project), enabled: sides.some((side) => side.onMain) });
+  const compares = useQueries({
+    queries: shown.map((attempt, i) => {
+      const from = sides[i]?.onMain ? (main.data ?? null) : (attempt.base?.sha ?? null);
+      return laneCompareQuery(owner, project, attempt, from);
+    }),
+  });
+  const failed = compares.find((compare) => compare.isError);
+  const span = { gridColumn: "1 / -1" };
+  if (failed !== undefined) {
+    return (
+      <div style={span}>
+        <ErrorState error={failed.error} />
+      </div>
+    );
+  }
+  if (compares.some((compare) => compare.isLoading) || (main.isLoading && sides.some((side) => side.onMain))) {
+    return (
+      <div style={span}>
+        <Loading label="Loading changes…" />
+      </div>
+    );
+  }
+  const rows = fileRows(compares.map((compare) => compare.data?.files ?? []));
+  return rows.map((row) => {
+    const changedBy = row.diffs.filter((diff) => diff !== null).length;
+    return (
+      <section
+        key={row.path}
+        aria-label={`File ${row.path}`}
+        className="grid grid-cols-subgrid gap-y-2 rounded-xl border-t pt-2"
+        style={span}
+      >
+        <h3 className="flex flex-wrap items-baseline gap-2 text-sm" style={span}>
+          <span className="font-mono">{row.path}</span>
+          <span className="text-muted-foreground">
+            changed by {changedBy} of {shown.length}
+          </span>
+        </h3>
+        {shown.map((attempt, i) => {
+          const diff = row.diffs[i] ?? null;
+          return (
+            <div key={attempt.ref} role="group" aria-label={attempt.ref} className="min-w-0">
+              {diff === null ? (
+                <p className="rounded-xl border border-dashed px-4 py-3 text-sm text-muted-foreground">
+                  {attempt.ref} left this file alone.
+                </p>
+              ) : (
+                <FileSection file={diff} idPrefix={`${attempt.ref}-`} layout={layout} />
+              )}
+            </div>
+          );
+        })}
+      </section>
+    );
+  });
 }
 
 const SORT_LABELS = { number: "Number", gate: "Gate" } as const;

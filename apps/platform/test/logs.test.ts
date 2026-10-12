@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -53,6 +53,7 @@ function read(files: Record<string, string>, name: string, maxBytes?: number) {
   for (const [file, content] of Object.entries(files)) writeFileSync(join(dir, "logs", `${file}.log`), content);
   const script = maxBytes === undefined ? readLogScript(name) : readLogScript(name, maxBytes);
   const run = spawnSync("bash", ["-c", script], { cwd: dir, encoding: "utf8", maxBuffer: 2 * MAX_LOG_BYTES });
+  rmSync(dir, { recursive: true, force: true });
   return { exit: run.status, stdout: run.stdout };
 }
 

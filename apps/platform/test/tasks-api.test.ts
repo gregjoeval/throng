@@ -21,7 +21,10 @@ async function setup() {
     workflow: { create: async () => ({}), get: async () => ({ terminate: async () => {} }) },
     teardown: async () => {},
   });
-  const api = apiRoutes({ verifierFor: () => verify, now, repos: () => repos, tasks: () => backend });
+  const options = { verifierFor: () => verify, now, repos: () => repos, tasks: () => backend };
+  const api = apiRoutes(options);
+  // throng-web's binding, over the same database and backend.
+  const web = webApp(options);
   const env = { DB: testDatabase(), ACCESS_TEAM_DOMAIN: "throng.cloudflareaccess.com", ACCESS_AUD: "aud" };
 
   const call = async (method: string, path: string, bearer?: string, body?: unknown) => {
@@ -30,6 +33,11 @@ async function setup() {
     if (body !== undefined) headers["Content-Type"] = "application/json";
     const init = { method, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) };
     const res = await api.request(path, init, env);
+    return { status: res.status, body: (await res.json()) as Json };
+  };
+  /** A body-less request through throng-web's binding, as the signed-in user with `email`. */
+  const callAs = async (method: string, path: string, email: string) => {
+    const res = await web.request(`/api${path}`, { method, headers: { [FORWARDED_EMAIL_HEADER]: email } }, env);
     return { status: res.status, body: (await res.json()) as Json };
   };
   /** A bearer token for the user with `email`, under `agent` if given. */
@@ -45,7 +53,7 @@ async function setup() {
   const bob = await tokenFor("bob@example.com");
   const project = (await call("POST", "/projects", greg, { handle: "throng" })).body;
   const base = "/projects/greg/throng";
-  return { call, repos, store, greg, ada, adaClaude, bob, project, base };
+  return { call, callAs, repos, store, greg, ada, adaClaude, bob, project, base };
 }
 
 describe("task routes", () => {
@@ -458,5 +466,16 @@ describe("over throng-web's service binding", () => {
     expect((await call("GET", `${base}/tasks/t1/attempts`)).body).toEqual({ attempts: [] });
     expect((await call("POST", `${base}/tasks/t1/close`)).body["state"]).toBe("closed");
     expect((await call("POST", `${base}/tasks/t2/obsolete`)).body["state"]).toBe("obsolete");
+  });
+
+  it("scores the forwarded user's own draft now", async () => {
+    const { call, callAs, ada, base, repos, project } = await setup();
+    repos.commit(`${project["id"]}-main`, { files: { "README.md": "hi\n" } });
+    await call("POST", `${base}/tasks`, ada, { title: "a" });
+    await call("POST", `${base}/tasks/t1/attempts`, ada);
+    expect((await callAs("POST", `${base}/attempts/t1a1/score`, "bob@example.com")).status).toBe(403);
+    const scored = await callAs("POST", `${base}/attempts/t1a1/score`, "ada@example.com");
+    expect(scored.status).toBe(200);
+    expect(scored.body).toMatchObject({ queued: true, run: { ref: "t1a1", trigger: "scoreNow", agent: null } });
   });
 });

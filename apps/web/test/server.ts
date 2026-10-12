@@ -196,6 +196,16 @@ export function serveCompare(filesFor: (to: string, from: string) => FileDiff[],
   });
 }
 
+/** `main`'s head in `serveRefs` unless given another. */
+export const MAIN = "3a1e".padEnd(40, "0");
+
+/** A handler serving the project's refs: `main` at `sha` (null: no commits yet), and no attempts. */
+export function serveRefs(sha: string | null = MAIN) {
+  return http.get("*/api/projects/:owner/:project/refs", () =>
+    HttpResponse.json({ main: { ref: "main", sha }, active: [], archived: [] }),
+  );
+}
+
 /** A file added with one line, as a diff lists it. */
 export function addedFile(path: string): FileDiff {
   return {

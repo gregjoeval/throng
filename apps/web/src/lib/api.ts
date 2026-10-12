@@ -1,7 +1,7 @@
 // The platform API from the browser: a typed `hc` client over same-origin `/api/*`, which throng-web
 // forwards to the platform with the signed-in user attached (see `src/server/forward.ts`).
 
-import { queryOptions } from "@tanstack/react-query";
+import { queryOptions, experimental_streamedQuery as streamedQuery } from "@tanstack/react-query";
 import type { QueryKey } from "@tanstack/react-query";
 import type { AppType } from "@throng/platform/app";
 import { hc, parseResponse } from "hono/client";
@@ -178,6 +178,23 @@ export const compareQuery = (owner: string, project: string, from: string, to: s
     },
   });
 
+/**
+ * `main`'s current head (null before the first push), polled while the page is visible: the arena's
+ * "current main" reference compares against it by sha, so a moved `main` is a new compare.
+ */
+export const mainHeadQuery = (owner: string, project: string) => ({
+  ...apiQuery([...projectKey(owner, project), "refs"], (init) =>
+    projectApi.refs.$get({ param: { owner, project } }, { init }),
+  ),
+  select: (refs: { main: { sha: string | null } }) => refs.main.sha,
+  refetchInterval: TASK_POLL_MS,
+});
+
+/** Queues scoring of a draft's head now. Rejects with hono's `DetailedError` on failure. */
+export async function scoreNow(owner: string, project: string, attempt: string) {
+  return parseResponse(projectApi.attempts[":a"].score.$post({ param: { owner, project, a: attempt } }));
+}
+
 /** The task's attempts by number, obsolete ones left out, polled while the page is visible. */
 export const taskAttemptsQuery = (owner: string, project: string, task: string) => ({
   ...apiQuery([...taskKey(owner, project, task), "attempts"], (init) =>
@@ -185,3 +202,64 @@ export const taskAttemptsQuery = (owner: string, project: string, task: string) 
   ),
   refetchInterval: TASK_POLL_MS,
 });
+
+/** The key prefix of everything read about one attempt: invalidate it after changing the attempt. */
+export const attemptKey = (owner: string, project: string, attempt: string) =>
+  [...projectKey(owner, project), "attempt", attempt] as const;
+
+const attemptApi = projectApi.attempts[":a"];
+
+/** An attempt's scoring runs, newest first, superseded and cancelled ones included, polled. */
+export const attemptRunsQuery = (owner: string, project: string, attempt: string) => ({
+  ...apiQuery([...attemptKey(owner, project, attempt), "runs"], (init) =>
+    attemptApi.runs.$get({ param: { owner, project, a: attempt } }, { init }),
+  ),
+  refetchInterval: TASK_POLL_MS,
+});
+
+export type RunDetail = InferResponseType<typeof attemptApi.runs.$get, 200>["runs"][number];
+
+/** Every verdict on the attempt, on every head it has had, oldest first, polled. */
+export const verdictsQuery = (owner: string, project: string, attempt: string) => ({
+  ...apiQuery([...attemptKey(owner, project, attempt), "verdicts"], (init) =>
+    attemptApi.verdicts.$get({ param: { owner, project, a: attempt } }, { init }),
+  ),
+  refetchInterval: TASK_POLL_MS,
+});
+
+export type Verdict = InferResponseType<typeof attemptApi.verdicts.$get, 200>["verdicts"][number];
+
+/**
+ * Posts the signed-in user's verdict on the attempt's current head, replacing theirs on that head.
+ * Rejects with hono's `DetailedError` on failure.
+ */
+export async function postVerdict(
+  owner: string,
+  project: string,
+  attempt: string,
+  verdict: Pick<Verdict, "recommendation" | "body">,
+) {
+  return parseResponse(attemptApi.verdicts.$post({ param: { owner, project, a: attempt }, json: verdict }));
+}
+
+/**
+ * One log of a scoring run, streamed: the text read so far, growing as chunks arrive. A stored log
+ * never changes, so it's never refetched.
+ */
+export const runLogQuery = (owner: string, project: string, run: number, name: string) =>
+  queryOptions({
+    queryKey: [...projectKey(owner, project), "run", run, "log", name] as const,
+    staleTime: Number.POSITIVE_INFINITY,
+    queryFn: streamedQuery({
+      streamFn: async function* ({ signal }) {
+        const res = await projectApi.runs[":runId"].logs[":name"].$get(
+          { param: { owner, project, runId: String(run), name } },
+          { init: { signal } },
+        );
+        if (!res.ok || res.body === null) throw await PlatformError.from(res);
+        yield* res.body.pipeThrough(new TextDecoderStream());
+      },
+      reducer: (text: string, chunk: string) => text + chunk,
+      initialValue: "",
+    }),
+  });

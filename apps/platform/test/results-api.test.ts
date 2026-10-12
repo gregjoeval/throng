@@ -81,11 +81,11 @@ async function setup() {
     repos.commit(`${projectId}-${attempt}`, { files: { "README.md": content } }).hash;
   const me = (await call("GET", "/me", ada)).body as { user: User; alias: null };
   /** Pushes a new head to ada's attempt and records it, as the git proxy does once it lands. */
-  const push = async (task: number, attempt: number, content: string) => {
+  const push = (task: number, attempt: number, content: string) => {
     const fork = `t${task}a${attempt}`;
     const before = repos.ref(`${projectId}-${fork}`, "refs/heads/main") ?? "0".repeat(40);
     const after = commit(fork, content);
-    await store(projectId).recordPush({ id: projectId, owner: "" }, me, {
+    store(projectId).recordPush({ id: projectId, owner: "" }, me, {
       task,
       number: attempt,
       updates: [{ ref: "refs/heads/main", before, after }],
@@ -188,7 +188,7 @@ describe("the arena", () => {
     commit("t1a4", "four\n");
     await call("POST", `${base}/attempts/t1a4/score`, ada);
     await finish(3, { status: "done", result: result({ gate: "failed" }) });
-    const moved = await push(1, 4, "four again\n");
+    const moved = push(1, 4, "four again\n");
 
     const res = await call("GET", `${base}/tasks/t1/arena`, bob);
     expect(res.status).toBe(200);
@@ -356,8 +356,8 @@ describe("scoring runs", () => {
     const first = commit("t1a1", "one\n");
     await call("POST", `${base}/attempts/t1a1/open`, ada);
     await finish(1, { status: "done", result: result() });
-    const second = await push(1, 1, "two\n");
-    const third = await push(1, 1, "three\n");
+    const second = push(1, 1, "two\n");
+    const third = push(1, 1, "three\n");
 
     const list = await call("GET", `${base}/attempts/t1a1/runs`, bob);
     expect(list.status).toBe(200);
@@ -458,7 +458,7 @@ describe("attempt scoring", () => {
     const path = `${base}/attempts/t1a1/scoring`;
     expect((await call("GET", path, ada)).body).toMatchObject({ status: "running", result: { run: 1 } });
 
-    const newer = await push(1, 1, "two\n");
+    const newer = push(1, 1, "two\n");
     expect((await call("GET", path, ada)).body).toEqual({ status: "queued", sha: newer });
   });
 
@@ -468,7 +468,7 @@ describe("attempt scoring", () => {
     commit("t1a1", "one\n");
     await call("POST", `${base}/attempts/t1a1/score`, ada);
     await finish(1, { status: "done", result: result() });
-    const newer = await push(1, 1, "two\n");
+    const newer = push(1, 1, "two\n");
     expect((await call("GET", `${base}/attempts/t1a1/scoring`, ada)).body).toEqual({ status: "none", sha: newer });
   });
 

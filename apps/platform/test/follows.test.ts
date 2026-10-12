@@ -106,7 +106,8 @@ async function setup({ landing = true } = {}) {
   const push = async (ref: AttemptInput, parents?: string[]) => {
     const before = attempt(ref).scoring.sha ?? base.hash;
     const after = repos.commit(fork(ref), { files: { "README.md": `push ${++n}\n` }, parents }).hash;
-    await store.recordPush(PROJECT, author(ref), { ...ref, updates: [{ ref: "refs/heads/main", before, after }] });
+    store.recordPush(PROJECT, author(ref), { ...ref, updates: [{ ref: "refs/heads/main", before, after }] });
+    await store.followIfDropped(PROJECT, author(ref), { ...ref, head: after });
     return after;
   };
   /** The latest Follow Workflow started for an attempt. */

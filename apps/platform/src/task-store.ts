@@ -181,19 +181,13 @@ export interface Sql {
 
 /**
  * What `recordPush` did: the scoring it queued, what to tell the pusher of their merge request, and
- * the follow it queued when the push dropped the task branch.
+ * the attempt's new head, which the proxy checks (`followIfDropped`) once git has its reply; null
+ * when the push didn't move it.
  */
 export interface PushRecord {
   scoring: ScoringRequest | null;
   mergeRequest: PushNotice | null;
-  follow: FollowNotice | null;
-}
-
-/** A follow a push queued because its new head doesn't contain the task head. */
-export interface FollowNotice {
-  task: number;
-  attempt: string;
-  taskHead: string;
+  head: string | null;
 }
 
 /** The merge request news a push to its source attempt carries back to the pusher. */
@@ -1076,32 +1070,24 @@ export class TaskStore {
    * fork, with the old and new ids so force-pushes show up afterwards, and queues scoring when the
    * attempt is open and its head moved; the scoring queue skips a head it already covers. The
    * proxy checked the claim before forwarding the push, and the push has landed, so this checks
-   * nothing. A new head that doesn't contain the task head (a forced push dropped a follow's merge)
-   * queues a follow, as a task branch push does. Returns the scoring request, or null when the push
-   * asked for none, and that follow.
+   * nothing, and leaves checking whether the new head dropped the task branch to `followIfDropped`.
+   * Returns the scoring request, or null when the push asked for none, and the new head.
    */
-  async recordPush(
-    project: ProjectContext,
-    actor: Actor,
-    input: AttemptInput & { updates: PushedRef[] },
-  ): Promise<PushRecord> {
+  recordPush(project: ProjectContext, actor: Actor, input: AttemptInput & { updates: PushedRef[] }): PushRecord {
     const current = this.#attempt(input);
-    let head: string | null = null;
-    const recorded = this.#sql.transaction(() => {
-      head = this.#recordPushed(actor, current, input.updates);
+    return this.#sql.transaction(() => {
+      const head = this.#recordPushed(actor, current, input.updates);
       if (head !== null) this.#authorMoved(project, current);
       const needsReview = head !== null && this.#pushedToSource(actor, current, head);
       const mergeRequest = this.#pushNotice(current, needsReview ? head : null);
-      if (head === null) return { scoring: null, mergeRequest };
+      if (head === null) return { scoring: null, mergeRequest, head };
       // A draft isn't scored, but its old result no longer describes its head.
       if (current.state !== "open") {
         this.scoring.moveHead({ ...scoredAttempt(current), sha: head });
-        return { scoring: null, mergeRequest };
+        return { scoring: null, mergeRequest, head };
       }
-      return { scoring: this.#request(project, actor, current, head, "push"), mergeRequest };
+      return { scoring: this.#request(project, actor, current, head, "push"), mergeRequest, head };
     });
-    const follow = head === null ? null : await this.#followIfDropped(project, current, head);
-    return { ...recorded, follow };
   }
 
   /**
@@ -1287,16 +1273,18 @@ export class TaskStore {
   }
 
   /**
-   * Queues a follow of the task head when an author's push moved the attempt to `head` and `head`
-   * doesn't contain it, and returns it; when it does, remembers `head`, where checking a later push
-   * stops. Null when there is nothing to check (`#toCheck`), or `head` contains the task head. A
-   * check that can't tell, because a commit can't be read or the history is too long to walk, is
-   * logged and queues nothing: the attempt's next push is checked again, and a task branch push
-   * follows it anyway.
+   * For the git proxy, once it has answered an author's push that moved the attempt to `head`
+   * (`recordPush`): queues a follow of the task head when `head` doesn't contain it, as a forced
+   * push over a follow's merge does; when it does, remembers `head`, where checking a later push
+   * stops. Nothing to check (`#toCheck`) checks nothing. A check that can't tell, because a commit
+   * can't be read or the history is too long to walk, is logged and queues nothing: the attempt's
+   * next push is checked again, and a task branch push follows it anyway.
    */
-  async #followIfDropped(project: ProjectId, attempt: AttemptInput, head: string): Promise<FollowNotice | null> {
+  async followIfDropped(project: ProjectContext, _actor: Actor, input: AttemptInput & { head: string }): Promise<void> {
+    const attempt = { task: input.task, number: input.number };
+    const { head } = input;
     const check = this.#toCheck(attempt, head);
-    if (check === null) return null;
+    if (check === null) return;
     const { taskHead, known } = check;
     const fork = attemptRef(attempt.task, attempt.number);
     let contains: boolean | null;
@@ -1304,22 +1292,18 @@ export class TaskStore {
       contains = await containsCommit(this.#repos, project.id, { attempt: fork, head, known }, taskHead);
     } catch (error) {
       console.error({ event: "follow.check_failed", attempt: fork, head, taskHead, error: String(error) });
-      return null;
+      return;
     }
     if (contains === null) {
       console.warn({ event: "follow.check_unknown", attempt: fork, head, taskHead });
-      return null;
+      return;
     }
-    return this.#sql.transaction(() => {
+    this.#sql.transaction(() => {
       // The task branch, the attempt or its head may have moved on while the head was read: a newer
       // push is checked on its own, and a task branch push queued a follow of its new head.
-      if (this.#toCheck(attempt, head)?.taskHead !== taskHead) return null;
-      if (contains) {
-        this.#setFollow(attempt, { contains_task_head: head });
-        return null;
-      }
-      this.#queueFollow(project, attempt, taskHead);
-      return { task: attempt.task, attempt: fork, taskHead };
+      if (this.#toCheck(attempt, head)?.taskHead !== taskHead) return;
+      if (contains) this.#setFollow(attempt, { contains_task_head: head });
+      else this.#queueFollow(project, attempt, taskHead);
     });
   }
 
@@ -2593,6 +2577,7 @@ export const TASK_METHODS = [
   "recordTaskBranchPush",
   "pullFirstNotice",
   "recordPush",
+  "followIfDropped",
   "routeBranchPush",
   "completeBranchPush",
   "abandonBranchPush",

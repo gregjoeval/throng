@@ -87,10 +87,10 @@ async function setup() {
     store.scoringFinished(run.id, outcome);
   };
   let n = 0;
-  const push = async (ref: AttemptInput) => {
+  const push = (ref: AttemptInput) => {
     const before = store.getAttempt(PROJECT, owner, ref).scoring.sha ?? base.hash;
     const after = repos.commit(`abc123-t${ref.task}a${ref.number}`, { files: { "README.md": `push ${++n}\n` } }).hash;
-    await store.recordPush(PROJECT, author(ref), { ...ref, updates: [{ ref: "refs/heads/main", before, after }] });
+    store.recordPush(PROJECT, author(ref), { ...ref, updates: [{ ref: "refs/heads/main", before, after }] });
     return after;
   };
   const mr = () => store.getMergeRequest(PROJECT, owner, { task: task.number });
@@ -231,7 +231,7 @@ describe("approve and cancel", () => {
     const { store, ref1, open, push } = await setup();
     await open(ref1);
     await store.selectAttempt(PROJECT, cat, ref1);
-    await push(ref1);
+    push(ref1);
     for (const who of [ada, bob]) {
       expect(await code(store.approveMergeRequest(PROJECT, who, { task: 1 }))).toBe("forbidden");
       expect(await code(() => store.cancelMergeRequest(PROJECT, who, { task: 1 }))).toBe("forbidden");
@@ -244,7 +244,7 @@ describe("approve and cancel", () => {
     const { store, ref1, open, push, score, mr, mrEvents } = await setup();
     await open(ref1);
     await store.selectAttempt(PROJECT, cat, ref1);
-    const head = await push(ref1);
+    const head = push(ref1);
     expect(mr()).toMatchObject({ state: "needsReview" });
     const approved = await store.approveMergeRequest(PROJECT, owner, { task: 1 });
     expect(approved).toMatchObject({ state: "pending", approved_head: head, approved_by: { user: owner.user.id } });
@@ -270,7 +270,7 @@ describe("approve and cancel", () => {
     const { store, ref1, open, score, push, mr, mrEvents } = await setup();
     await open(ref1);
     await store.selectAttempt(PROJECT, cat, ref1);
-    if (from === "needsReview") await push(ref1);
+    if (from === "needsReview") push(ref1);
     if (from === "queued" || from === "landing") await score(ref1);
     if (from === "landing") store.startLanding(PROJECT, null);
     expect(mr().state).toBe(from);
@@ -309,7 +309,7 @@ describe("a push to the source attempt", () => {
     if (from !== "pending") await score(ref1);
     if (from === "landing") store.startLanding(PROJECT, null);
     expect(mr().state).toBe(from);
-    await push(ref1);
+    push(ref1);
     const inQueue = from !== "pending";
     const lastDequeue = inQueue ? { reason: "newPush" } : null;
     expect(mr()).toMatchObject({ state: "needsReview", position: null, last_dequeue: lastDequeue });
@@ -326,10 +326,10 @@ describe("a push to the source attempt", () => {
     await open(ref1);
     await score(ref1);
     await store.selectAttempt(PROJECT, cat, ref1);
-    await push(ref1);
+    push(ref1);
     const events = mrEvents().length;
     await score(ref1);
-    await push(ref1);
+    push(ref1);
     await score(ref1);
     expect(mr().state).toBe("needsReview");
     expect(mrEvents()).toHaveLength(events);
@@ -340,7 +340,7 @@ describe("a push to the source attempt", () => {
     await open(ref1);
     await store.selectAttempt(PROJECT, cat, ref1);
     store.cancelMergeRequest(PROJECT, cat, { task: 1 });
-    await push(ref1);
+    push(ref1);
     expect(mr().state).toBe("cancelled");
   });
 });
@@ -449,7 +449,7 @@ describe("dequeue", () => {
     await score(ref1);
     await store.selectAttempt(PROJECT, cat, ref1);
     store.dequeueMergeRequest(PROJECT, null, { task: 1, reason: "conflict", details: conflictDetails(["README.md"]) });
-    await push(ref1);
+    push(ref1);
     expect(mr()).toMatchObject({ state: "needsReview", last_dequeue: { reason: "conflict" } });
     await store.approveMergeRequest(PROJECT, cat, { task: 1 });
     await score(ref1);

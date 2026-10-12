@@ -94,10 +94,10 @@ async function setup() {
     refs.map((r) => at(store.scoring.listRuns({ task: r.task, attempt: r.number }), -1).status);
   const mr = (task: number) => store.getMergeRequest(PROJECT, owner, { task });
   let n = 0;
-  const push = async (ref: AttemptInput, as: Actor = ada) => {
+  const push = (ref: AttemptInput, as: Actor = ada) => {
     const before = store.getAttempt(PROJECT, owner, ref).scoring.sha ?? base.hash;
     const after = repos.commit(`abc123-t${ref.task}a${ref.number}`, { files: { "README.md": `push ${++n}\n` } }).hash;
-    await store.recordPush(PROJECT, as, { ...ref, updates: [{ ref: "refs/heads/main", before, after }] });
+    store.recordPush(PROJECT, as, { ...ref, updates: [{ ref: "refs/heads/main", before, after }] });
     return after;
   };
   const journalKinds = () =>
@@ -156,9 +156,9 @@ describe("starting landings", () => {
   it("names each alias that pushed to the attempt as a co-author", async () => {
     const { store, drain, attempt, score, push, landingWorkflow } = await setup();
     const ref = await attempt("Aliases");
-    await push(ref, adaAlias);
-    await push(ref, ada);
-    await push(ref, adaAlias);
+    push(ref, adaAlias);
+    push(ref, ada);
+    push(ref, adaAlias);
     await drain();
     score(ref);
     await store.selectAttempt(PROJECT, owner, ref);
@@ -241,7 +241,7 @@ describe("after each outcome", () => {
       details: { attempt: "t1a1", head: base.hash, main: base.hash, base: base.hash, files },
     });
     const after = repos.commit("abc123-t1a1", { files: { "README.md": "fixed\n" } }).hash;
-    const pushed = await store.recordPush(PROJECT, ada, {
+    const pushed = store.recordPush(PROJECT, ada, {
       ...t1,
       updates: [{ ref: "refs/heads/main", before: base.hash, after }],
     });
@@ -306,7 +306,7 @@ describe("a merge request leaving the queue while landing", () => {
     const t1 = await queued("First");
     const t2 = await queued("Second");
     await drain();
-    await push(t1);
+    push(t1);
     await drain();
 
     expect(mr(t1.task)).toMatchObject({ state: "needsReview", last_dequeue: { reason: "newPush" } });
@@ -334,7 +334,7 @@ describe("a merge request leaving the queue while landing", () => {
     const t1 = await queued("First");
     await drain();
     expect(store.claimLandingPush(1)).toBeTruthy();
-    await push(t1);
+    push(t1);
     const err = await Promise.resolve()
       .then(() => store.cancelMergeRequest(PROJECT, owner, { task: t1.task }))
       .catch((error: unknown) => error);
@@ -350,7 +350,7 @@ describe("a merge request leaving the queue while landing", () => {
   it("records an errored landing as merged when main already holds its merge commit", async () => {
     const { store, drain, attempt, score, push, repos, base, mr } = await setup();
     const ref = await attempt("First");
-    const head = await push(ref);
+    const head = push(ref);
     await drain();
     score(ref);
     await store.selectAttempt(PROJECT, owner, ref);
@@ -399,7 +399,7 @@ describe("a merge request leaving the queue while landing", () => {
     const t1 = await queued("First");
     await drain();
     store.claimLandingPush(1);
-    await push(t1);
+    push(t1);
     await store.landingFinished(1, { kind: "errored", details: { error: "main moved", step: "land" } });
     expect(mr(t1.task)).toMatchObject({ state: "needsReview", last_dequeue: { reason: "errored" } });
   });

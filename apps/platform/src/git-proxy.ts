@@ -48,7 +48,6 @@ import {
 import type {
   AttemptInput,
   BranchRoute,
-  FollowNotice,
   ProjectContext,
   PushNotice,
   PushRecord,
@@ -365,10 +364,12 @@ async function pushToCreate(
     } else {
       const recorded = await backend.call("recordPush", [project, actor, { ...attempt, updates: [forkUpdate] }]);
       if (!recorded.ok) console.error({ event: "git.record_push_failed", error: recorded.message });
+      const record = recorded.ok ? (recorded.value as PushRecord) : null;
+      if (record?.head != null) checkPushed(c, forkTarget, attempt, backend, record.head);
       messages = [
         `Updated ${name} on ${taskRef(attempt.task)} from branch ${branch}.`,
         ...links(c, attempt.task, name),
-        ...(recorded.ok ? recordLines(c, recorded.value as PushRecord) : []),
+        ...(record === null ? [] : recordLines(c, record)),
       ];
     }
 
@@ -428,17 +429,21 @@ function scoringLines({ scoring }: { scoring: ScoringRequest | null }): string[]
 
 /** The `remote:` lines for a push recorded on an attempt's fork: scoring, then its merge request's news. */
 function recordLines(c: GitContext, record: PushRecord): string[] {
-  return [...scoringLines(record), ...mergeRequestLines(c, record.mergeRequest), ...followLines(record.follow)];
+  return [...scoringLines(record), ...mergeRequestLines(c, record.mergeRequest)];
 }
 
-/** The `remote:` line telling the pusher their push dropped the task branch, which a follow merges in again. */
-function followLines(notice: FollowNotice | null): string[] {
-  if (notice === null) return [];
-  const { task, attempt, taskHead } = notice;
-  return [
-    `This push doesn't contain ${taskRef(task)}'s task branch at ${taskHead}; merging it into ${attempt} again, ` +
-      `or marking it needs update if that conflicts.`,
-  ];
+/**
+ * Once git has its reply, checks whether a recorded push to an attempt dropped its task branch
+ * (`followIfDropped`), which may walk the fork's history: the push's reply never waits on it.
+ */
+function checkPushed(c: GitContext, target: Target, attempt: AttemptInput, backend: TaskBackend, head: string): void {
+  const check = async () => {
+    const outcome = await backend
+      .call("followIfDropped", [target.project, c.var.actor, { ...attempt, head }])
+      .catch((error: unknown) => ({ ok: false, message: String(error) }) as const);
+    if (!outcome.ok) console.error({ event: "git.follow_check_failed", repo: target.repo, error: outcome.message });
+  };
+  c.executionCtx.waitUntil(check());
 }
 
 /** The `remote:` lines telling the pusher their merge request was dequeued, or now needs review. */
@@ -658,7 +663,9 @@ async function recordForkPush(
     console.error({ event: "git.record_push_failed", repo: target.repo, error: recorded.message });
     return bytes;
   }
-  const messages = recordLines(c, recorded.value as PushRecord);
+  const record = recorded.value as PushRecord;
+  if (record.head !== null) checkPushed(c, target, attempt, backend, record.head);
+  const messages = recordLines(c, record);
   return messages.length === 0 ? bytes : writeReport(report, messages, sideband);
 }
 

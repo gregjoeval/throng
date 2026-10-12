@@ -106,6 +106,7 @@ async function setup() {
     fork,
     followed,
     attemptRemote,
+    settled: server.settled,
   };
 }
 
@@ -287,6 +288,7 @@ async function following() {
   let runs = 0;
   /** Runs the latest follow of attempt `t1a<attempt>`, as its Workflow would, and returns its merge. */
   const runFollow = async (attempt: number) => {
+    await s.settled();
     await tasks.drain(project.id);
     const follow = followed.findLast((f) => f.attempt === attempt);
     if (follow === undefined) throw new Error(`no follow of t1a${attempt}`);
@@ -302,8 +304,12 @@ async function following() {
     await tasks.drain(project.id);
     return head;
   };
-  /** How many follows of `t1a<attempt>` have started. */
-  const follows = (attempt: number) => followed.filter((f) => f.attempt === attempt).length;
+  /** How many follows of `t1a<attempt>` have started, once the pushes so far are checked. */
+  const follows = async (attempt: number) => {
+    await s.settled();
+    await tasks.drain(project.id);
+    return followed.filter((f) => f.attempt === attempt).length;
+  };
   return { ...s, pushTaskBranch, runFollow, follows };
 }
 
@@ -337,31 +343,27 @@ async function bobsAttempt({
   return mine;
 }
 
-/** A pushed reply's line saying the push dropped the task branch. */
-const dropped = (tests: string, attempt: string) =>
-  new RegExp(`remote: This push doesn't contain t1's task branch at ${tests}; merging it into ${attempt} again`, "u");
-
 describe("an author's push that drops the task branch", () => {
   it("follows again after a forced push, which the host accepts, drops the follow's merge", async () => {
-    const { env, host, commit, fork, mine, tests, merged, follows, runFollow } = await followedAttempt();
-    const count = follows(1);
+    const { env, host, commit, fork, mine, merged, follows, runFollow } = await followedAttempt();
+    const count = await follows(1);
 
     const fix = await commit(mine, "More of the fix");
     const forced = await tryGit(mine, env, "push", "--force", "attempt", "HEAD:main");
     expect(forced.ok).toBeTruthy();
-    expect(forced.stderr).toMatch(dropped(tests, "t1a1"));
     expect(await host.head(fork("t1a1"))).toBe(fix);
     expect(fix).not.toBe(merged);
 
     const again = await runFollow(1);
-    expect(follows(1)).toBe(count + 1);
+    expect(await follows(1)).toBe(count + 1);
     expect(await host.head(fork("t1a1"))).toBe(again);
   });
 
   it("marks the attempt needs update when following again conflicts", async () => {
-    const { env, commit, tasks, project, bob, followed, mine, tests } = await followedAttempt();
+    const { env, commit, tasks, project, bob, followed, mine, tests, settled } = await followedAttempt();
     const fix = await commit(mine, "More of the fix");
     expect((await tryGit(mine, env, "push", "--force", "attempt", "HEAD:main")).ok).toBeTruthy();
+    await settled();
     await tasks.drain(project.id);
     const follow = followed.findLast((f) => f.attempt === 1);
     if (follow === undefined) throw new Error("no follow of t1a1");
@@ -373,42 +375,55 @@ describe("an author's push that drops the task branch", () => {
 
   it("queues nothing when the push contains the task head", async () => {
     const { env, commit, mine, follows } = await followedAttempt();
-    const count = follows(1);
+    const count = await follows(1);
     await git(mine, env, "pull", "-q", "--no-rebase", "--no-edit", "attempt", "main");
     await commit(mine, "More of the fix");
     const pushed = await tryGit(mine, env, "push", "attempt", "HEAD:main");
     expect(pushed.ok).toBeTruthy();
-    expect(pushed.stderr).not.toMatch(/task branch/u);
-    expect(follows(1)).toBe(count);
+    expect(await follows(1)).toBe(count);
+  });
+
+  it("answers the push before checking it", async () => {
+    const { env, host, commit, mine, follows } = await followedAttempt();
+    const count = await follows(1);
+    // The fork's history can't be read until the push has its reply.
+    const { promise: readable, resolve: release } = Promise.withResolvers<void>();
+    const readCommit = host.readCommit.bind(host);
+    host.readCommit = async (name, hash) => {
+      await readable;
+      return readCommit(name, hash);
+    };
+
+    await commit(mine, "More of the fix");
+    expect((await tryGit(mine, env, "push", "--force", "attempt", "HEAD:main")).ok).toBeTruthy();
+    release();
+    expect(await follows(1)).toBe(count + 1);
   });
 
   it("checks a push-to-create push into an existing attempt the same way", async () => {
     const { bob, host, clone, commit, push, fork, follows, pushTaskBranch, runFollow } = await following();
-    const tests = await pushTaskBranch();
+    await pushTaskBranch();
     const mine = await clone(bob.token);
     await commit(mine, "Fix login");
     expect((await push(mine, "refs/heads/t1/bob")).ok).toBeTruthy();
     await runFollow(1);
-    const count = follows(1);
+    const count = await follows(1);
 
     // bob pushes his branch again without the follow's merge; it replaces the fork's main.
     const fix = await commit(mine, "More of the fix");
-    const again = await push(mine, "refs/heads/t1/bob");
-    expect(again.ok).toBeTruthy();
-    expect(again.stderr).toMatch(dropped(tests, "t1a1"));
+    expect((await push(mine, "refs/heads/t1/bob")).ok).toBeTruthy();
     expect(await host.head(fork("t1a1"))).toBe(fix);
     await runFollow(1);
-    expect(follows(1)).toBe(count + 1);
+    expect(await follows(1)).toBe(count + 1);
   });
 
   it("leaves an attempt on a task with no task branch alone", async () => {
     const s = await setup();
-    const { env, commit, tasks, project, followed } = s;
+    const { env, commit, tasks, project, followed, settled } = s;
     const mine = await bobsAttempt(s);
     await commit(mine, "More of the fix");
-    const pushed = await tryGit(mine, env, "push", "--force", "attempt", "HEAD:main");
-    expect(pushed.ok).toBeTruthy();
-    expect(pushed.stderr).not.toMatch(/task branch/u);
+    expect((await tryGit(mine, env, "push", "--force", "attempt", "HEAD:main")).ok).toBeTruthy();
+    await settled();
     await tasks.drain(project.id);
     expect(followed).toHaveLength(0);
   });

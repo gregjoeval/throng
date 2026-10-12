@@ -63,11 +63,11 @@ async function setup() {
   await call("POST", `${base}/tasks/t1/attempts`, ada, { count: 2 });
 
   /** Pushes a new head to one of ada's attempts and records it, as the git proxy does once it lands. */
-  const push = async (attempt: number, content: string) => {
+  const push = (attempt: number, content: string) => {
     const fork = `${projectId}-t1a${attempt}`;
     const before = repos.ref(fork, "refs/heads/main") ?? "0".repeat(40);
     const after = repos.commit(fork, { files: { "README.md": content } }).hash;
-    await store(projectId).recordPush(
+    store(projectId).recordPush(
       { id: projectId, owner: "" },
       { user: adaUser, alias: null },
       {
@@ -96,7 +96,7 @@ async function setup() {
 describe("posting a verdict", () => {
   it("records another user's verdict on the current head, with the alias they acted under", async () => {
     const { post, list, push, bobClaude, bobUser, journal } = await setup();
-    const head = await push(1, "one\n");
+    const head = push(1, "one\n");
     const posted = await post(bobClaude, { recommendation: "revise", body: "Needs a **test**." });
     const verdict = {
       reviewer: { id: bobUser.id, handle: "bob" },
@@ -123,7 +123,7 @@ describe("posting a verdict", () => {
 
   it("refuses the attempt's author and their aliases, and lets any other user or alias post", async () => {
     const { post, push, ada, adaClaude, bob, bobClaude, greg, list } = await setup();
-    await push(1, "one\n");
+    push(1, "one\n");
     for (const author of [ada, adaClaude]) {
       const refused = await post(author, { recommendation: "merge", body: "Mine is great." });
       expect(refused.status).toBe(403);
@@ -144,7 +144,7 @@ describe("posting a verdict", () => {
 
   it("replaces the reviewer's verdict on the same head, and journals each post", async () => {
     const { post, push, bob, list, journal } = await setup();
-    await push(1, "one\n");
+    push(1, "one\n");
     await post(bob, { recommendation: "revise", body: "Not yet." });
     clock = new Date("2026-10-10T13:00:00.000Z");
     await post(bob, { recommendation: "merge", body: "Now it is." });
@@ -156,9 +156,9 @@ describe("posting a verdict", () => {
 
   it("keeps a verdict on an older head, superseded, after a push, beside a new one on the new head", async () => {
     const { post, push, bob, list } = await setup();
-    const first = await push(1, "one\n");
+    const first = push(1, "one\n");
     await post(bob, { recommendation: "revise", body: "Not yet." });
-    const second = await push(1, "two\n");
+    const second = push(1, "two\n");
     expect((await list())["verdicts"].map((v: Json) => [v["head"], v["superseded"]])).toEqual([[first, true]]);
     await post(bob, { recommendation: "merge", body: "Now it is." });
     expect((await list())["verdicts"].map((v: Json) => [v["head"], v["recommendation"], v["superseded"]])).toEqual([
@@ -169,7 +169,7 @@ describe("posting a verdict", () => {
 
   it("takes a body of up to 64 KB and a known recommendation", async () => {
     const { post, push, bob } = await setup();
-    await push(1, "one\n");
+    push(1, "one\n");
     expect((await post(bob, { recommendation: "reject", body: "x".repeat(65_536) })).status).toBe(201);
     const tooLong = await post(bob, { recommendation: "reject", body: "x".repeat(65_537) });
     expect(tooLong.status).toBe(400);
@@ -184,7 +184,7 @@ describe("posting a verdict", () => {
     expect(noHead.status).toBe(409);
     expect(noHead.body["error"]["code"]).toBe("invalidState");
 
-    await push(1, "one\n");
+    push(1, "one\n");
     await call("POST", `${base}/attempts/t1a1/close`, ada);
     expect((await post(bob, { recommendation: "merge", body: "ok" })).status).toBe(409);
     await call("POST", `${base}/attempts/t1a1/obsolete`, greg);
@@ -199,7 +199,7 @@ describe("posting a verdict", () => {
 
   it("takes and lists verdicts from the web as the signed-in user, refusing the author there too", async () => {
     const { call, base, post, push } = await setup();
-    await push(1, "one\n");
+    push(1, "one\n");
     const posted = await post({ web: "bob@example.com" }, { recommendation: "merge", body: "LGTM" });
     expect(posted.status).toBe(201);
     expect(posted.body).toMatchObject({ reviewer: { handle: "bob" }, alias: null });
@@ -210,7 +210,7 @@ describe("posting a verdict", () => {
 
   it("takes a verdict on an open attempt, and on a merged one for the record", async () => {
     const { call, base, post, push, merge, ada, bob, list } = await setup();
-    const head = await push(1, "one\n");
+    const head = push(1, "one\n");
     await call("POST", `${base}/attempts/t1a1/open`, ada);
     expect((await post(bob, { recommendation: "revise", body: "Hmm." })).status).toBe(201);
     await merge(1);
@@ -224,9 +224,9 @@ describe("posting a verdict", () => {
 describe("verdict summaries", () => {
   it("counts the current head's verdicts by recommendation on the attempt and in the arena", async () => {
     const { call, base, post, push, bob, bobClaude, greg, ada } = await setup();
-    await push(1, "one\n");
+    push(1, "one\n");
     await post(bob, { recommendation: "revise", body: "Not yet." });
-    const head = await push(1, "two\n");
+    const head = push(1, "two\n");
     await post(bobClaude, { recommendation: "merge", body: "Good now." });
     await post(greg, { recommendation: "merge", body: "Agreed." });
 

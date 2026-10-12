@@ -15,7 +15,7 @@
 // `e2e-browser.ts`): two scored attempts load as lanes against their base, by file lines up their
 // files, and selecting one there lands its merge request and closes the task.
 //
-// Scoring scenarios, through the e2e routes (`/e2e/*`): metrics (a check writes two JSON files into $THRONG_OUTPUT and fails; metrics are read from both), taskmetrics (a task adds a metric over a project check, scored with source task; a clash main later adds makes the next run invalid; through `/api`), failing (a required check fails the gate),
+// Scoring scenarios, through the e2e routes (`/e2e/*`): metrics (a check writes two JSON files into $THRONG_OUTPUT and fails; metrics are read from both), taskmetrics (a task adds a metric over a project check, scored with source task; a clash main later adds makes the next run invalid; through `/api`), taskchecks (a task adds a metric over a project check and a required check of its own; the gate follows the task check; through `/api`), failing (a required check fails the gate),
 // invalid (an invalid config fails the gate with a config entry), preview (a passing gate deploys a
 // Worker Preview built with `preview.command`, and its URL serves it), coalesce (two quick pushes; the first
 // run is cancelled and only the newest sha is scored), intrusion (an attempt's checks try to push to
@@ -203,6 +203,7 @@ const scenarios: Record<string, () => Promise<void>> = {
   arena,
   metrics,
   taskmetrics,
+  taskchecks,
   failing,
   invalid,
   preview,
@@ -754,6 +755,74 @@ writeFileSync(process.env.THRONG_OUTPUT + "/coverage-summary.json", JSON.stringi
       clashed.config.error?.includes("lines is also a metric's name") === true,
     `expected the clash to make the config invalid: ${JSON.stringify(clashed.config)}`,
   );
+  await finish(p.project, p.work, timeline);
+}
+
+/**
+ * A task adds a metric over the project's `report` check and a required `smoke` check of its own,
+ * which needs the greeting to say who it's from. Both attempts show the task's check and metrics with
+ * `source: task`, after the project's; the gate follows `smoke`: passed for a1, failed for a2.
+ */
+async function taskchecks(): Promise<void> {
+  const timeline = new Timeline();
+  const p = await setUpRealProject(timeline, {
+    "scripts/report.js": `import { writeFileSync } from "node:fs";
+writeFileSync(process.env.THRONG_OUTPUT + "/coverage-summary.json", JSON.stringify({ total: { lines: { pct: 87.5, total: 40 } } }));
+`,
+    "scripts/smoke.js": `import { readFileSync, writeFileSync } from "node:fs";
+const ok = readFileSync("src/greeting.js", "utf8").includes("hello from");
+writeFileSync(process.env.THRONG_OUTPUT + "/smoke.json", JSON.stringify({ ok }));
+process.exit(ok ? 0 : 1);
+`,
+    ".throng/config.yml": TASK_METRICS_CONFIG,
+  });
+  const [t1, a1, a2] = ["t1", "t1a1", "t1a2"];
+  const { ref, checks } = await throng<{ ref: string; checks: { name: string; source: string; required: boolean }[] }>(
+    p,
+    "POST",
+    "/tasks",
+    {
+      title: "Greet",
+      checks: [{ name: "smoke", command: "node scripts/smoke.js", timeout: "2m" }],
+      metrics: [
+        { name: "lines", from: "report.coverage-summary.total.lines.total", type: "number", order: "asc" },
+        { name: "smoked", from: "smoke.smoke.ok", type: "boolean" },
+      ],
+    },
+  );
+  assert(
+    ref === t1 && checks.map((c) => `${c.name}:${c.source}:${String(c.required)}`).join() === "smoke:task:true",
+    `unexpected task ${ref}: ${JSON.stringify(checks)}`,
+  );
+  await createAttempts(p, t1, [a1, a2], timeline);
+  const passing = await editAndPush(p, a1, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
+  const unsigned = await editAndPush(p, a2, "src/greeting.js", (s) => s.replace('"hello"', '"bye"'), "a2");
+  for (const attempt of [a1, a2]) await throng(p, "POST", `/attempts/${attempt}/open`);
+  const passed = (await scoredHead(p, a1, passing)).result;
+  const failed = (await scoredHead(p, a2, unsigned)).result;
+  for (const [result, gate, outcome, ok] of [
+    [passed, "passed", "passed", true],
+    [failed, "failed", "failed", false],
+  ] as const) {
+    const ran = configChecks(result).map((c) => `${c.name}:${c.source}:${String(c.required)}:${c.outcome}`);
+    assert(
+      result.config.kind === "valid" &&
+        result.gate === gate &&
+        ran.join() === `report:project:true:passed,smoke:task:true:${outcome}`,
+      `expected the gate to follow smoke (${gate}): ${JSON.stringify({ gate: result.gate, ran, config: result.config })}`,
+    );
+    const { lines, smoked, smoke } = result.metrics;
+    assert(
+      lines?.source === "task" &&
+        lines.value === 40 &&
+        smoked?.source === "task" &&
+        smoked.value === ok &&
+        smoke?.source === "task" &&
+        smoke.value === outcome,
+      `expected the task's metrics with source task: ${JSON.stringify(result.metrics)}`,
+    );
+  }
+  timeline.mark("task check gated");
   await finish(p.project, p.work, timeline);
 }
 

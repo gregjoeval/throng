@@ -54,6 +54,7 @@ gh workflow run e2e.yml --ref my-branch     # every scenario, against a branch
 
 - `metrics`, `failing`, `invalid`, `preview`, `coalesce`, `intrusion`, `deps`: scoring, through the e2e routes' attempts (forks with no task rows); see the header of `scripts/e2e.ts`.
 - `taskmetrics`: a task's own metric over a project check, through `/api` on a project with task rows. A clashing name is refused on save; the saved metric is scored with `source: task`; once `main`'s config adds a metric with the task's name, the attempt's next run is `config: invalid`, naming the clash.
+- `taskchecks`: a task adds a metric over a project check and a required check of its own, through `/api`. Its check runs after the project's with `source: task`, its metrics read both checks, and the gate follows its check: one attempt passes it, the other fails it.
 - `refs`: attempt archives. Closing an attempt pushes its fork's `main` to `refs/attempts/t42a3` in the origin (`ARCHIVE_REF_PREFIX` in `src/archive.ts`), and reopening copies it back. The scenario checks, against real Artifacts, that:
   1. a plain `git push` to a ref under that prefix succeeds and `git ls-remote` lists it;
   2. the Worker's own git client (`src/git-client.ts`, behind `POST /e2e/repos/:name/copy-ref`) copies one origin's `main` into another origin's archive ref, and an archive ref back out again;

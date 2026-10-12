@@ -16,6 +16,7 @@ import { userForEmail } from "../src/users.ts";
 import { testDatabase } from "./support/d1.ts";
 import { git, gitEnv, LocalGitHost, serve, tryGit } from "./support/git-host.ts";
 import { testTaskBackends } from "./support/task-backend.ts";
+import { conflictDetails, ERRORED } from "./support/conflicts.ts";
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -356,8 +357,8 @@ describe("merge request notices on a push to the source attempt", () => {
 
   it("prints a conflict dequeue with its file count once, and that the push needs review", async () => {
     const { commit, dir, dequeueUrl, env, project, store } = await queued();
-    const files = ["a.ts", "b.ts", "c.ts"].map((path) => ({ path, type: "content" }));
-    store(project.id).dequeueMergeRequest(project, null, { task: 1, reason: "conflict", details: { files } });
+    const details = conflictDetails(["a.ts", "b.ts", "c.ts"]);
+    store(project.id).dequeueMergeRequest(project, null, { task: 1, reason: "conflict", details });
 
     const sha = await commit(dir, "fix");
     const pushed = await tryGit(dir, env, "push", "origin", "HEAD:main");
@@ -373,7 +374,7 @@ describe("merge request notices on a push to the source attempt", () => {
 
   it("prints a dequeue without a file count when there is none, on a push that moves no head", async () => {
     const { dir, dequeueUrl, env, project, store } = await queued();
-    store(project.id).dequeueMergeRequest(project, null, { task: 1, reason: "errored" });
+    store(project.id).dequeueMergeRequest(project, null, { task: 1, reason: "errored", details: ERRORED });
 
     const pushed = await tryGit(dir, env, "push", "origin", "HEAD:refs/heads/copy");
     expect(pushed.ok).toBe(true);

@@ -3,7 +3,7 @@
 // gate live here so they're tested without a container.
 
 import { DEFAULT_CHECK_TIMEOUT_MS } from "./config.ts";
-import type { CheckConfig, ConfigResult, MetricConfig, MetricOrder } from "./config.ts";
+import type { CheckConfig, ConfigResult, MetricConfig, MetricOrder, Source } from "./config.ts";
 import { parseFrom, typedValue } from "./metric-values.ts";
 import type { MetricFormat, MetricRule, MetricValue } from "./metric-values.ts";
 import type { PreviewScriptResult } from "./scripts.ts";
@@ -11,10 +11,6 @@ import type { PreviewScriptResult } from "./scripts.ts";
 /** A check's outcome, best first; they are also the values of the check's outcome metric. */
 export const CHECK_OUTCOMES = ["passed", "failed", "timedOut", "errored", "skipped"] as const;
 export type CheckOutcome = (typeof CHECK_OUTCOMES)[number];
-
-/** Who defined a check or metric: Throng itself, the project's config, or the task. */
-export const METRIC_SOURCES = ["platform", "project", "task"] as const;
-export type MetricSource = (typeof METRIC_SOURCES)[number];
 
 /** Longest a `setup` command may run; the spec gives setup no timeout of its own. */
 export const SETUP_TIMEOUT_MS = DEFAULT_CHECK_TIMEOUT_MS;
@@ -30,7 +26,7 @@ const PREVIEW_CHECK = "_preview";
 /** A check: a process the run ran, or skipped. Its outcome is also a metric named after it. */
 export interface CheckResult {
   name: string;
-  source: MetricSource;
+  source: Source;
   /** Whether the gate needs it to pass. */
   required: boolean;
   outcome: CheckOutcome;
@@ -40,7 +36,7 @@ export interface CheckResult {
 }
 
 interface MetricFields {
-  source: MetricSource;
+  source: Source;
   /** Why the value is null. */
   note?: string;
 }
@@ -286,7 +282,7 @@ function checkedValue(metric: MetricConfig, reported: MetricValue | undefined): 
  * A metric's entry in the result: its type's fields, and its value, already checked against its
  * type, or null with the note.
  */
-function metricResult(metric: MetricConfig, source: MetricSource, checked: MetricValue): MetricResult {
+function metricResult(metric: MetricConfig, source: Source, checked: MetricValue): MetricResult {
   const note = checked.value === null ? { note: checked.note } : {};
   const { value } = checked;
   switch (metric.type) {

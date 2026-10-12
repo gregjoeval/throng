@@ -20,6 +20,7 @@ import {
   MAX_CONFIG_BYTES,
   METRIC_ORDERS,
   parseConfig,
+  SOURCES,
 } from "./config.ts";
 import { dequeueRoutes } from "./dequeue-api.ts";
 import type { DiffCache } from "./diff.ts";
@@ -31,7 +32,7 @@ import { DEQUEUE_REASONS, MERGE_REQUEST_STATES } from "./merge-requests.ts";
 import { METRIC_FORMATS, METRIC_TYPES } from "./metric-values.ts";
 import { MAX_PROJECT_HANDLE, PROJECT_HANDLE, projectService } from "./projects.ts";
 import type { Repos } from "./repos.ts";
-import { CHECK_OUTCOMES, GATES, METRIC_SOURCES } from "./results.ts";
+import { CHECK_OUTCOMES, GATES } from "./results.ts";
 import { ATTEMPT_SCORING_STATUSES, RUN_STATUSES, SCORING_TRIGGERS } from "./scoring.ts";
 import { ATTEMPT_STATES, TASK_STATES } from "./task-store.ts";
 import { taskService } from "./tasks.ts";
@@ -364,7 +365,7 @@ const ScoringSchema = z
   .openapi("ScoringRequest");
 
 const metricFields = {
-  source: z.enum(METRIC_SOURCES).openapi({ description: "Who defined it: Throng, the project's config or the task." }),
+  source: z.enum(SOURCES).openapi({ description: "Who defined it: Throng, the project's config or the task." }),
   note: z.string().optional().openapi({ description: "Why its value is null." }),
 };
 
@@ -423,7 +424,7 @@ const ScoringResultSchema = z
         z
           .object({
             name: z.string().openapi({ example: "test" }),
-            source: z.enum(METRIC_SOURCES),
+            source: z.enum(SOURCES),
             required: z.boolean(),
             outcome: z.enum(CHECK_OUTCOMES),
             durationMs: z.number(),

@@ -22,9 +22,12 @@ const FROM = /^[^.]+\.[^./\\]+(\.[^.]+)+$/u;
 /** A metric's stored `order`: `asc` when lower values are better, `desc` when higher are. */
 export const METRIC_ORDERS = ["asc", "desc"] as const;
 export type MetricOrder = (typeof METRIC_ORDERS)[number];
-/** Who defined a check or metric: the project's config, or a task over it. */
-export const CONFIG_LAYERS = ["project", "task"] as const;
-export type ConfigLayer = (typeof CONFIG_LAYERS)[number];
+/** Who defined a check or metric: Throng itself, the project's config, or a task over it. */
+export const SOURCES = ["platform", "project", "task"] as const;
+export type Source = (typeof SOURCES)[number];
+/** The layers a config merges: every source but Throng, whose own checks no config defines. */
+export type ConfigLayer = Exclude<Source, "platform">;
+export const CONFIG_LAYERS = SOURCES.filter((source): source is ConfigLayer => source !== "platform");
 
 /** A metric, with the fields its type has. */
 export type MetricConfig = {

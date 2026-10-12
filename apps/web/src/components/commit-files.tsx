@@ -17,7 +17,8 @@ const NOTICES: Record<DiffFlag, string> = {
 /** How far outside the viewport a file's diff starts rendering. */
 const LAZY_MARGIN = "800px 0px";
 
-export function CommitFiles({ diff }: { diff: CommitDiff }) {
+/** The files of a commit diff, or of any answer shaped like one (the compare endpoint's). */
+export function CommitFiles({ diff }: { diff: Pick<CommitDiff, "files" | "totals" | "truncated"> }) {
   const { files, totals } = diff;
   return (
     <div className="flex flex-col gap-4">

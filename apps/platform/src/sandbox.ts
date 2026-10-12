@@ -2,9 +2,9 @@ import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { CLOUDFLARE_API_HOST, interceptedHosts, outboundDecision } from "./network";
 import type { OutboundAccess } from "./network";
 
-const INACTIVITY_TIMEOUT_MS = 10 * 60 * 1_000;
+const INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000;
 /** How long a script may run when its caller gives no timeout. */
-const COMMAND_TIMEOUT_MS = 5 * 60 * 1_000;
+const COMMAND_TIMEOUT_MS = 5 * 60 * 1000;
 const CA_PATH = "/etc/cloudflare/certs/cloudflare-containers-ca.crt";
 
 // HTTPS interception re-signs traffic with the Containers CA, and exec() does not inherit the

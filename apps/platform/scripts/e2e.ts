@@ -38,13 +38,13 @@ import type { Commit } from "./e2e-git.ts";
 const run = promisify(execFile);
 const FIXTURE = new URL("../fixtures/fixture-worker/", import.meta.url).pathname;
 const WRANGLER_CONFIG = new URL("../wrangler.jsonc", import.meta.url).pathname;
-const POLL_MS = 1_000;
+const POLL_MS = 1000;
 /** The fixture's own tests, as a check. */
 const TEST_CHECK = `checks:
   - name: test
     command: npm test
 `;
-const CHECK_TIMEOUT_MS = 10 * 60 * 1_000;
+const CHECK_TIMEOUT_MS = 10 * 60 * 1000;
 
 const baseUrl = requireEnv("THRONG_URL").replace(/\/$/, "");
 const e2eSecret = requireEnv("SPIKE_TOKEN");
@@ -565,13 +565,13 @@ async function preview(): Promise<void> {
 
   // A new Preview's hostname can take a moment to answer.
   const url = `${deployed.url}?name=e2e`;
-  const deadline = Date.now() + 2 * 60 * 1_000;
+  const deadline = Date.now() + 2 * 60 * 1000;
   let last = "";
   while (Date.now() < deadline) {
     const response = await fetch(url).catch((cause: unknown) => cause);
     last = response instanceof Response ? `${response.status} ${await response.text()}` : String(response);
     if (last === "200 hello from a1, built, e2e") break;
-    await new Promise((r) => setTimeout(r, 2_000));
+    await new Promise((r) => setTimeout(r, 2000));
   }
   timeline.mark("preview answered");
   assert(last === "200 hello from a1, built, e2e", `the Preview at ${url} answered ${last}`);
@@ -755,7 +755,7 @@ async function refs(): Promise<void> {
 
   // Archive pushes are internal: neither project queued any scoring.
   for (const project of [a.project, b.project]) {
-    const kinds = new Set((await settle(project, 5_000)).map((e) => e.kind));
+    const kinds = new Set((await settle(project, 5000)).map((e) => e.kind));
     assert(!kinds.has("scoringQueued"), `${project} queued scoring on an archive push`);
   }
   timeline.print();
@@ -911,7 +911,7 @@ async function editAndPush(
       break;
     } catch (cause) {
       if (Date.now() > deadline) throw cause;
-      await new Promise((r) => setTimeout(r, 2_000));
+      await new Promise((r) => setTimeout(r, 2000));
     }
   }
   return (await git(p.work, "rev-parse", "HEAD")).trim();
@@ -1024,7 +1024,7 @@ function proxyAuth(p: RealProject): string[] {
 
 /** Reports a scenario's journal and deletes what it made. */
 async function finish(project: string, work: string, timeline: Timeline): Promise<void> {
-  report(timeline, await settle(project, 5_000));
+  report(timeline, await settle(project, 5000));
   await cleanUp(project, work);
 }
 

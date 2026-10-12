@@ -5,7 +5,7 @@
 
 const FLUSH = "0000";
 /** The largest pkt-line git sends: 4 bytes of length and 65516 of payload. */
-const MAX_PKT = 65520;
+const MAX_PKT = 65_520;
 /** A side-band-64k packet carries at most this much data after its band byte. */
 const MAX_BAND_DATA = MAX_PKT - 5;
 /** Commands one push may carry before the proxy gives up on it. */

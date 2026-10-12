@@ -25,7 +25,15 @@
         "ignoreCase": true
       }
     ],
-    "unicorn/switch-case-braces": "error"
+    "unicorn/switch-case-braces": "error",
+    "unicorn/numeric-separators-style": [
+      "error",
+      {
+        "hexadecimal": {
+          "onlyIfContainsSeparator": true
+        }
+      }
+    ]
   },
   "overrides": [
     {

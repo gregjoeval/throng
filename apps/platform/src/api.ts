@@ -401,7 +401,7 @@ const ConfigSchema = z
             .number()
             .int()
             .max(MAX_CHECK_TIMEOUT_MS)
-            .openapi({ description: "Defaults to 10 minutes.", example: 600000 }),
+            .openapi({ description: "Defaults to 10 minutes.", example: 600_000 }),
           metrics: z.array(
             z.object({
               name: ConfigNameSchema.openapi({ example: "coverage" }),

@@ -157,6 +157,7 @@ describe("attempt routes", () => {
         alias: "claude",
         state: "draft",
         fork: `t1a${n}`,
+        remote: `http://localhost/git/greg/throng/t1a${n}.git`,
         branch: null,
         note: "go",
         createdAt: "2026-10-10T12:00:00.000Z",
@@ -167,7 +168,6 @@ describe("attempt routes", () => {
         scoring: { status: "none", sha: null },
         mergeRequest: null,
         verdicts: { head: null, merge: 0, revise: 0, reject: 0 },
-        remote: expect.any(String),
         clone: expect.any(String),
       })),
     );

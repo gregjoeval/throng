@@ -240,6 +240,17 @@ export class ScoringQueue {
     return row === undefined ? null : toRun(row);
   }
 
+  /** The newest `done` or `errored` run of the attempt's current head, or null when that head has none. */
+  scoredRun({ task, attempt }: ScoredAttempt): number | null {
+    const [row] = this.#sql.exec<{ id: number }>(
+      `SELECT r.id FROM scoring_runs r JOIN scoring_heads h ON h.task = r.task AND h.attempt = r.attempt AND h.sha = r.sha
+       WHERE r.task = ? AND r.attempt = ? AND r.status IN ('done', 'errored') ORDER BY r.id DESC LIMIT 1`,
+      task,
+      attempt,
+    );
+    return row?.id ?? null;
+  }
+
   /**
    * Asks for the attempt's head `sha` to be scored. Checks no permission: the task store has
    * already decided the request is allowed.

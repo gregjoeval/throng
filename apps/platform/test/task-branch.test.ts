@@ -139,6 +139,19 @@ describe("starting attempts on a task with a task branch", () => {
     expect(await host.head(fork("t1a1"))).toBe(mainSha);
   });
 
+  it("seeds an attempt forked from another with that attempt's head, not the task head", async () => {
+    const { ada, bob, clone, commit, push, host, fork, tasks, project, mainSha } = await setup();
+    await tasks.createAttempts(project, bob.actor, { task: 1 });
+    const dir = await clone(ada.token);
+    const tests = await commit(dir, "Add login tests");
+    expect((await push(dir, "refs/tasks/t1")).ok).toBeTruthy();
+
+    await tasks.createAttempts(project, bob.actor, { task: 1, from: { task: 1, number: 1 } });
+    expect(await host.head(fork("t1a2"))).toBe(mainSha);
+    await tasks.createAttempts(project, bob.actor, { task: 1 });
+    expect(await host.head(fork("t1a3"))).toBe(tests);
+  });
+
   it("starts a push-to-create attempt from the task head, and names the task branch in the notice", async () => {
     const { ada, bob, env, clone, commit, push, host, fork, tasks, project } = await setup();
     const dir = await clone(ada.token);

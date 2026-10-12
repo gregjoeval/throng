@@ -20,14 +20,14 @@ async function renderApp(path: string) {
 
 const header = () => screen.getByRole("banner");
 const openSwitcher = async (user: ReturnType<typeof userEvent.setup>) =>
-  user.click(within(header()).getByRole("button", { name: /select a project|\//iu }));
+  user.click(within(header()).getByRole("button", { name: /Select a project|\//u }));
 
 describe("the app shell", () => {
   it("shows the signed-in user, a sign-out link to Access and the theme toggle", async () => {
     await renderApp("/");
     expect(await within(header()).findByText(me.user.handle)).toBeInTheDocument();
     expect(within(header()).getByRole("link", { name: "Sign out" })).toHaveAttribute("href", "/cdn-cgi/access/logout");
-    expect(within(header()).getByRole("button", { name: /switch to (dark|light) theme/iu })).toBeInTheDocument();
+    expect(within(header()).getByRole("button", { name: /Switch to (dark|light) theme/u })).toBeInTheDocument();
   });
 
   it("lists the user's projects on the home page", async () => {

@@ -40,7 +40,7 @@ import type {
   ScoringTrigger,
   StoredRun,
 } from "./scoring.ts";
-import { attemptRef, reservedTask, taskRef } from "./task-refs.ts";
+import { attemptRef, reservedTask, taskBranchRef, taskRef } from "./task-refs.ts";
 import type { Actor } from "./tokens.ts";
 import { Verdicts } from "./verdicts.ts";
 import type { StoredVerdict, VerdictRecommendation, VerdictSummary } from "./verdicts.ts";
@@ -937,6 +937,20 @@ export class TaskStore {
     }
     mayAuthor(actor, current);
     return current;
+  }
+
+  /**
+   * Checks the actor may push task `task`'s task branch (`refs/tasks/t42` in the origin), so the git
+   * proxy may forward the push: the task exists and the actor's human is its creator or the project
+   * owner. The task branch may be pushed in any state.
+   */
+  authorizeTaskBranchPush(project: ProjectContext, actor: Actor, input: { task: number }): StoredTask {
+    const current = this.#task(input.task);
+    if (actor.user.id === project.owner || actor.user.id === current.creator) return current;
+    throw new ServiceError(
+      "forbidden",
+      `only ${taskRef(current.number)}'s creator or the project owner may push its task branch`,
+    );
   }
 
   /**
@@ -1906,10 +1920,32 @@ export class TaskStore {
       numbers.map((n) => this.#repos.fork(origin, forkRepo(project.id, attemptRef(task, n)))),
     );
     const failed = results.find((r): r is PromiseRejectedResult => r.status === "rejected");
-    if (failed === undefined) return;
-    const made = numbers.filter((_, i) => results[i]?.status === "fulfilled");
-    await this.#deleteForks(project, task, made);
-    throw failed.reason;
+    if (failed !== undefined) {
+      const made = numbers.filter((_, i) => results[i]?.status === "fulfilled");
+      await this.#deleteForks(project, task, made);
+      throw failed.reason;
+    }
+    try {
+      await Promise.all(numbers.map((n) => this.#startFromTaskBranch(project, task, n)));
+    } catch (error) {
+      await this.#deleteForks(project, task, numbers);
+      throw error;
+    }
+  }
+
+  /**
+   * Sets a new fork's `main` to its task's task branch head, so the attempt starts from it; the
+   * fork is left at the origin's `main` when the task has no task branch.
+   */
+  async #startFromTaskBranch(project: ProjectContext, task: number, number: number): Promise<void> {
+    await this.#untilReady(() =>
+      this.#repos.copyRef({
+        from: originRepo(project.id),
+        fromRef: taskBranchRef(task),
+        to: forkRepo(project.id, attemptRef(task, number)),
+        toRef: FORK_HEAD,
+      }),
+    );
   }
 
   /** A fork source is an attempt of the same task with a head to copy: its fork's, or its archive's. */
@@ -2090,6 +2126,7 @@ export const TASK_METHODS = [
   "rescore",
   "runLogKey",
   "authorizePush",
+  "authorizeTaskBranchPush",
   "recordPush",
   "routeBranchPush",
   "completeBranchPush",

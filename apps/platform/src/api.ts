@@ -119,6 +119,14 @@ const TaskSchema = z
       .int()
       .nullable()
       .openapi({ description: "Overrides the project's cap on active attempts; null to use the project's." }),
+    taskBranch: z
+      .object({ sha: z.string().openapi({ description: "The task branch's head." }) })
+      .nullable()
+      .openapi("TaskBranch", {
+        description:
+          "The task's task branch, `refs/tasks/t42` in the origin, which new attempts start from; null when it has none. " +
+          "The task creator or project owner pushes it with `git push throng HEAD:refs/tasks/t42`.",
+      }),
   })
   .openapi("Task");
 

@@ -39,6 +39,12 @@ export async function attemptBase(
   return sha === null ? null : { sha, on: line.on };
 }
 
+/** The head of task `task`'s task branch in the origin, or null when it has none. */
+export async function taskBranchHead(repos: Repos, project: string, task: number): Promise<{ sha: string } | null> {
+  const sha = await tip(repos, originRepo(project), taskBranchRef(task));
+  return sha === null ? null : { sha };
+}
+
 /** `attemptBase` at the attempt's current head, its fork's `main`, scored or not. Null with no head. */
 export async function currentBase(repos: Repos, project: string, attempt: string): Promise<Base | null> {
   const head = await tip(repos, forkRepo(project, attempt), "refs/heads/main");

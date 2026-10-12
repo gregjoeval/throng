@@ -6,9 +6,10 @@
 // addressed by `main` or an attempt resolves the ref first, sends a short max-age and an ETag of
 // the resolved sha, and answers a matching `If-None-Match` with 304 before reading anything else.
 
-import { createRoute, OpenAPIHono, z, type RouteConfig } from "@hono/zod-openapi";
+import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import type { Context } from "hono";
 import type { AccessBindings } from "./access.ts";
+import { CommitDiffSchema, diffContent, diffResponse, ProjectPathSchema, TAIL, tailedRoutes } from "./api-shared.ts";
 import type { AuthEnv, bearerOrForwarded } from "./auth.ts";
 import {
   browseService,
@@ -39,11 +40,6 @@ export interface BrowseOptions {
   tasks: (env: AccessBindings) => (projectId: string) => TaskBackend;
   diffCache: (env: AccessBindings) => DiffCache | undefined;
 }
-
-const ProjectPathSchema = z.object({
-  owner: z.string().openapi({ description: "The owner's handle.", example: "greg" }),
-  project: z.string().openapi({ description: "The project's handle.", example: "throng" }),
-});
 
 const RefParamSchema = ProjectPathSchema.extend({
   ref: z.string().openapi({
@@ -123,41 +119,6 @@ const CommitSchema = z
   })
   .openapi("Commit");
 
-const FileDiffSchema = z
-  .object({
-    path: z.string().openapi({ description: "The new path, or the old one for a deleted file." }),
-    oldPath: z.string().optional().openapi({ description: "Only for a rename: where the file was." }),
-    status: z.enum(["added", "deleted", "modified", "renamed"]),
-    oldMode: z.string().nullable().openapi({ example: "100644" }),
-    newMode: z.string().nullable().openapi({ example: "100755" }),
-    oldHash: z.string().nullable().openapi({ description: "The old blob's sha; null for an added file." }),
-    newHash: z.string().nullable().openapi({ description: "The new blob's sha; null for a deleted file." }),
-    additions: z.number().int(),
-    deletions: z.number().int(),
-    flags: z.array(z.enum(["truncated", "tooLarge", "tooComplex", "binary"])).openapi({
-      description:
-        "`binary`, `tooLarge` and `tooComplex` files get no patch. `truncated`: listed past the patched-file " +
-        "cap with no patch, or cut short (or left out) once the whole diff hit its size cap.",
-    }),
-    patch: z
-      .string()
-      .optional()
-      .openapi({ description: "The git-style unified patch, headers included; absent when a flag left it out." }),
-  })
-  .openapi("FileDiff");
-
-const CommitDiffSchema = z
-  .object({
-    sha: z.string(),
-    parent: z.string().nullable().openapi({ description: "The first parent; null for a root commit." }),
-    oldTree: z.string().nullable().openapi({ description: "The parent's tree; null for a root commit." }),
-    newTree: z.string(),
-    files: z.array(FileDiffSchema).openapi({ description: "By path, byte-wise." }),
-    totals: z.object({ files: z.number().int(), additions: z.number().int(), deletions: z.number().int() }),
-    truncated: z.boolean().openapi({ description: "More files changed than are listed." }),
-  })
-  .openapi("CommitDiff");
-
 const CommitPageSchema = z
   .object({
     ...ResolvedSchema,
@@ -208,9 +169,6 @@ const refErrors = {
   404: errorResponse("No such project, ref or path."),
 };
 
-/** Hono matches `{path{.+}}` across slashes; the OpenAPI document shows it as plain `{path}`. */
-const TAIL = "{path{.+}}";
-
 export function browseRoutes({ auth, repos, tasks, diffCache }: BrowseOptions) {
   const browse = (env: AccessBindings) => browseService({ db: env.DB, repos: repos(env), backend: tasks(env) });
 
@@ -221,12 +179,7 @@ export function browseRoutes({ auth, repos, tasks, diffCache }: BrowseOptions) {
     },
   });
 
-  /** Routes whose path ends in a multi-segment `{path}`: routed with the tail, documented without it. */
-  const tailed = <R extends { path: string }>(config: R): R & { hide: true } => {
-    const { middleware: _middleware, hide: _hide, ...documented } = config as R & RouteConfig;
-    api.openAPIRegistry.registerPath({ ...documented, path: config.path.replace(TAIL, "{path}") } as RouteConfig);
-    return { ...config, hide: true };
-  };
+  const tailed = tailedRoutes(api);
 
   const treeResponses = { 200: { description: "The directory.", ...json(TreeSchema) }, ...refErrors };
   const treeDescription =
@@ -428,13 +381,7 @@ export function browseRoutes({ auth, repos, tasks, diffCache }: BrowseOptions) {
         middleware: [auth] as const,
         request: { params: ProjectPathSchema.extend({ sha: ShaSchema }), query: AttemptQuerySchema },
         responses: {
-          200: {
-            description: "The diff.",
-            content: {
-              "application/json": { schema: CommitDiffSchema },
-              "text/x-diff": { schema: z.string().openapi({ description: "The unified patch." }) },
-            },
-          },
+          200: { description: "The diff.", content: diffContent(CommitDiffSchema) },
           ...refErrors,
         },
       }),
@@ -445,19 +392,13 @@ export function browseRoutes({ auth, repos, tasks, diffCache }: BrowseOptions) {
         const diff = await diffCommit(repos(c.env), at.repo, at.sha, { cache: diffCache(c.env) });
         if (diff === null) throw new ServiceError("not_found", `no commit ${at.sha}`);
         cacheFor(c, at);
-        c.header("Vary", "Accept");
-        if (wantsPatch(c.req.header("Accept"))) {
-          c.header("Content-Type", "text/x-diff; charset=utf-8");
-          return c.body(unifiedPatch(diff), 200) as never;
-        }
-        return c.json(diff, 200);
+        return diffResponse(
+          c,
+          () => unifiedPatch(diff),
+          () => diff,
+        ) as never;
       },
     );
-}
-
-/** Whether the client asked for the unified patch rather than JSON. */
-export function wantsPatch(accept: string | undefined): boolean {
-  return accept?.split(",").some((t) => t.split(";")[0]?.trim().toLowerCase() === "text/x-diff") ?? false;
 }
 
 /**

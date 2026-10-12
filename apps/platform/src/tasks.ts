@@ -2,13 +2,18 @@
 // machine in the project's Durable Object (`task-store.ts`), where the permission checks sit next
 // to the state they guard. Answers carry users as `{id, handle}`, resolved from D1 at read time.
 
+import { currentBase, readTaskBranch } from "./base.ts";
+import type { Base } from "./base.ts";
+import { loadConfig } from "./config.ts";
+import type { MetricConfig } from "./config.ts";
 import type { ConflictDetails, ConflictFile } from "./conflicts.ts";
 import { ServiceError } from "./errors.ts";
 import type { ErroredDetails, FailedChecksDetails } from "./landing.ts";
 import type { Dequeue, DequeueReason, StoredMergeRequest } from "./merge-requests.ts";
 import { resolveProject } from "./projects.ts";
 import { forkRepo, originRepo } from "./repos.ts";
-import type { ScoringResult } from "./results.ts";
+import type { Repos } from "./repos.ts";
+import type { Gate, ScoringResult } from "./results.ts";
 import { headAttemptRef } from "./scoring.ts";
 import type { AttemptScoring, ScoringRequest, StoredRun } from "./scoring.ts";
 import { attemptRef, parseAttemptRef, parseTaskRef, taskRef } from "./task-refs.ts";
@@ -24,9 +29,12 @@ import type {
   TaskOutcome,
   TaskState,
   TaskStore,
+  VerdictDetail,
 } from "./task-store.ts";
+import { isActive } from "./task-store.ts";
 import type { Actor } from "./tokens.ts";
 import type { Database } from "./users.ts";
+import type { VerdictRecommendation, VerdictSummary } from "./verdicts.ts";
 
 /** A project's Durable Object, as the services call it: one store method per call. */
 export interface TaskBackend {
@@ -35,6 +43,8 @@ export interface TaskBackend {
 
 export interface TaskServiceDeps {
   db: Database;
+  /** Read for each active attempt's base in the arena. */
+  repos: Repos;
   /** The backend for a project id: its Durable Object in production, an in-process store in tests. */
   backend: (projectId: string) => TaskBackend;
 }
@@ -56,10 +66,39 @@ export interface Task {
   closedAt: string | null;
   closedBy: UserRef | null;
   attemptLimit: number | null;
+  /** The head of its task branch (`refs/tasks/t42` in the origin), or null when it has none. */
+  taskBranch: TaskBranch | null;
+}
+
+export interface TaskBranch {
+  sha: string;
+  /** How many of its commits `main` doesn't have yet: they land with the selected attempt. */
+  commits: number;
+}
+
+/** A task as the task list shows it, with what its row summarises. */
+export interface ListedTask extends Task {
+  /** Its attempts, obsolete ones left out. */
+  attemptCount: number;
+  /** The best gate among those attempts' current results: `passed` beats `failed`; null when none has one. */
+  bestGate: Gate | null;
+  /** Its latest merge request's state, or null when it has none. */
+  mergeRequestState: StoredMergeRequest["state"] | null;
 }
 
 /** An attempt as the API shows it. */
-export interface Attempt {
+/** What every view of an attempt shows beside its state: its alias, where it came from, whether it needs update, its verdicts. */
+interface AttemptStanding {
+  /** The alias its author started it under; null when they acted as themselves, or after a hand-off. */
+  alias: string | null;
+  /** The attempt of the same task it was copied from when it was started; absent when it wasn't. Never its base. */
+  forkedFrom?: string;
+  /** Its task branch moved and merging it in conflicted; its author merges it to clear this. */
+  needsUpdate: boolean;
+  verdicts: VerdictSummary;
+}
+
+export interface Attempt extends AttemptStanding {
   ref: string;
   task: number;
   number: number;
@@ -74,6 +113,19 @@ export interface Attempt {
   archivedSha: string | null;
   scoring: AttemptScoring;
   mergeRequest: { state: AttemptMergeRequest["state"]; lastDequeue: { reason: DequeueReason } | null } | null;
+}
+
+/** A reviewer's verdict on one head of an attempt, as the API shows it. */
+export interface Verdict {
+  reviewer: UserRef;
+  /** The agent alias the reviewer posted under, if any. */
+  agent: string | null;
+  head: string;
+  recommendation: VerdictRecommendation;
+  body: string;
+  at: string;
+  /** Whether its head is no longer the attempt's current head. */
+  superseded: boolean;
 }
 
 /** Who approved or created a merge request: a user, and the agent they acted under. */
@@ -164,15 +216,19 @@ export interface ScoringStatus extends AttemptScoring {
 }
 
 /** One attempt in a task's arena, obsolete or not: its state lets a UI filter. */
-export interface ArenaAttempt extends ScoringStatus {
+export interface ArenaAttempt extends ScoringStatus, AttemptStanding {
   ref: string;
   state: AttemptState;
   author: UserRef;
+  /** An active attempt's base at its current head, scored or not (`currentBase`); null otherwise. */
+  base: Base | null;
 }
 
 /** A task's arena: the current result of every attempt in it. */
 export interface TaskArena {
   task: string;
+  /** Every metric the config on `origin/main` declares, in check order; none without a valid config. */
+  metrics: MetricConfig[];
   attempts: ArenaAttempt[];
 }
 
@@ -195,7 +251,7 @@ type StoreArgs<K extends TaskMethod> = Parameters<TaskStore[K]>;
 type StoreResult<K extends TaskMethod> = Awaited<ReturnType<TaskStore[K]>>;
 
 /** The task and attempt services. Any signed-in actor may read any project's tasks in P0. */
-export function taskService({ db, backend }: TaskServiceDeps) {
+export function taskService({ db, repos, backend }: TaskServiceDeps) {
   async function project(path: ProjectPath): Promise<ProjectContext> {
     const found = await resolveProject(db, path.owner, path.project);
     if (found === null) throw new ServiceError("notFound", `no project ${path.owner}/${path.project}`);
@@ -209,12 +265,16 @@ export function taskService({ db, backend }: TaskServiceDeps) {
     return outcome.value as StoreResult<K>;
   }
 
-  const tasks = async (list: StoredTask[]) => {
-    const users = await handles(
-      db,
-      list.flatMap((t) => [t.creator, t.closed_by]),
-    );
-    return list.map((t) => publicTask(t, users));
+  /** Renders tasks of project `ctx`, each with its task branch read from the origin. */
+  const tasks = (ctx: ProjectContext) => async (list: StoredTask[]) => {
+    const [users, branches] = await Promise.all([
+      handles(
+        db,
+        list.flatMap((t) => [t.creator, t.closed_by]),
+      ),
+      Promise.all(list.map((t) => readTaskBranch(repos, ctx.id, t.number))),
+    ]);
+    return list.map((t, i) => publicTask(t, users, branches[i] ?? null));
   };
   const attempts = async (list: StoredAttempt[]) => {
     const users = await handles(
@@ -227,8 +287,10 @@ export function taskService({ db, backend }: TaskServiceDeps) {
   /** A task transition: resolves the project and task reference, then runs `method`. */
   const taskMove =
     (method: "closeTask" | "reopenTask" | "obsoleteTask" | "restoreTask") =>
-    async (actor: Actor, input: TaskPath): Promise<Task> =>
-      one(await invoke(method, await project(input), actor, { task: taskNumber(input.task) }), tasks);
+    async (actor: Actor, input: TaskPath): Promise<Task> => {
+      const ctx = await project(input);
+      return one(await invoke(method, ctx, actor, { task: taskNumber(input.task) }), tasks(ctx));
+    };
 
   /** An attempt transition: resolves the project and attempt reference, then runs `method`. */
   const attemptMove =
@@ -262,16 +324,26 @@ export function taskService({ db, backend }: TaskServiceDeps) {
       input: ProjectPath & { title: string; body?: string | undefined; attemptLimit?: number | null | undefined },
     ): Promise<Task> {
       const { title, body, attemptLimit } = input;
-      return one(await invoke("createTask", await project(input), actor, { title, body, attemptLimit }), tasks);
+      const ctx = await project(input);
+      return one(await invoke("createTask", ctx, actor, { title, body, attemptLimit }), tasks(ctx));
     },
 
     async getTask(actor: Actor, input: TaskPath): Promise<Task> {
-      return one(await invoke("getTask", await project(input), actor, { task: taskNumber(input.task) }), tasks);
+      const ctx = await project(input);
+      return one(await invoke("getTask", ctx, actor, { task: taskNumber(input.task) }), tasks(ctx));
     },
 
     /** The project's tasks; obsolete ones only when `state` is `obsolete`. */
-    async listTasks(actor: Actor, input: ProjectPath & { state?: TaskState | undefined }): Promise<Task[]> {
-      return tasks(await invoke("listTasks", await project(input), actor, { state: input.state }));
+    async listTasks(actor: Actor, input: ProjectPath & { state?: TaskState | undefined }): Promise<ListedTask[]> {
+      const ctx = await project(input);
+      const list = await invoke("listTasks", ctx, actor, { state: input.state });
+      const shown = await tasks(ctx)(list);
+      return list.map((t, i) => ({
+        ...(shown[i] as Task),
+        attemptCount: t.attempt_count,
+        bestGate: t.best_gate,
+        mergeRequestState: t.merge_request_state,
+      }));
     },
 
     /** Edits a task. The project owner or the task's creator may. */
@@ -285,7 +357,8 @@ export function taskService({ db, backend }: TaskServiceDeps) {
     ): Promise<Task> {
       const { title, body, attemptLimit } = input;
       const edit = { task: taskNumber(input.task), title, body, attemptLimit };
-      return one(await invoke("editTask", await project(input), actor, edit), tasks);
+      const ctx = await project(input);
+      return one(await invoke("editTask", ctx, actor, edit), tasks(ctx));
     },
 
     closeTask: taskMove("closeTask"),
@@ -296,9 +369,14 @@ export function taskService({ db, backend }: TaskServiceDeps) {
     /** Creates `count` draft attempts, each with its own fork. Any signed-in user may. */
     async createAttempts(
       actor: Actor,
-      input: TaskPath & { count?: number | undefined; note?: string | undefined },
+      input: TaskPath & { count?: number | undefined; note?: string | undefined; from?: string | undefined },
     ): Promise<Attempt[]> {
-      const create = { task: taskNumber(input.task), count: input.count, note: input.note };
+      const create = {
+        task: taskNumber(input.task),
+        count: input.count,
+        note: input.note,
+        from: input.from === undefined ? undefined : attemptRefOf(input.from),
+      };
       return attempts(await invoke("createAttempts", await project(input), actor, create));
     },
 
@@ -346,18 +424,29 @@ export function taskService({ db, backend }: TaskServiceDeps) {
      */
     async taskArena(actor: Actor, input: TaskPath): Promise<TaskArena> {
       const number = taskNumber(input.task);
-      const list = await invoke("taskArena", await project(input), actor, { task: number });
-      const users = await handles(
-        db,
-        list.map((a) => a.author),
-      );
+      const ctx = await project(input);
+      const list = await invoke("taskArena", ctx, actor, { task: number });
+      const [users, bases, config] = await Promise.all([
+        handles(
+          db,
+          list.map((a) => a.author),
+        ),
+        Promise.all(list.map(({ fork, state }) => (isActive(state) ? currentBase(repos, ctx.id, fork) : null))),
+        loadConfig(repos, ctx.id),
+      ]);
       return {
         task: taskRef(number),
-        attempts: list.map(({ scoring, fork, state, author }) => ({
+        metrics: config.kind === "valid" ? config.config.checks.flatMap((check) => check.metrics) : [],
+        attempts: list.map(({ scoring, fork, state, author, alias, verdicts, forked_from, needs_update }, i) => ({
           ref: fork,
           state,
           author: userRef(author, users),
+          alias,
           ...scoringStatus(scoring),
+          base: bases[i] ?? null,
+          ...forkedFrom(forked_from),
+          needsUpdate: needs_update,
+          verdicts,
         })),
       };
     },
@@ -389,6 +478,29 @@ export function taskService({ db, backend }: TaskServiceDeps) {
       const to = await db.prepare("SELECT id FROM users WHERE handle = ?").bind(input.to).first<{ id: string }>();
       if (to === null) throw new ServiceError("notFound", `no user ${input.to}`);
       return one(await invoke("handOffAttempt", ctx, actor, { ...ref, to: to.id }), attempts);
+    },
+
+    /**
+     * Posts the actor's verdict on the attempt's current head, replacing their earlier one on it.
+     * Anyone but the attempt's author (or their agents) may, while it is active or merged.
+     */
+    async postVerdict(
+      actor: Actor,
+      input: AttemptPath & { recommendation: VerdictRecommendation; body: string },
+    ): Promise<Verdict> {
+      const post = { ...attemptRefOf(input.attempt), recommendation: input.recommendation, body: input.body };
+      const verdict = await invoke("postVerdict", await project(input), actor, post);
+      return publicVerdict(verdict, await handles(db, [verdict.reviewer]));
+    },
+
+    /** The attempt's verdicts on every head, oldest first. Any signed-in user may read them. */
+    async listVerdicts(actor: Actor, input: AttemptPath): Promise<Verdict[]> {
+      const list = await invoke("listVerdicts", await project(input), actor, attemptRefOf(input.attempt));
+      const users = await handles(
+        db,
+        list.map((v) => v.reviewer),
+      );
+      return list.map((v) => publicVerdict(v, users));
     },
 
     /**
@@ -485,7 +597,7 @@ function userRef(id: string, users: Map<string, string>): UserRef {
   return { id, handle: users.get(id) ?? id };
 }
 
-function publicTask(t: StoredTask, users: Map<string, string>): Task {
+function publicTask(t: StoredTask, users: Map<string, string>, taskBranch: TaskBranch | null): Task {
   return {
     ref: taskRef(t.number),
     number: t.number,
@@ -497,7 +609,13 @@ function publicTask(t: StoredTask, users: Map<string, string>): Task {
     closedAt: t.closed_at,
     closedBy: t.closed_by === null ? null : userRef(t.closed_by, users),
     attemptLimit: t.attempt_limit,
+    taskBranch,
   };
+}
+
+/** `forkedFrom` for an attempt copied from another, and nothing for one that wasn't. */
+function forkedFrom(source: string | null): { forkedFrom?: string } {
+  return source === null ? {} : { forkedFrom: source };
 }
 
 function publicAttempt(a: StoredAttempt, users: Map<string, string>): Attempt {
@@ -507,6 +625,7 @@ function publicAttempt(a: StoredAttempt, users: Map<string, string>): Attempt {
     task: a.task,
     number: a.number,
     author: userRef(a.author, users),
+    alias: a.alias,
     state: a.state,
     fork: a.fork,
     branch: a.branch,
@@ -515,8 +634,23 @@ function publicAttempt(a: StoredAttempt, users: Map<string, string>): Attempt {
     closedAt: a.closed_at,
     mergedSha: a.merged_sha,
     archivedSha: a.archived_sha,
+    ...forkedFrom(a.forked_from),
+    needsUpdate: a.needs_update,
     scoring: a.scoring,
     mergeRequest: mr === null ? null : { state: mr.state, lastDequeue: mr.last_dequeue },
+    verdicts: a.verdicts,
+  };
+}
+
+function publicVerdict(v: VerdictDetail, users: Map<string, string>): Verdict {
+  return {
+    reviewer: userRef(v.reviewer, users),
+    agent: v.agent,
+    head: v.head,
+    recommendation: v.recommendation,
+    body: v.body,
+    at: v.at,
+    superseded: v.superseded,
   };
 }
 

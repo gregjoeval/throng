@@ -131,7 +131,7 @@ const errors = {
 const taskPath = ({ t, ...rest }: { owner: string; project: string; t: string }) => ({ ...rest, task: t });
 
 export function dequeueRoutes({ auth, repos, tasks, logs }: DequeueOptions) {
-  const service = (env: AccessBindings) => taskService({ db: env.DB, backend: tasks(env) });
+  const service = (env: AccessBindings) => taskService({ db: env.DB, repos: repos(env), backend: tasks(env) });
 
   const api = new OpenAPIHono<AuthEnv>({
     defaultHook: (result, c) => {

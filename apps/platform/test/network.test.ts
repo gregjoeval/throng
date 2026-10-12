@@ -128,6 +128,7 @@ describe("roleAccess", () => {
     originRead: repoGrant("p1-main", "read", "origin-read"),
     originWrite: repoGrant("p1-main", "write", "origin-write"),
     forkRead: repoGrant("p1-t1a1", "read", "fork-read"),
+    forkWrite: repoGrant("p1-t1a1", "write", "fork-write"),
   };
   const preview = { accountId: "acct", workerName: "fixture" };
   const deploy = new URL("https://api.cloudflare.com/client/v4/accounts/acct/workers/scripts/fixture");
@@ -176,5 +177,18 @@ describe("roleAccess", () => {
     expect(outboundDecision("POST", pushTo("p1-t1a1"), given)).toEqual({ action: "deny" });
     expect(outboundDecision("GET", new URL("https://registry.npmjs.org/left-pad"), given)).toEqual({ action: "deny" });
     expect(outboundDecision("GET", new URL("https://api.github.com/"), given)).toEqual({ action: "deny" });
+  });
+
+  it("gives a follow's trusted container origin read and fork write, and nothing else", () => {
+    const given = roleAccess("follow", grants, { preview, allow: ["api.github.com"] });
+    expect(given).toEqual({
+      grants: [grants.originRead, grants.forkWrite],
+      preview: null,
+      npmRegistry: false,
+      allow: [],
+    });
+    expect(outboundDecision("POST", pushTo("p1-t1a1"), given)).toEqual({ action: "bearer", token: "fork-write" });
+    expect(outboundDecision("POST", pushTo("p1-main"), given)).toEqual({ action: "deny" });
+    expect(outboundDecision("GET", new URL("https://registry.npmjs.org/left-pad"), given)).toEqual({ action: "deny" });
   });
 });

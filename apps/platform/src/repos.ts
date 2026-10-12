@@ -41,6 +41,16 @@ function repoName(project: string, suffix: string): string {
   return name;
 }
 
+/** Awaits a repo read, turning a missing repo (`NOT_FOUND`) into null. */
+export async function missingAsNull<T>(read: Promise<T>): Promise<T | null> {
+  try {
+    return await read;
+  } catch (error) {
+    if ((error as { code?: unknown }).code === "NOT_FOUND") return null;
+    throw error;
+  }
+}
+
 export interface RepoInfo {
   name: string;
   /** HTTPS git remote. Pushes and fetches need a token from `mintToken`. */

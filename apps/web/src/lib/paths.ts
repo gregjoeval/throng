@@ -14,12 +14,15 @@ interface InProject {
 /**
  * One place in a project. A `ref` is `main`, an attempt (`t42a3`) or a full sha; `attempt` is the
  * `?attempt=` hint that tells the platform which fork to look up a sha in. `path` has no leading or
- * trailing slash, and is `""` for the root directory.
+ * trailing slash, and is `""` for the root directory. `offset` is the commit log's page: how many
+ * commits to skip, absent for the first page.
  */
 export type ProjectLocation =
   | (InProject & { view: "home" })
+  | (InProject & { view: "tasks" })
+  | (InProject & { view: "task"; task: string })
   | (InProject & { view: "tree" | "blob" | "raw"; ref: string; path: string; attempt?: string })
-  | (InProject & { view: "commits"; ref: string; attempt?: string })
+  | (InProject & { view: "commits"; ref: string; attempt?: string; offset?: number })
   | (InProject & { view: "commit"; sha: string; attempt?: string });
 
 const segment = (value: string) => encodeURIComponent(value);
@@ -31,6 +34,12 @@ export function buildPath(location: ProjectLocation): string {
   switch (location.view) {
     case "home": {
       return base;
+    }
+    case "tasks": {
+      return `${base}/tasks`;
+    }
+    case "task": {
+      return `${base}/tasks/${segment(location.task)}`;
     }
     case "commit": {
       path = `${base}/commit/${segment(location.sha)}`;
@@ -45,12 +54,16 @@ export function buildPath(location: ProjectLocation): string {
       path = `${base}/${location.view}/${segment(location.ref)}${rest === "" ? "" : `/${rest}`}`;
     }
   }
-  return location.attempt === undefined ? path : `${path}?${new URLSearchParams({ attempt: location.attempt })}`;
+  const query = new URLSearchParams();
+  if (location.attempt !== undefined) query.set("attempt", location.attempt);
+  if (location.view === "commits" && location.offset) query.set("offset", String(location.offset));
+  const search = query.toString();
+  return search === "" ? path : `${path}?${search}`;
 }
 
 /**
  * The location an href or pathname points at, or null when it isn't one of a project's views. Only
- * the pathname and the `attempt` query parameter are read.
+ * the pathname and the `attempt` query parameter (and the commit log's `offset`) are read.
  */
 export function parsePath(href: string): ProjectLocation | null {
   const url = new URL(href, "http://throng.invalid");
@@ -67,9 +80,13 @@ export function parsePath(href: string): ProjectLocation | null {
   const attempt = url.searchParams.get("attempt");
   const hint = attempt === null ? {} : { attempt };
   if (view === undefined) return { owner, project, view: "home" };
+  if (view === "tasks" && ref === undefined) return { owner, project, view };
   if (!ref) return null;
+  if (view === "tasks" && rest.length === 0) return { owner, project, view: "task", task: ref };
   if (view === "commit" && rest.length === 0) return { owner, project, view, sha: ref, ...hint };
-  if (view === "commits" && rest.length === 0) return { owner, project, view, ref, ...hint };
+  if (view === "commits" && rest.length === 0) {
+    return { owner, project, view, ref, ...commitsSearch(Object.fromEntries(url.searchParams)) };
+  }
   if (view === "tree" || view === "blob" || view === "raw") {
     if (rest.some((part) => part === "")) return null;
     return { owner, project, view, ref, path: rest.join("/"), ...hint };
@@ -80,6 +97,12 @@ export function parsePath(href: string): ProjectLocation | null {
 /** The search params of a ref-addressed route: only the `?attempt=` hint, when it's a string. */
 export function attemptSearch(search: Record<string, unknown>): { attempt?: string } {
   return typeof search["attempt"] === "string" ? { attempt: search["attempt"] } : {};
+}
+
+/** The commit log's search params: the `?attempt=` hint, and `?offset=` when it's a positive integer. */
+export function commitsSearch(search: Record<string, unknown>): { attempt?: string; offset?: number } {
+  const offset = Number(search["offset"]);
+  return { ...attemptSearch(search), ...(Number.isSafeInteger(offset) && offset > 0 ? { offset } : {}) };
 }
 
 /** A path's segments, ignoring leading, trailing and doubled slashes. */

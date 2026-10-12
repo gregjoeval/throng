@@ -7,6 +7,7 @@ const grants: RunGrants = {
   originRead: { remote: remote("demo"), token: "origin-read", access: "read" },
   originWrite: { remote: remote("demo"), token: "origin-write", access: "write" },
   forkRead: { remote: remote("demo--a1"), token: "fork-read", access: "read" },
+  forkWrite: { remote: remote("demo--a1"), token: "fork-write", access: "write" },
 };
 
 describe("grantsForRole", () => {
@@ -16,7 +17,8 @@ describe("grantsForRole", () => {
       expect({ role, writes }).toEqual({ role, writes: writes && !RUNS_REPO_CODE[role] });
     }
     expect(grantsForRole("land", grants).map((g) => g.token)).toEqual(["origin-write", "fork-read"]);
-    expect(grantsForRole("score", grants).map((g) => g.token)).toEqual(["origin-read", "fork-read"]);
+    expect(grantsForRole("score", grants).map((g) => g.token)).toEqual(["fork-read"]);
+    expect(grantsForRole("follow", grants).map((g) => g.token)).toEqual(["origin-read", "fork-write"]);
   });
 });
 

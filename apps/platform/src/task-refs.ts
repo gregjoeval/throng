@@ -4,6 +4,7 @@
 const TASK_REF = /^t?([1-9]\d*)$/u;
 const ATTEMPT_REF = /^t?([1-9]\d*)a([1-9]\d*)$/u;
 const RESERVED_BRANCH = /^t([1-9]\d*)\//u;
+const TASK_BRANCH_PREFIX = "refs/tasks/";
 
 /** A task reference, `t42` or `42`, as its number; null when it isn't one. */
 export function parseTaskRef(ref: string): number | null {
@@ -27,6 +28,23 @@ export function isAttemptRef(ref: string): boolean {
 
 export function taskRef(task: number): string {
   return `t${task}`;
+}
+
+/** The hidden origin ref holding task `task`'s task branch, when it has one: `refs/tasks/t42`. */
+export function taskBranchRef(task: number): string {
+  return `${TASK_BRANCH_PREFIX}${taskRef(task)}`;
+}
+
+/** Whether `ref` is under `refs/tasks/`, where task branches live, well-formed or not. */
+export function isTaskBranchNamespace(ref: string): boolean {
+  return ref.startsWith(TASK_BRANCH_PREFIX);
+}
+
+/** The task whose task branch `ref` is, in its canonical form `refs/tasks/t42`; null otherwise. */
+export function parseTaskBranchRef(ref: string): number | null {
+  if (!isTaskBranchNamespace(ref)) return null;
+  const task = parseTaskRef(ref.slice(TASK_BRANCH_PREFIX.length));
+  return task !== null && taskBranchRef(task) === ref ? task : null;
 }
 
 export function attemptRef(task: number, number: number): string {

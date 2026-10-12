@@ -9,7 +9,7 @@
 import { archiveRef } from "./archive.ts";
 import { ServiceError } from "./errors.ts";
 import { resolveProject } from "./projects.ts";
-import { forkRepo, originRepo } from "./repos.ts";
+import { forkRepo, missingAsNull, originRepo } from "./repos.ts";
 import type { Commit, Repos, TreeEntry } from "./repos.ts";
 import { attemptRef, parseAttemptRef } from "./task-refs.ts";
 import type { ProjectContext, StoredAttempt, TaskMethod } from "./task-store.ts";
@@ -340,16 +340,6 @@ const CONTENT_TYPES: Record<string, string> = {
 function contentType(name: string): string | null {
   const dot = name.lastIndexOf(".");
   return dot <= 0 ? null : (CONTENT_TYPES[name.slice(dot + 1).toLowerCase()] ?? null);
-}
-
-/** Awaits a repo read, turning a missing repo (`NOT_FOUND`) into null. */
-async function missingAsNull<T>(read: Promise<T>): Promise<T | null> {
-  try {
-    return await read;
-  } catch (error) {
-    if ((error as { code?: unknown }).code === "NOT_FOUND") return null;
-    throw error;
-  }
 }
 
 /** Maps over `items` with at most `limit` calls in flight, keeping order. */

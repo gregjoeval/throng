@@ -48,8 +48,8 @@ async function openArena(
 }
 
 const METRICS: Metric[] = [
-  { name: "coverage", from: "test.coverage.pct", type: "number", unit: "%", order: "desc" },
-  { name: "bundle_kb", from: "bundle.size.kb", type: "number", unit: "KB", order: "asc" },
+  { name: "coverage", from: "test.coverage.pct", type: "number", unit: "%", order: "desc", source: "project" },
+  { name: "bundle_kb", from: "bundle.size.kb", type: "number", unit: "KB", order: "asc", source: "project" },
 ];
 
 const rail = () => screen.getByRole("list", { name: "Attempts" });

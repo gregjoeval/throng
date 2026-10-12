@@ -22,6 +22,9 @@ const FROM = /^[^.]+\.[^./\\]+(\.[^.]+)+$/u;
 /** A metric's stored `order`: `asc` when lower values are better, `desc` when higher are. */
 export const METRIC_ORDERS = ["asc", "desc"] as const;
 export type MetricOrder = (typeof METRIC_ORDERS)[number];
+/** Who defined a check or metric: the project's config, or a task over it. */
+export const CONFIG_LAYERS = ["project", "task"] as const;
+export type ConfigLayer = (typeof CONFIG_LAYERS)[number];
 
 export interface MetricConfig {
   name: string;
@@ -31,6 +34,7 @@ export interface MetricConfig {
   unit: string | null;
   /** Which way is better: `asc` when lower values are better, `desc` when higher are. */
   order: MetricOrder;
+  source: ConfigLayer;
 }
 
 export interface CheckConfig {
@@ -93,7 +97,7 @@ const oneOf = (values: readonly string[]) =>
 const FROM_FORMAT = "from must be <check>.<file>.<path>, like test.coverage-summary.total.lines.pct";
 const command = z.string({ error: "must be a string" }).trim().min(1, "must not be empty");
 
-const MetricSchema = z.strictObject({
+export const MetricSchema = z.strictObject({
   name: name("metric name"),
   from: z
     .string({ error: (issue) => (issue.input === undefined ? "from is required: <check>.<file>.<path>" : FROM_FORMAT) })
@@ -223,16 +227,22 @@ export function parseConfig(text: string | null): ConfigResult {
         required: check.required ?? true,
         timeoutMs: check.timeout ?? DEFAULT_CHECK_TIMEOUT_MS,
       })),
-      metrics: (config.metrics ?? []).map((metric) => ({
-        name: metric.name,
-        from: metric.from,
-        type: metric.type,
-        unit: metric.unit ?? null,
-        order: metric.order === undefined ? "desc" : ORDERS[metric.order],
-      })),
+      metrics: (config.metrics ?? []).map((metric) => metricConfig(metric, "project")),
       preview: config.preview === undefined ? null : { command: config.preview.command ?? null },
       attempts: { limit: config.attempts?.limit ?? null },
     },
+  };
+}
+
+/** A metric `MetricSchema` parsed, with its defaults, as the layer `source` defined it. */
+export function metricConfig(metric: z.infer<typeof MetricSchema>, source: ConfigLayer): MetricConfig {
+  return {
+    name: metric.name,
+    from: metric.from,
+    type: metric.type,
+    unit: metric.unit ?? null,
+    order: metric.order === undefined ? "desc" : ORDERS[metric.order],
+    source,
   };
 }
 
@@ -242,7 +252,7 @@ export async function loadConfig(repos: Repos, projectId: string): Promise<Confi
   return parseConfig(file === null ? null : await file.text());
 }
 
-function describeIssue(issue: z.core.$ZodIssue): string {
+export function describeIssue(issue: z.core.$ZodIssue): string {
   const path = issue.path
     .map((part, i) => (typeof part === "number" ? `[${part}]` : `${i === 0 ? "" : "."}${String(part)}`))
     .join("");

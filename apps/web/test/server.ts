@@ -41,6 +41,7 @@ export function task(number: number, fields: Partial<ListedTask> = {}): ListedTa
     closedAt: null,
     closedBy: null,
     attemptLimit: null,
+    metrics: [],
     taskBranch: null,
     attemptCount: 0,
     bestGate: null,

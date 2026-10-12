@@ -16,6 +16,7 @@ import type { Repos } from "./repos.ts";
 import type { Gate, ScoringResult } from "./results.ts";
 import { headAttemptRef } from "./scoring.ts";
 import type { AttemptScoring, ScoringRequest, StoredRun } from "./scoring.ts";
+import { taskDefinitionsFrom } from "./task-definitions.ts";
 import { attemptRef, parseAttemptRef, parseTaskRef, taskRef } from "./task-refs.ts";
 import type {
   AttemptInput,
@@ -66,6 +67,8 @@ export interface Task {
   closedAt: string | null;
   closedBy: UserRef | null;
   attemptLimit: number | null;
+  /** Its own metrics, read after the project's; empty by default. */
+  metrics: MetricConfig[];
   /** The head of its task branch (`refs/tasks/t42` in the origin), or null when it has none. */
   taskBranch: TaskBranch | null;
 }
@@ -261,6 +264,17 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
     return outcome.value as StoreResult<K>;
   }
 
+  /**
+   * A task's metrics as a request gave them, checked against the project's config on `main`;
+   * undefined when it gave none. Saving them is still up to the store's permission check.
+   */
+  async function taskMetrics(ctx: ProjectContext, metrics: unknown): Promise<MetricConfig[] | undefined> {
+    if (metrics === undefined) return undefined;
+    const checked = taskDefinitionsFrom({ metrics }, await loadConfig(repos, ctx.id));
+    if ("error" in checked) throw new ServiceError("invalidRequest", checked.error);
+    return checked.definitions.metrics;
+  }
+
   /** Renders tasks of project `ctx`, each with its task branch read from the origin. */
   const tasks = (ctx: ProjectContext) => async (list: StoredTask[]) => {
     const [users, branches] = await Promise.all([
@@ -317,11 +331,17 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
     /** Creates an open task; the caller's user is its creator. Any signed-in user may. */
     async createTask(
       actor: Actor,
-      input: ProjectPath & { title: string; body?: string | undefined; attemptLimit?: number | null | undefined },
+      input: ProjectPath & {
+        title: string;
+        body?: string | undefined;
+        attemptLimit?: number | null | undefined;
+        metrics?: unknown;
+      },
     ): Promise<Task> {
       const { title, body, attemptLimit } = input;
       const ctx = await project(input);
-      return one(await invoke("createTask", ctx, actor, { title, body, attemptLimit }), tasks(ctx));
+      const metrics = await taskMetrics(ctx, input.metrics);
+      return one(await invoke("createTask", ctx, actor, { title, body, attemptLimit, metrics }), tasks(ctx));
     },
 
     async getTask(actor: Actor, input: TaskPath): Promise<Task> {
@@ -349,11 +369,13 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
         title?: string | undefined;
         body?: string | undefined;
         attemptLimit?: number | null | undefined;
+        metrics?: unknown;
       },
     ): Promise<Task> {
       const { title, body, attemptLimit } = input;
-      const edit = { task: taskNumber(input.task), title, body, attemptLimit };
       const ctx = await project(input);
+      const metrics = await taskMetrics(ctx, input.metrics);
+      const edit = { task: taskNumber(input.task), title, body, attemptLimit, metrics };
       return one(await invoke("editTask", ctx, actor, edit), tasks(ctx));
     },
 
@@ -605,6 +627,7 @@ function publicTask(t: StoredTask, users: Map<string, string>, taskBranch: TaskB
     closedAt: t.closed_at,
     closedBy: t.closed_by === null ? null : userRef(t.closed_by, users),
     attemptLimit: t.attempt_limit,
+    metrics: t.definitions.metrics,
     taskBranch,
   };
 }

@@ -75,6 +75,7 @@ describe("task routes", () => {
       closedAt: null,
       closedBy: null,
       attemptLimit: null,
+      metrics: [],
       taskBranch: null,
     });
     await call("POST", `${base}/tasks`, bob, { title: "Second", attemptLimit: 3 });
@@ -139,6 +140,98 @@ describe("task routes", () => {
     const { call, base } = await setup();
     expect((await call("GET", `${base}/tasks`)).status).toBe(401);
     expect((await call("POST", `${base}/tasks`, undefined, { title: "a" })).status).toBe(401);
+  });
+});
+
+describe("task metrics", () => {
+  const PROJECT_CONFIG = [
+    "checks:",
+    "  - name: test",
+    "    command: pnpm test",
+    "metrics:",
+    "  - name: coverage",
+    "    from: test.coverage-summary.total.lines.pct",
+    "    type: number",
+    "",
+  ].join("\n");
+  const LINES = { name: "lines", from: "test.coverage-summary.total.lines.total", type: "number", unit: "lines" };
+
+  async function withConfig() {
+    const env = await setup();
+    env.repos.writeFile(`${env.project["id"]}-main`, "main", ".throng/config.yml", PROJECT_CONFIG);
+    return env;
+  }
+
+  it("are saved on create and edit in the config's shape, and read back with the task", async () => {
+    const { call, ada, bob, base } = await withConfig();
+    const created = await call("POST", `${base}/tasks`, ada, {
+      title: "a",
+      metrics: [{ ...LINES, order: "ascending" }],
+    });
+    expect(created.status).toBe(201);
+    const lines = { ...LINES, source: "task", order: "asc" };
+    expect(created.body["metrics"]).toEqual([lines]);
+    expect((await call("GET", `${base}/tasks/t1`, bob)).body["metrics"]).toEqual([lines]);
+
+    expect((await call("POST", `${base}/tasks`, ada, { title: "b" })).body["metrics"]).toEqual([]);
+    const renamed = await call("PATCH", `${base}/tasks/t1`, ada, { title: "A" });
+    expect(renamed.body["metrics"]).toEqual([lines]);
+    const edited = await call("PATCH", `${base}/tasks/t1`, ada, {
+      metrics: [{ name: "branches", from: "test.coverage-summary.total.branches.pct", type: "number" }],
+    });
+    expect(edited.status).toBe(200);
+    expect(edited.body["metrics"]).toEqual([
+      {
+        name: "branches",
+        from: "test.coverage-summary.total.branches.pct",
+        type: "number",
+        unit: null,
+        order: "desc",
+        source: "task",
+      },
+    ]);
+    expect((await call("PATCH", `${base}/tasks/t1`, ada, { metrics: [] })).body["metrics"]).toEqual([]);
+  });
+
+  it("may be edited only by the task's creator or the project's owner", async () => {
+    const { call, ada, bob, greg, base } = await withConfig();
+    await call("POST", `${base}/tasks`, ada, { title: "a" });
+    const edit = (token: string) => call("PATCH", `${base}/tasks/t1`, token, { metrics: [LINES] });
+    expect((await edit(bob)).status).toBe(403);
+    expect((await edit(greg)).status).toBe(200);
+    expect((await edit(ada)).status).toBe(200);
+  });
+
+  it.each([
+    ["an invalid shape", { ...LINES, order: "up" }, /^metrics\[0\]\.order: order must be/u],
+    ["a missing type", { name: "lines", from: LINES.from }, /^metrics\[0\]\.type: type is required/u],
+    ["a reserved name", { ...LINES, name: "_lines" }, /^metrics\[0\]\.name: .*reserved/u],
+    ["an unknown check", { ...LINES, from: "lint.report.errors" }, /^metrics\[0\]\.from: no check is named lint$/u],
+    [
+      "a project metric's name",
+      { ...LINES, name: "coverage" },
+      /^metrics\[0\]\.name: coverage is also a metric's name in \.throng\/config\.yml$/u,
+    ],
+    [
+      "a project check's name",
+      { ...LINES, name: "test" },
+      /^metrics\[0\]\.name: test is also a check's name in \.throng\/config\.yml$/u,
+    ],
+  ])("are rejected with what is wrong: %s", async (_label, metric, message) => {
+    const { call, ada, base } = await withConfig();
+    const created = await call("POST", `${base}/tasks`, ada, { title: "a", metrics: [metric] });
+    expect(created.status).toBe(400);
+    expect(created.body["error"]).toMatchObject({ code: "invalidRequest", message: expect.stringMatching(message) });
+    await call("POST", `${base}/tasks`, ada, { title: "b" });
+    const edited = await call("PATCH", `${base}/tasks/t1`, ada, { metrics: [metric] });
+    expect(edited.status).toBe(400);
+    expect(edited.body["error"]["message"]).toMatch(message);
+  });
+
+  it("rejects two task metrics with the same name", async () => {
+    const { call, ada, base } = await withConfig();
+    const created = await call("POST", `${base}/tasks`, ada, { title: "a", metrics: [LINES, LINES] });
+    expect(created.body["error"]["message"]).toBe("metrics[1].name: duplicate metric name lines");
   });
 });
 

@@ -359,8 +359,8 @@ describe("the arena", () => {
     ].join("\n");
     repos.commit(`${projectId}-main`, { files: { "README.md": "hi\n", ".throng/config.yml": config } });
     expect((await call("GET", `${base}/tasks/t1/arena`, ada)).body["metrics"]).toEqual([
-      { name: "coverage", from: "test.coverage.pct", type: "number", unit: "%", order: "desc" },
-      { name: "bundle_kb", from: "bundle.size.kb", type: "number", unit: null, order: "asc" },
+      { name: "coverage", from: "test.coverage.pct", type: "number", unit: "%", order: "desc", source: "project" },
+      { name: "bundle_kb", from: "bundle.size.kb", type: "number", unit: null, order: "asc", source: "project" },
     ]);
   });
 

@@ -114,6 +114,7 @@ describe("tasks", () => {
       closed_at: null,
       closed_by: null,
       attempt_limit: null,
+      definitions: { metrics: [] },
     });
     expect(t2).toMatchObject({ number: 2, body: "**md**", attempt_limit: 2 });
     await store.obsoleteTask(PROJECT, owner, { task: 2 });

@@ -30,6 +30,7 @@ import { ServiceError } from "./errors.ts";
 import { missingLog } from "./logs.ts";
 import { ATTEMPT_STATES, TASK_STATES } from "./task-store.ts";
 import { taskService } from "./tasks.ts";
+import type { MergeRequest, ScoringAnswer } from "./tasks.ts";
 import type { Actor } from "./tokens.ts";
 import { MAX_WAIT_SECONDS } from "./waiters.ts";
 
@@ -117,6 +118,21 @@ function answer(summary: string, data: Record<string, unknown>): CallToolResult 
     ],
     structuredContent: data,
   };
+}
+
+/** A summary line with its hint, if any, as one more sentence. */
+function withHint(summary: string, hint: string | null): string {
+  return hint === null ? summary : `${summary}. ${hint}`;
+}
+
+/** The answer to a scoring request: the run it queued, or why it queued none. */
+function scoringAnswer(scored: ScoringAnswer): CallToolResult {
+  return answer(scored.queued ? `queued run ${scored.run.id}` : `not queued: ${scored.reason}`, { ...scored });
+}
+
+/** The answer to a call that moves the task's merge request: its new state. */
+function mergeRequestAnswer(mergeRequest: MergeRequest): CallToolResult {
+  return answer(`merge request is ${mergeRequest.state}`, { mergeRequest });
 }
 
 /** Runs a tool, turning a service's refusal into a tool error the model can read and act on. */
@@ -288,7 +304,7 @@ function mcpServer({ repos, tasks, logs, diffCache }: Deps, { actor, token, env,
         content,
         hint,
       };
-      return answer(`${file.path} at ${at.sha}: ${file.size} bytes${hint === null ? "" : `. ${hint}`}`, data);
+      return answer(withHint(`${file.path} at ${at.sha}: ${file.size} bytes`, hint), data);
     },
   );
 
@@ -322,7 +338,7 @@ function mcpServer({ repos, tasks, logs, diffCache }: Deps, { actor, token, env,
           ? "Some files have no patch or a cut-short one (see `capped`); diff them in a clone."
           : null;
       const { totals } = diff;
-      const summary = `${totals.files} files, +${totals.additions} -${totals.deletions}${hint === null ? "" : `. ${hint}`}`;
+      const summary = withHint(`${totals.files} files, +${totals.additions} -${totals.deletions}`, hint);
       return answer(summary, {
         sha: diff.sha,
         parent: diff.parent,
@@ -368,14 +384,12 @@ function mcpServer({ repos, tasks, logs, diffCache }: Deps, { actor, token, env,
     "Score a draft attempt's head now. Only its author may.",
     onAttempt,
     async ({ project, attempt }) => {
-      const scored = await service.scoreNow(actor, { ...projectPath(project), attempt });
-      return answer(scored.queued ? `queued run ${scored.run.id}` : `not queued: ${scored.reason}`, { ...scored });
+      return scoringAnswer(await service.scoreNow(actor, { ...projectPath(project), attempt }));
     },
   );
 
   tool("rescore", "Score an open attempt's head again.", onAttempt, async ({ project, attempt }) => {
-    const scored = await service.rescore(actor, { ...projectPath(project), attempt });
-    return answer(scored.queued ? `queued run ${scored.run.id}` : `not queued: ${scored.reason}`, { ...scored });
+    return scoringAnswer(await service.rescore(actor, { ...projectPath(project), attempt }));
   });
 
   tool(
@@ -398,7 +412,7 @@ function mcpServer({ repos, tasks, logs, diffCache }: Deps, { actor, token, env,
       const capped = start > 0 || end < bytes.length;
       const hint = capped ? `Bytes ${start}-${end} of ${bytes.length}; pass \`offset\` to read another part.` : null;
       const data = { run, name, size: bytes.length, offset: start, text: sliceBytes(bytes, start, end - start), hint };
-      return answer(`${name} of run ${run}: ${bytes.length} bytes${hint === null ? "" : `. ${hint}`}`, data);
+      return answer(withHint(`${name} of run ${run}: ${bytes.length} bytes`, hint), data);
     },
   );
 
@@ -429,8 +443,7 @@ function mcpServer({ repos, tasks, logs, diffCache }: Deps, { actor, token, env,
       "task's other active attempts. The task's creator or the project owner may.",
     SelectionSchema.extend(onTask.shape),
     async ({ project, task, attempt }) => {
-      const mergeRequest = await service.selectAttempt(actor, { ...projectPath(project), task, attempt });
-      return answer(`merge request is ${mergeRequest.state}`, { mergeRequest });
+      return mergeRequestAnswer(await service.selectAttempt(actor, { ...projectPath(project), task, attempt }));
     },
   );
 
@@ -439,14 +452,12 @@ function mcpServer({ repos, tasks, logs, diffCache }: Deps, { actor, token, env,
     "Approve the task's merge request at its source attempt's current head, e.g. after it was dequeued and fixed.",
     onTask,
     async ({ project, task }) => {
-      const mergeRequest = await service.approveMergeRequest(actor, { ...projectPath(project), task });
-      return answer(`merge request is ${mergeRequest.state}`, { mergeRequest });
+      return mergeRequestAnswer(await service.approveMergeRequest(actor, { ...projectPath(project), task }));
     },
   );
 
   tool("cancel_merge_request", "Cancel the task's open merge request.", onTask, async ({ project, task }) => {
-    const mergeRequest = await service.cancelMergeRequest(actor, { ...projectPath(project), task });
-    return answer(`merge request is ${mergeRequest.state}`, { mergeRequest });
+    return mergeRequestAnswer(await service.cancelMergeRequest(actor, { ...projectPath(project), task }));
   });
 
   tool(

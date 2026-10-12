@@ -13,8 +13,6 @@ import { buildPath, isMarkdown, markdownLinks } from "@/lib/paths";
 import type { BrowseLocation } from "@/lib/paths";
 import { cn } from "@/lib/utils";
 
-const IMAGE = /\.(?:png|jpe?g|gif|webp|svg)$/iu;
-
 /** The text's lines, a final newline ending the last line rather than starting another. */
 function lineCount(text: string): number {
   if (text === "") return 0;
@@ -60,7 +58,7 @@ export function FileView({ at, blob }: { at: BrowseLocation; blob: Blob }) {
 }
 
 function FileBody({ at, blob, raw, showSource }: { at: BrowseLocation; blob: Blob; raw: string; showSource: boolean }) {
-  if (IMAGE.test(blob.path) && !blob.tooLarge) {
+  if (blob.contentType.startsWith("image/") && !blob.tooLarge) {
     return <img src={raw} alt={blob.name} className="mx-auto max-w-full" />;
   }
   if (blob.content === null) {

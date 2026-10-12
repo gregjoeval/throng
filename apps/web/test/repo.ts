@@ -16,6 +16,8 @@ export const REFS: Refs = {
 };
 
 const MAX_TEXT_BYTES = 1024 * 1024;
+/** The image types these tests serve, standing in for the platform's extension table. */
+const IMAGE_TYPES: Record<string, string> = { png: "image/png", avif: "image/avif" };
 const bytes = (content: Content) => (typeof content === "string" ? new TextEncoder().encode(content) : content);
 const hash = (text: string) =>
   [...text]
@@ -91,6 +93,7 @@ export function serveRepo(files: Files, refs: Refs = REFS) {
         size: raw.length,
         binary,
         tooLarge,
+        contentType: IMAGE_TYPES[name.split(".").at(-1) ?? ""] ?? (binary ? "application/octet-stream" : "text/plain"),
         content: binary || tooLarge ? null : new TextDecoder().decode(raw),
       } satisfies Blob);
     }),

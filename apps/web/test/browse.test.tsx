@@ -267,6 +267,15 @@ describe("the file view", () => {
     );
   });
 
+  it("shows any image type the platform serves as one inline", async () => {
+    serveRepo({ main: { "art/photo.avif": new Uint8Array([0, 0, 0, 0x1c, 0x66, 0x74, 0x79, 0x70]) } });
+    await renderApp("/ada/alpha/blob/main/art/photo.avif");
+    expect(await screen.findByRole("img", { name: "photo.avif" })).toHaveAttribute(
+      "src",
+      "/ada/alpha/raw/main/art/photo.avif",
+    );
+  });
+
   it("shows a binary file's size and a raw link instead of its content", async () => {
     serveRepo({ main: { "bin/tool": new Uint8Array([0x7f, 0x45, 0x4c, 0x46, 0, 1, 2, 3]) } });
     await renderApp("/ada/alpha/blob/main/bin/tool");

@@ -10,6 +10,13 @@ import { archiveRef } from "./archive.ts";
 import { CONFIG_PATH, loadConfig, type ConfigResult } from "./config.ts";
 import { ServiceError, type ErrorCode } from "./errors.ts";
 import { isLogName, logKey, missingLog } from "./logs.ts";
+import {
+  MergeRequests,
+  type DequeueReason,
+  type MergeRequestEvent,
+  type MergeRequestState,
+  type StoredMergeRequest,
+} from "./merge-requests.ts";
 import { isZeroId } from "./pkt-line.ts";
 import { forkRepo, originRepo, type Repos } from "./repos.ts";
 import {
@@ -17,6 +24,7 @@ import {
   ScoringQueue,
   type AttemptScoring,
   type ScoredAttempt,
+  type ScoringOutcome,
   type ScoringRequest,
   type ScoringRunner,
   type ScoringTrigger,
@@ -78,6 +86,14 @@ export interface StoredAttempt {
   archived_sha: string | null;
   /** Its current head's scoring status, for polling. */
   scoring: AttemptScoring;
+  /** The latest merge request it is the source of, if any, for polling: its state and last dequeue reason. */
+  merge_request: AttemptMergeRequest | null;
+}
+
+/** A merge request as its source attempt shows it. */
+export interface AttemptMergeRequest {
+  state: MergeRequestState;
+  last_dequeue: { reason: DequeueReason } | null;
 }
 
 /** An attempt's scoring status, and the run holding its current result, if its head has one. */
@@ -336,6 +352,8 @@ export class TaskStore {
   readonly #reserved = new Map<number, number>();
   /** The project's scoring runs. Its caller runs `scoring.drain()` after every store call. */
   readonly scoring: ScoringQueue;
+  /** The project's merge requests and merge queue. */
+  readonly mergeRequests: MergeRequests;
 
   constructor({ sql, repos, now = () => new Date(), scoring = null }: TaskStoreDeps) {
     this.#sql = sql;
@@ -343,6 +361,12 @@ export class TaskStore {
     this.#now = now;
     migrate(sql);
     this.scoring = new ScoringQueue({ sql, runner: scoring, now });
+    this.mergeRequests = new MergeRequests({
+      sql,
+      now,
+      journal: (actor, kind, mr, detail) =>
+        this.#journal(actor, kind, mr.task, mr.attempt, { merge_request: taskRef(mr.task), ...detail }),
+    });
   }
 
   // --- tasks -----------------------------------------------------------------------------------
@@ -485,6 +509,7 @@ export class TaskStore {
     // From here to the reservation nothing awaits, so concurrent batches can't both pass the cap.
     const current = this.#task(input.task);
     this.#expect(current, ["open"], "add attempts to");
+    this.#checkNoMergeRequest(current.number);
     const limit = current.attempt_limit ?? projectLimit;
     const reserved = this.#reserved.get(current.number) ?? 0;
     const active = this.#activeAttempts(current.number).length + reserved + this.#branchPushes(current.number);
@@ -693,6 +718,7 @@ export class TaskStore {
     this.#expect(current, ["closed"], "reopen");
     const parent = this.#task(current.task);
     this.#expect(parent, ["open"], "reopen an attempt of");
+    this.#checkNoMergeRequest(parent.number);
     const limit = parent.attempt_limit ?? projectLimit;
     const reserved = this.#reserved.get(parent.number) ?? 0;
     const active = this.#activeAttempts(parent.number).length + reserved + this.#branchPushes(parent.number);
@@ -783,35 +809,20 @@ export class TaskStore {
   }
 
   /**
-   * open → merged, for the merge queue: records the landed sha, closes the task and closes its
-   * other active attempts. All their forks, the merged one's too, are archived and deleted. The
-   * merge queue decides who may merge, so this checks no permission.
+   * open → merged, for the merge queue: records the landed sha and closes the task. The merged
+   * attempt's fork is archived and deleted. Its siblings were closed by the selection, so this
+   * leaves any others as they are. The merge queue decides who may merge, so this checks no
+   * permission.
    */
   async markMerged(
     project: ProjectContext,
-    actor: Actor,
+    actor: Actor | null,
     input: AttemptInput & { sha: string },
   ): Promise<StoredAttempt> {
     const current = this.#attempt(input);
-    this.#expect(current, ["open"], "merge");
-    this.#expect(this.#task(current.task), ["open"], "merge into");
-    const ended = this.#sql.transaction(() => {
-      const at = this.#stamp();
-      this.#sql.exec(
-        "UPDATE attempts SET state = 'merged', merged_sha = ?, closed_at = ? WHERE task = ? AND number = ?",
-        input.sha,
-        at,
-        current.task,
-        current.number,
-      );
-      this.#journal(actor, "merged", current.task, current.number, { sha: input.sha });
-      this.scoring.cancelAttempt(scoredAttempt(current), "attempt merged");
-      const others = this.#activeAttempts(current.task);
-      for (const other of others) this.#endAttempt(actor, other, "closed");
-      this.#endTask(actor, current.task, "closed");
-      return [current, ...others];
-    });
-    await this.#archive(project, ended);
+    this.#checkMergeable(current);
+    this.#sql.transaction(() => this.#markMergedRows(actor, current, input.sha));
+    await this.#archive(project, [current]);
     return this.#attempt(current);
   }
 
@@ -845,6 +856,7 @@ export class TaskStore {
     return this.#sql.transaction(() => {
       const head = this.#recordPushed(actor, current, input.updates);
       if (head === null) return { scoring: null };
+      this.#pushedToSource(actor, current, head);
       // A draft isn't scored, but its old result no longer describes its head.
       if (current.state !== "open") {
         this.scoring.moveHead({ ...scoredAttempt(current), sha: head });
@@ -1020,13 +1032,158 @@ export class TaskStore {
     await this.#deleteForks(project, row.task, [row.attempt]);
   }
 
-  /**
-   * Whether a task has an open merge request; such a task takes no new attempts. Merge requests
-   * don't exist yet (#139), so none does: this is where that check reads them once they land.
-   */
+  /** Whether a task has an open merge request; such a task takes no new attempts. */
   hasOpenMergeRequest(_project: ProjectContext, _actor: Actor, input: { task: number }): boolean {
     this.#task(input.task);
-    return false;
+    return this.mergeRequests.open(input.task) !== null;
+  }
+
+  // --- merge requests --------------------------------------------------------------------------
+  //
+  // A task's selection makes one open attempt its merge request, approving its current head, and
+  // closes its other active attempts. The merge request enters the queue once its approved head's
+  // latest scoring run is done with a passing gate, checked on selection, on approval and whenever
+  // a run finishes (`scoringFinished`). A push to the source needs a new approval; ending the source
+  // cancels it. Landing (#140) moves the front of the queue through `startLanding`, then reports
+  // through `dequeueMergeRequest` or `landMergeRequest`.
+
+  /**
+   * Selects an open attempt of an open task as its merge request, approving the attempt's current
+   * head, and closes the task's other active attempts (archived once this commits). The merge
+   * request is `pending`, or `queued` if its head's gate has already passed. The task's creator or
+   * the project owner (or their agents) may; the creator may select their own attempt.
+   */
+  async selectAttempt(project: ProjectContext, actor: Actor, input: AttemptInput): Promise<StoredMergeRequest> {
+    const current = this.#attempt(input);
+    const task = this.#task(current.task);
+    this.#mayManageTask(project, actor, task);
+    this.#checkSelectable(current);
+    const head = await this.#currentHead(project, current);
+    const { mr, closed } = this.#sql.transaction(() => {
+      // The attempt, the task or its merge requests may have moved while the head was read.
+      this.#checkSelectable(this.#attempt(current));
+      const created = this.mergeRequests.select(actor, { task: current.task, attempt: current.number, head });
+      const others = this.#activeAttempts(current.task).filter((a) => a.number !== current.number);
+      for (const other of others) this.#endAttempt(actor, other, "closed");
+      return { mr: this.#evaluate(actor, created), closed: others };
+    });
+    await this.#archive(project, closed);
+    return mr;
+  }
+
+  /**
+   * Approves the source attempt's current head: `needs_review` → `pending`. From `pending` it
+   * re-approves the same head, which lets a merge request held after a dequeue (an `errored` one,
+   * say) requeue. Either way the gate is checked again. The task's creator or the project owner may.
+   */
+  async approveMergeRequest(
+    project: ProjectContext,
+    actor: Actor,
+    input: { task: number },
+  ): Promise<StoredMergeRequest> {
+    const task = this.#task(input.task);
+    this.#mayManageTask(project, actor, task);
+    const mr = this.#openMergeRequest(task.number);
+    this.#expectMergeRequest(mr, ["pending", "needs_review"], "approve");
+    const head =
+      mr.state === "pending" ? mr.approved_head : await this.#currentHead(project, this.#attempt(sourceOf(mr)));
+    return this.#sql.transaction(() => {
+      const now = this.#openMergeRequest(task.number);
+      if (now.id !== mr.id || now.state !== mr.state) {
+        throw invalidState(`${taskRef(task.number)}'s merge request moved; try again`);
+      }
+      return this.#evaluate(actor, this.mergeRequests.approve(actor, now, head));
+    });
+  }
+
+  /**
+   * Cancels the task's open merge request from any open state, dequeuing it (`cancelled`) if it was
+   * in the queue. The task stays open and can be selected again. The task's creator or the project
+   * owner may.
+   */
+  cancelMergeRequest(project: ProjectContext, actor: Actor, input: { task: number }): StoredMergeRequest {
+    const task = this.#task(input.task);
+    this.#mayManageTask(project, actor, task);
+    return this.#sql.transaction(() => this.#cancel(actor, this.#openMergeRequest(task.number)));
+  }
+
+  /** The task's latest merge request, open or not. Anyone signed in may read it. */
+  getMergeRequest(_project: ProjectContext, _actor: Actor, input: { task: number }): StoredMergeRequest {
+    this.#task(input.task);
+    const mr = this.mergeRequests.latest(input.task);
+    if (mr === null) throw new ServiceError("not_found", `${taskRef(input.task)} has no merge request`);
+    return mr;
+  }
+
+  /** The project's merge queue: the landing merge request first, then the queued ones, first in first out. */
+  mergeQueue(_project: ProjectContext, _actor: Actor): StoredMergeRequest[] {
+    return this.mergeRequests.queue();
+  }
+
+  /**
+   * Records how a scoring run ended (see `ScoringQueue.finish`), then checks whether the merge
+   * request its attempt is the source of can enter the queue. Returns whether the run was recorded.
+   */
+  scoringFinished(run: number, outcome: ScoringOutcome): boolean {
+    return this.#sql.transaction(() => {
+      if (!this.scoring.finish(run, outcome)) return false;
+      const finished = this.scoring.getRun(run);
+      if (finished === null) return true;
+      const mr = this.mergeRequests.open(finished.task);
+      if (mr !== null && mr.attempt === finished.attempt) this.#evaluate(null, mr);
+      return true;
+    });
+  }
+
+  /**
+   * For the merge queue: when nothing is landing, moves the front of the queue to `landing` and
+   * returns it; otherwise null. The caller starts its Landing Workflow.
+   */
+  startLanding(_project: ProjectContext, actor: Actor | null): StoredMergeRequest | null {
+    return this.#sql.transaction(() => {
+      const [front] = this.mergeRequests.queue();
+      if (front === undefined || front.state !== "queued") return null;
+      return this.mergeRequests.startLanding(actor, front);
+    });
+  }
+
+  /**
+   * For the merge queue: takes a queued or landing merge request out of the queue for `conflict`,
+   * `failed_checks` or `errored`, back to `pending` with its approval kept. It requeues only on a
+   * new approval, or after a push and its approval.
+   */
+  dequeueMergeRequest(
+    _project: ProjectContext,
+    actor: Actor | null,
+    input: { task: number; reason: "conflict" | "failed_checks" | "errored"; details?: unknown },
+  ): StoredMergeRequest {
+    return this.#sql.transaction(() => {
+      const mr = this.#openMergeRequest(input.task);
+      this.#expectMergeRequest(mr, ["queued", "landing"], "dequeue");
+      return this.mergeRequests.dequeue(actor, mr, input.reason, "pending", input.details);
+    });
+  }
+
+  /**
+   * For the merge queue: a landing merge request landed at `sha`. It becomes `merged`, and its
+   * source attempt is marked merged and its task closed (as `markMerged` does), in one transaction.
+   */
+  async landMergeRequest(
+    project: ProjectContext,
+    actor: Actor | null,
+    input: { task: number; sha: string },
+  ): Promise<StoredMergeRequest> {
+    const mr = this.#openMergeRequest(input.task);
+    this.#expectMergeRequest(mr, ["landing"], "land");
+    const source = this.#attempt(sourceOf(mr));
+    this.#checkMergeable(source);
+    const merged = this.#sql.transaction(() => {
+      const landed = this.mergeRequests.merged(actor, mr, input.sha);
+      this.#markMergedRows(actor, source, input.sha);
+      return landed;
+    });
+    await this.#archive(project, [source]);
+    return merged;
   }
 
   // --- internals -------------------------------------------------------------------------------
@@ -1037,6 +1194,97 @@ export class TaskStore {
     return toTask(row);
   }
 
+  #openMergeRequest(task: number): StoredMergeRequest {
+    const mr = this.mergeRequests.open(task);
+    if (mr === null) throw invalidState(`${taskRef(task)} has no open merge request`);
+    return mr;
+  }
+
+  #expectMergeRequest(mr: StoredMergeRequest, from: readonly MergeRequestState[], verb: string): void {
+    if (from.includes(mr.state)) return;
+    throw invalidState(`can't ${verb} ${taskRef(mr.task)}'s merge request: it is ${mr.state}`);
+  }
+
+  /** An attempt may be selected while it is open, on an open task with no open merge request. */
+  #checkSelectable(attempt: StoredAttempt): void {
+    this.#expect(attempt, ["open"], "select");
+    this.#expect(this.#task(attempt.task), ["open"], "select an attempt of");
+    if (this.mergeRequests.open(attempt.task) !== null) {
+      throw invalidState(`${taskRef(attempt.task)} already has an open merge request`);
+    }
+  }
+
+  /** A task with an open merge request takes no new or reopened attempts. */
+  #checkNoMergeRequest(task: number): void {
+    if (this.mergeRequests.open(task) === null) return;
+    throw invalidState(`${taskRef(task)} has an open merge request, so it takes no new attempts`);
+  }
+
+  /**
+   * pending → queued when the merge request isn't held after a dequeue, its source attempt is open,
+   * the approved head is still the attempt's head, and that head's latest scoring run is done with
+   * a passing gate. Returns the merge request as it is afterwards.
+   */
+  #evaluate(actor: Actor | null, mr: StoredMergeRequest): StoredMergeRequest {
+    if (mr.state !== "pending" || this.mergeRequests.held(mr)) return mr;
+    const source = this.#attempt(sourceOf(mr));
+    if (source.state !== "open") return mr;
+    const { status, sha } = this.scoring.statusFor(scoredAttempt(source));
+    if (sha !== mr.approved_head || status !== "done") return mr;
+    if (this.scoring.currentRun(scoredAttempt(source))?.result?.gate !== "passed") return mr;
+    return this.mergeRequests.enqueue(actor, mr);
+  }
+
+  /** A push moved the attempt's head: if it is an open merge request's source, that needs a new approval. */
+  #pushedToSource(actor: Actor, attempt: StoredAttempt, head: string): void {
+    const mr = this.mergeRequests.open(attempt.task);
+    if (mr === null || mr.attempt !== attempt.number || mr.state === "needs_review") return;
+    if (head === mr.approved_head) return;
+    if (mr.state === "queued" || mr.state === "landing") {
+      this.mergeRequests.dequeue(actor, mr, "new_push", "needs_review");
+    } else {
+      this.mergeRequests.move(actor, mr, "needs_review", { head });
+    }
+  }
+
+  /** Cancels an open merge request, dequeuing it if it is in the queue. */
+  #cancel(actor: Actor | null, mr: StoredMergeRequest): StoredMergeRequest {
+    if (mr.state === "queued" || mr.state === "landing") {
+      return this.mergeRequests.dequeue(actor, mr, "cancelled", "cancelled");
+    }
+    return this.mergeRequests.move(actor, mr, "cancelled");
+  }
+
+  /**
+   * The attempt's current head: the one its pushes and scoring last recorded, or else its fork's
+   * `main`. An attempt with no commits has none to approve.
+   */
+  async #currentHead(project: ProjectContext, attempt: StoredAttempt): Promise<string> {
+    const known = this.scoring.statusFor(scoredAttempt(attempt)).sha;
+    if (known !== null) return known;
+    const [commit] = await this.#repos.listCommits(forkRepo(project.id, attempt.fork), { ref: "main", limit: 1 });
+    if (commit === undefined) throw invalidState(`${attempt.fork} has no head to approve; push a commit first`);
+    return commit.hash;
+  }
+
+  #checkMergeable(attempt: StoredAttempt): void {
+    this.#expect(attempt, ["open"], "merge");
+    this.#expect(this.#task(attempt.task), ["open"], "merge into");
+  }
+
+  #markMergedRows(actor: Actor | null, attempt: StoredAttempt, sha: string): void {
+    this.#sql.exec(
+      "UPDATE attempts SET state = 'merged', merged_sha = ?, closed_at = ? WHERE task = ? AND number = ?",
+      sha,
+      this.#stamp(),
+      attempt.task,
+      attempt.number,
+    );
+    this.#journal(actor, "merged", attempt.task, attempt.number, { sha });
+    this.scoring.cancelAttempt(scoredAttempt(attempt), "attempt merged");
+    this.#endTask(actor, attempt.task, "closed");
+  }
+
   #attempt({ task, number }: AttemptInput): StoredAttempt {
     const [row] = this.#sql.exec<AttemptRow>("SELECT * FROM attempts WHERE task = ? AND number = ?", task, number);
     if (row === undefined) throw new ServiceError("not_found", `no attempt ${attemptRef(task, number)}`);
@@ -1044,7 +1292,15 @@ export class TaskStore {
   }
 
   #toAttempt(row: AttemptRow): StoredAttempt {
-    return { ...toAttempt(row), scoring: this.scoring.statusFor(scoredAttempt(row)) };
+    const mr = this.mergeRequests.forAttempt(row.task, row.number);
+    return {
+      ...toAttempt(row),
+      scoring: this.scoring.statusFor(scoredAttempt(row)),
+      merge_request:
+        mr === null
+          ? null
+          : { state: mr.state, last_dequeue: mr.last_dequeue === null ? null : { reason: mr.last_dequeue.reason } },
+    };
   }
 
   #activeAttempts(task: number): StoredAttempt[] {
@@ -1148,13 +1404,13 @@ export class TaskStore {
   }
 
   /** Moves a task to closed or obsolete, keeping the first close time and who closed it. */
-  #endTask(actor: Actor, number: number, to: "closed" | "obsolete"): void {
+  #endTask(actor: Actor | null, number: number, to: "closed" | "obsolete"): void {
     this.#sql.exec(
       `UPDATE tasks SET state = ?, closed_at = COALESCE(closed_at, ?), closed_by = COALESCE(closed_by, ?)
        WHERE number = ?`,
       to,
       this.#stamp(),
-      actor.user.id,
+      actor?.user.id ?? null,
       number,
     );
     this.#journal(actor, to === "closed" ? "closed" : "made_obsolete", number, null);
@@ -1174,6 +1430,8 @@ export class TaskStore {
     );
     this.#journal(actor, to === "closed" ? "closed" : "made_obsolete", current.task, current.number);
     this.scoring.cancelAttempt(scoredAttempt(current), `attempt ${to}`);
+    const mr = this.mergeRequests.open(current.task);
+    if (mr !== null && mr.attempt === current.number) this.#cancel(actor, mr);
   }
 
   /**
@@ -1384,8 +1642,8 @@ export class TaskStore {
   }
 
   #journal(
-    actor: Actor,
-    kind: TaskEvent,
+    actor: Actor | null,
+    kind: TaskEvent | MergeRequestEvent,
     task: number,
     attempt: number | null,
     extra: Record<string, unknown> = {},
@@ -1396,8 +1654,8 @@ export class TaskStore {
       this.#now().getTime(),
       kind,
       JSON.stringify(detail),
-      actor.user.id,
-      actor.agent,
+      actor?.user.id ?? null,
+      actor?.agent ?? null,
       task,
       attempt,
     );
@@ -1436,6 +1694,11 @@ export const TASK_METHODS = [
   "restoreAttempt",
   "handOffAttempt",
   "markMerged",
+  "selectAttempt",
+  "approveMergeRequest",
+  "cancelMergeRequest",
+  "getMergeRequest",
+  "mergeQueue",
   "scoreNow",
   "rescore",
   "runLogKey",
@@ -1513,7 +1776,7 @@ function toTask(row: TaskRow): StoredTask {
   };
 }
 
-function toAttempt(row: AttemptRow): Omit<StoredAttempt, "scoring"> {
+function toAttempt(row: AttemptRow): Omit<StoredAttempt, "scoring" | "merge_request"> {
   return {
     task: row.task,
     number: row.number,
@@ -1536,6 +1799,10 @@ function mayOwn(project: ProjectContext, actor: Actor): void {
 /** The attempt's author, or one of their agents, holds its claim. */
 function mayAuthor(actor: Actor, current: StoredAttempt): void {
   if (actor.user.id !== current.author) throw new ServiceError("forbidden", `only the author of ${current.fork} may`);
+}
+
+function sourceOf(mr: StoredMergeRequest): AttemptInput {
+  return { task: mr.task, number: mr.attempt };
 }
 
 function invalidState(message: string): ServiceError {

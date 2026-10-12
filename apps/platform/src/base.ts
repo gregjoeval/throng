@@ -39,6 +39,24 @@ export async function attemptBase(
   return sha === null ? null : { sha, on: line.on };
 }
 
+/**
+ * Whether commit `head` on attempt `attempt`'s fork has `commit` from the origin in its history: an
+ * ancestry test, read through `Repos` with the same walk limit as `attemptBase`. False past it.
+ */
+export async function containsCommit(
+  repos: Repos,
+  project: string,
+  { attempt, head }: { attempt: string; head: string },
+  commit: string,
+): Promise<boolean> {
+  const sha = await mergeBase(
+    repos,
+    { repo: forkRepo(project, attempt), sha: head },
+    { repo: originRepo(project), sha: commit },
+  );
+  return sha === commit;
+}
+
 /** The head of task `task`'s task branch in the origin, or null when it has none. */
 export async function taskBranchHead(repos: Repos, project: string, task: number): Promise<{ sha: string } | null> {
   const sha = await tip(repos, originRepo(project), taskBranchRef(task));

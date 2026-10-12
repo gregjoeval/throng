@@ -48,6 +48,7 @@ import {
 import type {
   AttemptInput,
   BranchRoute,
+  FollowNotice,
   ProjectContext,
   PushNotice,
   PushRecord,
@@ -427,7 +428,14 @@ function scoringLines({ scoring }: { scoring: ScoringRequest | null }): string[]
 
 /** The `remote:` lines for a push recorded on an attempt's fork: scoring, then its merge request's news. */
 function recordLines(c: GitContext, record: PushRecord): string[] {
-  return [...scoringLines(record), ...mergeRequestLines(c, record.mergeRequest)];
+  return [...scoringLines(record), ...mergeRequestLines(c, record.mergeRequest), ...followingLines(record.following)];
+}
+
+/** The `remote:` line telling the pusher their push dropped the task branch, which a follow merges in again. */
+function followingLines(notice: FollowNotice | null): string[] {
+  if (notice === null) return [];
+  const { task, attempt, taskHead } = notice;
+  return [`This push doesn't contain ${taskRef(task)}'s task branch at ${taskHead}; merging it into ${attempt}.`];
 }
 
 /** The `remote:` lines telling the pusher their merge request was dequeued, or now needs review. */

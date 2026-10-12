@@ -67,8 +67,9 @@ function setup() {
     repos.commit(`abc123-t${ref.task}a${ref.number}`, { files: { "README.md": content } }).hash;
 
   /** Records a push of `after` to the attempt's fork `main`, as the git proxy does once it lands. */
-  const pushed = (ref: AttemptInput, after: string, who: Actor = ada) =>
-    store.recordPush(PROJECT, who, { ...ref, updates: [{ ref: "refs/heads/main", before: base.hash, after }] }).scoring;
+  const pushed = async (ref: AttemptInput, after: string, who: Actor = ada) =>
+    (await store.recordPush(PROJECT, who, { ...ref, updates: [{ ref: "refs/heads/main", before: base.hash, after }] }))
+      .scoring;
 
   /** A task by ada with `count` draft attempts by ada. */
   const drafts = async (count = 1): Promise<AttemptInput[]> => {
@@ -139,12 +140,12 @@ describe("scoring triggers", () => {
     const { runs, commit, pushed, draft, store } = setup();
     const ref = await draft();
     const draftHead = commit(ref, "draft work\n");
-    expect(pushed(ref, draftHead)).toBeNull();
+    expect(await pushed(ref, draftHead)).toBeNull();
     expect(runs(ref)).toEqual([]);
 
     await store.openAttempt(PROJECT, ada, ref);
     const openHead = commit(ref, "open work\n");
-    const request = queued(pushed(ref, openHead));
+    const request = queued(await pushed(ref, openHead));
     expect(request.run).toMatchObject({ sha: openHead, trigger: "push" });
     expect(runs(ref).map((r) => [r.sha, r.trigger, r.status])).toEqual([
       [draftHead, "open", "cancelled"],
@@ -159,7 +160,7 @@ describe("scoring triggers", () => {
     const before = runs(ref).length;
     const other = commit(ref, "elsewhere\n");
     const zero = "0".repeat(40);
-    store.recordPush(PROJECT, ada, {
+    await store.recordPush(PROJECT, ada, {
       ...ref,
       updates: [
         { ref: "refs/heads/wip", before: zero, after: other },
@@ -221,14 +222,14 @@ describe("the scoring queue", () => {
     await store.scoring.drain();
     const a = commit(ref, "a\n");
     const b = commit(ref, "b\n");
-    queued(pushed(ref, a));
-    expect(pushed(ref, a)).toMatchObject({ queued: false, reason: "already queued" });
+    queued(await pushed(ref, a));
+    expect(await pushed(ref, a)).toMatchObject({ queued: false, reason: "already queued" });
     await store.scoring.drain();
     store.scoring.finish(at(runs(ref), -1).id, done());
 
-    queued(pushed(ref, b));
+    queued(await pushed(ref, b));
     // Back to a, which already has a finished run: b's run is superseded and a isn't scored again.
-    expect(pushed(ref, a)).toMatchObject({ queued: false, reason: "already scored" });
+    expect(await pushed(ref, a)).toMatchObject({ queued: false, reason: "already scored" });
     expect(
       journal()
         .filter((e) => e.kind === "pushed")
@@ -251,8 +252,8 @@ describe("the scoring queue", () => {
 
     const first = commit(waiting, "one\n");
     const second = commit(waiting, "two\n");
-    pushed(waiting, first);
-    pushed(waiting, second);
+    await pushed(waiting, first);
+    await pushed(waiting, second);
     expect(runs(waiting).map((r) => r.status)).toEqual(["cancelled", "cancelled", "queued"]);
     expect(at(runs(waiting), -1).sha).toBe(second);
   });
@@ -265,7 +266,7 @@ describe("the scoring queue", () => {
     const running = at(runs(ref), 0);
 
     const head = commit(ref, "newer\n");
-    pushed(ref, head);
+    await pushed(ref, head);
     await store.scoring.drain();
     expect(workflow.terminated).toEqual([running.instance_id]);
     expect(tornDown).toEqual([running.instance_id]);
@@ -350,8 +351,9 @@ describe("the scoring queue", () => {
     // Opening reads the fork's head; a push lands while that read is in flight.
     const listCommits = repos.listCommits.bind(repos);
     repos.listCommits = async (name, opts) => {
+      repos.listCommits = listCommits;
       const [head, ...rest] = await listCommits(name, opts);
-      store.recordPush(PROJECT, ada, {
+      await store.recordPush(PROJECT, ada, {
         ...ref,
         updates: [{ ref: "refs/heads/main", before: base.hash, after: newer }],
       });
@@ -444,7 +446,7 @@ describe("results", () => {
     await store.scoring.drain();
     store.scoring.finish(at(runs(ref), 0).id, done());
     const newer = commit(ref, "newer\n");
-    pushed(ref, newer);
+    await pushed(ref, newer);
 
     expect(runs(ref).map((r) => [r.status, r.superseded])).toEqual([
       ["done", true],
@@ -461,7 +463,7 @@ describe("results", () => {
     await store.scoring.drain();
     store.scoring.finish(at(runs(ref), 0).id, done());
     const newer = commit(ref, "draft work\n");
-    expect(pushed(ref, newer)).toBeNull();
+    expect(await pushed(ref, newer)).toBeNull();
     expect(runs(ref)).toMatchObject([{ status: "done", superseded: true }]);
     expect(store.getAttempt(PROJECT, ada, ref).scoring).toEqual({ status: "none", sha: newer });
   });
@@ -472,8 +474,8 @@ describe("results", () => {
     await store.openAttempt(PROJECT, ada, ref);
     await store.scoring.drain();
     store.scoring.finish(at(runs(ref), 0).id, done());
-    pushed(ref, commit(ref, "b\n"));
-    pushed(ref, base.hash);
+    await pushed(ref, commit(ref, "b\n"));
+    await pushed(ref, base.hash);
     expect(runs(ref).map((r) => [r.sha, r.status, r.superseded])).toEqual([
       [base.hash, "done", false],
       [expect.any(String), "cancelled", true],

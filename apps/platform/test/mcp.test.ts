@@ -177,7 +177,7 @@ async function withProject() {
     const after = repos.commit(fork, { files: { "README.md": `try ${number}\n` } }).hash;
     const user = await userForEmail(env.DB, email);
     const updates = [{ ref: "refs/heads/main", before, after }];
-    context
+    await context
       .store(projectId)
       .recordPush({ id: projectId, owner: "" }, { user, alias: null }, { task: 1, number, updates });
     return after;
@@ -315,7 +315,7 @@ describe("/mcp", () => {
           const after = repos.commit(fork, { files: { "README.md": "hello\n" } }).hash;
           const user = await userForEmail(env.DB, "greg@example.com");
           const updates = [{ ref: "refs/heads/main", before, after }];
-          store(projectId).recordPush(
+          await store(projectId).recordPush(
             { id: projectId, owner: "" },
             { user, alias: "codex" },
             { task: Number(task), number: Number(number), updates },

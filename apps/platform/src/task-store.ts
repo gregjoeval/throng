@@ -7,7 +7,7 @@
 // handles when it answers.
 
 import { archiveRef } from "./archive.ts";
-import { taskBranchHead } from "./base.ts";
+import { containsCommit, taskBranchHead } from "./base.ts";
 import { migrateValues, normaliseLandingOutcome } from "./casing.ts";
 import { addColumns, renameColumns } from "./columns.ts";
 import { CONFIG_PATH, loadConfig } from "./config.ts";
@@ -179,10 +179,21 @@ export interface Sql {
   transaction: <T>(fn: () => T) => T;
 }
 
-/** What `recordPush` did: the scoring it queued, and what to tell the pusher of their merge request. */
+/**
+ * What `recordPush` did: the scoring it queued, what to tell the pusher of their merge request, and
+ * the follow it queued when the push dropped the task branch.
+ */
 export interface PushRecord {
   scoring: ScoringRequest | null;
   mergeRequest: PushNotice | null;
+  following: FollowNotice | null;
+}
+
+/** A follow a push queued because its new head doesn't contain the task head. */
+export interface FollowNotice {
+  task: number;
+  attempt: string;
+  taskHead: string;
 }
 
 /** The merge request news a push to its source attempt carries back to the pusher. */
@@ -1041,23 +1052,31 @@ export class TaskStore {
    * fork, with the old and new ids so force-pushes show up afterwards, and queues scoring when the
    * attempt is open and its head moved; the scoring queue skips a head it already covers. The
    * proxy checked the claim before forwarding the push, and the push has landed, so this checks
-   * nothing. Returns the scoring request, or null when the push asked for none.
+   * nothing. A new head that doesn't contain the task head (a forced push dropped a follow's merge)
+   * queues a follow, as a task branch push does. Returns the scoring request, or null when the push
+   * asked for none, and that follow.
    */
-  recordPush(project: ProjectContext, actor: Actor, input: AttemptInput & { updates: PushedRef[] }): PushRecord {
+  async recordPush(
+    project: ProjectContext,
+    actor: Actor,
+    input: AttemptInput & { updates: PushedRef[] },
+  ): Promise<PushRecord> {
     const current = this.#attempt(input);
-    return this.#sql.transaction(() => {
-      const head = this.#recordPushed(actor, current, input.updates);
-      if (head !== null) this.#authorMoved(project, current);
-      const needsReview = head !== null && this.#pushedToSource(actor, current, head);
-      const mergeRequest = this.#pushNotice(current, needsReview ? head : null);
-      if (head === null) return { scoring: null, mergeRequest };
+    const { head, ...recorded } = this.#sql.transaction(() => {
+      const moved = this.#recordPushed(actor, current, input.updates);
+      if (moved !== null) this.#authorMoved(project, current);
+      const needsReview = moved !== null && this.#pushedToSource(actor, current, moved);
+      const mergeRequest = this.#pushNotice(current, needsReview ? moved : null);
+      if (moved === null) return { head: moved, scoring: null, mergeRequest };
       // A draft isn't scored, but its old result no longer describes its head.
       if (current.state !== "open") {
-        this.scoring.moveHead({ ...scoredAttempt(current), sha: head });
-        return { scoring: null, mergeRequest };
+        this.scoring.moveHead({ ...scoredAttempt(current), sha: moved });
+        return { head: moved, scoring: null, mergeRequest };
       }
-      return { scoring: this.#request(project, actor, current, head, "push"), mergeRequest };
+      return { head: moved, scoring: this.#request(project, actor, current, moved, "push"), mergeRequest };
     });
+    const following = head === null ? null : await this.#followIfDropped(project, current, head);
+    return { ...recorded, following };
   }
 
   /**
@@ -1233,6 +1252,27 @@ export class TaskStore {
   #landingHolds(attempt: AttemptInput): boolean {
     const mr = this.mergeRequests.open(attempt.task);
     return mr !== null && mr.attempt === attempt.number && this.#pushing(mr);
+  }
+
+  /**
+   * Queues a follow of the task head when an author's push moved the attempt to `head` and `head`
+   * doesn't contain it, and returns it. Null when the task has no task branch, `head` contains its
+   * head, or the attempt needs update: `#authorMoved` already queued its follow.
+   */
+  async #followIfDropped(project: ProjectId, attempt: StoredAttempt, head: string): Promise<FollowNotice | null> {
+    if (!isActive(attempt.state) || this.#attemptRow(attempt)?.needs_update != null) return null;
+    let taskHead: string;
+    try {
+      const branch = await taskBranchHead(this.#repos, project.id, attempt.task);
+      if (branch === null) return null;
+      taskHead = branch.sha;
+      if (await containsCommit(this.#repos, project.id, { attempt: attempt.fork, head }, taskHead)) return null;
+    } catch (error) {
+      console.error({ event: "follow.task_branch_unreadable", task: attempt.task, error: String(error) });
+      return null;
+    }
+    this.#sql.transaction(() => this.#queueFollow(project, attempt, taskHead));
+    return { task: attempt.task, attempt: attempt.fork, taskHead };
   }
 
   /** Queues a follow of the task's task branch for an attempt that (re)starts, when the task has one. */

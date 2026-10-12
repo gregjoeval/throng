@@ -268,3 +268,56 @@ describe("following the task branch", () => {
     expect(pulled.stderr).not.toMatch(/pull first/u);
   });
 });
+
+/**
+ * `setup` with bob's attempt t1a1, his clone `mine` (remote `attempt` is the fork), and a task
+ * branch ada pushed that a follow merged into t1a1, as its Workflow would. `mine` doesn't have the
+ * merge: bob never pulled it.
+ */
+async function followedAttempt() {
+  const s = await setup();
+  const { ada, bob, env, host, clone, commit, push, tasks, project, fork, followed, attemptRemote } = s;
+  await tasks.createAttempts(project, bob.actor, { task: 1 });
+  const mine = await clone(bob.token);
+  await git(mine, env, "remote", "add", "attempt", attemptRemote(bob.token, "t1a1"));
+  await commit(mine, "Fix login");
+  expect((await tryGit(mine, env, "push", "attempt", "HEAD:main")).ok).toBeTruthy();
+
+  const dir = await clone(ada.token);
+  const tests = await commit(dir, "Add login tests");
+  expect((await push(dir, "refs/tasks/t1")).ok).toBeTruthy();
+  await tasks.drain(project.id);
+  const follow = followed.find((f) => f.attempt === 1);
+  if (follow === undefined) throw new Error("no follow of t1a1");
+  const before = (await host.head(fork("t1a1"))) ?? "";
+  await git(mine, env, "fetch", "-q", "origin", "refs/tasks/t1");
+  await git(mine, env, "merge", "-q", "--no-edit", "FETCH_HEAD");
+  const merged = (await git(mine, env, "rev-parse", "HEAD")).trim();
+  await git(mine, env, "push", "-q", host.path(fork("t1a1")), "HEAD:main");
+  await git(mine, env, "reset", "-q", "--hard", "HEAD~1");
+  expect(tasks.claimFollowPush(follow.follow)).toBeTruthy();
+  await tasks.followFinished(follow.follow, { kind: "merged", before, head: merged });
+  await tasks.drain(project.id);
+  /** How many follows of t1a1 have started. */
+  const follows = () => followed.filter((f) => f.attempt === 1).length;
+  return { ...s, mine, tests, merged, follows };
+}
+
+describe("an author's push that drops the task branch", () => {
+  it("follows again after a forced push, which the host accepts, drops the follow's merge", async () => {
+    const { env, host, commit, tasks, project, fork, followed, mine, tests, merged, follows } = await followedAttempt();
+    expect(follows()).toBe(1);
+
+    const fix = await commit(mine, "More of the fix");
+    const forced = await tryGit(mine, env, "push", "--force", "attempt", "HEAD:main");
+    expect(forced.ok).toBeTruthy();
+    expect(forced.stderr).toMatch(
+      new RegExp(`remote: This push doesn't contain t1's task branch at ${tests}; merging it into t1a1\\.`, "u"),
+    );
+    expect(await host.head(fork("t1a1"))).toBe(fix);
+    expect(fix).not.toBe(merged);
+    await tasks.drain(project.id);
+    expect(follows()).toBe(2);
+    expect(followed.at(-1)).toMatchObject({ attempt: 1, taskHead: tests });
+  });
+});

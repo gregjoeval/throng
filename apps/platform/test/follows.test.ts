@@ -100,10 +100,10 @@ async function setup({ landing = true } = {}) {
     return { head, following: store.recordTaskBranchPush(PROJECT, cat, { task: 1, head }) };
   };
   /** The author pushes a new commit to their fork through the proxy. */
-  const push = (ref: AttemptInput) => {
+  const push = async (ref: AttemptInput) => {
     const before = attempt(ref).scoring.sha ?? base.hash;
     const after = repos.commit(fork(ref), { files: { "README.md": `push ${++n}\n` } }).hash;
-    store.recordPush(PROJECT, author(ref), { ...ref, updates: [{ ref: "refs/heads/main", before, after }] });
+    await store.recordPush(PROJECT, author(ref), { ...ref, updates: [{ ref: "refs/heads/main", before, after }] });
     return after;
   };
   /** The latest Follow Workflow started for an attempt. */
@@ -280,7 +280,7 @@ describe("a conflict", () => {
     expect(journal().at(-1)).toMatchObject({ kind: "needsUpdate", attempt: 1, detail: { taskBranch: head } });
 
     // The author merges the task branch and pushes; a follow checks the push and finds it current.
-    push(t1a1);
+    await push(t1a1);
     await drain();
     expect(followWorkflow.created.filter((c) => c.params.attempt === 1)).toHaveLength(2);
     expect(started(t1a1)?.params.taskHead).toBe(head);
@@ -294,7 +294,7 @@ describe("a conflict", () => {
     moveTaskBranch();
     await drain();
     await follow(t1a1, (before) => ({ kind: "conflict", head: before }));
-    push(t1a1);
+    await push(t1a1);
     await drain();
     await follow(t1a1, (before) => ({ kind: "conflict", head: before }));
     expect(attempt(t1a1).needs_update).toBeTruthy();
@@ -381,7 +381,7 @@ describe("a merge request's source", () => {
 
   it("leaves a needsReview merge request in needsReview", async () => {
     const { drain, t1a1, mr, moveTaskBranch, follow, merged, push } = await selected();
-    push(t1a1);
+    await push(t1a1);
     expect(mr().state).toBe("needsReview");
     const { head } = moveTaskBranch();
     await drain();

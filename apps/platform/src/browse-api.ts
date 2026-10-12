@@ -12,10 +12,12 @@ import type { RouteConfig } from "@hono/zod-openapi";
 import type { Context } from "hono";
 import type { AccessBindings } from "./access.ts";
 import {
+  AttemptQuerySchema,
   CommitDiffSchema,
   diffContent,
   diffResponse,
   json,
+  PageQuerySchema,
   ProjectPathSchema,
   TAIL,
   tailedRoutes,
@@ -58,13 +60,6 @@ const PathParamSchema = RefParamSchema.extend({
   path: z
     .string()
     .openapi({ description: "A repository-relative path; slashes need no escaping.", example: "src/app.ts" }),
-});
-
-const AttemptQuerySchema = z.object({
-  attempt: z
-    .string()
-    .optional()
-    .openapi({ description: "For a sha that isn't in origin: the attempt whose fork to look in.", example: "t42a3" }),
 });
 
 const ShaSchema = z
@@ -153,17 +148,6 @@ const RefsSchema = z
       .openapi({ description: "Closed and merged attempts: their archived heads in origin." }),
   })
   .openapi("Refs");
-
-const PageQuerySchema = z.object({
-  offset: z.coerce.number().int().min(0).default(0).openapi({ description: "Commits to skip." }),
-  limit: z.coerce
-    .number()
-    .int()
-    .min(1)
-    .max(MAX_COMMITS_PAGE)
-    .default(DEFAULT_COMMITS_PAGE)
-    .openapi({ description: `Defaults to ${DEFAULT_COMMITS_PAGE}, at most ${MAX_COMMITS_PAGE}.` }),
-});
 
 const CompareParamSchema = ProjectPathSchema.extend({
   from: z.string().openapi({ description: "The old side: a ref or sha, as `{ref}` takes.", example: "main" }),

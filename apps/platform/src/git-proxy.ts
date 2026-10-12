@@ -5,7 +5,7 @@
 //
 // and passes `info/refs`, `git-upload-pack` and `git-receive-pack` through to Artifacts with a
 // token minted by Throng, which never reaches the client. Callers authenticate with a Throng token
-// as the Basic password. Any valid token may read; pushes are checked against claims first. A push
+// as the Basic password or a bearer header. Any valid token may read; pushes are checked against claims first. A push
 // of a branch to the origin never lands there: push-to-create sends it to an attempt's fork (see
 // `pushToCreate`). See the spec's "Git proxy" and "Push-to-create" sections and
 // `docs/research/git-proxy.md`.
@@ -17,6 +17,7 @@ import { gitAuth } from "./auth.ts";
 import type { AuthEnv, AuthOptions } from "./auth.ts";
 import { taskBranchHead } from "./base.ts";
 import { ServiceError } from "./errors.ts";
+import { attemptRemote } from "./git-remotes.ts";
 import {
   commandList,
   concat,
@@ -468,7 +469,7 @@ function links(c: GitContext, task: number, attempt: string): string[] {
   const [, owner = "", project = ""] = REMOTE_PATH.exec(pathname) ?? [];
   return [
     `  Task:    ${projectApi(c)}/tasks/${taskRef(task)}`,
-    `  Attempt: ${origin}/git/${owner}/${project}/${attempt}.git`,
+    `  Attempt: ${attemptRemote(origin, { owner, project }, attempt)}`,
   ];
 }
 

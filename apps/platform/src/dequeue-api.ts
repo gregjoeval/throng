@@ -11,6 +11,7 @@ import {
   FileDiffSchema,
   json,
   ProjectPathSchema,
+  requestTaskService,
   TAIL,
   tailedRoutes,
 } from "./api-shared.ts";
@@ -24,7 +25,6 @@ import type { LogStore } from "./logs.ts";
 import { DEQUEUE_REASONS } from "./merge-requests.ts";
 import type { Repos } from "./repos.ts";
 import { CHECK_OUTCOMES } from "./results.ts";
-import { taskService } from "./tasks.ts";
 import type { TaskBackend } from "./tasks.ts";
 
 export interface DequeueOptions {
@@ -131,7 +131,7 @@ const errors = {
 const taskPath = ({ t, ...rest }: { owner: string; project: string; t: string }) => ({ ...rest, task: t });
 
 export function dequeueRoutes({ auth, repos, tasks, logs }: DequeueOptions) {
-  const service = (env: AccessBindings) => taskService({ db: env.DB, repos: repos(env), backend: tasks(env) });
+  const service = requestTaskService(repos, tasks);
 
   const api = new OpenAPIHono<AuthEnv>({
     defaultHook: (result, c) => {
@@ -163,7 +163,7 @@ export function dequeueRoutes({ auth, repos, tasks, logs }: DequeueOptions) {
           404: errorResponse("No such project or task, or its merge request was never dequeued."),
         },
       }),
-      async (c) => c.json(await service(c.env).getDequeue(c.var.actor, taskPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await service(c).getDequeue(c.var.actor, taskPath(c.req.valid("param"))), 200),
     )
     .openapi(
       tailed(
@@ -194,7 +194,7 @@ export function dequeueRoutes({ auth, repos, tasks, logs }: DequeueOptions) {
       async (c) => {
         const { path, ...params } = c.req.valid("param");
         const { side } = c.req.valid("query");
-        const found = await service(c.env).getDequeueFile(c.var.actor, { ...taskPath(params), path });
+        const found = await service(c).getDequeueFile(c.var.actor, { ...taskPath(params), path });
         const sideOf = (s: "base" | typeof side): FileSide | null => {
           const hash = found.file.blobs[s];
           const mode = found.file.modes[s];
@@ -236,7 +236,7 @@ export function dequeueRoutes({ auth, repos, tasks, logs }: DequeueOptions) {
       }),
       async (c) => {
         const { name, ...params } = c.req.valid("param");
-        const key = await service(c.env).dequeueLogKey(c.var.actor, { ...taskPath(params), name });
+        const key = await service(c).dequeueLogKey(c.var.actor, { ...taskPath(params), name });
         const log = await logs(c.env).get(key);
         if (log === null) throw new ServiceError("notFound", `the log ${name} has expired`);
         return c.body(log.body, 200, { "Content-Type": LOG_CONTENT_TYPE }) as never;

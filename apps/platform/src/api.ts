@@ -656,8 +656,15 @@ interface AttemptAction<S extends z.ZodType> {
   ok: { description: string; schema: S };
 }
 
-/** An attempt action route: `POST …/attempts/{a}/<verb>`, bearer-only. */
-function attemptAction<V extends string, S extends z.ZodType>(bearer: Bearer, verb: V, action: AttemptAction<S>) {
+/**
+ * An attempt action route: `POST …/attempts/{a}/<verb>`. Bearer-only unless `auth` is the `browser`
+ * middleware, which also takes throng-web's forwarded user (`web`).
+ */
+function attemptAction<V extends string, S extends z.ZodType>(
+  auth: { middleware: Bearer | Browser; web: boolean },
+  verb: V,
+  action: AttemptAction<S>,
+) {
   return createRoute({
     method: "post",
     path: `/projects/{owner}/{project}/attempts/{a}/${verb}`,
@@ -665,8 +672,8 @@ function attemptAction<V extends string, S extends z.ZodType>(bearer: Bearer, ve
     tags: action.tags,
     summary: action.summary,
     ...(action.description === undefined ? {} : { description: action.description }),
-    security: bearerOnly,
-    middleware: [bearer] as const,
+    security: auth.web ? bearerOrWeb : bearerOnly,
+    middleware: [auth.middleware] as const,
     request: { params: AttemptPathSchema },
     responses: {
       200: { description: action.ok.description, ...json(action.ok.schema) },
@@ -688,7 +695,7 @@ function attemptTransition<V extends string>(
   forbidden: string,
   conflicts: string[],
 ) {
-  return attemptAction(bearer, verb, {
+  return attemptAction({ middleware: bearer, web: false }, verb, {
     operationId,
     tags: ["Attempts"],
     summary,
@@ -698,9 +705,9 @@ function attemptTransition<V extends string>(
   });
 }
 
-/** A scoring request route: `POST …/attempts/{a}/<verb>`. */
+/** A scoring request route: `POST …/attempts/{a}/<verb>`, under `auth` (see `attemptAction`). */
 function scoringRoute<V extends string>(
-  bearer: Bearer,
+  auth: { middleware: Bearer | Browser; web: boolean },
   verb: V,
   operationId: string,
   summary: string,
@@ -708,7 +715,7 @@ function scoringRoute<V extends string>(
   forbidden: string,
   conflict: string,
 ) {
-  return attemptAction(bearer, verb, {
+  return attemptAction(auth, verb, {
     operationId,
     tags: ["Scoring"],
     summary,
@@ -1178,12 +1185,12 @@ export function apiRoutes(options: ApiOptions = {}) {
     )
     .openapi(
       scoringRoute(
-        bearer,
+        { middleware: browser, web: true },
         "score",
         "scoreAttempt",
         "Score a draft attempt's head now",
         "Drafts aren't scored on push; this queues a run for the head anyway. A head already queued, running " +
-          "or scored isn't queued again.",
+          "or scored isn't queued again. The arena's Score now button calls this too.",
         AUTHOR_ONLY,
         "the attempt isn't a draft",
       ),
@@ -1191,7 +1198,7 @@ export function apiRoutes(options: ApiOptions = {}) {
     )
     .openapi(
       scoringRoute(
-        bearer,
+        { middleware: bearer, web: false },
         "rescore",
         "rescoreAttempt",
         "Score an open attempt's head again",

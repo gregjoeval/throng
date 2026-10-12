@@ -670,12 +670,12 @@ interface AttemptAction<S extends z.ZodType> {
 }
 
 /**
- * Who a route lets in: bearer tokens only, or, with the `browser` middleware and `web`, throng-web's
- * forwarded user too.
+ * Who a route lets in, and the security its OpenAPI operation declares to match: bearer tokens only,
+ * or, with the `browser` middleware, throng-web's forwarded user too.
  */
 interface RouteAuth {
   middleware: Bearer | Browser;
-  web: boolean;
+  security: Record<string, string[]>[];
 }
 
 /** An attempt action route: `POST …/attempts/{a}/<verb>`, under `auth`. */
@@ -687,7 +687,7 @@ function attemptAction<V extends string, S extends z.ZodType>(auth: RouteAuth, v
     tags: action.tags,
     summary: action.summary,
     ...(action.description === undefined ? {} : { description: action.description }),
-    security: auth.web ? bearerOrWeb : bearerOnly,
+    security: auth.security,
     middleware: [auth.middleware] as const,
     request: { params: AttemptPathSchema },
     responses: {
@@ -756,7 +756,8 @@ export function apiRoutes(options: ApiOptions = {}) {
   const auth = bearerOrAccess(options);
   const bearer = bearerAuth(options.now === undefined ? {} : { now: options.now });
   const browser = bearerOrForwarded(options);
-  const bearerRoute: RouteAuth = { middleware: bearer, web: false };
+  const bearerRoute: RouteAuth = { middleware: bearer, security: bearerOnly };
+  const webRoute: RouteAuth = { middleware: browser, security: bearerOrWeb };
   const reposFor = options.repos ?? noRepos;
   const projects = (env: AccessBindings) => projectService({ db: env.DB, repos: reposFor(env) });
   const backendFor = options.tasks ?? noTasks;
@@ -1186,17 +1187,10 @@ export function apiRoutes(options: ApiOptions = {}) {
       async (c) => c.json(await tasks(c.env).closeAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
-      attemptTransition(
-        { middleware: browser, web: true },
-        "reopen",
-        "reopenAttempt",
-        "Reopen a closed attempt as a draft",
-        AUTHOR_ONLY,
-        [
-          "`invalidState`: the attempt isn't closed or its task isn't open;",
-          "`attemptLimit`: the task is at its cap; `conflict`: another active attempt has its branch.",
-        ],
-      ),
+      attemptTransition(webRoute, "reopen", "reopenAttempt", "Reopen a closed attempt as a draft", AUTHOR_ONLY, [
+        "`invalidState`: the attempt isn't closed or its task isn't open;",
+        "`attemptLimit`: the task is at its cap; `conflict`: another active attempt has its branch.",
+      ]),
       async (c) => c.json(await tasks(c.env).reopenAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
@@ -1213,7 +1207,7 @@ export function apiRoutes(options: ApiOptions = {}) {
     )
     .openapi(
       scoringRoute(
-        { middleware: browser, web: true },
+        webRoute,
         "score",
         "scoreAttempt",
         "Score a draft attempt's head now",

@@ -1,5 +1,39 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "categories": { "correctness": "error", "suspicious": "warn" },
+  "plugins": ["typescript", "unicorn", "oxc", "import", "promise"],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "warn"
+  },
+  "rules": {
+    "typescript/array-type": "error",
+    "typescript/consistent-type-assertions": "error",
+    "import/no-unassigned-import": [
+      "error",
+      {
+        "allow": ["**/*.css", "@testing-library/jest-dom/vitest"]
+      }
+    ],
+    "promise/always-return": "off"
+  },
+  "overrides": [
+    {
+      "files": ["**/test/**", "**/*.test.{ts,tsx,js}"],
+      "plugins": ["vitest"],
+      "rules": {
+        "vitest/valid-expect": "off",
+        "vitest/require-to-throw-message": "off",
+        "vitest/no-conditional-expect": "off"
+      }
+    },
+    {
+      "files": ["apps/web/**"],
+      "plugins": ["react"],
+      "rules": {
+        "react/react-in-jsx-scope": "off",
+        "react/set-state-in-effect": "off"
+      }
+    }
+  ],
   "ignorePatterns": ["**/worker-configuration.d.ts", "**/routeTree.gen.ts", "**/dist"]
 }

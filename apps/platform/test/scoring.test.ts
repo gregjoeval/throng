@@ -460,6 +460,50 @@ describe("rescoring on a task edit", () => {
     ]);
   });
 
+  it("queues one rescore behind a run that's running, which may have read the old definitions", async () => {
+    const { store, workflow, runs, open } = await scored();
+    const sha = at(runs(open), 0).sha;
+    store.scoring.request({ project: PROJECT.id, task: 1, attempt: 1, sha, trigger: "rescore", actor: ada });
+    await store.scoring.drain();
+    expect(runs(open).map((r) => [r.trigger, r.status])).toEqual([
+      ["open", "done"],
+      ["rescore", "running"],
+    ]);
+
+    await store.editTask(PROJECT, ada, { task: 1, metrics: [lines()] });
+    await store.editTask(PROJECT, ada, { task: 1, metrics: [lines("test.coverage.total")] });
+    await store.scoring.drain();
+    expect(runs(open).map((r) => [r.trigger, r.status])).toEqual([
+      ["open", "done"],
+      ["rescore", "running"],
+      ["rescore", "queued"],
+    ]);
+
+    // The follow-up starts once the run ahead of it ends.
+    store.scoring.finish(at(runs(open), 1).id, done());
+    await store.scoring.drain();
+    expect(at(runs(open), 2).status).toBe("running");
+    expect(workflow.created).toHaveLength(3);
+  });
+
+  it("still answers a push or score now for a head that's running with the run, queuing nothing", async () => {
+    const { store, runs, open } = await scored();
+    const sha = at(runs(open), 0).sha;
+    const head = { project: PROJECT.id, task: 1, attempt: 1, sha, actor: ada };
+    store.scoring.request({ ...head, trigger: "rescore" });
+    await store.scoring.drain();
+    const running = at(runs(open), 1);
+
+    for (const trigger of ["push", "scoreNow"] as const) {
+      expect(store.scoring.request({ ...head, trigger })).toMatchObject({
+        queued: false,
+        reason: "already running",
+        run: { id: running.id },
+      });
+    }
+    expect(runs(open)).toHaveLength(2);
+  });
+
   it("refuses someone who may not manage the task before checking their metrics", async () => {
     const { store, runs, open } = await scored();
     expect(await code(store.editTask(PROJECT, bob, { task: 1, metrics: [lines("lint.errors")] }))).toBe("forbidden");

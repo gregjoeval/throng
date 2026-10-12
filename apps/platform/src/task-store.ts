@@ -186,7 +186,7 @@ export interface Sql {
 export interface PushRecord {
   scoring: ScoringRequest | null;
   mergeRequest: PushNotice | null;
-  following: FollowNotice | null;
+  follow: FollowNotice | null;
 }
 
 /** A follow a push queued because its new head doesn't contain the task head. */
@@ -1062,21 +1062,22 @@ export class TaskStore {
     input: AttemptInput & { updates: PushedRef[] },
   ): Promise<PushRecord> {
     const current = this.#attempt(input);
-    const { head, ...recorded } = this.#sql.transaction(() => {
-      const moved = this.#recordPushed(actor, current, input.updates);
-      if (moved !== null) this.#authorMoved(project, current);
-      const needsReview = moved !== null && this.#pushedToSource(actor, current, moved);
-      const mergeRequest = this.#pushNotice(current, needsReview ? moved : null);
-      if (moved === null) return { head: moved, scoring: null, mergeRequest };
+    let head: string | null = null;
+    const recorded = this.#sql.transaction(() => {
+      head = this.#recordPushed(actor, current, input.updates);
+      if (head !== null) this.#authorMoved(project, current);
+      const needsReview = head !== null && this.#pushedToSource(actor, current, head);
+      const mergeRequest = this.#pushNotice(current, needsReview ? head : null);
+      if (head === null) return { scoring: null, mergeRequest };
       // A draft isn't scored, but its old result no longer describes its head.
       if (current.state !== "open") {
-        this.scoring.moveHead({ ...scoredAttempt(current), sha: moved });
-        return { head: moved, scoring: null, mergeRequest };
+        this.scoring.moveHead({ ...scoredAttempt(current), sha: head });
+        return { scoring: null, mergeRequest };
       }
-      return { head: moved, scoring: this.#request(project, actor, current, moved, "push"), mergeRequest };
+      return { scoring: this.#request(project, actor, current, head, "push"), mergeRequest };
     });
-    const following = head === null ? null : await this.#followIfDropped(project, current, head);
-    return { ...recorded, following };
+    const follow = head === null ? null : await this.#followIfDropped(project, current, head);
+    return { ...recorded, follow };
   }
 
   /**
@@ -1098,8 +1099,8 @@ export class TaskStore {
   // --- following the task branch ---------------------------------------------------------------
   //
   // Active attempts follow their task branch (ADR 0003). A push of the task branch, an author's push
-  // to an attempt that needs update, and reopening or starting an attempt on a task with a task
-  // branch each queue a follow; the DO's drain starts its Follow Workflow, which claims the push,
+  // to an attempt that needs update or that drops the task head (a forced push over a follow's
+  // merge), and reopening or starting an attempt on a task with a task branch each queue a follow; the DO's drain starts its Follow Workflow, which claims the push,
   // merges the task head into the fork's `main` in a trusted container with a lease on the head it
   // read, and reports. A clean merge is recorded as a push by no user: its new head is scored, and a
   // merge request it is the source of goes to `needsReview`. A conflict writes nothing and marks
@@ -1257,35 +1258,43 @@ export class TaskStore {
   /**
    * Queues a follow of the task head when an author's push moved the attempt to `head` and `head`
    * doesn't contain it, and returns it. Null when the task has no task branch, `head` contains its
-   * head, or the attempt needs update: `#authorMoved` already queued its follow.
+   * head, or the attempt needs update: `#authorMoved` already queued its follow. A head that can't
+   * be read, or whose history is too long to walk, is followed: a follow of a head that contains the
+   * task head changes nothing.
    */
   async #followIfDropped(project: ProjectId, attempt: StoredAttempt, head: string): Promise<FollowNotice | null> {
     if (!isActive(attempt.state) || this.#attemptRow(attempt)?.needs_update != null) return null;
-    let taskHead: string;
+    const taskHead = await this.#readTaskHead(project, attempt.task);
+    if (taskHead === null) return null;
     try {
-      const branch = await taskBranchHead(this.#repos, project.id, attempt.task);
-      if (branch === null) return null;
-      taskHead = branch.sha;
       if (await containsCommit(this.#repos, project.id, { attempt: attempt.fork, head }, taskHead)) return null;
     } catch (error) {
-      console.error({ event: "follow.task_branch_unreadable", task: attempt.task, error: String(error) });
-      return null;
+      console.error({ event: "follow.head_unreadable", attempt: attempt.fork, error: String(error) });
     }
-    this.#sql.transaction(() => this.#queueFollow(project, attempt, taskHead));
-    return { task: attempt.task, attempt: attempt.fork, taskHead };
+    // The attempt may have ended, or needed update, while the head was read.
+    return this.#sql.transaction(() => {
+      const now = this.#attempt(attempt);
+      if (!isActive(now.state) || this.#attemptRow(now)?.needs_update != null) return null;
+      this.#queueFollow(project, now, taskHead);
+      return { task: now.task, attempt: now.fork, taskHead };
+    });
   }
 
   /** Queues a follow of the task's task branch for an attempt that (re)starts, when the task has one. */
   async #catchUp(project: ProjectId, attempt: AttemptInput): Promise<void> {
-    let head: { sha: string } | null;
+    const taskHead = await this.#readTaskHead(project, attempt.task);
+    if (taskHead === null) return;
+    this.#sql.transaction(() => this.#queueFollow(project, attempt, taskHead));
+  }
+
+  /** The head of the task's task branch, or null when it has none or the origin couldn't be read. */
+  async #readTaskHead(project: ProjectId, task: number): Promise<string | null> {
     try {
-      head = await taskBranchHead(this.#repos, project.id, attempt.task);
+      return (await taskBranchHead(this.#repos, project.id, task))?.sha ?? null;
     } catch (error) {
-      console.error({ event: "follow.task_branch_unreadable", task: attempt.task, error: String(error) });
-      return;
+      console.error({ event: "follow.task_branch_unreadable", task, error: String(error) });
+      return null;
     }
-    if (head === null) return;
-    this.#sql.transaction(() => this.#queueFollow(project, attempt, head.sha));
   }
 
   /**

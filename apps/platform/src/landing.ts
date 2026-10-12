@@ -3,7 +3,7 @@
 
 import type { ConfigResult } from "./config.ts";
 import type { ConflictDetails } from "./conflicts.ts";
-import type { ScoringResult } from "./results.ts";
+import type { CheckOutcome, ScoringResult } from "./results.ts";
 import { attemptRef, taskRef } from "./task-refs.ts";
 
 /** Commits name people by a no-reply address, never their real email. */
@@ -88,7 +88,8 @@ export function actedAlias(acted: { alias?: string | null; agent?: string | null
 /** A required check that didn't pass on the merged tree, and the name of its stored log, if any. */
 export interface FailedCheck {
   name: string;
-  outcome: "failed" | "timedOut" | "skipped";
+  /** Only `_preview` errors, and it is never required. */
+  outcome: Exclude<CheckOutcome, "passed" | "errored">;
   log: string | null;
 }
 
@@ -123,10 +124,13 @@ export function retestConfig(config: ConfigResult): ConfigResult | null {
   return checks.length === 0 ? null : { kind: "valid", config: { ...config.config, checks } };
 }
 
-/** The required checks the retest's result didn't pass, each with its log when one was stored. */
+/**
+ * The required checks the retest's result didn't pass, each with its log when one was stored. Throng's
+ * own checks are left out: the retest doesn't diff or deploy, and neither is ever required.
+ */
 export function failedChecks(result: ScoringResult, stored: string[]): FailedChecksDetails {
   const checks = result.checks
-    .filter((check) => check.outcome !== "passed")
+    .filter((check) => check.source !== "platform" && check.outcome !== "passed")
     .map((check) => ({
       name: check.name,
       outcome: check.outcome as FailedCheck["outcome"],

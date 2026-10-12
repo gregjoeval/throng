@@ -10,11 +10,13 @@ import {
   scorePlan,
   scoreTimeoutMs,
   SETUP_TIMEOUT_MS,
+  upgradeResult,
   withPreview,
 } from "../src/results.ts";
-import type { CheckResult, RawScore } from "../src/results.ts";
+import type { CheckResult, LegacyResult, RawScore, ScoringResult } from "../src/results.ts";
 
 const BASE = "a".repeat(40);
+const OUTCOMES = ["passed", "failed", "timedOut", "errored", "skipped"];
 
 function raw(overrides: Partial<RawScore> = {}): RawScore {
   return {
@@ -47,26 +49,29 @@ network:
 describe("parseMetrics", () => {
   it("keeps declared metrics with finite numbers", () => {
     expect(parseMetrics('{"coverage": 81.5, "lines": 3}', ["coverage", "lines"])).toEqual({
-      metrics: { coverage: 81.5, lines: 3 },
+      metrics: { coverage: { value: 81.5 }, lines: { value: 3 } },
       notes: [],
     });
   });
 
-  it("notes and ignores undeclared keys and non-numbers", () => {
+  it("nulls non-numbers with a note, and notes and ignores undeclared keys", () => {
     expect(parseMetrics('{"coverage": "81", "extra": 1, "nan": null}', ["coverage", "nan"])).toEqual({
-      metrics: {},
-      notes: [
-        "ignored metric coverage: not a number",
-        "ignored metric extra: not declared by this check",
-        "ignored metric nan: not a number",
-      ],
+      metrics: { coverage: { value: null, note: "not a number" }, nan: { value: null, note: "not a number" } },
+      notes: ["ignored metric extra: not declared by this check"],
     });
   });
 
-  it("notes a file that isn't a JSON object, and a declared metric that wasn't reported", () => {
-    expect(parseMetrics("coverage=80", ["coverage"]).notes).toEqual(["ignored $THRONG_METRICS: not JSON"]);
+  it("nulls every declared metric of a file that isn't a JSON object, or that didn't report it", () => {
+    expect(parseMetrics("coverage=80", ["coverage"])).toEqual({
+      metrics: { coverage: { value: null, note: "$THRONG_METRICS was not JSON" } },
+      notes: ["ignored $THRONG_METRICS: not JSON"],
+    });
     expect(parseMetrics("[1, 2]", []).notes).toEqual(["ignored $THRONG_METRICS: not a JSON object of name to number"]);
-    expect(parseMetrics("", ["coverage"])).toEqual({ metrics: {}, notes: ["metric coverage was not reported"] });
+    expect(parseMetrics("", ["coverage"])).toEqual({
+      metrics: { coverage: { value: null, note: "not reported" } },
+      notes: [],
+    });
+    expect(parseMetrics("{}", ["coverage"]).metrics).toEqual({ coverage: { value: null, note: "not reported" } });
     expect(parseMetrics(null, [])).toEqual({ metrics: {}, notes: [] });
   });
 });
@@ -88,10 +93,10 @@ describe("checkOutcome", () => {
 function entry(required: boolean, outcome: CheckResult["outcome"]): CheckResult {
   return {
     name: "c",
+    source: "project",
     required,
     outcome,
     durationMs: 0,
-    metrics: {},
     notes: [],
   };
 }
@@ -141,37 +146,56 @@ describe("scorePlan", () => {
 });
 
 describe("buildResult", () => {
-  it("passes a zero-config project with no checks, keeping the built-in metrics", () => {
+  it("passes a zero-config project, recording the diff as the _diff check and skipping _preview", () => {
     expect(buildResult({ kind: "none" }, raw())).toEqual({
       base: BASE,
       config: { kind: "none" },
       gate: "passed",
-      checks: [],
-      builtin: { filesChanged: 3, additions: 10, deletions: 4, durationMs: 12 },
-      preview: { status: "none" },
+      checks: [
+        { name: "_diff", source: "platform", required: false, outcome: "passed", durationMs: 12, notes: [] },
+        {
+          name: "_preview",
+          source: "platform",
+          required: false,
+          outcome: "skipped",
+          durationMs: 0,
+          notes: ["skipped: the config has no preview section"],
+        },
+      ],
+      metrics: {
+        _diff: { source: "platform", type: "enum", value: "passed", values: OUTCOMES },
+        "_diff.filesChanged": { source: "platform", type: "number", value: 3, order: "asc" },
+        "_diff.additions": { source: "platform", type: "number", value: 10, order: "asc" },
+        "_diff.deletions": { source: "platform", type: "number", value: 4, order: "asc" },
+        _preview: { source: "platform", type: "enum", value: "skipped", values: OUTCOMES },
+        "_preview.url": {
+          source: "platform",
+          type: "string",
+          format: "url",
+          value: null,
+          note: "_preview was skipped: the config has no preview section",
+        },
+      },
       logs: [],
     });
   });
 
-  it("fails an invalid config's gate with a single config entry carrying the error", () => {
+  it("fails an invalid config's gate, keeping its error on config and running only _diff", () => {
     const invalid = parseConfig("checks:\n  - name: Bad Name\n    command: x\n");
     expect(invalid.kind).toBe("invalid");
     const result = buildResult(invalid, raw());
-    expect(result).toMatchObject({ config: { kind: "invalid" }, gate: "failed", builtin: { filesChanged: 3 } });
-    expect(result.checks).toEqual([
-      {
-        name: "config",
-        required: true,
-        outcome: "failed",
-        durationMs: 0,
-        metrics: {},
-        notes: [],
-        error: expect.stringMatching(/checks\[0\]\.name/u),
-      },
+    expect(result).toMatchObject({
+      config: { kind: "invalid", error: expect.stringMatching(/checks\[0\]\.name/u) },
+      gate: "failed",
+      metrics: { "_diff.filesChanged": { value: 3 } },
+    });
+    expect(result.checks.map((c) => [c.name, c.outcome, c.notes])).toEqual([
+      ["_diff", "passed", []],
+      ["_preview", "skipped", ["skipped: the config is invalid"]],
     ]);
   });
 
-  it("scores each check from its exit and metrics, and gates on the required ones", () => {
+  it("scores each check from its exit, and gates on the required ones", () => {
     const result = buildResult(
       CONFIG,
       raw({
@@ -182,17 +206,74 @@ describe("buildResult", () => {
       }),
     );
     expect(result.gate).toBe("passed");
-    expect(result.checks).toEqual([
+    expect(result.checks.slice(1, 3)).toEqual([
       {
         name: "test",
+        source: "project",
         required: true,
         outcome: "passed",
         durationMs: 900,
-        metrics: { coverage: 92 },
         notes: ["ignored metric bundle_kb: not declared by this check"],
       },
-      { name: "bundle", required: false, outcome: "failed", durationMs: 40, metrics: { bundle_kb: 120 }, notes: [] },
+      { name: "bundle", source: "project", required: false, outcome: "failed", durationMs: 40, notes: [] },
     ]);
+  });
+
+  it("gives each config check an outcome metric, followed by its inline metrics as project numbers", () => {
+    const result = buildResult(
+      CONFIG,
+      raw({
+        checks: [
+          { exit: 0, durationMs: 900, metrics: '{"coverage": 92}' },
+          { exit: 1, durationMs: 40, metrics: '{"bundle_kb": 120}' },
+        ],
+      }),
+    );
+    expect(Object.keys(result.metrics)).toEqual([
+      "_diff",
+      "_diff.filesChanged",
+      "_diff.additions",
+      "_diff.deletions",
+      "test",
+      "coverage",
+      "bundle",
+      "bundle_kb",
+      "_preview",
+      "_preview.url",
+    ]);
+    expect(result.metrics).toMatchObject({
+      test: { source: "project", type: "enum", value: "passed", values: OUTCOMES },
+      coverage: { source: "project", type: "number", value: 92, order: "desc", unit: "%" },
+      bundle: { source: "project", type: "enum", value: "failed", values: OUTCOMES },
+      bundle_kb: { source: "project", type: "number", value: 120, order: "asc", unit: "KB" },
+    });
+  });
+
+  it("gives a declared metric that wasn't reported, or isn't a number, null with a note", () => {
+    const result = buildResult(
+      CONFIG,
+      raw({
+        checks: [
+          { exit: 0, durationMs: 1, metrics: '{"coverage": "92"}' },
+          { exit: 0, durationMs: 1, metrics: "" },
+        ],
+      }),
+    );
+    expect(result.metrics.coverage).toEqual({
+      source: "project",
+      type: "number",
+      value: null,
+      order: "desc",
+      unit: "%",
+      note: "not a number",
+    });
+    expect(result.metrics.bundle_kb).toMatchObject({ value: null, note: "not reported" });
+  });
+
+  it("leaves out a metric's unit when it declares none", () => {
+    const config = parseConfig("checks:\n  - name: t\n    command: x\n    metrics: [{ name: n, order: asc }]\n");
+    const result = buildResult(config, raw({ checks: [{ exit: 0, durationMs: 1, metrics: '{"n": 1}' }] }));
+    expect(result.metrics.n).toEqual({ source: "project", type: "number", value: 1, order: "asc" });
   });
 
   it("fails the gate on a required check that timed out", () => {
@@ -205,11 +286,12 @@ describe("buildResult", () => {
         ],
       }),
     );
-    expect(result.checks.map((c) => c.outcome)).toEqual(["timedOut", "passed"]);
+    expect(result.checks.map((c) => c.outcome)).toEqual(["passed", "timedOut", "passed", "skipped"]);
+    expect(result.metrics.test).toMatchObject({ value: "timedOut" });
     expect(result.gate).toBe("failed");
   });
 
-  it("skips every check after a failed setup, saying which command failed", () => {
+  it("skips every check after a failed setup, saying which command failed, and nulls its metrics", () => {
     const result = buildResult(
       CONFIG,
       raw({
@@ -221,10 +303,14 @@ describe("buildResult", () => {
       }),
     );
     expect(result.gate).toBe("failed");
-    expect(result.checks.map((c) => [c.outcome, c.notes])).toEqual([
+    expect(result.checks.slice(1, 3).map((c) => [c.outcome, c.notes])).toEqual([
       ["skipped", ["skipped: setup command 1 failed"]],
       ["skipped", ["skipped: setup command 1 failed"]],
     ]);
+    expect(result.metrics.coverage).toMatchObject({
+      value: null,
+      note: "test was skipped: setup command 1 failed",
+    });
   });
 });
 
@@ -247,6 +333,15 @@ describe("previewPlan", () => {
     const result = buildResult(failing, raw({ checks: [{ exit: 1, durationMs: 1, metrics: "" }] }));
     expect(result.gate).toBe("failed");
     expect(previewPlan(failing, result)).toBeNull();
+    expect(result.checks.at(-1)).toMatchObject({
+      name: "_preview",
+      outcome: "skipped",
+      notes: ["skipped: the gate failed"],
+    });
+    expect(result.metrics["_preview.url"]).toMatchObject({
+      value: null,
+      note: "_preview was skipped: the gate failed",
+    });
   });
 
   it("deploys nothing without a preview section, without a config, or with an invalid one", () => {
@@ -256,26 +351,149 @@ describe("previewPlan", () => {
   });
 });
 
+/** A result's `_preview` check, its outcome metric and `_preview.url`. */
+const preview = (result: ScoringResult) => ({
+  check: result.checks.at(-1),
+  outcome: result.metrics["_preview"],
+  url: result.metrics["_preview.url"],
+});
+
 describe("withPreview", () => {
   const passed = buildResult(parseConfig("preview: {}\n"), raw());
 
-  it("records a deployed Preview as ready with its URL", () => {
-    const result = withPreview(passed, { ok: true, url: "https://t1a1-pabc-w.acct.workers.dev" });
-    expect(result.preview).toEqual({ status: "ready", url: "https://t1a1-pabc-w.acct.workers.dev" });
+  it("skips _preview until it deploys, as the last check", () => {
+    expect(preview(passed)).toMatchObject({ check: { name: "_preview", outcome: "skipped" } });
   });
 
-  it("records a failed Preview without changing the gate or the checks", () => {
-    for (const outcome of [{ ok: false, stage: "build", output: "boom" } as const, null]) {
-      const result = withPreview(passed, outcome);
-      expect(result).toEqual({ ...passed, preview: { status: "failed" } });
+  it("records a deployed Preview as passed, with _preview.url", () => {
+    const result = withPreview(passed, { ok: true, url: "https://t1a1-pabc-w.acct.workers.dev" }, 4200);
+    expect(preview(result)).toEqual({
+      check: { name: "_preview", source: "platform", required: false, outcome: "passed", durationMs: 4200, notes: [] },
+      outcome: { source: "platform", type: "enum", value: "passed", values: OUTCOMES },
+      url: { source: "platform", type: "string", format: "url", value: "https://t1a1-pabc-w.acct.workers.dev" },
+    });
+  });
+
+  it("records a failed build or deploy as failed, with a null URL, without changing the gate or the other checks", () => {
+    for (const [deployed, why] of [
+      [{ ok: false, stage: "build", output: "boom" }, "its build step failed"],
+      [null, "the preview script gave no result"],
+    ] as const) {
+      const result = withPreview(passed, deployed, 10);
+      expect(result.gate).toBe("passed");
+      expect(result.checks.slice(0, -1)).toEqual(passed.checks.slice(0, -1));
+      expect(preview(result)).toMatchObject({
+        check: { outcome: "failed", notes: [`failed: ${why}`] },
+        outcome: { value: "failed" },
+        url: { value: null, note: `_preview failed: ${why}` },
+      });
     }
   });
 
   it("records an infrastructure error as errored, apart from a failed build, without changing the gate", () => {
-    const result = withPreview(passed, { error: "Error: preview script exited 12: fetch failed" });
-    expect(result).toEqual({
-      ...passed,
-      preview: { status: "errored", error: "Error: preview script exited 12: fetch failed" },
+    const result = withPreview(passed, { error: "Error: preview script exited 12: fetch failed" }, 0);
+    expect(result.gate).toBe("passed");
+    expect(preview(result)).toMatchObject({
+      check: { outcome: "errored", notes: ["errored: Error: preview script exited 12: fetch failed"] },
+      outcome: { value: "errored" },
+      url: { value: null, note: "_preview errored: Error: preview script exited 12: fetch failed" },
     });
+  });
+
+  it("keeps the metrics in run order", () => {
+    const result = withPreview(passed, { ok: true, url: "https://x.workers.dev" }, 1);
+    expect(Object.keys(result.metrics)).toEqual(Object.keys(passed.metrics));
+  });
+});
+
+/** A result as runs stored it before built-in checks: `builtin`, `preview` and per-check metrics. */
+function legacy(overrides: Partial<LegacyResult> = {}): LegacyResult {
+  return {
+    base: BASE,
+    config: { kind: "valid" },
+    gate: "passed",
+    checks: [
+      { name: "test", required: true, outcome: "passed", durationMs: 900, metrics: { coverage: 92 }, notes: [] },
+      {
+        name: "bundle",
+        required: false,
+        outcome: "timedOut",
+        durationMs: 40,
+        metrics: {},
+        notes: ["metric bundle_kb was not reported"],
+      },
+    ],
+    builtin: { filesChanged: 3, additions: 10, deletions: 4, durationMs: 12 },
+    preview: { status: "ready", url: "https://x.workers.dev" },
+    logs: ["test", "preview.deploy"],
+    ...overrides,
+  };
+}
+
+/** A legacy result with this Preview status, upgraded: `_preview`'s outcome and notes, and `_preview.url`. */
+function upgradedPreview(status: LegacyResult["preview"]) {
+  const result = upgradeResult(legacy({ preview: status }));
+  return [result.checks.at(-1)?.outcome, result.checks.at(-1)?.notes, result.metrics["_preview.url"]?.value];
+}
+
+describe("upgradeResult", () => {
+  it("turns builtin into _diff, preview into _preview, and each check's metrics into project numbers", () => {
+    expect(upgradeResult(legacy())).toEqual({
+      base: BASE,
+      config: { kind: "valid" },
+      gate: "passed",
+      checks: [
+        { name: "_diff", source: "platform", required: false, outcome: "passed", durationMs: 12, notes: [] },
+        { name: "test", source: "project", required: true, outcome: "passed", durationMs: 900, notes: [] },
+        {
+          name: "bundle",
+          source: "project",
+          required: false,
+          outcome: "timedOut",
+          durationMs: 40,
+          notes: ["metric bundle_kb was not reported"],
+        },
+        { name: "_preview", source: "platform", required: false, outcome: "passed", durationMs: 0, notes: [] },
+      ],
+      metrics: {
+        _diff: { source: "platform", type: "enum", value: "passed", values: OUTCOMES },
+        "_diff.filesChanged": { source: "platform", type: "number", value: 3, order: "asc" },
+        "_diff.additions": { source: "platform", type: "number", value: 10, order: "asc" },
+        "_diff.deletions": { source: "platform", type: "number", value: 4, order: "asc" },
+        test: { source: "project", type: "enum", value: "passed", values: OUTCOMES },
+        coverage: { source: "project", type: "number", value: 92, order: "desc" },
+        bundle: { source: "project", type: "enum", value: "timedOut", values: OUTCOMES },
+        _preview: { source: "platform", type: "enum", value: "passed", values: OUTCOMES },
+        "_preview.url": { source: "platform", type: "string", format: "url", value: "https://x.workers.dev" },
+      },
+      logs: ["test", "preview.deploy"],
+    });
+  });
+
+  it("reads each stored Preview status as a _preview outcome", () => {
+    expect(upgradedPreview({ status: "none" })).toEqual(["skipped", [], null]);
+    expect(upgradedPreview({ status: "failed" })).toEqual(["failed", [], null]);
+    expect(upgradedPreview({ status: "errored", error: "boom" })).toEqual(["errored", ["errored: boom"], null]);
+  });
+
+  it("drops an invalid config's synthetic config check, keeping the error on config", () => {
+    const result = upgradeResult(
+      legacy({
+        config: { kind: "invalid", error: "checks[0].name: bad" },
+        gate: "failed",
+        checks: [
+          { name: "config", required: true, outcome: "failed", durationMs: 0, metrics: {}, notes: [], error: "x" },
+        ],
+        preview: { status: "none" },
+      }),
+    );
+    expect(result.checks.map((c) => c.name)).toEqual(["_diff", "_preview"]);
+    expect(result.config).toEqual({ kind: "invalid", error: "checks[0].name: bad" });
+    expect(result.gate).toBe("failed");
+  });
+
+  it("leaves a result already in the new shape as it is", () => {
+    const current = buildResult(CONFIG, raw());
+    expect(upgradeResult(current)).toBe(current);
   });
 });

@@ -91,7 +91,7 @@ const FailedChecksDetailsSchema = z
     checks: z.array(
       z.object({
         name: z.string(),
-        outcome: z.enum(CHECK_OUTCOMES).exclude(["passed"]),
+        outcome: z.enum(CHECK_OUTCOMES).exclude(["passed", "errored"]),
         log: z.string().nullable().openapi({ description: "For `GET …/merge-request/dequeue/logs/{name}`." }),
       }),
     ),

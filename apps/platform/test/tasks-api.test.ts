@@ -412,8 +412,7 @@ describe("merge request routes", () => {
         config: { kind: "none" },
         gate: "passed",
         checks: [],
-        builtin: { filesChanged: 0, additions: 0, deletions: 0, durationMs: 1 },
-        preview: { status: "none" },
+        metrics: {},
         logs: [],
       },
     });
@@ -440,8 +439,7 @@ describe("the task list's summaries", () => {
         config: { kind: "none" },
         gate,
         checks: [],
-        builtin: { filesChanged: 0, additions: 0, deletions: 0, durationMs: 1 },
-        preview: { status: "none" },
+        metrics: {},
         logs: [],
       },
     });

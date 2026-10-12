@@ -3,8 +3,10 @@ import { describe, expect, it } from "vitest";
 import type { AccessVerifier } from "../src/access.ts";
 import { apiRoutes } from "../src/api.ts";
 import type { ApiRoutes } from "../src/api.ts";
+import { parseConfig } from "../src/config.ts";
 import type { FollowParams } from "../src/follows.ts";
-import type { ScoringResult } from "../src/results.ts";
+import { buildResult, withPreview } from "../src/results.ts";
+import type { LegacyResult, ScoringResult } from "../src/results.ts";
 import type { ScoringOutcome } from "../src/scoring.ts";
 import type { User } from "../src/users.ts";
 import { FakeRepos } from "./fake-repos.ts";
@@ -16,21 +18,32 @@ import { testTaskBackends } from "./support/task-backend.ts";
 const verify: AccessVerifier = async (token) => (token.startsWith("as:") ? { email: token.slice(3) } : null);
 
 const now = () => new Date("2026-10-10T12:00:00.000Z");
+const OUTCOMES = ["passed", "failed", "timedOut", "errored", "skipped"];
 
+const CONFIG = parseConfig(`checks:
+  - name: test
+    command: npm test
+    metrics: [{ name: coverage, unit: "%", order: desc }]
+  - name: bundle
+    command: npm run size
+    required: false
+    metrics: [{ name: bundle_kb, order: asc }]
+preview: {}
+`);
+
+/** A run's result as the Workflow builds it: two checks with inline metrics, and a deployed Preview. */
 function result(overrides: Partial<ScoringResult> = {}): ScoringResult {
-  return {
+  const scored = buildResult(CONFIG, {
     base: "b".repeat(40),
-    config: { kind: "valid" },
-    gate: "passed",
+    shortstat: " 1 file changed, 2 insertions(+)",
+    builtinMs: 5,
+    setupFailed: null,
     checks: [
-      { name: "test", required: true, outcome: "passed", durationMs: 900, metrics: { coverage: 81.5 }, notes: [] },
-      { name: "bundle", required: false, outcome: "failed", durationMs: 300, metrics: { bundle_kb: 120 }, notes: [] },
+      { exit: 0, durationMs: 900, metrics: '{"coverage": 81.5}' },
+      { exit: 1, durationMs: 300, metrics: '{"bundle_kb": 120}' },
     ],
-    builtin: { filesChanged: 1, additions: 2, deletions: 0, durationMs: 5 },
-    preview: { status: "none" },
-    logs: [],
-    ...overrides,
-  };
+  });
+  return { ...withPreview(scored, { ok: true, url: "https://t1a1.preview.test" }, 40), ...overrides };
 }
 
 async function setup() {
@@ -208,7 +221,6 @@ describe("the arena", () => {
           ...result(),
           run: 1,
           finishedAt: "2026-10-10T12:00:00.000Z",
-          metrics: { coverage: 81.5, bundle_kb: 120 },
         },
       },
       {
@@ -245,6 +257,67 @@ describe("the arena", () => {
         needsUpdate: false,
       },
     ]);
+  });
+
+  it("gives a current result's checks with their source, and every metric in one flat map", async () => {
+    const { call, ada, base, drafts, commit, finish } = await setup();
+    await drafts();
+    commit("t1a1", "one\n");
+    await call("POST", `${base}/attempts/t1a1/score`, ada);
+    await finish(1, { status: "done", result: result() });
+
+    const arena = (await call("GET", `${base}/tasks/t1/arena`, ada)).body;
+    const current = arena["attempts"][0]["result"] as Json;
+    expect(current).not.toHaveProperty("builtin");
+    expect(current).not.toHaveProperty("preview");
+    expect((current["checks"] as Json[]).map((c) => [c["name"], c["source"], c["outcome"]])).toEqual([
+      ["_diff", "platform", "passed"],
+      ["test", "project", "passed"],
+      ["bundle", "project", "failed"],
+      ["_preview", "platform", "passed"],
+    ]);
+    expect(current["metrics"]).toEqual({
+      _diff: { source: "platform", type: "enum", value: "passed", values: OUTCOMES },
+      "_diff.filesChanged": { source: "platform", type: "number", value: 1, order: "asc" },
+      "_diff.additions": { source: "platform", type: "number", value: 2, order: "asc" },
+      "_diff.deletions": { source: "platform", type: "number", value: 0, order: "asc" },
+      test: { source: "project", type: "enum", value: "passed", values: OUTCOMES },
+      coverage: { source: "project", type: "number", value: 81.5, order: "desc", unit: "%" },
+      bundle: { source: "project", type: "enum", value: "failed", values: OUTCOMES },
+      bundle_kb: { source: "project", type: "number", value: 120, order: "asc" },
+      _preview: { source: "platform", type: "enum", value: "passed", values: OUTCOMES },
+      "_preview.url": { source: "platform", type: "string", format: "url", value: "https://t1a1.preview.test" },
+    });
+  });
+
+  it("answers in the current shape for a result stored with builtin and preview", async () => {
+    const { call, ada, base, drafts, commit, finish } = await setup();
+    await drafts();
+    commit("t1a1", "one\n");
+    await call("POST", `${base}/attempts/t1a1/score`, ada);
+    const legacy: LegacyResult = {
+      base: null,
+      config: { kind: "valid" },
+      gate: "passed",
+      checks: [
+        { name: "test", required: true, outcome: "passed", durationMs: 9, metrics: { coverage: 80 }, notes: [] },
+      ],
+      builtin: { filesChanged: 2, additions: 5, deletions: 1, durationMs: 3 },
+      preview: { status: "failed" },
+      logs: ["test"],
+    };
+    await finish(1, { status: "done", result: legacy as unknown as ScoringResult });
+
+    const run = (await call("GET", `${base}/runs/1`, ada)).body["result"] as Json;
+    expect(run).not.toHaveProperty("builtin");
+    expect(run).toMatchObject({
+      checks: [{ name: "_diff" }, { name: "test", source: "project" }, { name: "_preview", outcome: "failed" }],
+      metrics: {
+        "_diff.additions": { value: 5 },
+        coverage: { source: "project", type: "number", value: 80 },
+        "_preview.url": { value: null },
+      },
+    });
   });
 
   it("derives each active attempt's base from its current head: the task branch when the task has one", async () => {
@@ -442,7 +515,6 @@ describe("attempt scoring", () => {
         ...result(),
         run: 1,
         finishedAt: "2026-10-10T12:00:00.000Z",
-        metrics: { coverage: 81.5, bundle_kb: 120 },
       },
     });
   });

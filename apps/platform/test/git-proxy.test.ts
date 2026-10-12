@@ -326,8 +326,7 @@ describe("merge request notices on a push to the source attempt", () => {
     config: { kind: "none" },
     gate: "passed",
     checks: [],
-    builtin: { filesChanged: 1, additions: 1, deletions: 0, durationMs: 5 },
-    preview: { status: "none" },
+    metrics: {},
     logs: [],
   };
 

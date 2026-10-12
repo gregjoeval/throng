@@ -200,14 +200,10 @@ export interface RunDetail extends ScoringRun {
   result: ScoringResult | null;
 }
 
-/**
- * An attempt's current result: the latest `done` run for its current head, with the run it came
- * from and every check's metrics in one map (metric names are unique per project).
- */
+/** An attempt's current result: the latest `done` run for its current head, with the run it came from. */
 export interface CurrentResult extends ScoringResult {
   run: number;
   finishedAt: string;
-  metrics: Record<string, number>;
 }
 
 /** An attempt's scoring status for polling, with its current result once its head has one. */
@@ -715,8 +711,7 @@ function scoringStatus({ current, ...status }: AttemptScoringDetail): ScoringSta
 
 function currentResult(run: StoredRun): CurrentResult {
   if (run.result === null || run.finished_at === null) throw new Error(`run ${run.id} is done without a result`);
-  const metrics = Object.assign({}, ...run.result.checks.map((c) => c.metrics)) as Record<string, number>;
-  return { ...run.result, run: run.id, finishedAt: new Date(run.finished_at).toISOString(), metrics };
+  return { ...run.result, run: run.id, finishedAt: new Date(run.finished_at).toISOString() };
 }
 
 function iso(ms: number | null): string | null {

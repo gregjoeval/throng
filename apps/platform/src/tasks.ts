@@ -90,6 +90,8 @@ export interface Attempt {
   closedAt: string | null;
   mergedSha: string | null;
   archivedSha: string | null;
+  /** The attempt of the same task it was copied from when it was started; absent when it wasn't. Never its base. */
+  forkedFrom?: string;
   scoring: AttemptScoring;
   mergeRequest: { state: AttemptMergeRequest["state"]; lastDequeue: { reason: DequeueReason } | null } | null;
   verdicts: VerdictSummary;
@@ -202,6 +204,8 @@ export interface ArenaAttempt extends ScoringStatus {
   author: UserRef;
   /** An active attempt's base at its current head, scored or not (`currentBase`); null otherwise. */
   base: Base | null;
+  /** The attempt of the same task it was copied from when it was started; absent when it wasn't. Never its base. */
+  forkedFrom?: string;
   verdicts: VerdictSummary;
 }
 
@@ -338,9 +342,14 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
     /** Creates `count` draft attempts, each with its own fork. Any signed-in user may. */
     async createAttempts(
       actor: Actor,
-      input: TaskPath & { count?: number | undefined; note?: string | undefined },
+      input: TaskPath & { count?: number | undefined; note?: string | undefined; from?: string | undefined },
     ): Promise<Attempt[]> {
-      const create = { task: taskNumber(input.task), count: input.count, note: input.note };
+      const create = {
+        task: taskNumber(input.task),
+        count: input.count,
+        note: input.note,
+        from: input.from === undefined ? undefined : attemptRefOf(input.from),
+      };
       return attempts(await invoke("createAttempts", await project(input), actor, create));
     },
 
@@ -403,12 +412,13 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
       ]);
       return {
         task: taskRef(number),
-        attempts: list.map(({ scoring, fork, state, author, verdicts }, i) => ({
+        attempts: list.map(({ scoring, fork, state, author, verdicts, forked_from }, i) => ({
           ref: fork,
           state,
           author: userRef(author, users),
           ...scoringStatus(scoring),
           base: bases[i] ?? null,
+          ...forkedFrom(forked_from),
           verdicts,
         })),
       };
@@ -575,6 +585,11 @@ function publicTask(t: StoredTask, users: Map<string, string>): Task {
   };
 }
 
+/** `forkedFrom` for an attempt copied from another, and nothing for one that wasn't. */
+function forkedFrom(source: string | null): { forkedFrom?: string } {
+  return source === null ? {} : { forkedFrom: source };
+}
+
 function publicAttempt(a: StoredAttempt, users: Map<string, string>): Attempt {
   const mr = a.merge_request;
   return {
@@ -590,6 +605,7 @@ function publicAttempt(a: StoredAttempt, users: Map<string, string>): Attempt {
     closedAt: a.closed_at,
     mergedSha: a.merged_sha,
     archivedSha: a.archived_sha,
+    ...forkedFrom(a.forked_from),
     scoring: a.scoring,
     mergeRequest: mr === null ? null : { state: mr.state, lastDequeue: mr.last_dequeue },
     verdicts: a.verdicts,

@@ -21,7 +21,7 @@ describe("e2eToken", () => {
     expect(first.user.id).toBe(second.user.id);
     expect(first.token).not.toBe(second.token);
     const found = await authenticateToken(db, first.token, NOW);
-    expect(found?.actor).toMatchObject({ user: { id: first.user.id }, agent: null });
+    expect(found?.actor).toMatchObject({ user: { id: first.user.id }, alias: null });
   });
 });
 
@@ -158,7 +158,7 @@ describe("the e2e routes", () => {
     const { body: minted } = await call("POST", "/e2e/token");
     if (minted === null) throw new Error("minting the run's token returned no JSON");
     const other = await userForEmail(db, "ada@example.com");
-    const { token: adas } = await mintToken(db, { userId: other.id, agent: null, ttlSeconds: 60, now: new Date() });
+    const { token: adas } = await mintToken(db, { userId: other.id, alias: null, ttlSeconds: 60, now: new Date() });
 
     expect((await call("DELETE", `/e2e/tokens/${adas.id}`)).status).toBe(404);
     expect((await call("DELETE", `/e2e/tokens/${minted["id"]}`)).status).toBe(200);

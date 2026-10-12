@@ -14,13 +14,13 @@ import { testSql } from "./support/task-backend.ts";
 const PROJECT: ProjectContext = { id: "abc123", owner: "owner001" };
 const ORIGIN = "abc123-main";
 
-function actor(id: string, agent: string | null = null): Actor {
-  return { user: { id, handle: id, email: `${id}@example.com`, created_at: "" }, agent };
+function actor(id: string, alias: string | null = null): Actor {
+  return { user: { id, handle: id, email: `${id}@example.com`, created_at: "" }, alias };
 }
 
 const owner = actor("owner001");
 const cat = actor("cat00001");
-const catAgent = actor("cat00001", "claude");
+const catAlias = actor("cat00001", "claude");
 const ada = actor("ada00001");
 const bob = actor("bob00001");
 
@@ -112,14 +112,14 @@ describe("selection", () => {
     await open(ref1);
     await open(ref2);
 
-    const selected = await store.selectAttempt(PROJECT, catAgent, { ...ref1 });
+    const selected = await store.selectAttempt(PROJECT, catAlias, { ...ref1 });
     expect(selected).toMatchObject({
       task: 1,
       attempt: 1,
       state: "pending",
       approved_head: base.hash,
-      approved_by: { user: cat.user.id, agent: "claude" },
-      created_by: { user: cat.user.id, agent: "claude" },
+      approved_by: { user: cat.user.id, alias: "claude" },
+      created_by: { user: cat.user.id, alias: "claude" },
       queued_at: null,
       position: null,
       last_dequeue: null,
@@ -186,7 +186,7 @@ describe("pending → queued", () => {
 });
 
 describe("selection permissions and requirements", () => {
-  it("lets the task creator or the project owner (or their agents) select, not others", async () => {
+  it("lets the task creator or the project owner (or their aliases) select, not others", async () => {
     const { store, ref1, open } = await setup();
     await open(ref1);
     expect(await code(store.selectAttempt(PROJECT, ada, ref1))).toBe("forbidden");
@@ -212,7 +212,7 @@ describe("selection permissions and requirements", () => {
     const mine = at(await store.createAttempts(PROJECT, cat, { task: task.number }), 0);
     const ref = { task: mine.task, number: mine.number };
     await store.openAttempt(PROJECT, cat, ref);
-    expect(await store.selectAttempt(PROJECT, catAgent, ref)).toMatchObject({ task: 2, attempt: 1, state: "pending" });
+    expect(await store.selectAttempt(PROJECT, catAlias, ref)).toMatchObject({ task: 2, attempt: 1, state: "pending" });
   });
 
   it("merges a single-attempt task through the same call, closing nothing else", async () => {
@@ -237,7 +237,7 @@ describe("approve and cancel", () => {
       expect(await code(() => store.cancelMergeRequest(PROJECT, who, { task: 1 }))).toBe("forbidden");
     }
     expect((await store.approveMergeRequest(PROJECT, owner, { task: 1 })).state).toBe("pending");
-    expect(store.cancelMergeRequest(PROJECT, catAgent, { task: 1 }).state).toBe("cancelled");
+    expect(store.cancelMergeRequest(PROJECT, catAlias, { task: 1 }).state).toBe("cancelled");
   });
 
   it("approves the source's current head from needsReview, and queues once it passes", async () => {

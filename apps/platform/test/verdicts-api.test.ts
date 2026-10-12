@@ -41,9 +41,9 @@ async function setup() {
     const res = await api.request(path, init, env);
     return { status: res.status, body: (await res.json()) as Json };
   };
-  const tokenFor = async (email: string, agent?: string) => {
+  const tokenFor = async (email: string, alias?: string) => {
     const headers = { [FORWARDED_EMAIL_HEADER]: email, "Content-Type": "application/json" };
-    const res = await api.request("/tokens", { method: "POST", headers, body: JSON.stringify({ agent }) }, env);
+    const res = await api.request("/tokens", { method: "POST", headers, body: JSON.stringify({ alias }) }, env);
     return ((await res.json()) as Json)["token"] as string;
   };
 
@@ -69,7 +69,7 @@ async function setup() {
     const after = repos.commit(fork, { files: { "README.md": content } }).hash;
     store(projectId).recordPush(
       { id: projectId, owner: "" },
-      { user: adaUser, agent: null },
+      { user: adaUser, alias: null },
       {
         task: 1,
         number: attempt,
@@ -83,7 +83,7 @@ async function setup() {
   const list = async (attempt = "t1a1") => (await call("GET", `${base}/attempts/${attempt}/verdicts`, ada)).body;
   const journal = () =>
     sql(projectId)
-      .db.prepare("SELECT kind, user_id, agent, task, attempt, detail FROM journal WHERE kind = 'verdictPosted'")
+      .db.prepare("SELECT kind, user_id, alias, task, attempt, detail FROM journal WHERE kind = 'verdictPosted'")
       .all();
 
   /** Merges one of ada's attempts, as a landing would. */
@@ -94,13 +94,13 @@ async function setup() {
 }
 
 describe("posting a verdict", () => {
-  it("records another user's verdict on the current head, with the agent they acted under", async () => {
+  it("records another user's verdict on the current head, with the alias they acted under", async () => {
     const { post, list, push, bobClaude, bobUser, journal } = await setup();
     const head = push(1, "one\n");
     const posted = await post(bobClaude, { recommendation: "revise", body: "Needs a **test**." });
     const verdict = {
       reviewer: { id: bobUser.id, handle: "bob" },
-      agent: "claude",
+      alias: "claude",
       head,
       recommendation: "revise",
       body: "Needs a **test**.",
@@ -113,7 +113,7 @@ describe("posting a verdict", () => {
       {
         kind: "verdictPosted",
         user_id: bobUser.id,
-        agent: "claude",
+        alias: "claude",
         task: 1,
         attempt: 1,
         detail: JSON.stringify({ ref: "t1a1", head, recommendation: "revise" }),
@@ -121,7 +121,7 @@ describe("posting a verdict", () => {
     ]);
   });
 
-  it("refuses the attempt's author and their agents, and lets any other user or agent post", async () => {
+  it("refuses the attempt's author and their aliases, and lets any other user or alias post", async () => {
     const { post, push, ada, adaClaude, bob, bobClaude, greg, list } = await setup();
     push(1, "one\n");
     for (const author of [ada, adaClaude]) {
@@ -135,8 +135,8 @@ describe("posting a verdict", () => {
     for (const other of [bob, bobClaude, greg]) {
       expect((await post(other, { recommendation: "merge", body: "LGTM" })).status).toBe(201);
     }
-    // Bob and Bob's agent are one reviewer: the agent's verdict replaced Bob's.
-    expect((await list())["verdicts"].map((v: Json) => [v["reviewer"]["handle"], v["agent"]])).toEqual([
+    // Bob and Bob's alias are one reviewer: the alias's verdict replaced Bob's.
+    expect((await list())["verdicts"].map((v: Json) => [v["reviewer"]["handle"], v["alias"]])).toEqual([
       ["bob", "claude"],
       ["greg", null],
     ]);
@@ -202,7 +202,7 @@ describe("posting a verdict", () => {
     push(1, "one\n");
     const posted = await post({ web: "bob@example.com" }, { recommendation: "merge", body: "LGTM" });
     expect(posted.status).toBe(201);
-    expect(posted.body).toMatchObject({ reviewer: { handle: "bob" }, agent: null });
+    expect(posted.body).toMatchObject({ reviewer: { handle: "bob" }, alias: null });
     expect((await post({ web: "ada@example.com" }, { recommendation: "merge", body: "Mine" })).status).toBe(403);
     const listed = await call("GET", `${base}/attempts/t1a1/verdicts`, { web: "greg@example.com" });
     expect(listed.body["verdicts"]).toEqual([posted.body]);

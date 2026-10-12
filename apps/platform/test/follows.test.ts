@@ -19,7 +19,7 @@ const PROJECT: ProjectContext = { id: "abc123", owner: "owner001" };
 const ORIGIN = "abc123-main";
 
 function actor(id: string): Actor {
-  return { user: { id, handle: id, email: `${id}@example.com`, created_at: "" }, agent: null };
+  return { user: { id, handle: id, email: `${id}@example.com`, created_at: "" }, alias: null };
 }
 const owner = actor("owner001");
 const cat = actor("cat00001");

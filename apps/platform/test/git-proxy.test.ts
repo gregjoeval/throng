@@ -48,8 +48,8 @@ async function setup() {
 
   const person = async (email: string) => {
     const user = await userForEmail(db, email);
-    const { plaintext } = await mintToken(db, { userId: user.id, agent: null, ttlSeconds: 3600, now: now() });
-    const actor: Actor = { user, agent: null };
+    const { plaintext } = await mintToken(db, { userId: user.id, alias: null, ttlSeconds: 3600, now: now() });
+    const actor: Actor = { user, alias: null };
     return { user, actor, token: plaintext };
   };
   const greg = await person("greg@example.com");

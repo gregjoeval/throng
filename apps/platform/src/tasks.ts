@@ -118,8 +118,8 @@ export interface Attempt extends AttemptStanding {
 /** A reviewer's verdict on one head of an attempt, as the API shows it. */
 export interface Verdict {
   reviewer: UserRef;
-  /** The agent alias the reviewer posted under, if any. */
-  agent: string | null;
+  /** The alias the reviewer posted under, if any. */
+  alias: string | null;
   head: string;
   recommendation: VerdictRecommendation;
   body: string;
@@ -128,9 +128,9 @@ export interface Verdict {
   superseded: boolean;
 }
 
-/** Who approved or created a merge request: a user, and the agent they acted under. */
+/** Who approved or created a merge request: a user, and the alias they acted under. */
 export interface ActorRef extends UserRef {
-  agent: string | null;
+  alias: string | null;
 }
 
 /** A merge request as the API shows it. Its latest dequeue's details are read separately. */
@@ -186,7 +186,7 @@ export interface ScoringRun {
   status: StoredRun["status"];
   /** Who asked for it, or null when no user did. */
   requestedBy: UserRef | null;
-  agent: string | null;
+  alias: string | null;
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
@@ -318,7 +318,7 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
       mergeRequest(await invoke(method, await project(input), actor, { task: taskNumber(input.task) }));
 
   return {
-    /** Creates an open task; the caller's human is its creator. Any signed-in user may. */
+    /** Creates an open task; the caller's user is its creator. Any signed-in user may. */
     async createTask(
       actor: Actor,
       input: ProjectPath & { title: string; body?: string | undefined; attemptLimit?: number | null | undefined },
@@ -390,7 +390,7 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
       return attempts(await invoke("listAttempts", await project(input), actor, list));
     },
 
-    /** Edits an attempt's note. Only its author (or their agents) may. */
+    /** Edits an attempt's note. Only its author (or their aliases) may. */
     async editAttempt(actor: Actor, input: AttemptPath & { note: string }): Promise<Attempt> {
       const edit = { ...attemptRefOf(input.attempt), note: input.note };
       return one(await invoke("editAttempt", await project(input), actor, edit), attempts);
@@ -403,7 +403,7 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
     obsoleteAttempt: attemptMove("obsoleteAttempt"),
     restoreAttempt: attemptMove("restoreAttempt"),
 
-    /** Scores a draft attempt's head now. Only its author (or their agents) may. */
+    /** Scores a draft attempt's head now. Only its author (or their aliases) may. */
     scoreNow: scoringRequest("scoreNow"),
     /** Scores an open attempt's head again. Its author, the task's creator or the project owner may. */
     rescore: scoringRequest("rescore"),
@@ -469,7 +469,7 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
 
     /**
      * Hands an active attempt to the user with handle `to`, who becomes its author. Only its
-     * author (or their agents) may. An unknown handle is `notFound`; handing it to its own author
+     * author (or their aliases) may. An unknown handle is `notFound`; handing it to its own author
      * is `invalidRequest`.
      */
     async handOffAttempt(actor: Actor, input: AttemptPath & { to: string }): Promise<Attempt> {
@@ -482,7 +482,7 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
 
     /**
      * Posts the actor's verdict on the attempt's current head, replacing their earlier one on it.
-     * Anyone but the attempt's author (or their agents) may, while it is active or merged.
+     * Anyone but the attempt's author (or their aliases) may, while it is active or merged.
      */
     async postVerdict(
       actor: Actor,
@@ -645,7 +645,7 @@ function publicAttempt(a: StoredAttempt, users: Map<string, string>): Attempt {
 function publicVerdict(v: VerdictDetail, users: Map<string, string>): Verdict {
   return {
     reviewer: userRef(v.reviewer, users),
-    agent: v.agent,
+    alias: v.alias,
     head: v.head,
     recommendation: v.recommendation,
     body: v.body,
@@ -654,8 +654,8 @@ function publicVerdict(v: VerdictDetail, users: Map<string, string>): Verdict {
   };
 }
 
-function actorRef(acted: { user: string; agent: string | null }, users: Map<string, string>): ActorRef {
-  return { ...userRef(acted.user, users), agent: acted.agent };
+function actorRef(acted: { user: string; alias: string | null }, users: Map<string, string>): ActorRef {
+  return { ...userRef(acted.user, users), alias: acted.alias };
 }
 
 function publicMergeRequest(mr: StoredMergeRequest, users: Map<string, string>): MergeRequest {
@@ -697,7 +697,7 @@ function publicRun(run: StoredRun, users: Map<string, string>): ScoringRun {
     trigger: run.trigger,
     status: run.status,
     requestedBy: run.user_id === null ? null : userRef(run.user_id, users),
-    agent: run.agent,
+    alias: run.alias,
     createdAt: new Date(run.created_at).toISOString(),
     startedAt: iso(run.started_at),
     finishedAt: iso(run.finished_at),

@@ -510,7 +510,7 @@ async function reject(c: GitContext, target: Target, push: PushRequest, refusal:
     event: "git.push_rejected",
     repo: target.repo,
     user: c.var.actor.user.id,
-    agent: c.var.actor.agent,
+    alias: c.var.actor.alias,
     refs: push.updates.map((u) => u.ref),
   });
   // Read the rest of the pack, so the client sees our answer rather than a broken pipe.

@@ -76,12 +76,12 @@ describe("the commit log", () => {
     expect(rows()).toHaveLength(2);
   });
 
-  it("shows the agent alias an author acted under", async () => {
+  it("shows the alias an author acted under", async () => {
     serveHistory([commit(1, { author: { ...commit(1).author, name: "ada (claude)" } })]);
     await renderApp("/ada/alpha/commits/main");
     const row = await screen.findByRole("listitem", { name: "Change number 1" });
     expect(within(row).getByText("ada")).toBeInTheDocument();
-    expect(within(row).getByText("claude")).toHaveAttribute("title", "Agent alias");
+    expect(within(row).getByText("claude")).toHaveAttribute("title", "Alias");
   });
 
   it("pages through the history with older and newer links", async () => {

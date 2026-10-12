@@ -49,7 +49,7 @@ const run = (id: number, sha: string, fields: Partial<RunDetail> = {}): RunDetai
   trigger: "push",
   status: "done",
   requestedBy: null,
-  agent: null,
+  alias: null,
   createdAt: me.user.createdAt,
   startedAt: me.user.createdAt,
   finishedAt: me.user.createdAt,
@@ -62,7 +62,7 @@ const run = (id: number, sha: string, fields: Partial<RunDetail> = {}): RunDetai
 /** A verdict on t1a1 by `reviewer` at `head`, on the current head unless `superseded`. */
 const verdict = (head: string, fields: Partial<Verdict> = {}): Verdict => ({
   reviewer: { id: me.user.id, handle: me.user.handle },
-  agent: null,
+  alias: null,
   head,
   recommendation: "merge",
   body: "Looks good.",
@@ -151,7 +151,7 @@ describe("an attempt's details", () => {
           body: "Breaks **login**.",
           superseded: true,
         }),
-        verdict(String(head.sha), { reviewer: { id: "u3", handle: "cy" }, agent: "reviewer-bot", body: "Fixed." }),
+        verdict(String(head.sha), { reviewer: { id: "u3", handle: "cy" }, alias: "reviewer-bot", body: "Fixed." }),
       ],
     });
     const list = await within(sheet).findByRole("list", { name: "Verdicts" });

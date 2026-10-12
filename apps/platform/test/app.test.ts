@@ -17,7 +17,7 @@ async function setup() {
   const options = { verifierFor: () => verify, now: () => NOW, repos: () => repos };
   const apps = { public: publicApp(options), binding: webApp(options) };
   const owner = await userForEmail(env.DB, "owner@example.com");
-  const { plaintext } = await mintToken(env.DB, { userId: owner.id, agent: null, ttlSeconds: 3600, now: NOW });
+  const { plaintext } = await mintToken(env.DB, { userId: owner.id, alias: null, ttlSeconds: 3600, now: NOW });
   const me = async (via: keyof typeof apps, headers: Record<string, string> = {}) => {
     const res = await apps[via].request("/api/me", { headers }, env);
     return { status: res.status, body: (await res.json()) as Json };
@@ -47,7 +47,7 @@ describe("the service binding (WebEntrypoint)", () => {
     const { me } = await setup();
     const res = await me("binding", { [FORWARDED_EMAIL_HEADER]: "Ada@Example.com" });
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ user: { handle: "ada", email: "ada@example.com" }, agent: null, token: null });
+    expect(res.body).toMatchObject({ user: { handle: "ada", email: "ada@example.com" }, alias: null, token: null });
   });
 
   it("is 401 without a forwarded email", async () => {

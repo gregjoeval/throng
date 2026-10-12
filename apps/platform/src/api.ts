@@ -40,7 +40,7 @@ const UserSchema = z
 const TokenSchema = z
   .object({
     id: z.string(),
-    agent: z.string().nullable(),
+    alias: z.string().nullable(),
     expiresAt: z.string(),
     revokedAt: z.string().nullable(),
     createdAt: z.string(),
@@ -50,7 +50,7 @@ const TokenSchema = z
 const MeSchema = z
   .object({
     user: UserSchema,
-    agent: z.string().nullable().openapi({ description: "The agent alias the caller's token acts under." }),
+    alias: z.string().nullable().openapi({ description: "The alias the caller's token acts under, if any." }),
     token: z
       .object({ id: z.string(), expiresAt: z.string() })
       .nullable()
@@ -60,14 +60,19 @@ const MeSchema = z
 
 const MintTokenSchema = z
   .object({
-    agent: z
+    alias: z
       .string()
       .trim()
       .min(1)
       .max(40)
-      .regex(/^[^\p{C}()]+$/u, "agent must be printable text without parentheses")
+      .regex(/^[^\p{C}()]+$/u, "alias must be printable text without parentheses")
+      .nullable()
       .optional()
-      .openapi({ description: "An agent alias of the caller, e.g. `claude`. Omit for the human." }),
+      .openapi({
+        description:
+          "An alias of the caller, e.g. `claude`, or null for the caller as themselves. Omitted, it is the alias the " +
+          "caller's token acts under, if any.",
+      }),
     expiresIn: z
       .number()
       .int()
@@ -149,7 +154,7 @@ const VerdictSummarySchema = z
 const VerdictSchema = z
   .object({
     reviewer: UserRefSchema,
-    agent: z.string().nullable().openapi({ description: "The agent alias the reviewer posted under, if any." }),
+    alias: z.string().nullable().openapi({ description: "The alias the reviewer posted under, if any." }),
     head: z.string().openapi({ description: "The head it judges: the attempt's current head when it was posted." }),
     recommendation: z.enum(VERDICT_RECOMMENDATIONS),
     body: z.string().openapi({ description: "Markdown." }),
@@ -247,7 +252,7 @@ const ScoringRunFields = z.object({
   trigger: z.enum(SCORING_TRIGGERS),
   status: z.enum(RUN_STATUSES),
   requestedBy: UserRefSchema.nullable(),
-  agent: z.string().nullable(),
+  alias: z.string().nullable(),
   createdAt: z.string(),
   startedAt: z.string().nullable(),
   finishedAt: z.string().nullable(),
@@ -403,7 +408,7 @@ const TaskArenaSchema = z
   .openapi("TaskArena");
 
 const ActorRefSchema = UserRefSchema.extend({
-  agent: z.string().nullable().openapi({ description: "The agent alias they acted under, if any." }),
+  alias: z.string().nullable().openapi({ description: "The alias they acted under, if any." }),
 }).openapi("ActorRef");
 
 const MergeRequestSchema = z
@@ -597,10 +602,10 @@ function noLogs(): LogStore {
 type Bearer = ReturnType<typeof bearerAuth>;
 type Browser = ReturnType<typeof bearerOrForwarded>;
 
-const AUTHOR_ONLY = "Only the attempt's author, or their agents, may.";
+const AUTHOR_ONLY = "Only the attempt's author, or their aliases, may.";
 const OWNER_ONLY = "Only the project owner may.";
 const TASK_MANAGERS = "Only the project owner or the task's creator may.";
-const RESCORERS = "Only the attempt's author (or their agents), the task's creator or the project owner may.";
+const RESCORERS = "Only the attempt's author (or their aliases), the task's creator or the project owner may.";
 
 /** A task transition route: `POST …/tasks/{t}/<verb>`, also open to throng-web. */
 function taskTransition<V extends string>(
@@ -749,8 +754,8 @@ function scoringRoute<V extends string>(
 }
 
 /** A token row as the API shows it. */
-function publicToken({ id, agent, expires_at, revoked_at, created_at }: Token): z.infer<typeof TokenSchema> {
-  return { id, agent, expiresAt: expires_at, revokedAt: revoked_at, createdAt: created_at };
+function publicToken({ id, alias, expires_at, revoked_at, created_at }: Token): z.infer<typeof TokenSchema> {
+  return { id, alias, expiresAt: expires_at, revokedAt: revoked_at, createdAt: created_at };
 }
 
 /** A user row as the API shows it. */
@@ -808,7 +813,7 @@ export function apiRoutes(options: ApiOptions = {}) {
         path: "/me",
         operationId: "getMe",
         tags: ["Users"],
-        summary: "The caller: their user, and the agent alias and token they act with",
+        summary: "The caller: their user, and the alias and token they act with",
         security,
         middleware: [auth] as const,
         responses: {
@@ -817,9 +822,9 @@ export function apiRoutes(options: ApiOptions = {}) {
         },
       }),
       (c) => {
-        const { user, agent } = c.var.actor;
+        const { user, alias } = c.var.actor;
         const token = c.var.token === null ? null : { id: c.var.token.id, expiresAt: c.var.token.expires_at };
-        return c.json({ user: publicUser(user), agent, token }, 200);
+        return c.json({ user: publicUser(user), alias, token }, 200);
       },
     )
     .openapi(
@@ -828,10 +833,10 @@ export function apiRoutes(options: ApiOptions = {}) {
         path: "/tokens",
         operationId: "mintToken",
         tags: ["Tokens"],
-        summary: "Mint a token for the caller or one of their agent aliases",
+        summary: "Mint a token for the caller or one of their aliases",
         description:
           "Returns the plaintext once. A token-authenticated caller can't mint a token that outlives its own, " +
-          "and an agent's token can only mint tokens for that same agent.",
+          "and an alias's token can only mint tokens for that same alias.",
         security,
         middleware: [auth] as const,
         request: {
@@ -841,7 +846,7 @@ export function apiRoutes(options: ApiOptions = {}) {
           201: { description: "The new token.", content: { "application/json": { schema: MintedTokenSchema } } },
           400: errorResponse("The request is invalid, e.g. `expiresIn` is above 7 days."),
           401: unauthorized,
-          403: errorResponse("An agent's token tried to mint for the human or another agent."),
+          403: errorResponse("An alias's token tried to mint for the user themselves or another alias."),
         },
       }),
       async (c) => {
@@ -857,7 +862,7 @@ export function apiRoutes(options: ApiOptions = {}) {
         operationId: "listTokens",
         tags: ["Tokens"],
         summary: "List the caller's tokens, without secrets",
-        description: "An agent's token lists only that agent's tokens.",
+        description: "An alias's token lists only that alias's tokens.",
         security,
         middleware: [auth] as const,
         responses: {
@@ -900,7 +905,7 @@ export function apiRoutes(options: ApiOptions = {}) {
         tags: ["Projects"],
         summary: "List the projects the caller owns",
         description:
-          "The projects owned by the caller's human, also when an agent's token calls, ordered by handle. " +
+          "The projects owned by the caller's user, also when an alias's token calls, ordered by handle. " +
           "Other owners' projects can still be read by `owner/project`.",
         security: bearerOrWeb,
         middleware: [browser] as const,
@@ -925,7 +930,7 @@ export function apiRoutes(options: ApiOptions = {}) {
         tags: ["Projects"],
         summary: "Create a project owned by the caller",
         description:
-          "The caller's human becomes the owner, also when an agent's token calls. Creates the project's " +
+          "The caller's user becomes the owner, also when an alias's token calls. Creates the project's " +
           "origin repo with `main` as its default branch.",
         security: bearerOrWeb,
         middleware: [browser] as const,
@@ -970,7 +975,7 @@ export function apiRoutes(options: ApiOptions = {}) {
         operationId: "createTask",
         tags: ["Tasks"],
         summary: "Create a task in a project",
-        description: "Any signed-in user may. The caller's human is its creator. The task starts open.",
+        description: "Any signed-in user may. The caller is its creator. The task starts open.",
         security: bearerOrWeb,
         middleware: [browser] as const,
         request: { params: ProjectPathSchema, body: { required: true, ...json(CreateTaskSchema) } },
@@ -1085,7 +1090,7 @@ export function apiRoutes(options: ApiOptions = {}) {
         tags: ["Attempts"],
         summary: "Fan a task out to new draft attempts, each with its own fork",
         description:
-          "Any signed-in user may; the caller's human authors every attempt. Creates `count` attempts or none: " +
+          "Any signed-in user may; the caller's user authors every attempt. Creates `count` attempts or none: " +
           "the batch fails whole if it would exceed the task's cap on active attempts or a fork fails.",
         security: bearerOnly,
         middleware: [bearer] as const,
@@ -1152,7 +1157,7 @@ export function apiRoutes(options: ApiOptions = {}) {
         operationId: "editAttempt",
         tags: ["Attempts"],
         summary: "Edit an attempt's note",
-        description: "Only the attempt's author, or their agents, may. Obsolete attempts can't be edited.",
+        description: "Only the attempt's author, or their aliases, may. Obsolete attempts can't be edited.",
         security: bearerOnly,
         middleware: [bearer] as const,
         request: { params: AttemptPathSchema, body: { required: true, ...json(EditAttemptSchema) } },
@@ -1335,7 +1340,7 @@ export function apiRoutes(options: ApiOptions = {}) {
         tags: ["Attempts"],
         summary: "Hand an active attempt to another user",
         description:
-          "Only the attempt's author, or their agents, may, and only while it is a draft or open. " +
+          "Only the attempt's author, or their aliases, may, and only while it is a draft or open. " +
           "The user named by `to` becomes its author at once, and the git proxy checks the new author " +
           "on the next push, so the old author's pushes are refused from then on. Journals `handedOff`.",
         security: bearerOnly,
@@ -1364,7 +1369,7 @@ export function apiRoutes(options: ApiOptions = {}) {
         summary: "Post a verdict on an attempt's current head",
         description:
           "Recommends `merge`, `revise` or `reject` for the attempt's current head, with a markdown explanation. Anyone " +
-          "but the attempt's author, or their agents, may, while it is a draft, open or merged. Posting again for the same " +
+          "but the attempt's author, or their aliases, may, while it is a draft, open or merged. Posting again for the same " +
           "head replaces your verdict; after a push, your verdict on the old head stays, superseded. Verdicts are advice: " +
           "they never change the gate, the score or the merge queue. Journals `verdictPosted`.",
         security: bearerOrWeb,
@@ -1374,7 +1379,7 @@ export function apiRoutes(options: ApiOptions = {}) {
           201: { description: "The verdict as stored.", ...json(VerdictSchema) },
           400: errorResponse("The request is invalid: a bad reference or recommendation, or a body over 64 KB."),
           401: unauthorizedBearer,
-          403: errorResponse("The attempt's author, or their agents, can't post a verdict on it."),
+          403: errorResponse("The attempt's author, or their aliases, can't post a verdict on it."),
           404: errorResponse("No such project or attempt."),
           409: errorResponse("`invalidState`: the attempt is closed or obsolete, or nothing has been pushed to it."),
         },
@@ -1481,7 +1486,7 @@ export function apiRoutes(options: ApiOptions = {}) {
           "Creates the task's merge request from one of its open attempts, approving the attempt's current head, and " +
           "closes the task's other active attempts (archiving their forks). The merge request is `pending`, and enters the " +
           "merge queue once the approved head's latest scoring run is done with a passing gate. A single-attempt task's " +
-          "Merge button calls this too. The task's creator or the project owner (or their agents) may; the creator may " +
+          "Merge button calls this too. The task's creator or the project owner (or their aliases) may; the creator may " +
           "select their own attempt. Journals `selected` and `approved`.",
         security: bearerOrWeb,
         middleware: [browser] as const,

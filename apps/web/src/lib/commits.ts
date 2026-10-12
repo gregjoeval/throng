@@ -14,14 +14,14 @@ export function body(message: string): string {
 }
 
 /**
- * A git identity's name split into the human and the agent alias they acted under. Throng names an
- * agent's work `ada (claude)`, as in its `Co-authored-by` trailers; any other name has no alias.
+ * A git identity's name split into the user and the alias they acted under. Throng names work done
+ * under an alias `ada (claude)`, as in its `Co-authored-by` trailers; any other name has no alias.
  */
-export function person(name: string): { name: string; agent: string | null } {
+export function person(name: string): { name: string; alias: string | null } {
   const match = /^(.+?) \(([^()]+)\)$/u.exec(name);
   return match?.[1] === undefined || match[2] === undefined
-    ? { name, agent: null }
-    : { name: match[1], agent: match[2] };
+    ? { name, alias: null }
+    : { name: match[1], alias: match[2] };
 }
 
 /** `3 hours ago`, from an ISO 8601 date. */

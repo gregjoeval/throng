@@ -15,6 +15,7 @@
 // Workflows is I/O, done by `drain`, which the Durable Object runs after every store call.
 
 import { normaliseResult } from "./casing.ts";
+import { addColumns, renameColumns } from "./columns.ts";
 import { forkRepo } from "./repos.ts";
 import type { ScoringResult } from "./results.ts";
 import { attemptRef } from "./task-refs.ts";
@@ -92,7 +93,7 @@ export interface StoredRun extends ScoredHead {
   trigger: ScoringTrigger;
   /** The requesting user's id, or null for a request no user made. */
   user_id: string | null;
-  agent: string | null;
+  alias: string | null;
   status: RunStatus;
   /** The Workflow instance id. */
   instance_id: string;
@@ -138,7 +139,7 @@ const SCHEMA = [
   sha TEXT NOT NULL,
   trigger TEXT NOT NULL,
   user_id TEXT,
-  agent TEXT,
+  alias TEXT,
   status TEXT NOT NULL,
   instance_id TEXT NOT NULL,
   created_at INTEGER NOT NULL,
@@ -156,6 +157,8 @@ const SCHEMA = [
 ];
 /** Columns added to `scoring_runs` after its first version. */
 const RUN_COLUMNS = ["result TEXT", "error TEXT", "superseded INTEGER NOT NULL DEFAULT 0"];
+/** `scoring_runs` columns named before an actor's alias was called an alias. */
+const RUN_RENAMES = [["agent", "alias"]] as const;
 
 export interface ScoringQueueDeps {
   sql: Sql;
@@ -179,10 +182,8 @@ export class ScoringQueue {
     this.#now = now;
     this.#reserved = reserved;
     for (const statement of SCHEMA) sql.exec(statement);
-    const columns = new Set(sql.exec<{ name: string }>("PRAGMA table_info(scoring_runs)").map((c) => c.name));
-    for (const column of RUN_COLUMNS) {
-      if (!columns.has(column.split(" ")[0] ?? "")) sql.exec(`ALTER TABLE scoring_runs ADD COLUMN ${column}`);
-    }
+    renameColumns(sql, "scoring_runs", RUN_RENAMES);
+    addColumns(sql, "scoring_runs", RUN_COLUMNS);
   }
 
   /**
@@ -277,7 +278,7 @@ export class ScoringQueue {
       }
 
       const [row] = this.#sql.exec<RunRow>(
-        `INSERT INTO scoring_runs (project, task, attempt, sha, trigger, user_id, agent, status, instance_id, created_at)
+        `INSERT INTO scoring_runs (project, task, attempt, sha, trigger, user_id, alias, status, instance_id, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', '', ?) RETURNING *`,
         input.project,
         input.task,
@@ -285,7 +286,7 @@ export class ScoringQueue {
         input.sha,
         input.trigger,
         input.actor?.user.id ?? null,
-        input.actor?.agent ?? null,
+        input.actor?.alias ?? null,
         this.#ms(),
       );
       if (row === undefined) throw new Error("scoring run insert returned no row");
@@ -466,12 +467,12 @@ export class ScoringQueue {
   #journal(kind: string, run: StoredRun, extra: Record<string, unknown>): void {
     const detail = { ref: headAttemptRef(run), run: run.id, sha: run.sha, ...extra };
     this.#sql.exec(
-      "INSERT INTO journal (at, kind, detail, user_id, agent, task, attempt) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO journal (at, kind, detail, user_id, alias, task, attempt) VALUES (?, ?, ?, ?, ?, ?, ?)",
       this.#ms(),
       kind,
       JSON.stringify(detail),
       run.user_id,
-      run.agent,
+      run.alias,
       run.task,
       run.attempt,
     );

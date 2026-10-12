@@ -24,8 +24,8 @@ import { testSql, testTaskBackends } from "./support/task-backend.ts";
 
 const PROJECT: ProjectContext = { id: "abc123", owner: "owner001" };
 
-function actor(id: string, agent: string | null = null): Actor {
-  return { user: { id, handle: id, email: `${id}@example.com`, created_at: "" }, agent };
+function actor(id: string, alias: string | null = null): Actor {
+  return { user: { id, handle: id, email: `${id}@example.com`, created_at: "" }, alias };
 }
 
 const owner = actor("owner001");
@@ -39,7 +39,7 @@ function storeSetup() {
   const sql = testSql();
   const store = new TaskStore({ sql, repos, now: () => new Date("2026-10-10T12:00:00.000Z") });
   const journal = () =>
-    sql.db.prepare("SELECT kind, user_id, agent, task, attempt, detail FROM journal WHERE kind = 'handedOff'").all();
+    sql.db.prepare("SELECT kind, user_id, alias, task, attempt, detail FROM journal WHERE kind = 'handedOff'").all();
   return { store, journal };
 }
 
@@ -87,7 +87,7 @@ describe("handOffAttempt", () => {
       {
         kind: "handedOff",
         user_id: adaUser.user.id,
-        agent: "claude",
+        alias: "claude",
         task: 1,
         attempt: 1,
         detail: JSON.stringify({ ref: "t1a1", from: adaUser.user.id, to: bobUser.user.id }),
@@ -163,10 +163,10 @@ async function e2eSetup() {
   const server = await serve(app, bindings);
   cleanups.push(server.close);
 
-  const person = async (email: string, agent: string | null = null) => {
+  const person = async (email: string, alias: string | null = null) => {
     const user = await userForEmail(db, email);
-    const { plaintext } = await mintToken(db, { userId: user.id, agent, ttlSeconds: 3600, now: now() });
-    return { user, actor: { user, agent } as Actor, token: plaintext };
+    const { plaintext } = await mintToken(db, { userId: user.id, alias, ttlSeconds: 3600, now: now() });
+    return { user, actor: { user, alias } as Actor, token: plaintext };
   };
   const greg = await person("greg@example.com");
   const ada = await person("ada@example.com");

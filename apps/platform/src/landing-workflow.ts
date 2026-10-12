@@ -4,7 +4,7 @@ import { parseConfig } from "./config";
 import { conflictFiles, parseMergeTree } from "./conflicts";
 import type { ConflictDetails } from "./conflicts";
 import { LANDING_ROLES, sandboxName } from "./grants";
-import { failedChecks, mergeAuthor, mergeCommitMessage, retestConfig } from "./landing";
+import { actedAlias, failedChecks, mergeAuthor, mergeCommitMessage, retestConfig } from "./landing";
 import type { LandingOutcome, LandingParams, Signer } from "./landing";
 import { landingLogKey, logNames } from "./logs";
 import { buildResult, scorePlan, scoreTimeoutMs } from "./results";
@@ -215,10 +215,10 @@ export class LandingWorkflow extends WorkflowEntrypoint<Env, LandingParams> {
       .bind(...ids)
       .all<{ id: string; handle: string }>();
     const handles = new Map(results.map((u) => [u.id, u.handle]));
-    const signer = (id: string, agent: string | null): Signer => ({ id, handle: handles.get(id) ?? id, agent });
+    const signer = (id: string, alias: string | null): Signer => ({ id, handle: handles.get(id) ?? id, alias });
     return {
-      approver: signer(params.approver.user, params.approver.agent),
-      coAuthors: params.coAuthors.map((c) => signer(c.user, c.agent)),
+      approver: signer(params.approver.user, actedAlias(params.approver)),
+      coAuthors: params.coAuthors.map((c) => signer(c.user, actedAlias(c))),
     };
   }
 }

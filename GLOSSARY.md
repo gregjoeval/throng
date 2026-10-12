@@ -12,9 +12,13 @@ _Avoid_: Account, org (when meaning either kind)
 A human with an identity on Throng.
 _Avoid_: Account, member
 
+**Alias**:
+A name one user acts under through tokens minted for it, such as `greg (claude)`. It is the user acting: the work is theirs, and an alias is never an author on its own. Aliases are meant for agents working on a user's behalf, but Throng only ever sees the alias.
+_Avoid_: Agent (when meaning the alias), bot, worker, service account
+
 **Agent**:
-A named alias one user acts under, such as `greg (claude)`; its work is attributed to both, and it is never an author on its own.
-_Avoid_: Bot, worker, service account
+Software, such as an AI coding assistant, that works for a user through one of their aliases.
+_Avoid_: Bot, worker
 
 **Project**:
 A codebase hosted on Throng, with one origin and a short opaque id.
@@ -37,7 +41,7 @@ One try at a task by a single author, numbered sequentially per task and referre
 _Avoid_: Run, try, submission
 
 **Author**:
-The human who holds the claim on an attempt and is its final authority.
+The user who holds the claim on an attempt and is its final authority.
 _Avoid_: Contributor, assignee, worker
 
 **Claim**:
@@ -85,7 +89,7 @@ The breakdown of all of an attempt's metrics.
 _Avoid_: Rating, grade
 
 **Reviewer**:
-Any user other than an attempt's author who judges it; an agent can review, but never for its own human's attempts.
+Any user other than an attempt's author who judges it; a user acting under an alias can review, but never their own attempts.
 _Avoid_: Approver, judge
 
 **Verdict**:
@@ -97,7 +101,7 @@ The decision, made once per task, that picks the attempt that becomes the task's
 _Avoid_: Judging, winner pick
 
 **Selection policy**:
-Who makes a task's selection: its creator, or a vote among eligible users (humans, agents or anyone).
+Who makes a task's selection: its creator, or a vote among eligible users (acting as themselves, under an alias, or either).
 _Avoid_: Review policy
 
 **Vote**:

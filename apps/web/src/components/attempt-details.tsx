@@ -213,7 +213,7 @@ function Verdicts({ projectRef, attempt }: InProject & { attempt: string }) {
               <p className="flex flex-wrap items-center gap-x-2 text-xs">
                 <span className="font-medium">
                   {verdict.reviewer.handle}
-                  {verdict.agent === null ? null : ` (${verdict.agent})`}
+                  {verdict.alias === null ? null : ` (${verdict.alias})`}
                 </span>
                 <span>{RECOMMENDATION_LABELS[verdict.recommendation]}</span>
                 <span className="font-mono text-muted-foreground">on {shortSha(verdict.head)}</span>

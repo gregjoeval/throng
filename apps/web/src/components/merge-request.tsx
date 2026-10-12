@@ -77,7 +77,7 @@ export function MergeRequestSummary({ mr, action = null }: { mr: MergeRequest; a
         Approved <span className="font-mono text-foreground">{mr.approvedHead.slice(0, 7)}</span> by{" "}
         <span className="text-foreground">
           {mr.approvedBy.handle}
-          {mr.approvedBy.agent === null ? null : ` (${mr.approvedBy.agent})`}
+          {mr.approvedBy.alias === null ? null : ` (${mr.approvedBy.alias})`}
         </span>{" "}
         <RelativeTime date={mr.approvedAt} />
       </p>

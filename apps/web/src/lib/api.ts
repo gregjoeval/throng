@@ -27,7 +27,7 @@ export function apiQuery<const K extends QueryKey, R extends ClientResponse<unkn
   return queryOptions({ queryKey, queryFn: ({ signal }) => parseResponse(request({ signal })) });
 }
 
-/** The caller: their user, and the agent and token they act with (both null in the browser). */
+/** The caller: their user, and the alias and token they act with (both null in the browser). */
 export const meQuery = apiQuery(["me"], (init) => client.api.me.$get(undefined, { init }));
 
 /** The projects the signed-in user owns, by handle. */

@@ -30,7 +30,7 @@ function mergeRequest(fields: Partial<MergeRequest> = {}): MergeRequest {
     attempt: "t1a1",
     state: "pending",
     approvedHead: HEAD,
-    approvedBy: { id: me.user.id, handle: "ada", agent: null },
+    approvedBy: { id: me.user.id, handle: "ada", alias: null },
     approvedAt: "2026-10-10T12:00:00.000Z",
     queuedAt: null,
     position: null,
@@ -38,7 +38,7 @@ function mergeRequest(fields: Partial<MergeRequest> = {}): MergeRequest {
     mergeSha: null,
     mergedAt: null,
     createdAt: "2026-10-10T12:00:00.000Z",
-    createdBy: { id: me.user.id, handle: "ada", agent: null },
+    createdBy: { id: me.user.id, handle: "ada", alias: null },
     ...fields,
   };
 }
@@ -110,8 +110,8 @@ describe("the merge request view", () => {
     expect(await banner()).toHaveTextContent(text);
   });
 
-  it("names the agent an approval came through", async () => {
-    await openMergeRequest(mergeRequest({ approvedBy: { ...bob, agent: "claude" } }));
+  it("names the alias an approval came through", async () => {
+    await openMergeRequest(mergeRequest({ approvedBy: { ...bob, alias: "claude" } }));
     await banner();
     expect(
       within(view())

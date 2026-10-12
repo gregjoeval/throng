@@ -125,7 +125,7 @@ describe("the commit view", () => {
     expect(message.querySelector("b")).toBeNull();
     const people = screen.getByRole("list", { name: "People" });
     expect(within(people).getByText("Authored by").parentElement).toHaveTextContent("ada");
-    expect(within(people).getByText("claude")).toHaveAttribute("title", "Agent alias");
+    expect(within(people).getByText("claude")).toHaveAttribute("title", "Alias");
     expect(within(people).getByText("Committed by").parentElement).toHaveTextContent("Throng");
     expect(screen.getByRole("link", { name: PARENT.slice(0, 7) })).toHaveAttribute(
       "href",

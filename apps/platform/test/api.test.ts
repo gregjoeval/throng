@@ -58,21 +58,21 @@ describe("GET /api/me", () => {
     }
   });
 
-  it("returns the signed-in user, created on first sight, with no agent or token", async () => {
+  it("returns the signed-in user, created on first sight, with no alias or token", async () => {
     const { call, human } = setup();
     const first = await call("GET", "/me", human);
     expect(first.status).toBe(200);
-    expect(first.body).toMatchObject({ user: { handle: "greg", email: "greg@example.com" }, agent: null, token: null });
+    expect(first.body).toMatchObject({ user: { handle: "greg", email: "greg@example.com" }, alias: null, token: null });
     expect((await call("GET", "/me", human)).body).toEqual(first.body);
   });
 
-  it("returns the agent alias and token expiry for a bearer token", async () => {
+  it("returns the alias and token expiry for a bearer token", async () => {
     const { call, mint, human } = setup();
     const user = (await call("GET", "/me", human)).body["user"];
-    const minted = await mint({ agent: "claude" });
+    const minted = await mint({ alias: "claude" });
     const res = await call("GET", "/me", { bearer: minted["token"] });
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ user, agent: "claude", token: { id: minted["id"], expiresAt: minted["expiresAt"] } });
+    expect(res.body).toEqual({ user, alias: "claude", token: { id: minted["id"], expiresAt: minted["expiresAt"] } });
   });
 });
 
@@ -82,7 +82,7 @@ describe("POST /api/tokens", () => {
     const minted = await mint();
     expect(minted).toEqual({
       id: expect.stringMatching(/^[a-z0-9]{12}$/u),
-      agent: null,
+      alias: null,
       token: expect.stringMatching(/^thr_[A-Za-z0-9_-]{43}$/u),
       createdAt: "2026-10-10T12:00:00.000Z",
       expiresAt: "2026-10-11T12:00:00.000Z",
@@ -93,17 +93,17 @@ describe("POST /api/tokens", () => {
     expect(Object.values(row ?? {})).not.toContain(minted["token"]);
   });
 
-  it("accepts an agent alias and an expiry of up to 7 days", async () => {
+  it("accepts an alias and an expiry of up to 7 days", async () => {
     const { mint } = setup();
-    expect(await mint({ agent: "claude", expiresIn: 7 * DAY })).toMatchObject({
-      agent: "claude",
+    expect(await mint({ alias: "claude", expiresIn: 7 * DAY })).toMatchObject({
+      alias: "claude",
       expiresAt: "2026-10-17T12:00:00.000Z",
     });
   });
 
   it("rejects an expiry above 7 days, and malformed requests", async () => {
     const { call, human } = setup();
-    const bodies = [{ expiresIn: 7 * DAY + 1 }, { expiresIn: 0 }, { expiresIn: 1.5 }, { agent: "" }, { agent: "a(b)" }];
+    const bodies = [{ expiresIn: 7 * DAY + 1 }, { expiresIn: 0 }, { expiresIn: 1.5 }, { alias: "" }, { alias: "a(b)" }];
     for (const body of bodies) {
       const res = await call("POST", "/tokens", human, body);
       expect(res.status).toBe(400);
@@ -121,15 +121,20 @@ describe("POST /api/tokens", () => {
     const parent = await mint({ expiresIn: 2 * HOUR });
     const bearer = { bearer: parent["token"] };
     expect((await mint({}, bearer))["expiresAt"]).toBe(parent["expiresAt"]);
-    expect((await mint({ expiresIn: HOUR, agent: "claude" }, bearer))["agent"]).toBe("claude");
+    expect((await mint({ expiresIn: HOUR, alias: "claude" }, bearer))["alias"]).toBe("claude");
     expect((await call("POST", "/tokens", bearer, { expiresIn: 3 * HOUR })).status).toBe(400);
   });
 
-  it("only lets an agent's token mint for that agent", async () => {
+  it("takes a null alias as the caller acting as themselves", async () => {
+    const { mint } = setup();
+    expect((await mint({ alias: null }))["alias"]).toBeNull();
+  });
+
+  it("only lets an alias's token mint for that alias", async () => {
     const { call, mint } = setup();
-    const agent = { bearer: (await mint({ agent: "claude" }))["token"] };
-    expect((await mint({}, agent))["agent"]).toBe("claude");
-    expect((await call("POST", "/tokens", agent, { agent: "codex" })).body["error"]["code"]).toBe("forbidden");
+    const alias = { bearer: (await mint({ alias: "claude" }))["token"] };
+    expect((await mint({}, alias))["alias"]).toBe("claude");
+    expect((await call("POST", "/tokens", alias, { alias: "codex" })).body["error"]["code"]).toBe("forbidden");
   });
 });
 
@@ -138,20 +143,20 @@ describe("GET /api/tokens", () => {
     const { call, mint, human, advance } = setup();
     const first = await mint();
     advance(60);
-    const second = await mint({ agent: "claude" });
+    const second = await mint({ alias: "claude" });
     const res = await call("GET", "/tokens", human);
     expect(res.status).toBe(200);
     expect(res.body["tokens"].map((t: Json) => t["id"])).toEqual([second["id"], first["id"]]);
     for (const token of res.body["tokens"]) {
-      expect(Object.keys(token).toSorted()).toEqual(["agent", "createdAt", "expiresAt", "id", "revokedAt"]);
+      expect(Object.keys(token).toSorted()).toEqual(["alias", "createdAt", "expiresAt", "id", "revokedAt"]);
     }
   });
 
-  it("shows an agent only its own tokens", async () => {
+  it("shows an alias only its own tokens", async () => {
     const { call, mint } = setup();
     await mint();
-    const claude = await mint({ agent: "claude" });
-    await mint({ agent: "codex" });
+    const claude = await mint({ alias: "claude" });
+    await mint({ alias: "codex" });
     const res = await call("GET", "/tokens", { bearer: claude["token"] });
     expect(res.body["tokens"].map((t: Json) => t["id"])).toEqual([claude["id"]]);
   });
@@ -188,8 +193,8 @@ describe("DELETE /api/tokens/{id}", () => {
       error: { code: "notFound", message: "no such token" },
     });
     const humanToken = await mint();
-    const agent = { bearer: (await mint({ agent: "claude" }))["token"] };
-    expect((await call("DELETE", `/tokens/${humanToken["id"]}`, agent)).status).toBe(404);
+    const alias = { bearer: (await mint({ alias: "claude" }))["token"] };
+    expect((await call("DELETE", `/tokens/${humanToken["id"]}`, alias)).status).toBe(404);
   });
 });
 
@@ -205,9 +210,9 @@ describe("token expiry", () => {
 });
 
 describe("POST /api/projects", () => {
-  it("creates a project owned by the token's human, with its origin repo", async () => {
+  it("creates a project owned by the token's user, with its origin repo", async () => {
     const { call, mint, repos } = setup();
-    const bearer = { bearer: (await mint({ agent: "claude" }))["token"] };
+    const bearer = { bearer: (await mint({ alias: "claude" }))["token"] };
     const res = await call("POST", "/projects", bearer, { handle: "throng" });
     expect(res.status).toBe(201);
     expect(res.body).toEqual({
@@ -247,15 +252,15 @@ describe("POST /api/projects", () => {
 });
 
 describe("GET /api/projects", () => {
-  it("lists the projects the caller's human owns, by handle", async () => {
+  it("lists the projects the caller's user owns, by handle", async () => {
     const { call, mint, env } = setup();
     const greg = { bearer: (await mint())["token"] };
-    const claude = { bearer: (await mint({ agent: "claude" }))["token"] };
+    const claude = { bearer: (await mint({ alias: "claude" }))["token"] };
     for (const handle of ["zeta", "alpha"]) {
       expect((await call("POST", "/projects", greg, { handle })).status).toBe(201);
     }
     const ada = await userForEmail(env.DB, "ada@example.com");
-    const { plaintext } = await mintToken(env.DB, { userId: ada.id, agent: null, ttlSeconds: HOUR, now: NOW });
+    const { plaintext } = await mintToken(env.DB, { userId: ada.id, alias: null, ttlSeconds: HOUR, now: NOW });
     expect((await call("POST", "/projects", { bearer: plaintext }, { handle: "other" })).status).toBe(201);
 
     for (const as of [greg, claude]) {

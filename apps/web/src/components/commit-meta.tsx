@@ -2,15 +2,15 @@
 
 import { person, relativeDate } from "@/lib/commits";
 
-/** A git identity's name, with the agent alias they acted under as a badge. */
+/** A git identity's name, with the alias they acted under as a badge. */
 export function Author({ name }: { name: string }) {
   const who = person(name);
   return (
     <span className="inline-flex items-center gap-1">
       <span className="font-medium">{who.name}</span>
-      {who.agent === null ? null : (
-        <span title="Agent alias" className="rounded-md border px-1.5 text-xs text-muted-foreground">
-          {who.agent}
+      {who.alias === null ? null : (
+        <span title="Alias" className="rounded-md border px-1.5 text-xs text-muted-foreground">
+          {who.alias}
         </span>
       )}
     </span>

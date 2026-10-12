@@ -9,6 +9,7 @@
 import { archiveRef } from "./archive.ts";
 import { taskBranchHead } from "./base.ts";
 import { migrateValues, normaliseLandingOutcome } from "./casing.ts";
+import { addColumns, renameColumns } from "./columns.ts";
 import { CONFIG_PATH, loadConfig } from "./config.ts";
 import type { ConfigResult } from "./config.ts";
 import { ServiceError } from "./errors.ts";
@@ -364,7 +365,10 @@ const SCHEMA = [
 const DROPPED_TABLES = ["deliveries", "checks", "pending"];
 
 /** Columns added to the spike's journal, so task and attempt events record who acted on what. */
-const JOURNAL_COLUMNS = ["user_id TEXT", "agent TEXT", "task INTEGER", "attempt INTEGER"];
+const JOURNAL_COLUMNS = ["user_id TEXT", "alias TEXT", "task INTEGER", "attempt INTEGER"];
+
+/** The journal's `agent` column, from before an actor's alias was called an alias. */
+const JOURNAL_RENAMES = [["agent", "alias"]] as const;
 
 /**
  * Columns added to attempts after their table was made: where a forked attempt was copied from, how
@@ -379,32 +383,20 @@ const ATTEMPT_COLUMNS = ["forked_from INTEGER", "needs_update TEXT", "followed_h
 export function migrate(sql: Sql): void {
   for (const statement of SCHEMA) sql.exec(statement);
   for (const table of DROPPED_TABLES) sql.exec(`DROP TABLE IF EXISTS ${table}`);
+  renameColumns(sql, "journal", JOURNAL_RENAMES);
   addColumns(sql, "journal", JOURNAL_COLUMNS);
   const added = addColumns(sql, "attempts", ATTEMPT_COLUMNS);
   if (added.includes("alias")) {
-    // Attempts made before `alias` take it from their `created` entry, unless handed off since.
+    // Attempts made before `alias` take it from their `created` entry (renamed above), unless handed off since.
     sql.exec(
       `UPDATE attempts SET alias = (
-         SELECT agent FROM journal WHERE kind = 'created' AND journal.task = attempts.task AND journal.attempt = attempts.number
+         SELECT alias FROM journal WHERE kind = 'created' AND journal.task = attempts.task AND journal.attempt = attempts.number
        )
        WHERE NOT EXISTS (
          SELECT 1 FROM journal WHERE kind = 'handedOff' AND journal.task = attempts.task AND journal.attempt = attempts.number
        )`,
     );
   }
-}
-
-/** Adds each of `add` that `table` lacks, and returns the names of those it added. */
-function addColumns(sql: Sql, table: string, add: string[]): string[] {
-  const columns = new Set(sql.exec<{ name: string }>(`PRAGMA table_info(${table})`).map((c) => c.name));
-  const added: string[] = [];
-  for (const column of add) {
-    const name = column.split(" ")[0] ?? "";
-    if (columns.has(name)) continue;
-    sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column}`);
-    added.push(name);
-  }
-  return added;
 }
 
 export interface TaskStoreDeps {
@@ -603,7 +595,7 @@ export class TaskStore {
   // --- attempts --------------------------------------------------------------------------------
 
   /**
-   * Creates `count` draft attempts on an open task, authored by the actor's human, each with a
+   * Creates `count` draft attempts on an open task, authored by the actor's user, each with a
    * fork of the origin. Any signed-in user may. Either every attempt is created or none is: the cap
    * is checked for the whole batch, and if any fork fails the others are deleted again.
    *
@@ -652,7 +644,7 @@ export class TaskStore {
             current.number,
             number,
             actor.user.id,
-            actor.agent,
+            actor.alias,
             input.branch ?? null,
             input.note ?? "",
             at,
@@ -738,7 +730,7 @@ export class TaskStore {
 
   /**
    * Posts the actor's verdict on the attempt's current head, replacing their earlier one on that
-   * head, and journals `verdictPosted`. Anyone but the attempt's author (and their agents) may, on
+   * head, and journals `verdictPosted`. Anyone but the attempt's author (and their aliases) may, on
    * an active attempt with a head, or a merged one for the record.
    */
   postVerdict(_project: ProjectContext, actor: Actor, input: PostVerdictInput): VerdictDetail {
@@ -754,7 +746,7 @@ export class TaskStore {
       attempt: current.number,
       head,
       reviewer: actor.user.id,
-      agent: actor.agent,
+      alias: actor.alias,
       recommendation: input.recommendation,
       body: input.body,
       at: this.#stamp(),
@@ -793,7 +785,7 @@ export class TaskStore {
     return row === undefined ? null : this.#toAttempt(row);
   }
 
-  /** Edits an attempt's note. Only its author (or their agents) may. */
+  /** Edits an attempt's note. Only its author (or their aliases) may. */
   editAttempt(_project: ProjectContext, actor: Actor, input: AttemptInput & { note: string }): StoredAttempt {
     const current = this.#attempt(input);
     mayAuthor(actor, current);
@@ -949,7 +941,7 @@ export class TaskStore {
 
   /**
    * Hands a draft or open attempt to another user, `to` (a user id), who becomes its author at
-   * once. Only its author (or their agents) may, and not to themselves. Pushes check the claim
+   * once. Only its author (or their aliases) may, and not to themselves. Pushes check the claim
    * on every request, so the old author's next push is refused and nothing needs revoking.
    */
   handOffAttempt(_project: ProjectContext, actor: Actor, input: AttemptInput & { to: string }): StoredAttempt {
@@ -991,7 +983,7 @@ export class TaskStore {
 
   /**
    * Checks the actor holds the claim on an attempt, so the git proxy may let them push to its
-   * fork: the attempt is active and the actor's human is its author. Checked on every push, so a
+   * fork: the attempt is active and the actor's user is its author. Checked on every push, so a
    * hand-off or close takes effect on the next one.
    */
   authorizePush(_project: ProjectContext, actor: Actor, input: AttemptInput): StoredAttempt {
@@ -1005,7 +997,7 @@ export class TaskStore {
 
   /**
    * Checks the actor may push task `task`'s task branch (`refs/tasks/t42` in the origin), so the git
-   * proxy may forward the push: the task exists and the actor's human is its creator or the project
+   * proxy may forward the push: the task exists and the actor is its creator or the project
    * owner. The task branch may be pushed in any state.
    */
   authorizeTaskBranchPush(project: ProjectContext, actor: Actor, input: { task: number }): StoredTask {
@@ -1418,7 +1410,7 @@ export class TaskStore {
         row.task,
         row.attempt,
         actor.user.id,
-        actor.agent,
+        actor.alias,
         row.branch,
         at,
       );
@@ -1471,7 +1463,7 @@ export class TaskStore {
    * Selects an open attempt of an open task as its merge request, approving the attempt's current
    * head, and closes the task's other active attempts (archived once this commits). The merge
    * request is `pending`, or `queued` if its head's gate has already passed. The task's creator or
-   * the project owner (or their agents) may; the creator may select their own attempt.
+   * the project owner (or their aliases) may; the creator may select their own attempt.
    */
   async selectAttempt(project: ProjectContext, actor: Actor, input: AttemptInput): Promise<StoredMergeRequest> {
     const current = this.#attempt(input);
@@ -1800,9 +1792,9 @@ export class TaskStore {
       { project, task: mr.task, attempt: mr.attempt, merge_request: mr.id, head: mr.approved_head },
       (id) => `${forkRepo(project, attemptRef(mr.task, mr.attempt))}-landing-${id}`,
     );
-    const coAuthors = this.#sql.exec<{ user: string; agent: string }>(
-      `SELECT user_id AS user, agent FROM journal WHERE kind = 'pushed' AND task = ? AND attempt = ?
-         AND user_id IS NOT NULL AND agent IS NOT NULL GROUP BY user_id, agent ORDER BY MIN(id)`,
+    const coAuthors = this.#sql.exec<{ user: string; alias: string }>(
+      `SELECT user_id AS user, alias FROM journal WHERE kind = 'pushed' AND task = ? AND attempt = ?
+         AND user_id IS NOT NULL AND alias IS NOT NULL GROUP BY user_id, alias ORDER BY MIN(id)`,
       mr.task,
       mr.attempt,
     );
@@ -1814,7 +1806,7 @@ export class TaskStore {
       title: this.#task(mr.task).title,
       head: mr.approved_head,
       approver: mr.approved_by,
-      coAuthors: coAuthors.map(({ user, agent }) => ({ user, agent })),
+      coAuthors: coAuthors.map(({ user, alias }) => ({ user, alias })),
       startedAt: landing.started_at,
     };
     return { ...landing, params };
@@ -2371,12 +2363,12 @@ export class TaskStore {
   ): void {
     const detail = { ref: attempt === null ? taskRef(task) : attemptRef(task, attempt), ...extra };
     this.#sql.exec(
-      "INSERT INTO journal (at, kind, detail, user_id, agent, task, attempt) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO journal (at, kind, detail, user_id, alias, task, attempt) VALUES (?, ?, ?, ?, ?, ?, ?)",
       this.#now().getTime(),
       kind,
       JSON.stringify(detail),
       actor?.user.id ?? null,
-      actor?.agent ?? null,
+      actor?.alias ?? null,
       task,
       attempt,
     );
@@ -2526,7 +2518,7 @@ function mayOwn(project: ProjectContext, actor: Actor): void {
   if (actor.user.id !== project.owner) throw new ServiceError("forbidden", "only the project owner may");
 }
 
-/** The attempt's author, or one of their agents, holds its claim. */
+/** The attempt's author, or one of their aliases, holds its claim. */
 function mayAuthor(actor: Actor, current: StoredAttempt): void {
   if (actor.user.id !== current.author) throw new ServiceError("forbidden", `only the author of ${current.fork} may`);
 }

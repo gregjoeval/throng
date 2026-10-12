@@ -78,7 +78,7 @@ export async function resolveProject(db: Database, owner: string, handle: string
 export function projectService({ db, repos, newId = randomProjectId }: ProjectDeps) {
   return {
     /**
-     * Creates a project owned by the actor's human, and its origin repo with `main` as the default
+     * Creates a project owned by the actor's user, and its origin repo with `main` as the default
      * branch. The repo is created before the row, so a failure creating it leaves no project behind.
      */
     async create(actor: Actor, input: { handle: string }): Promise<Project> {
@@ -107,11 +107,11 @@ export function projectService({ db, repos, newId = randomProjectId }: ProjectDe
         }
         throw error;
       }
-      console.log({ event: "project.created", project: id, owner: owner.id, agent: actor.agent });
+      console.log({ event: "project.created", project: id, owner: owner.id, alias: actor.alias });
       return project(row);
     },
 
-    /** The projects owned by the actor's human, by handle. */
+    /** The projects owned by the actor's user, by handle. */
     async list(actor: Actor): Promise<Project[]> {
       const { results } = await db
         .prepare(`${SELECT_PROJECT} WHERE p.owner_id = ? ORDER BY p.handle`)

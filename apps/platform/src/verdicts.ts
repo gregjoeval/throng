@@ -1,8 +1,9 @@
 // Verdicts: a reviewer's recommendation on one head of an attempt, kept in the project Durable
-// Object's SQLite. One verdict per (attempt, head, reviewer), where the reviewer is the human; a
+// Object's SQLite. One verdict per (attempt, head, reviewer), where the reviewer is the user; a
 // new post for the same head replaces it. Verdicts are advisory: nothing here touches the gate,
 // the score or the queue. The task store checks who may post and journals it.
 
+import { renameColumns } from "./columns.ts";
 import type { Sql } from "./task-store.ts";
 
 export const VERDICT_RECOMMENDATIONS = ["merge", "revise", "reject"] as const;
@@ -17,8 +18,8 @@ export interface StoredVerdict {
   head: string;
   /** The reviewer's user id. */
   reviewer: string;
-  /** The agent alias they posted under, if any. */
-  agent: string | null;
+  /** The alias they posted under, if any. */
+  alias: string | null;
   recommendation: VerdictRecommendation;
   body: string;
   at: string;
@@ -36,13 +37,16 @@ const SCHEMA = [
     attempt INTEGER NOT NULL,
     head TEXT NOT NULL,
     reviewer TEXT NOT NULL,
-    agent TEXT,
+    alias TEXT,
     recommendation TEXT NOT NULL,
     body TEXT NOT NULL,
     at TEXT NOT NULL,
     PRIMARY KEY (task, attempt, head, reviewer)
   )`,
 ];
+
+/** `verdicts` columns named before an actor's alias was called an alias. */
+const RENAMES = [["agent", "alias"]] as const;
 
 interface AttemptKey {
   task: number;
@@ -56,20 +60,21 @@ export class Verdicts {
   constructor({ sql }: { sql: Sql }) {
     this.#sql = sql;
     for (const statement of SCHEMA) sql.exec(statement);
+    renameColumns(sql, "verdicts", RENAMES);
   }
 
   /** Stores a verdict, replacing the reviewer's earlier one on the same head. */
   put(verdict: StoredVerdict): void {
     this.#sql.exec(
-      `INSERT INTO verdicts (task, attempt, head, reviewer, agent, recommendation, body, at)
+      `INSERT INTO verdicts (task, attempt, head, reviewer, alias, recommendation, body, at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (task, attempt, head, reviewer) DO UPDATE SET
-         agent = excluded.agent, recommendation = excluded.recommendation, body = excluded.body, at = excluded.at`,
+         alias = excluded.alias, recommendation = excluded.recommendation, body = excluded.body, at = excluded.at`,
       verdict.task,
       verdict.attempt,
       verdict.head,
       verdict.reviewer,
-      verdict.agent,
+      verdict.alias,
       verdict.recommendation,
       verdict.body,
       verdict.at,

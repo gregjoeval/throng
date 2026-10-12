@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import { agentLoop, toolCaller } from "../scripts/e2e-mcp.ts";
 import type { AccessVerifier } from "../src/access.ts";
 import { publicApp } from "../src/app.ts";
+import { DIFF_CAPS } from "../src/diff.ts";
 import { FORWARDED_EMAIL_HEADER } from "../src/forwarded.ts";
 import type { LogStore } from "../src/logs.ts";
 import { MAX_FILE_BYTES, MAX_LOG_SLICE_BYTES } from "../src/mcp.ts";
@@ -397,6 +398,36 @@ describe("/mcp", () => {
     expect(diff.data["patch"]).toContain("-hi\n+hello\n");
     const commits = await call(greg, "list_commits", { project, ref: "main", limit: 1 });
     expect(commits.data).toMatchObject({ commits: [{ sha }], next: 1 });
+  });
+
+  it("caps a large commit diff at the diff caps, listing what it cut with a hint", async () => {
+    const { greg, repos, projectId, project } = await withProject();
+    // One file too large to diff, then more small ones than get a patch: the last by path goes without.
+    const small = Object.fromEntries(
+      Array.from({ length: DIFF_CAPS.maxPatchedFiles }, (_, i) => [`f/${String(i).padStart(3, "0")}.txt`, "a\n"]),
+    );
+    const files = { "README.md": "hi\n", "a-huge.txt": "x".repeat(DIFF_CAPS.maxBlobBytes + 1), ...small };
+    const sha = repos.commit(`${projectId}-main`, { files }).hash;
+    const diff = await call(greg, "get_commit_diff", { project, sha });
+    expect(diff.isError).toBeFalsy();
+    expect(diff.data).toMatchObject({
+      sha,
+      totals: { files: DIFF_CAPS.maxPatchedFiles + 1 },
+      truncated: false,
+      hint: "Some files have no patch or a cut-short one (see `capped`); diff them in a clone.",
+    });
+    const last = `f/${String(DIFF_CAPS.maxPatchedFiles - 1).padStart(3, "0")}.txt`;
+    expect(diff.data["capped"]).toEqual([
+      { path: "a-huge.txt", flags: ["tooLarge"] },
+      { path: last, flags: ["truncated"] },
+    ]);
+    // Lines are counted for patched files only.
+    expect(diff.summary).toBe(
+      `${DIFF_CAPS.maxPatchedFiles + 1} files, +${DIFF_CAPS.maxPatchedFiles - 1} -0. ${diff.data["hint"]}`,
+    );
+    expect(diff.data["patch"]).toContain("+++ b/f/000.txt");
+    expect(diff.data["patch"]).not.toContain(`+++ b/${last}`);
+    expect(diff.data["patch"]).not.toContain("xxxx");
   });
 
   it("returns a log's last 64 KB by default, and another part from `offset`", async () => {

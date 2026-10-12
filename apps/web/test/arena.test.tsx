@@ -103,9 +103,8 @@ describe("the arena's lanes", () => {
       "href",
       "https://t1a1.preview.test",
     );
-    expect(within(menu).getByRole("menuitem", { name: "Checks, logs and verdicts" })).toHaveAttribute(
+    expect(within(menu).getByRole("menuitem", { name: "Checks, logs and verdicts" })).not.toHaveAttribute(
       "aria-disabled",
-      "true",
     );
     await user.click(within(menu).getByRole("menuitem", { name: "Open in browser" }));
     await waitFor(() => expect(path()).toBe("/ada/alpha/tree/t1a1"));

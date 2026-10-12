@@ -315,6 +315,15 @@ describe("the file view", () => {
     expect(screen.getByRole("button", { name: "Source" })).toHaveAttribute("aria-pressed", "true");
   });
 
+  it("turns Markdown to its source when the URL comes to name a line", async () => {
+    serveRepo({ main: FILES });
+    const { router } = await renderApp("/ada/alpha/blob/main/docs/guide.md");
+    expect(await screen.findByRole("heading", { name: "Guide" })).toBeInTheDocument();
+    await router.navigate({ to: ".", search: true, hash: "L2" });
+    expect(await gutter()).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Source" })).toHaveAttribute("aria-pressed", "true");
+  });
+
   it("shows an image inline from /raw", async () => {
     serveRepo({ [`${"b".repeat(40)}`]: FILES }, { main: { ref: "main", sha: null }, active: [], archived: [] });
     await renderApp(`/ada/alpha/blob/${"b".repeat(40)}/docs/logo.png?attempt=t42a3`);

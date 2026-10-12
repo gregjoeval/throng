@@ -26,6 +26,12 @@ export function FileView({ at, blob }: { at: BrowseLocation; blob: Blob }) {
   const markdown = blob.content !== null && isMarkdown(blob.path);
   // A line anchor is in the source, so a link to one opens Markdown there.
   const [source, setSource] = useState(selected !== undefined);
+  // So does a link to one followed while the preview shows.
+  const [seenHash, setSeenHash] = useState(hash);
+  if (hash !== seenHash) {
+    setSeenHash(hash);
+    if (selected !== undefined) setSource(true);
+  }
   const showSource = !markdown || source;
 
   const summary =

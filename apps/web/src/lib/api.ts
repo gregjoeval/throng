@@ -5,7 +5,7 @@ import { queryOptions } from "@tanstack/react-query";
 import type { QueryKey } from "@tanstack/react-query";
 import type { AppType } from "@throng/platform/app";
 import { hc, parseResponse } from "hono/client";
-import type { ClientResponse } from "hono/client";
+import type { ClientResponse, InferResponseType } from "hono/client";
 
 /**
  * Same-origin, so the browser's Access session rides along. Calls go through the global `fetch` at
@@ -69,14 +69,27 @@ export const commitQuery = (owner: string, project: string, sha: string, attempt
     ),
   );
 
+/** A commit's diff as JSON (the endpoint can also answer with the raw patch, which the browser never asks for). */
+export type CommitDiff = Extract<
+  InferResponseType<(typeof projectApi.commit)[":sha"]["diff"]["$get"], 200>,
+  { files: unknown }
+>;
+export type FileDiff = CommitDiff["files"][number];
+export type DiffFlag = FileDiff["flags"][number];
+
 /** One commit's diff against its first parent: a patch per file, flags where a cap left it out. */
-export const commitDiffQuery = (owner: string, project: string, sha: string, attempt?: string) =>
-  apiQuery(["projects", owner, project, "commit", sha, "diff", { attempt }], (init) =>
+export const commitDiffQuery = (owner: string, project: string, sha: string, attempt?: string) => ({
+  ...apiQuery(["projects", owner, project, "commit", sha, "diff", { attempt }], (init) =>
     projectApi.commit[":sha"].diff.$get(
       { param: { owner, project, sha }, query: attempt === undefined ? {} : { attempt } },
       { init },
     ),
-  );
+  ),
+  select: (data: CommitDiff | string | Response): CommitDiff => {
+    if (typeof data === "object" && "files" in data) return data;
+    throw new Error("The platform didn't answer with a JSON diff.");
+  },
+});
 
 /** Creates a project owned by the signed-in user. Rejects with hono's `DetailedError` on failure. */
 export async function createProject(handle: string) {

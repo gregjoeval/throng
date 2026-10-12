@@ -26,7 +26,10 @@
       "images": { "sandbox": { "dockerfile": "./container/Dockerfile" } },
     },
   ],
-  "workflows": [{ "name": "throng-scoring", "binding": "SCORING", "class_name": "ScoringWorkflow" }],
+  "workflows": [
+    { "name": "throng-scoring", "binding": "SCORING", "class_name": "ScoringWorkflow" },
+    { "name": "throng-landing", "binding": "LANDING", "class_name": "LandingWorkflow" },
+  ],
   // Scoring run logs. R2's lifecycle rule (30 days on `logs/`) isn't wrangler config: see the README.
   "r2_buckets": [{ "binding": "LOGS", "bucket_name": "throng-logs" }],
   "d1_databases": [
@@ -74,7 +77,10 @@
         },
       ],
       // Workflow names are account-wide, so they can't reuse production's.
-      "workflows": [{ "name": "throng-ci-scoring", "binding": "SCORING", "class_name": "ScoringWorkflow" }],
+      "workflows": [
+        { "name": "throng-ci-scoring", "binding": "SCORING", "class_name": "ScoringWorkflow" },
+        { "name": "throng-ci-landing", "binding": "LANDING", "class_name": "LandingWorkflow" },
+      ],
       "r2_buckets": [{ "binding": "LOGS", "bucket_name": "throng-ci-logs" }],
       "d1_databases": [
         {

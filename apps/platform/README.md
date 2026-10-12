@@ -38,7 +38,7 @@ gh workflow run e2e.yml --ref my-branch     # every scenario, against a branch
 
 ### Scenarios
 
-- `zeroconfig`, `conflict`, `metrics`, `failing`, `invalid`, `preview`, `coalesce`, `intrusion`, `deps`: scoring, and the spike's landing until the merge queue replaces it; see the header of `scripts/e2e.ts`.
+- `zeroconfig`, `conflict`, `metrics`, `failing`, `invalid`, `preview`, `coalesce`, `intrusion`, `deps`: scoring; see the header of `scripts/e2e.ts`. The spike's landing is gone: the merge queue's Landing Workflow lands only selected attempts, so the scenarios that wait for a landing (`zeroconfig`, `conflict`) fail until they're rewritten for merge requests.
 - `refs`: attempt archives. Closing an attempt pushes its fork's `main` to `refs/attempts/t42a3` in the origin (`ARCHIVE_REF_PREFIX` in `src/archive.ts`), and reopening copies it back. The scenario checks, against real Artifacts, that:
   1. a plain `git push` to a ref under that prefix succeeds and `git ls-remote` lists it;
   2. the Worker's own git client (`src/git-client.ts`, behind `POST /spike/repos/:name/copy-ref`) copies one origin's `main` into another origin's archive ref, and an archive ref back out again;

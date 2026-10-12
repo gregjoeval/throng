@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   isLogName,
+  landingLogKey,
   logKey,
   logNames,
   MAX_LOG_BYTES,
@@ -23,6 +24,13 @@ describe("logKey", () => {
     expect(logKey(run, "test")).toBe(`logs/p123/t42a3/${SHA}/7/test.log`);
     expect(logKey(run, setupLogName(2))).toBe(`logs/p123/t42a3/${SHA}/7/setup.2.log`);
     expect(logKey(run, PREVIEW_LOG)).toBe(`logs/p123/t42a3/${SHA}/7/preview.deploy.log`);
+  });
+});
+
+describe("landingLogKey", () => {
+  it("lays a landing's retest logs out under the approved head, apart from its scoring runs", () => {
+    const landing = { project: "p123", task: 42, attempt: 3, head: SHA, landing: 5 };
+    expect(landingLogKey(landing, "test")).toBe(`logs/p123/t42a3/${SHA}/landing-5/test.log`);
   });
 });
 

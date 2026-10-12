@@ -152,4 +152,27 @@ describe("roleAccess", () => {
     expect(roleAccess("score", grants, { preview, allow })).toMatchObject({ npmRegistry: true, allow });
     expect(roleAccess("land", grants, { preview, allow })).toMatchObject({ npmRegistry: false, allow: [] });
   });
+
+  it("gives a landing's conflict check and retest container read grants on the origin and the fork only", () => {
+    const allow = ["api.github.com"];
+    const given = roleAccess("check", grants, { preview, allow });
+    expect(given).toEqual({ grants: [grants.originRead, grants.forkRead], preview: null, npmRegistry: true, allow });
+    for (const repo of ["p1-main", "p1-t1a1"]) {
+      expect(outboundDecision("POST", pushTo(repo), given)).toEqual({ action: "deny" });
+    }
+  });
+
+  it("gives a landing's trusted land container origin write and fork read, and nothing else", () => {
+    const given = roleAccess("land", grants, { preview, allow: ["api.github.com"] });
+    expect(given).toEqual({
+      grants: [grants.originWrite, grants.forkRead],
+      preview: null,
+      npmRegistry: false,
+      allow: [],
+    });
+    expect(outboundDecision("POST", pushTo("p1-main"), given)).toEqual({ action: "bearer", token: "origin-write" });
+    expect(outboundDecision("POST", pushTo("p1-t1a1"), given)).toEqual({ action: "deny" });
+    expect(outboundDecision("GET", new URL("https://registry.npmjs.org/left-pad"), given)).toEqual({ action: "deny" });
+    expect(outboundDecision("GET", new URL("https://api.github.com/"), given)).toEqual({ action: "deny" });
+  });
 });

@@ -87,7 +87,16 @@ export interface ListedTask extends Task {
 }
 
 /** An attempt as the API shows it. */
-export interface Attempt {
+/** What every view of an attempt shows beside its state: where it came from, whether it needs update, its verdicts. */
+interface AttemptStanding {
+  /** The attempt of the same task it was copied from when it was started; absent when it wasn't. Never its base. */
+  forkedFrom?: string;
+  /** Its task branch moved and merging it in conflicted; its author merges it to clear this. */
+  needsUpdate: boolean;
+  verdicts: VerdictSummary;
+}
+
+export interface Attempt extends AttemptStanding {
   ref: string;
   task: number;
   number: number;
@@ -100,13 +109,8 @@ export interface Attempt {
   closedAt: string | null;
   mergedSha: string | null;
   archivedSha: string | null;
-  /** The attempt of the same task it was copied from when it was started; absent when it wasn't. Never its base. */
-  forkedFrom?: string;
-  /** Its task branch moved and merging it in conflicted; its author merges it to clear this. */
-  needsUpdate: boolean;
   scoring: AttemptScoring;
   mergeRequest: { state: AttemptMergeRequest["state"]; lastDequeue: { reason: DequeueReason } | null } | null;
-  verdicts: VerdictSummary;
 }
 
 /** A reviewer's verdict on one head of an attempt, as the API shows it. */
@@ -210,17 +214,12 @@ export interface ScoringStatus extends AttemptScoring {
 }
 
 /** One attempt in a task's arena, obsolete or not: its state lets a UI filter. */
-export interface ArenaAttempt extends ScoringStatus {
+export interface ArenaAttempt extends ScoringStatus, AttemptStanding {
   ref: string;
   state: AttemptState;
   author: UserRef;
   /** An active attempt's base at its current head, scored or not (`currentBase`); null otherwise. */
   base: Base | null;
-  /** The attempt of the same task it was copied from when it was started; absent when it wasn't. Never its base. */
-  forkedFrom?: string;
-  /** Its task branch moved and merging it in conflicted; its author merges it to clear this. */
-  needsUpdate: boolean;
-  verdicts: VerdictSummary;
 }
 
 /** A task's arena: the current result of every attempt in it. */

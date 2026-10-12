@@ -21,7 +21,10 @@ async function setup() {
     workflow: { create: async () => ({}), get: async () => ({ terminate: async () => {} }) },
     teardown: async () => {},
   });
-  const api = apiRoutes({ verifierFor: () => verify, now, repos: () => repos, tasks: () => backend });
+  const options = { verifierFor: () => verify, now, repos: () => repos, tasks: () => backend };
+  const api = apiRoutes(options);
+  // throng-web's binding, over the same database and backend.
+  const web = webApp(options);
   const env = { DB: testDatabase(), ACCESS_TEAM_DOMAIN: "throng.cloudflareaccess.com", ACCESS_AUD: "aud" };
 
   const call = async (method: string, path: string, bearer?: string, body?: unknown) => {
@@ -32,10 +35,8 @@ async function setup() {
     const res = await api.request(path, init, env);
     return { status: res.status, body: (await res.json()) as Json };
   };
-  // The same API as throng-web reaches it, trusting the identity it forwards.
-  const web = webApp({ verifierFor: () => verify, now, repos: () => repos, tasks: () => backend });
-  /** Calls as the signed-in web user with `email`. */
-  const callWeb = async (method: string, path: string, email: string, body?: unknown) => {
+  /** A request through throng-web's binding, as the signed-in user with `email`. */
+  const callAs = async (method: string, path: string, email: string, body?: unknown) => {
     const headers: Record<string, string> = { [FORWARDED_EMAIL_HEADER]: email };
     if (body !== undefined) headers["Content-Type"] = "application/json";
     const init = { method, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) };
@@ -55,7 +56,7 @@ async function setup() {
   const bob = await tokenFor("bob@example.com");
   const project = (await call("POST", "/projects", greg, { handle: "throng" })).body;
   const base = "/projects/greg/throng";
-  return { call, callWeb, repos, store, greg, ada, adaClaude, bob, project, base };
+  return { call, callAs, repos, store, greg, ada, adaClaude, bob, project, base };
 }
 
 describe("task routes", () => {
@@ -370,12 +371,12 @@ describe("merge request routes", () => {
 
   it("selects, approves and cancels for the signed-in web user, only if they created the task or own the project", async () => {
     const env = await setup();
-    const { callWeb, base } = env;
+    const { callAs, base } = env;
     await twoAttempts(env);
-    const select = (email: string) => callWeb("POST", `${base}/tasks/t1/selection`, email, { attempt: "t1a1" });
+    const select = (email: string) => callAs("POST", `${base}/tasks/t1/selection`, email, { attempt: "t1a1" });
     expect((await select("bob@example.com")).status).toBe(403);
     expect((await select("ada@example.com")).body).toMatchObject({ state: "pending", approvedBy: { handle: "ada" } });
-    const act = (verb: string, email: string) => callWeb("POST", `${base}/tasks/t1/merge-request/${verb}`, email);
+    const act = (verb: string, email: string) => callAs("POST", `${base}/tasks/t1/merge-request/${verb}`, email);
     expect((await act("approve", "bob@example.com")).status).toBe(403);
     expect((await act("approve", "greg@example.com")).body["state"]).toBe("pending");
     expect((await act("cancel", "bob@example.com")).status).toBe(403);
@@ -384,11 +385,11 @@ describe("merge request routes", () => {
 
   it("reopens a closed attempt for its author signed in on the web, and no one else", async () => {
     const env = await setup();
-    const { call, callWeb, ada, base } = env;
+    const { call, callAs, ada, base } = env;
     await twoAttempts(env);
     await call("POST", `${base}/tasks/t1/selection`, ada, { attempt: "t1a1" });
     await call("POST", `${base}/tasks/t1/merge-request/cancel`, ada);
-    const reopen = (email: string) => callWeb("POST", `${base}/attempts/t1a2/reopen`, email);
+    const reopen = (email: string) => callAs("POST", `${base}/attempts/t1a2/reopen`, email);
     expect((await reopen("ada@example.com")).status).toBe(403);
     expect((await reopen("bob@example.com")).body["state"]).toBe("draft");
   });
@@ -492,5 +493,16 @@ describe("over throng-web's service binding", () => {
     expect((await call("GET", `${base}/tasks/t1/attempts`)).body).toEqual({ attempts: [] });
     expect((await call("POST", `${base}/tasks/t1/close`)).body["state"]).toBe("closed");
     expect((await call("POST", `${base}/tasks/t2/obsolete`)).body["state"]).toBe("obsolete");
+  });
+
+  it("scores the forwarded user's own draft now", async () => {
+    const { call, callAs, ada, base, repos, project } = await setup();
+    repos.commit(`${project["id"]}-main`, { files: { "README.md": "hi\n" } });
+    await call("POST", `${base}/tasks`, ada, { title: "a" });
+    await call("POST", `${base}/tasks/t1/attempts`, ada);
+    expect((await callAs("POST", `${base}/attempts/t1a1/score`, "bob@example.com")).status).toBe(403);
+    const scored = await callAs("POST", `${base}/attempts/t1a1/score`, "ada@example.com");
+    expect(scored.status).toBe(200);
+    expect(scored.body).toMatchObject({ queued: true, run: { ref: "t1a1", trigger: "scoreNow", agent: null } });
   });
 });

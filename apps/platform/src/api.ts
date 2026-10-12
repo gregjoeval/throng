@@ -661,13 +661,16 @@ interface AttemptAction<S extends z.ZodType> {
   ok: { description: string; schema: S };
 }
 
-/** Who a route lets in: bearer tokens only, or throng-web's signed-in user too. */
+/**
+ * Who a route lets in: bearer tokens only, or, with the `browser` middleware and `web`, throng-web's
+ * forwarded user too.
+ */
 interface RouteAuth {
   middleware: Bearer | Browser;
-  security: Record<string, string[]>[];
+  web: boolean;
 }
 
-/** An attempt action route: `POST …/attempts/{a}/<verb>`. */
+/** An attempt action route: `POST …/attempts/{a}/<verb>`, under `auth`. */
 function attemptAction<V extends string, S extends z.ZodType>(auth: RouteAuth, verb: V, action: AttemptAction<S>) {
   return createRoute({
     method: "post",
@@ -676,7 +679,7 @@ function attemptAction<V extends string, S extends z.ZodType>(auth: RouteAuth, v
     tags: action.tags,
     summary: action.summary,
     ...(action.description === undefined ? {} : { description: action.description }),
-    security: auth.security,
+    security: auth.web ? bearerOrWeb : bearerOnly,
     middleware: [auth.middleware] as const,
     request: { params: AttemptPathSchema },
     responses: {
@@ -709,7 +712,7 @@ function attemptTransition<V extends string>(
   });
 }
 
-/** A scoring request route: `POST …/attempts/{a}/<verb>`. */
+/** A scoring request route: `POST …/attempts/{a}/<verb>`, under `auth` (see `attemptAction`). */
 function scoringRoute<V extends string>(
   auth: RouteAuth,
   verb: V,
@@ -745,7 +748,7 @@ export function apiRoutes(options: ApiOptions = {}) {
   const auth = bearerOrAccess(options);
   const bearer = bearerAuth(options.now === undefined ? {} : { now: options.now });
   const browser = bearerOrForwarded(options);
-  const bearerRoute: RouteAuth = { middleware: bearer, security: bearerOnly };
+  const bearerRoute: RouteAuth = { middleware: bearer, web: false };
   const reposFor = options.repos ?? noRepos;
   const projects = (env: AccessBindings) => projectService({ db: env.DB, repos: reposFor(env) });
   const backendFor = options.tasks ?? noTasks;
@@ -1176,7 +1179,7 @@ export function apiRoutes(options: ApiOptions = {}) {
     )
     .openapi(
       attemptTransition(
-        { middleware: browser, security: bearerOrWeb },
+        { middleware: browser, web: true },
         "reopen",
         "reopenAttempt",
         "Reopen a closed attempt as a draft",
@@ -1202,12 +1205,12 @@ export function apiRoutes(options: ApiOptions = {}) {
     )
     .openapi(
       scoringRoute(
-        bearerRoute,
+        { middleware: browser, web: true },
         "score",
         "scoreAttempt",
         "Score a draft attempt's head now",
         "Drafts aren't scored on push; this queues a run for the head anyway. A head already queued, running " +
-          "or scored isn't queued again.",
+          "or scored isn't queued again. The arena's Score now button calls this too.",
         AUTHOR_ONLY,
         "the attempt isn't a draft",
       ),

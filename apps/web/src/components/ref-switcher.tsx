@@ -15,8 +15,12 @@ import {
 import { blobQuery, refsQuery, treeQuery } from "@/lib/api";
 import type { Refs } from "@/lib/api";
 import { shortSha } from "@/lib/commits";
+import { apiError } from "@/lib/errors";
 import { buildPath } from "@/lib/paths";
 import type { BrowseLocation } from "@/lib/paths";
+
+/** The heads of a group of attempts, active or archived. */
+type AttemptHeads = Refs["active"] | Refs["archived"];
 
 const SHA = /^[0-9a-f]{40}$/iu;
 
@@ -27,7 +31,7 @@ const refLabel = (ref: string) => (SHA.test(ref) ? shortSha(ref) : ref);
  * Where switching `at` to `ref` goes: the same path at that ref when it's there, else that ref's
  * root directory. The attempt hint is dropped, since only a sha needs one.
  */
-export async function switchedTo(
+async function switchedTo(
   at: BrowseLocation,
   ref: string,
   exists: (to: BrowseLocation) => Promise<unknown>,
@@ -36,9 +40,10 @@ export async function switchedTo(
   const root: BrowseLocation = { view: "tree", owner, project, ref, path: "" };
   if (path === "") return root;
   const to: BrowseLocation = { view, owner, project, ref, path };
+  // Only a 404 says the path isn't there; on any other failure the view at `to` shows what went wrong.
   return exists(to).then(
     () => to,
-    () => root,
+    (error: unknown) => (apiError(error).code === "notFound" ? root : to),
   );
 }
 
@@ -57,7 +62,7 @@ export function RefSwitcher({ at }: { at: BrowseLocation }) {
     await navigate({ href: buildPath(to) });
   };
 
-  const groups: [string, Refs["active"]][] =
+  const groups: [string, AttemptHeads][] =
     refs.data === undefined
       ? []
       : [

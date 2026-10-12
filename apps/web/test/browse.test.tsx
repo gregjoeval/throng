@@ -146,6 +146,15 @@ describe("the ref switcher", () => {
     expect(await screen.findByRole("link", { name: "other.md" })).toBeInTheDocument();
   });
 
+  it("keeps the path when it can't tell whether the path is there", async () => {
+    serveRepo({ main: FILES, t42a3: FILES });
+    server.use(http.get("*/api/projects/:owner/:project/blob/t42a3/*", () => new HttpResponse(null, { status: 502 })));
+    const { user, path } = await renderApp("/ada/alpha/blob/main/src/index.ts");
+    await user.click(await switcher());
+    await user.click(await screen.findByRole("menuitem", { name: "t42a3" }));
+    await waitFor(() => expect(path()).toBe("/ada/alpha/blob/t42a3/src/index.ts"));
+  });
+
   it("drops the attempt hint, which only a sha needs", async () => {
     const sha = "b".repeat(40);
     serveRepo({ [sha]: FILES, main: FILES });

@@ -83,14 +83,13 @@ function NumberedCode({ path, code }: { path: string; code: string }) {
   const hash = useRouterState({ select: (state) => state.location.hash });
   const selected = parseLineAnchor(hash);
   const lines = Array.from({ length: Math.max(1, lineCount(code)) }, (_, i) => i + 1);
-  const first = selected?.start;
+  // The line the page arrived at; picking lines afterwards shouldn't move the page.
+  const [arrivedAt] = useState(selected?.start);
 
   // The file loads after the page, too late for the browser's own jump to the anchor: jump once it's here.
   useEffect(() => {
-    if (first !== undefined) document.getElementById(`L${first}`)?.scrollIntoView?.({ block: "center" });
-    // Only on arrival: picking lines afterwards shouldn't move the page.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    if (arrivedAt !== undefined) document.getElementById(`L${arrivedAt}`)?.scrollIntoView?.({ block: "center" });
+  }, [arrivedAt]);
 
   const pick = (line: number) => (event: MouseEvent) => {
     event.preventDefault();

@@ -16,6 +16,8 @@ import type { RunResult } from "./sandbox";
 import type { ScoringOutcome, ScoringParams } from "./scoring";
 import { parseResult, PREVIEW_BUILD_TIMEOUT_MS, previewScript, scoreScript } from "./scripts";
 import type { PreviewScriptResult } from "./scripts";
+import { NO_TASK_DEFINITIONS, withTask } from "./task-definitions";
+import { parseAttemptRef } from "./task-refs";
 
 const TOKEN_TTL_SECONDS = 30 * 60;
 /** The preview step: fetching, installing and the build step at its timeout, then the deploy. */
@@ -43,7 +45,7 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
     let outcome: ScoringOutcome;
     try {
       const config = await step.do("config", { retries: STEP_RETRIES, timeout: "1 minute" }, () =>
-        loadConfig(reposFor(this.env), params.project),
+        this.#config(params),
       );
       const plan = scorePlan(config);
       const timeoutMs = scoreTimeoutMs(plan);
@@ -56,8 +58,8 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
       const preview = previewPlan(config, scored);
       let result = scored;
       if (preview !== null) {
-        const { deployed, logs } = await this.#preview(instanceId, params, preview, step);
-        result = { ...withPreview(scored, deployed), logs: [...scored.logs, ...logs] };
+        const { deployed, durationMs, logs } = await this.#preview(instanceId, params, preview, step);
+        result = { ...withPreview(scored, deployed, durationMs), logs: [...scored.logs, ...logs] };
       }
       outcome = { status: "done", result };
     } catch (error) {
@@ -74,6 +76,20 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
       await project.scoringFinished(params.run, outcome);
     });
     return outcome;
+  }
+
+  /**
+   * The run's config, its layers merged once: the project's config on `main`, then what the task
+   * defines over it. A clash between them makes it invalid. The spike's attempts have no task row,
+   * so they get the project's alone.
+   */
+  async #config(params: ScoringParams): Promise<ConfigResult> {
+    const task = parseAttemptRef(params.attempt)?.task;
+    const [project, definitions] = await Promise.all([
+      loadConfig(reposFor(this.env), params.project),
+      task === undefined ? NO_TASK_DEFINITIONS : this.env.PROJECT.getByName(params.project).definitionsOf(task),
+    ]);
+    return withTask(project, definitions);
   }
 
   /** Runs the score script in the run's own container, stores its logs and builds its result. */
@@ -114,20 +130,22 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
    * grant and only a read grant on the fork, and stores its log. `deployed` is null when it gave no
    * result, and the error when the step kept failing on infrastructure; then whatever log the
    * container wrote is still stored. A failed Preview is recorded on the result and never changes the gate.
+   * `durationMs` is how long its last try took, timed within the step so a replay keeps it; 0 once it errored.
    */
   async #preview(
     instanceId: string,
     params: ScoringParams,
     { command, allow }: PreviewPlan,
     step: WorkflowStep,
-  ): Promise<{ deployed: PreviewScriptResult | null | { error: string }; logs: string[] }> {
+  ): Promise<{ deployed: PreviewScriptResult | null | { error: string }; durationMs: number; logs: string[] }> {
     const workerName = this.env.PREVIEW_WORKER;
     const name = previewName(params, workerName);
     try {
-      const { run, logs } = await step.do(
+      const { run, durationMs, logs } = await step.do(
         "preview",
         { retries: STEP_RETRIES, timeout: PREVIEW_STEP_TIMEOUT_MS },
         async () => {
+          const started = Date.now();
           const deploy = await runInSandbox(
             this.env,
             instanceId,
@@ -144,6 +162,7 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
           );
           return {
             run: deploy,
+            durationMs: Date.now() - started,
             logs: await storeLogs(this.env, sandboxName(instanceId, "preview"), [PREVIEW_LOG], (log) =>
               logKey(params, log),
             ),
@@ -156,7 +175,7 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
       } else if (!deployed.ok) {
         console.log({ event: "scoring.preview_failed", stage: deployed.stage, output: deployed.output.slice(-2000) });
       }
-      return { deployed, logs };
+      return { deployed, durationMs, logs };
     } catch (error) {
       const message = String(error).slice(0, 2000);
       console.warn({ event: "scoring.preview_errored", error: message });
@@ -166,7 +185,7 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
           storeLogs(this.env, sandboxName(instanceId, "preview"), [PREVIEW_LOG], (log) => logKey(params, log)),
         )
         .catch(() => []);
-      return { deployed: { error: message }, logs };
+      return { deployed: { error: message }, durationMs: 0, logs };
     }
   }
 }

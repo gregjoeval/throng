@@ -5,7 +5,7 @@
 import { currentBase, readTaskBranch } from "./base.ts";
 import type { Base } from "./base.ts";
 import { loadConfig } from "./config.ts";
-import type { MetricConfig } from "./config.ts";
+import type { CheckConfig, MetricConfig } from "./config.ts";
 import type { ConflictDetails, ConflictFile } from "./conflicts.ts";
 import { ServiceError } from "./errors.ts";
 import { attemptRemote } from "./git-remotes.ts";
@@ -18,6 +18,8 @@ import type { Repos } from "./repos.ts";
 import type { Gate, ScoringResult } from "./results.ts";
 import { headAttemptRef } from "./scoring.ts";
 import type { AttemptScoring, ScoringRequest, StoredRun } from "./scoring.ts";
+import { NO_TASK_DEFINITIONS, taskDefinitionsFrom, withTask } from "./task-definitions.ts";
+import type { TaskDefinitions, TaskDefinitionsInput } from "./task-definitions.ts";
 import { attemptRef, parseAttemptRef, parseTaskRef, taskRef } from "./task-refs.ts";
 import type {
   AttemptInput,
@@ -71,6 +73,10 @@ export interface Task {
   closedAt: string | null;
   closedBy: UserRef | null;
   attemptLimit: number | null;
+  /** Its own checks, run after the project's; empty by default. */
+  checks: CheckConfig[];
+  /** Its own metrics, read after the project's; empty by default. */
+  metrics: MetricConfig[];
   /** The head of its task branch (`refs/tasks/t42` in the origin), or null when it has none. */
   taskBranch: TaskBranch | null;
 }
@@ -212,14 +218,10 @@ export interface RunDetail extends ScoringRun {
   result: ScoringResult | null;
 }
 
-/**
- * An attempt's current result: the latest `done` run for its current head, with the run it came
- * from and every check's metrics in one map (metric names are unique per project).
- */
+/** An attempt's current result: the latest `done` run for its current head, with the run it came from. */
 export interface CurrentResult extends ScoringResult {
   run: number;
   finishedAt: string;
-  metrics: Record<string, number>;
 }
 
 /** An attempt's scoring status for polling, with its current result once its head has one. */
@@ -239,7 +241,10 @@ export interface ArenaAttempt extends ScoringStatus, AttemptStanding {
 /** A task's arena: the current result of every attempt in it. */
 export interface TaskArena {
   task: string;
-  /** Every metric the config on `origin/main` declares, in check order; none without a valid config. */
+  /**
+   * Every metric a run of the task's attempts would read: the config on `origin/main`'s, then the
+   * task's, each with its `source`; none when they don't merge into a valid config.
+   */
   metrics: MetricConfig[];
   attempts: ArenaAttempt[];
 }
@@ -270,6 +275,18 @@ export function taskService({ db, repos, backend, origin }: TaskServiceDeps) {
     const outcome = await backend(ctx.id).call(method, args);
     if (!outcome.ok) throw new ServiceError(outcome.code, outcome.message);
     return outcome.value as StoreResult<K>;
+  }
+
+  /**
+   * A new task's checks and metrics as a request gave them, checked against the project's config on
+   * `main`; none when it gave neither. Anyone may create a task; an edit's are checked by the store,
+   * after who may edit.
+   */
+  async function newTaskDefinitions(ctx: ProjectContext, input: TaskDefinitionsInput): Promise<TaskDefinitions> {
+    if (input.checks === undefined && input.metrics === undefined) return NO_TASK_DEFINITIONS;
+    const checked = taskDefinitionsFrom(input, NO_TASK_DEFINITIONS, await loadConfig(repos, ctx.id));
+    if ("error" in checked) throw new ServiceError("invalidRequest", checked.error);
+    return checked.definitions;
   }
 
   /** Renders tasks of project `ctx`, each with its task branch read from the origin. */
@@ -329,11 +346,17 @@ export function taskService({ db, repos, backend, origin }: TaskServiceDeps) {
     /** Creates an open task; the caller's user is its creator. Any signed-in user may. */
     async createTask(
       actor: Actor,
-      input: ProjectPath & { title: string; body?: string | undefined; attemptLimit?: number | null | undefined },
+      input: ProjectPath &
+        TaskDefinitionsInput & {
+          title: string;
+          body?: string | undefined;
+          attemptLimit?: number | null | undefined;
+        },
     ): Promise<Task> {
       const { title, body, attemptLimit } = input;
       const ctx = await project(input);
-      return one(await invoke("createTask", ctx, actor, { title, body, attemptLimit }), tasks(ctx));
+      const definitions = await newTaskDefinitions(ctx, input);
+      return one(await invoke("createTask", ctx, actor, { title, body, attemptLimit, ...definitions }), tasks(ctx));
     },
 
     async getTask(actor: Actor, input: TaskPath): Promise<Task> {
@@ -357,15 +380,18 @@ export function taskService({ db, repos, backend, origin }: TaskServiceDeps) {
     /** Edits a task. The project owner or the task's creator may. */
     async editTask(
       actor: Actor,
-      input: TaskPath & {
-        title?: string | undefined;
-        body?: string | undefined;
-        attemptLimit?: number | null | undefined;
-      },
+      input: TaskPath &
+        TaskDefinitionsInput & {
+          title?: string | undefined;
+          body?: string | undefined;
+          attemptLimit?: number | null | undefined;
+        },
     ): Promise<Task> {
       const { title, body, attemptLimit } = input;
-      const edit = { task: taskNumber(input.task), title, body, attemptLimit };
       const ctx = await project(input);
+      // The store checks the checks and metrics itself, once it has checked who may edit the task.
+      const { checks, metrics } = input;
+      const edit = { task: taskNumber(input.task), title, body, attemptLimit, checks, metrics };
       return one(await invoke("editTask", ctx, actor, edit), tasks(ctx));
     },
 
@@ -458,7 +484,7 @@ export function taskService({ db, repos, backend, origin }: TaskServiceDeps) {
     async taskArena(actor: Actor, input: TaskPath): Promise<TaskArena> {
       const number = taskNumber(input.task);
       const ctx = await project(input);
-      const list = await invoke("taskArena", ctx, actor, { task: number });
+      const { definitions, attempts: list } = await invoke("taskArena", ctx, actor, { task: number });
       const [users, bases, config] = await Promise.all([
         handles(
           db,
@@ -467,9 +493,10 @@ export function taskService({ db, repos, backend, origin }: TaskServiceDeps) {
         Promise.all(list.map(({ fork, state }) => (isActive(state) ? currentBase(repos, ctx.id, fork) : null))),
         loadConfig(repos, ctx.id),
       ]);
+      const merged = withTask(config, definitions);
       return {
         task: taskRef(number),
-        metrics: config.kind === "valid" ? config.config.checks.flatMap((check) => check.metrics) : [],
+        metrics: merged.kind === "valid" ? merged.config.metrics : [],
         attempts: list.map(({ scoring, fork, state, author, alias, verdicts, forked_from, needs_update }, i) => ({
           ref: fork,
           state,
@@ -642,6 +669,8 @@ function publicTask(t: StoredTask, users: Map<string, string>, taskBranch: TaskB
     closedAt: t.closed_at,
     closedBy: t.closed_by === null ? null : userRef(t.closed_by, users),
     attemptLimit: t.attempt_limit,
+    checks: t.definitions.checks,
+    metrics: t.definitions.metrics,
     taskBranch,
   };
 }
@@ -759,8 +788,7 @@ function scoringStatus({ current, ...status }: AttemptScoringDetail): ScoringSta
 
 function currentResult(run: StoredRun): CurrentResult {
   if (run.result === null || run.finished_at === null) throw new Error(`run ${run.id} is done without a result`);
-  const metrics = Object.assign({}, ...run.result.checks.map((c) => c.metrics)) as Record<string, number>;
-  return { ...run.result, run: run.id, finishedAt: new Date(run.finished_at).toISOString(), metrics };
+  return { ...run.result, run: run.id, finishedAt: new Date(run.finished_at).toISOString() };
 }
 
 function iso(ms: number | null): string | null {

@@ -57,20 +57,20 @@ Any repo in a project other than its origin, where work is pushed; a fork made f
 _Avoid_: Branch (a fork is a whole repo)
 
 **Check**:
-One configured command run against an attempt's tree.
+One configured command run against an attempt's tree, defined by the project or added by a task; its outcome and its output are where metrics come from.
 _Avoid_: Test, job, CI step
 
+**Metric**:
+One named, typed value in an attempt's score, taken from a check or measured by Throng; it is null when nothing fits it.
+_Avoid_: Stat, KPI, signal, measure
+
 **Gate**:
-Whether every required check passed for an attempt.
+Whether every required condition on an attempt's metrics holds, such as each required check having passed.
 _Avoid_: Status, pass/fail
 
 **Score**:
-The breakdown of an attempt's results from signals other than the gate: its optional checks and its metrics.
+The breakdown of all of an attempt's metrics.
 _Avoid_: Rating, grade
-
-**Metric**:
-One named number in an attempt's score, either reported by a check or measured by Throng, with an order that says which value is best.
-_Avoid_: Stat, KPI
 
 **Reviewer**:
 Any user other than an attempt's author who judges it; an agent can review, but never for its own human's attempts.

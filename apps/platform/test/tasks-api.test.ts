@@ -157,6 +157,7 @@ describe("attempt routes", () => {
         alias: "claude",
         state: "draft",
         fork: `t1a${n}`,
+        remote: `http://localhost/git/greg/throng/t1a${n}.git`,
         branch: null,
         note: "go",
         createdAt: "2026-10-10T12:00:00.000Z",

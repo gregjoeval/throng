@@ -214,6 +214,11 @@ const AttemptSchema = z
     alias: AliasSchema,
     state: z.enum(ATTEMPT_STATES),
     fork: z.string().openapi({ description: "The logical fork name, kept for the attempt's life.", example: "t42a3" }),
+    remote: z.string().openapi({
+      description:
+        "The attempt's git remote, its fork. Clone and push with a Throng token as the bearer or Basic password.",
+      example: "https://throng.example/git/greg/throng/t42a3.git",
+    }),
     branch: z.string().nullable().openapi({ description: "The origin branch a push created it from." }),
     note: z.string().openapi({ description: "Markdown." }),
     createdAt: z.string(),
@@ -803,7 +808,9 @@ export function apiRoutes(options: ApiOptions = {}) {
   const projects = (env: AccessBindings) => projectService({ db: env.DB, repos: reposFor(env) });
   const backendFor = options.tasks ?? noTasks;
   const logsFor = options.logs ?? noLogs;
-  const tasks = (env: AccessBindings) => taskService({ db: env.DB, repos: reposFor(env), backend: backendFor(env) });
+  // Attempts name their git remotes on the origin the request came in on.
+  const tasks = ({ env, req }: { env: AccessBindings; req: { url: string } }) =>
+    taskService({ db: env.DB, repos: reposFor(env), backend: backendFor(env), origin: new URL(req.url).origin });
   const tokens = (env: AccessBindings) => tokenService({ db: env.DB, now });
   const taskPath = ({ t, ...rest }: z.infer<typeof TaskPathSchema>) => ({ ...rest, task: t });
   const attemptPath = ({ a, ...rest }: z.infer<typeof AttemptPathSchema>) => ({ ...rest, attempt: a });
@@ -1016,7 +1023,7 @@ export function apiRoutes(options: ApiOptions = {}) {
         },
       }),
       async (c) => {
-        const task = await tasks(c.env).createTask(c.var.actor, { ...c.req.valid("param"), ...c.req.valid("json") });
+        const task = await tasks(c).createTask(c.var.actor, { ...c.req.valid("param"), ...c.req.valid("json") });
         return c.json(task, 201);
       },
     )
@@ -1039,7 +1046,7 @@ export function apiRoutes(options: ApiOptions = {}) {
         },
       }),
       async (c) => {
-        const list = await tasks(c.env).listTasks(c.var.actor, { ...c.req.valid("param"), ...c.req.valid("query") });
+        const list = await tasks(c).listTasks(c.var.actor, { ...c.req.valid("param"), ...c.req.valid("query") });
         return c.json({ tasks: list }, 200);
       },
     )
@@ -1060,7 +1067,7 @@ export function apiRoutes(options: ApiOptions = {}) {
           404: errorResponse("No such project or task."),
         },
       }),
-      async (c) => c.json(await tasks(c.env).getTask(c.var.actor, taskPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c).getTask(c.var.actor, taskPath(c.req.valid("param"))), 200),
     )
     .openapi(
       createRoute({
@@ -1084,32 +1091,32 @@ export function apiRoutes(options: ApiOptions = {}) {
       }),
       async (c) => {
         const input = { ...taskPath(c.req.valid("param")), ...c.req.valid("json") };
-        return c.json(await tasks(c.env).editTask(c.var.actor, input), 200);
+        return c.json(await tasks(c).editTask(c.var.actor, input), 200);
       },
     )
     .openapi(
       taskTransition(browser, "close", "closeTask", "Close an open task, and its active attempts", TASK_MANAGERS, [
         "the task isn't open.",
       ]),
-      async (c) => c.json(await tasks(c.env).closeTask(c.var.actor, taskPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c).closeTask(c.var.actor, taskPath(c.req.valid("param"))), 200),
     )
     .openapi(
       taskTransition(browser, "reopen", "reopenTask", "Reopen a closed task", TASK_MANAGERS, [
         "the task isn't closed, or one of its attempts merged.",
       ]),
-      async (c) => c.json(await tasks(c.env).reopenTask(c.var.actor, taskPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c).reopenTask(c.var.actor, taskPath(c.req.valid("param"))), 200),
     )
     .openapi(
       taskTransition(browser, "obsolete", "obsoleteTask", "Make a task obsolete, and its active attempts", OWNER_ONLY, [
         "the task is already obsolete.",
       ]),
-      async (c) => c.json(await tasks(c.env).obsoleteTask(c.var.actor, taskPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c).obsoleteTask(c.var.actor, taskPath(c.req.valid("param"))), 200),
     )
     .openapi(
       taskTransition(browser, "restore", "restoreTask", "Restore an obsolete task to closed", OWNER_ONLY, [
         "the task isn't obsolete.",
       ]),
-      async (c) => c.json(await tasks(c.env).restoreTask(c.var.actor, taskPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c).restoreTask(c.var.actor, taskPath(c.req.valid("param"))), 200),
     )
     .openapi(
       createRoute({
@@ -1134,7 +1141,7 @@ export function apiRoutes(options: ApiOptions = {}) {
       }),
       async (c) => {
         const input = { ...taskPath(c.req.valid("param")), ...c.req.valid("json") };
-        return c.json({ attempts: await tasks(c.env).createAttempts(c.var.actor, input) }, 201);
+        return c.json({ attempts: await tasks(c).createAttempts(c.var.actor, input) }, 201);
       },
     )
     .openapi(
@@ -1157,7 +1164,7 @@ export function apiRoutes(options: ApiOptions = {}) {
       }),
       async (c) => {
         const input = { ...taskPath(c.req.valid("param")), ...c.req.valid("query") };
-        return c.json({ attempts: await tasks(c.env).listAttempts(c.var.actor, input) }, 200);
+        return c.json({ attempts: await tasks(c).listAttempts(c.var.actor, input) }, 200);
       },
     )
     .openapi(
@@ -1183,7 +1190,7 @@ export function apiRoutes(options: ApiOptions = {}) {
       async (c) => {
         const { wait, until } = c.req.valid("query");
         const path = attemptPath(c.req.valid("param"));
-        const service = tasks(c.env);
+        const service = tasks(c);
         const answer =
           wait === undefined
             ? await service.getAttempt(c.var.actor, path)
@@ -1213,7 +1220,7 @@ export function apiRoutes(options: ApiOptions = {}) {
       }),
       async (c) => {
         const input = { ...attemptPath(c.req.valid("param")), ...c.req.valid("json") };
-        return c.json(await tasks(c.env).editAttempt(c.var.actor, input), 200);
+        return c.json(await tasks(c).editAttempt(c.var.actor, input), 200);
       },
     )
     .openapi(
@@ -1225,38 +1232,38 @@ export function apiRoutes(options: ApiOptions = {}) {
         AUTHOR_ONLY,
         ["`invalidState`: the attempt isn't a draft."],
       ),
-      async (c) => c.json(await tasks(c.env).openAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c).openAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
       attemptTransition(bearerRoute, "draft", "draftAttempt", "Return an open attempt to draft", AUTHOR_ONLY, [
         "`invalidState`: the attempt isn't open.",
       ]),
-      async (c) => c.json(await tasks(c.env).draftAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c).draftAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
       attemptTransition(bearerRoute, "close", "closeAttempt", "Close a draft or open attempt", AUTHOR_ONLY, [
         "`invalidState`: the attempt isn't active.",
       ]),
-      async (c) => c.json(await tasks(c.env).closeAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c).closeAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
       attemptTransition(webRoute, "reopen", "reopenAttempt", "Reopen a closed attempt as a draft", AUTHOR_ONLY, [
         "`invalidState`: the attempt isn't closed or its task isn't open;",
         "`attemptLimit`: the task is at its cap; `conflict`: another active attempt has its branch.",
       ]),
-      async (c) => c.json(await tasks(c.env).reopenAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c).reopenAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
       attemptTransition(bearerRoute, "obsolete", "obsoleteAttempt", "Make an attempt obsolete", OWNER_ONLY, [
         "`invalidState`: the attempt is merged or already obsolete.",
       ]),
-      async (c) => c.json(await tasks(c.env).obsoleteAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c).obsoleteAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
       attemptTransition(bearerRoute, "restore", "restoreAttempt", "Restore an obsolete attempt to closed", OWNER_ONLY, [
         "`invalidState`: the attempt isn't obsolete.",
       ]),
-      async (c) => c.json(await tasks(c.env).restoreAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c).restoreAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
       scoringRoute(
@@ -1269,7 +1276,7 @@ export function apiRoutes(options: ApiOptions = {}) {
         AUTHOR_ONLY,
         "the attempt isn't a draft",
       ),
-      async (c) => c.json(await tasks(c.env).scoreNow(c.var.actor, attemptPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c).scoreNow(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
       scoringRoute(
@@ -1282,7 +1289,7 @@ export function apiRoutes(options: ApiOptions = {}) {
         RESCORERS,
         "the attempt isn't open",
       ),
-      async (c) => c.json(await tasks(c.env).rescore(c.var.actor, attemptPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c).rescore(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
       createRoute({
@@ -1304,7 +1311,7 @@ export function apiRoutes(options: ApiOptions = {}) {
           404: errorResponse("No such project or attempt."),
         },
       }),
-      async (c) => c.json(await tasks(c.env).getScoring(c.var.actor, attemptPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c).getScoring(c.var.actor, attemptPath(c.req.valid("param"))), 200),
     )
     .openapi(
       createRoute({
@@ -1326,7 +1333,7 @@ export function apiRoutes(options: ApiOptions = {}) {
           404: errorResponse("No such project or task."),
         },
       }),
-      async (c) => c.json(await tasks(c.env).taskArena(c.var.actor, taskPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c).taskArena(c.var.actor, taskPath(c.req.valid("param"))), 200),
     )
     .openapi(
       createRoute({
@@ -1347,7 +1354,7 @@ export function apiRoutes(options: ApiOptions = {}) {
         },
       }),
       async (c) => {
-        const runs = await tasks(c.env).listScoringRuns(c.var.actor, attemptPath(c.req.valid("param")));
+        const runs = await tasks(c).listScoringRuns(c.var.actor, attemptPath(c.req.valid("param")));
         return c.json({ runs }, 200);
       },
     )
@@ -1370,7 +1377,7 @@ export function apiRoutes(options: ApiOptions = {}) {
       }),
       async (c) => {
         const { runId, ...path } = c.req.valid("param");
-        return c.json(await tasks(c.env).getScoringRun(c.var.actor, { ...path, run: runId }), 200);
+        return c.json(await tasks(c).getScoringRun(c.var.actor, { ...path, run: runId }), 200);
       },
     )
     .openapi(
@@ -1398,7 +1405,7 @@ export function apiRoutes(options: ApiOptions = {}) {
       }),
       async (c) => {
         const input = { ...attemptPath(c.req.valid("param")), ...c.req.valid("json") };
-        return c.json(await tasks(c.env).handOffAttempt(c.var.actor, input), 200);
+        return c.json(await tasks(c).handOffAttempt(c.var.actor, input), 200);
       },
     )
     .openapi(
@@ -1427,7 +1434,7 @@ export function apiRoutes(options: ApiOptions = {}) {
       }),
       async (c) => {
         const input = { ...attemptPath(c.req.valid("param")), ...c.req.valid("json") };
-        return c.json(await tasks(c.env).postVerdict(c.var.actor, input), 201);
+        return c.json(await tasks(c).postVerdict(c.var.actor, input), 201);
       },
     )
     .openapi(
@@ -1451,7 +1458,7 @@ export function apiRoutes(options: ApiOptions = {}) {
         },
       }),
       async (c) => {
-        const verdicts = await tasks(c.env).listVerdicts(c.var.actor, attemptPath(c.req.valid("param")));
+        const verdicts = await tasks(c).listVerdicts(c.var.actor, attemptPath(c.req.valid("param")));
         return c.json({ verdicts }, 200);
       },
     )
@@ -1478,7 +1485,7 @@ export function apiRoutes(options: ApiOptions = {}) {
       }),
       async (c) => {
         const { runId, name, ...path } = c.req.valid("param");
-        const key = await tasks(c.env).runLogKey(c.var.actor, { ...path, run: runId, name });
+        const key = await tasks(c).runLogKey(c.var.actor, { ...path, run: runId, name });
         const log = await logsFor(c.env).get(key);
         if (log === null) throw missingLog(runId, name);
         // Streamed straight from R2; the typed response only knows the documented string body.
@@ -1546,7 +1553,7 @@ export function apiRoutes(options: ApiOptions = {}) {
       }),
       async (c) => {
         const input = { ...taskPath(c.req.valid("param")), ...c.req.valid("json") };
-        return c.json(await tasks(c.env).selectAttempt(c.var.actor, input), 200);
+        return c.json(await tasks(c).selectAttempt(c.var.actor, input), 200);
       },
     )
     .openapi(
@@ -1559,7 +1566,7 @@ export function apiRoutes(options: ApiOptions = {}) {
           "`pending` it re-approves the same head, which requeues one held after a dequeue (an `errored` one, say). Then, " +
           "as on selection, it enters the queue once the head's gate has passed. Journals `approved`.",
       ),
-      async (c) => c.json(await tasks(c.env).approveMergeRequest(c.var.actor, taskPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c).approveMergeRequest(c.var.actor, taskPath(c.req.valid("param"))), 200),
     )
     .openapi(
       mergeRequestAction(
@@ -1570,7 +1577,7 @@ export function apiRoutes(options: ApiOptions = {}) {
         "From any open state. A queued or landing one is dequeued with reason `cancelled`. The task stays open and can be " +
           "selected again. Journals `cancelled`.",
       ),
-      async (c) => c.json(await tasks(c.env).cancelMergeRequest(c.var.actor, taskPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c).cancelMergeRequest(c.var.actor, taskPath(c.req.valid("param"))), 200),
     )
     .openapi(
       createRoute({
@@ -1590,7 +1597,7 @@ export function apiRoutes(options: ApiOptions = {}) {
           404: errorResponse("No such project or task, or the task has no merge request."),
         },
       }),
-      async (c) => c.json(await tasks(c.env).getMergeRequest(c.var.actor, taskPath(c.req.valid("param"))), 200),
+      async (c) => c.json(await tasks(c).getMergeRequest(c.var.actor, taskPath(c.req.valid("param"))), 200),
     )
     .openapi(
       createRoute({
@@ -1609,7 +1616,7 @@ export function apiRoutes(options: ApiOptions = {}) {
           404: errorResponse("No such project."),
         },
       }),
-      async (c) => c.json({ queue: await tasks(c.env).mergeQueue(c.var.actor, c.req.valid("param")) }, 200),
+      async (c) => c.json({ queue: await tasks(c).mergeQueue(c.var.actor, c.req.valid("param")) }, 200),
     )
     .route(
       "/",

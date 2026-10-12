@@ -8,19 +8,21 @@ import type { AccessBindings } from "./access.ts";
 import { apiRoutes } from "./api.ts";
 import type { ApiOptions } from "./api.ts";
 import { rejectForwardedIdentity } from "./auth.ts";
+import { llmsRoutes } from "./llms.ts";
 import { mcpRoutes } from "./mcp.ts";
 
 type Options = Omit<ApiOptions, "trustForwardedIdentity">;
 
 /**
  * The public hostname's app: `/api` with bearer and Access auth, and the MCP server at `/mcp` with
- * bearer auth only, both refusing forwarded identities.
+ * bearer auth only, both refusing forwarded identities; and `/llms.txt`, the agents' guide, with none.
  */
 export function publicApp<B extends AccessBindings>(options: Options = {}) {
   const app = new Hono<{ Bindings: B }>();
   app.use(rejectForwardedIdentity());
   app.route("/api", apiRoutes(options));
   app.route("/mcp", mcpRoutes(options));
+  app.route("/llms.txt", llmsRoutes());
   return app;
 }
 

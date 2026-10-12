@@ -103,7 +103,11 @@ function NumberedCode({ path, code }: { path: string; code: string }) {
 
   return (
     <div className="flex font-mono text-sm leading-relaxed">
-      <nav aria-label="Line numbers" className="flex flex-col py-3 pr-2 text-right select-none">
+      {/* The same top border and padding as `.shiki`, so each number sits level with its line. */}
+      <nav
+        aria-label="Line numbers"
+        className="flex flex-col border-y border-transparent py-3 pr-2 text-right select-none"
+      >
         {lines.map((line) => (
           <a
             key={line}

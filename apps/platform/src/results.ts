@@ -274,8 +274,13 @@ export function withPreview(
  * beside the attempt's code, so the Worker trusts nothing it hands back.
  */
 function checkedValue(metric: MetricConfig, reported: MetricValue | undefined): MetricValue {
-  if (typeof reported !== "object" || reported === null) return { value: null, note: `${metric.from}: not reported` };
-  if (reported.value === null) return { value: null, note: String(reported.note) };
+  const notReported = { value: null, note: `${metric.from}: not reported` };
+  if (typeof reported !== "object" || reported === null) return notReported;
+  if (reported.value === null) {
+    return typeof reported.note === "string" && reported.note !== ""
+      ? { value: null, note: reported.note }
+      : notReported;
+  }
   const typed = typedValue(reported.value, ruleOf(metric));
   return "problem" in typed ? { value: null, note: `${metric.from}: ${typed.problem}` } : typed;
 }
@@ -327,7 +332,8 @@ function configScored(
   setupFailed: number | null,
 ): ScoredCheck {
   const outcome = checkOutcome(ran?.exit ?? null, ran?.durationMs ?? 0, check.timeoutMs);
-  const skipNote = setupFailed === null ? "skipped" : `skipped: setup command ${setupFailed} failed`;
+  // The score script records an exit for every check it runs, and runs them all unless setup fails.
+  const skipNote = `skipped: ${setupFailed === null ? "the score script didn't report it" : `setup command ${setupFailed} failed`}`;
   const metricValue = (metric: MetricConfig): MetricValue =>
     outcome === "skipped"
       ? { value: null, note: `${check.name}: ${check.name} was ${skipNote}` }
@@ -339,7 +345,7 @@ function configScored(
       required: check.required,
       outcome,
       durationMs: ran?.durationMs ?? 0,
-      notes: outcome === "skipped" && setupFailed !== null ? [skipNote] : [],
+      notes: outcome === "skipped" ? [skipNote] : [],
     },
     metrics: Object.fromEntries(
       metricsFrom(check.name, metrics).map((metric): [string, MetricResult] => [

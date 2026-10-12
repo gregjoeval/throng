@@ -318,6 +318,46 @@ describe("buildResult", () => {
     });
   });
 
+  it("skips a check the score script reported no exit for, saying so on it and its metrics", () => {
+    const result = buildResult(
+      CONFIG,
+      raw({
+        checks: [
+          { exit: null, durationMs: 0, metrics: {} },
+          { exit: 0, durationMs: 1, metrics: {} },
+        ],
+      }),
+    );
+    expect(result.checks[1]).toMatchObject({
+      outcome: "skipped",
+      notes: ["skipped: the score script didn't report it"],
+    });
+    expect(result.metrics.coverage).toMatchObject({
+      value: null,
+      note: "test: test was skipped: the score script didn't report it",
+    });
+  });
+
+  it("gives a null the score script sent without a note one naming its from", () => {
+    const result = buildResult(
+      CONFIG,
+      raw({
+        checks: [
+          {
+            exit: 0,
+            durationMs: 1,
+            metrics: { coverage: { value: null } as unknown as { value: null; note: string } },
+          },
+          { exit: 0, durationMs: 1, metrics: {} },
+        ],
+      }),
+    );
+    expect(result.metrics.coverage).toMatchObject({
+      value: null,
+      note: "test.coverage-summary.total.lines.pct: not reported",
+    });
+  });
+
   const TYPED = parseConfig(`checks:
   - { name: t, command: x }
 metrics:

@@ -30,16 +30,23 @@ const FORK_READY_TIMEOUT_MS = 60_000;
 /** R2 deletes at most this many keys per call. */
 const R2_DELETE_BATCH = 1000;
 
-/** Mints a Throng token for the e2e user (or another, by `email`), creating the user on first use. */
+/** The aliases the e2e routes mint tokens for: a plain lowercase name. */
+const E2E_ALIAS = /^[a-z0-9-]{1,40}$/u;
+
+/**
+ * Mints a Throng token for the e2e user (or another, by `email`), under `alias` if given, creating the
+ * user on first use.
+ */
 export async function e2eToken(
   db: Database,
   now: Date,
   email = E2E_EMAIL,
+  alias: string | null = null,
 ): Promise<{ token: string; id: string; user: User }> {
   const user = await userForEmail(db, email);
   const { plaintext, token } = await mintToken(db, {
     userId: user.id,
-    alias: null,
+    alias,
     ttlSeconds: E2E_TOKEN_TTL_SECONDS,
     now,
   });
@@ -171,13 +178,16 @@ export function e2eRoutes<E extends object>(deps: E2eDeps<E>) {
 
   /**
    * A Throng token for the e2e user, for the product API (`/api`) and the git proxy (`/git`). With
-   * `?as=reviewer`, one for the second e2e user instead.
+   * `?as=reviewer`, one for the second e2e user instead; with `?alias=claude`, one that acts under
+   * that alias, as an agent's would.
    */
   app.post("/token", async (c) => {
     const as = c.req.query("as");
     if (as !== undefined && as !== "reviewer") return c.json({ error: `no e2e user ${as}` }, 400);
+    const alias = c.req.query("alias") ?? null;
+    if (alias !== null && !E2E_ALIAS.test(alias)) return c.json({ error: `not an e2e alias: ${alias}` }, 400);
     const email = as === "reviewer" ? E2E_REVIEWER_EMAIL : E2E_EMAIL;
-    const { token, id, user } = await e2eToken(deps.db(c.env), new Date(), email);
+    const { token, id, user } = await e2eToken(deps.db(c.env), new Date(), email, alias);
     return c.json({ token, id, user: { id: user.id, handle: user.handle } });
   });
 

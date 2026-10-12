@@ -11,7 +11,8 @@
 // queued or landing merge request's source dequeues it with `newPush` to `needsReview`, and it
 // doesn't requeue on its own once the new head passes).
 //
-// The agent loop over MCP, mcp, through `/mcp` and git only (see `e2e-mcp.ts`): the e2e user's agent
+// The agent loop over MCP, mcp, through `/mcp` and git only (see `e2e-mcp.ts`), with tokens under
+// aliases so it runs as `user (alias)`: the e2e user's agent
 // creates a task, starts two attempts, clones one with llms.txt's recipe, pushes and opens it, and
 // waits until it is scored; a second e2e user, the reviewer, posts a verdict on it; the first selects
 // it and waits until it merges.
@@ -836,16 +837,17 @@ test("the dependency is installed", () => {
 async function mcp(): Promise<void> {
   const timeline = new Timeline();
   const p = await setUpRealProject(timeline);
-  const reviewer = await e2eReviewer();
+  // Agents' tokens, each under an alias, so the loop runs as `user (alias)` throughout.
+  const [creator, reviewer] = await Promise.all([e2eAgentToken("claude"), e2eAgentToken("codex", "reviewer")]);
   const clones = await mkdtemp(join(tmpdir(), `${p.project}-clones-`));
-  const [creatorClient, reviewerClient] = await Promise.all([connectMcp(p.token), connectMcp(reviewer.token)]);
+  const [creatorClient, reviewerClient] = await Promise.all([connectMcp(creator.token), connectMcp(reviewer.token)]);
   timeline.mark("connected to /mcp");
   try {
     await agentLoop({
       creator: toolCaller(creatorClient),
       reviewer: toolCaller(reviewerClient),
       project: `${p.owner}/${p.project}`,
-      push: (attempt) => cloneAndPush(p, attempt, join(clones, attempt.ref)),
+      push: (attempt) => cloneAndPush(creator.token, attempt, join(clones, attempt.ref)),
       wait: 30,
       timeoutMs: CHECK_TIMEOUT_MS,
       log: (line) => {
@@ -876,9 +878,9 @@ async function connectMcp(token: string): Promise<Client> {
  * own, so the push proves the clone kept the header. A new fork can take a moment to serve, so the
  * clone retries.
  */
-async function cloneAndPush(p: RealProject, attempt: LoopAttempt, dir: string): Promise<string> {
+async function cloneAndPush(token: string, attempt: LoopAttempt, dir: string): Promise<string> {
   const recipe = `${CLONE_RECIPE.replace("<remote>", '"$1"')} "$2"`;
-  const env = { ...process.env, THRONG_TOKEN: p.token, GIT_TERMINAL_PROMPT: "0" };
+  const env = { ...process.env, THRONG_TOKEN: token, GIT_TERMINAL_PROMPT: "0" };
   await retrying(() => run("sh", ["-c", recipe, "sh", attempt.remote, dir], { env }));
   const file = join(dir, "src/greeting.js");
   await writeFile(file, (await readFile(file, "utf8")).replace('"hello"', `"hello from ${attempt.ref}"`));
@@ -1054,26 +1056,36 @@ async function setUpRealProject(timeline: Timeline, files: Record<string, string
   return { project, owner: user.handle, work, origin, token, user };
 }
 
-let e2eUserToken: Promise<{ token: string; id: string; user: { id: string; handle: string } }> | null = null;
+/** A token an e2e route minted. */
+interface MintedToken {
+  token: string;
+  id: string;
+  user: { id: string; handle: string };
+}
+
+let e2eUserToken: Promise<MintedToken> | null = null;
 
 /** The e2e user's Throng token, minted once per run. */
-function e2eUser(): Promise<{ token: string; id: string; user: { id: string; handle: string } }> {
+function e2eUser(): Promise<MintedToken> {
   e2eUserToken ??= api("POST", "/e2e/token");
   return e2eUserToken;
 }
 
-let e2eReviewerToken: Promise<{ token: string; id: string; user: { id: string; handle: string } }> | null = null;
+/** Agents' tokens the run minted: each under an alias, for the e2e user or the second one, the reviewer. */
+const e2eAgentTokens: Promise<MintedToken>[] = [];
 
-/** The second e2e user's Throng token, minted once per run: a reviewer that isn't the attempts' author. */
-function e2eReviewer(): Promise<{ token: string; id: string; user: { id: string; handle: string } }> {
-  e2eReviewerToken ??= api("POST", "/e2e/token?as=reviewer");
-  return e2eReviewerToken;
+/** Mints a Throng token under `alias` for the e2e user, or for the reviewer: a user who isn't the attempts' author. */
+function e2eAgentToken(alias: string, as?: "reviewer"): Promise<MintedToken> {
+  const query = new URLSearchParams({ alias, ...(as === undefined ? {} : { as }) });
+  const minted = api<MintedToken>("POST", `/e2e/token?${query}`);
+  e2eAgentTokens.push(minted);
+  return minted;
 }
 
 /** Revokes the run's tokens, if it minted any. */
 async function revokeE2eTokens(): Promise<void> {
   if (process.env.E2E_KEEP === "1") return;
-  for (const minted of [e2eUserToken, e2eReviewerToken]) {
+  for (const minted of [e2eUserToken, ...e2eAgentTokens]) {
     if (minted === null) continue;
     const { id } = await minted;
     await api("DELETE", `/e2e/tokens/${id}`).catch((error) => console.warn("could not revoke a run's token", error));

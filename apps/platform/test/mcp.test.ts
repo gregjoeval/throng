@@ -249,14 +249,14 @@ describe("/mcp", () => {
   });
 
   it("runs the e2e suite's agent loop: start, push, open, wait for scoring, review, select, wait for the merge", async () => {
-    const { connect, tokenFor, runPlatform, repos, env, store, projectId, project, ada } = await withProject();
+    const { connect, tokenFor, runPlatform, repos, env, store, projectId, project, claude } = await withProject();
     const codex = await connect(await tokenFor("greg@example.com", "codex"));
     const stop = runPlatform(projectId);
     const pushed: string[] = [];
     try {
       const result = await agentLoop({
         creator: toolCaller(codex),
-        reviewer: toolCaller(ada),
+        reviewer: toolCaller(claude),
         project,
         // What `git push` to the attempt's remote does, through the git proxy.
         push: async ({ ref, remote }) => {
@@ -280,6 +280,8 @@ describe("/mcp", () => {
       });
       expect(pushed).toEqual(["t2a1"]);
       expect(result).toMatchObject({
+        creator: "greg (codex)",
+        reviewer: "ada (claude)",
         task: "t2",
         attempt: "t2a1",
         mergeSha: repos.ref(`${projectId}-main`, "refs/heads/main"),

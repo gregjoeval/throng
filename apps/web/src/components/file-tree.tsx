@@ -3,12 +3,12 @@
 
 import { useQueries } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import { ChevronRightIcon, FileIcon, FolderIcon } from "lucide-react";
+import { ChevronRightIcon } from "lucide-react";
 import { useState } from "react";
 import type { ReactNode } from "react";
 import { Button, Tree, TreeItem, TreeItemContent } from "react-aria-components";
 import type { Key, Selection } from "react-aria-components";
-import { entryLocation } from "@/components/directory";
+import { EntryIcon, entryLocation } from "@/components/directory";
 import { treeQuery } from "@/lib/api";
 import { buildPath, splitPath } from "@/lib/paths";
 import type { BrowseLocation } from "@/lib/paths";
@@ -82,11 +82,7 @@ export function FileTree({ at }: { at: BrowseLocation }) {
                 ) : (
                   <span className="w-4" />
                 )}
-                {folder ? (
-                  <FolderIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden />
-                ) : (
-                  <FileIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden />
-                )}
+                <EntryIcon type={entry.type} />
                 <span className="truncate">{entry.name}</span>
               </span>
             )}

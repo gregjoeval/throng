@@ -86,4 +86,10 @@ describe("credential parsing", () => {
     expect(basicPassword(`Basic ${btoa("no-colon")}`)).toBeNull();
     expect(basicPassword("Bearer x")).toBeNull();
   });
+
+  it("matches the scheme in ASCII only, not by Unicode case folding", () => {
+    // U+017F (long s) case-folds to "s".
+    expect(basicPassword(`Ba\u017Fic ${btoa("u:p")}`)).toBeNull();
+    expect(basicPassword(`BASIC ${btoa("u:p")}`)).toBe("p");
+  });
 });

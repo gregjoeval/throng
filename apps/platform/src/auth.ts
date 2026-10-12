@@ -31,15 +31,18 @@ export interface AuthOptions {
 const BEARER_CHALLENGE = { "WWW-Authenticate": 'Bearer realm="throng"' };
 const BASIC_CHALLENGE = { "WWW-Authenticate": 'Basic realm="throng"' };
 
-/** The token in an `Authorization: Bearer <token>` header, or null. */
+/**
+ * The token in an `Authorization: Bearer <token>` header, or null. The scheme is case-insensitive,
+ * spelled out rather than flagged `i`: with `u`, `i` also folds Unicode, so `Baſic` would match `Basic`.
+ */
 export function bearerToken(header: string | undefined): string | null {
-  const match = /^Bearer[ ]+(\S+)[ ]*$/iu.exec(header ?? "");
+  const match = /^[Bb][Ee][Aa][Rr][Ee][Rr][ ]+(\S+)[ ]*$/u.exec(header ?? "");
   return match?.[1] ?? null;
 }
 
 /** The password in an `Authorization: Basic <base64(user:password)>` header, or null. */
 export function basicPassword(header: string | undefined): string | null {
-  const match = /^Basic[ ]+([A-Za-z0-9+/=]+)[ ]*$/iu.exec(header ?? "");
+  const match = /^[Bb][Aa][Ss][Ii][Cc][ ]+([A-Za-z0-9+/=]+)[ ]*$/u.exec(header ?? "");
   if (match?.[1] === undefined) return null;
   let decoded: string;
   try {

@@ -265,7 +265,7 @@ describe("GET …/tasks/{t}/merge-request/dequeue/files/{path}/diff", () => {
       headers: { Accept: "text/x-diff" },
     });
     expect(res.headers.get("Content-Type")).toBe("text/x-diff; charset=utf-8");
-    expect(await res.text()).toMatch(/^diff --git a\/src\/greeting.js b\/src\/greeting.js\n/);
+    expect(await res.text()).toMatch(/^diff --git a\/src\/greeting.js b\/src\/greeting.js\n/u);
   });
 
   it("shows a file deleted on main as deleted", async () => {

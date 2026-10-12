@@ -53,7 +53,7 @@ export const UPSTREAM_TOKEN_TTL_SECONDS = 60 * 60;
 /** A cached token is replaced once it has less than this left, so no request carries a dying one. */
 export const UPSTREAM_TOKEN_MARGIN_MS = 5 * 60 * 1000;
 
-const REMOTE_PATH = /^\/git\/([^/]+)\/([^/]+?)(?:\/([^/]+?))?\.git\/(info\/refs|git-upload-pack|git-receive-pack)$/;
+const REMOTE_PATH = /^\/git\/([^/]+)\/([^/]+?)(?:\/([^/]+?))?\.git\/(info\/refs|git-upload-pack|git-receive-pack)$/u;
 const SERVICES = ["git-upload-pack", "git-receive-pack"] as const;
 type Service = (typeof SERVICES)[number];
 
@@ -366,7 +366,7 @@ async function forkReady(repos: Repos, name: string): Promise<void> {
 
 /** `report` with the fork's `main` turned from `ok` to `ng` for `reason`. */
 function refuse(report: PushReport, reason: string): PushReport {
-  const line = `ng ${MAIN} ${reason.replace(/\s+/g, " ").trim()}`;
+  const line = `ng ${MAIN} ${reason.replace(/\s+/gu, " ").trim()}`;
   return { ...report, lines: report.lines.map((l) => (l === `ok ${MAIN}` ? line : l)) };
 }
 
@@ -663,7 +663,7 @@ export class UpstreamTokens {
   async #mint(repos: Repos, repo: string, scope: TokenScope): Promise<CachedToken> {
     const { remote } = await repos.get(repo);
     const minted = await repos.mintToken(repo, scope, UPSTREAM_TOKEN_TTL_SECONDS);
-    return { remote: remote.replace(/\/+$/, ""), token: minted.token, expiresAt: Date.parse(minted.expiresAt) };
+    return { remote: remote.replace(/\/+$/u, ""), token: minted.token, expiresAt: Date.parse(minted.expiresAt) };
   }
 
   /** Forgets settled tokens past their expiry, so the cache doesn't grow with every repo ever served. */

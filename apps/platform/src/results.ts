@@ -114,9 +114,9 @@ export function checkOutcome(exit: number | null, durationMs: number, timeoutMs:
 export function parseShortstat(line: string): Omit<BuiltinMetrics, "durationMs"> {
   const count = (pattern: RegExp) => Number(pattern.exec(line)?.[1] ?? 0);
   return {
-    filesChanged: count(/(\d+) files? changed/),
-    additions: count(/(\d+) insertions?\(\+\)/),
-    deletions: count(/(\d+) deletions?\(-\)/),
+    filesChanged: count(/(\d+) files? changed/u),
+    additions: count(/(\d+) insertions?\(\+\)/u),
+    deletions: count(/(\d+) deletions?\(-\)/u),
   };
 }
 

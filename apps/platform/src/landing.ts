@@ -47,7 +47,7 @@ export interface MergeCommitInput {
 
 /** `Merge t42a3: <task title>` with the Throng trailers, `Approved-by` and a `Co-authored-by` per agent alias. */
 export function mergeCommitMessage({ task, attempt, title, approver, coAuthors }: MergeCommitInput): string {
-  const subject = `Merge ${attemptRef(task, attempt)}: ${title.replace(/\s+/g, " ").trim()}`;
+  const subject = `Merge ${attemptRef(task, attempt)}: ${title.replace(/\s+/gu, " ").trim()}`;
   const trailers = [
     `Throng-Task: ${taskRef(task)}`,
     `Throng-Attempt: ${attemptRef(task, attempt)}`,

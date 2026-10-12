@@ -189,7 +189,7 @@ describe("GET /tree", () => {
       path: "docs",
       type: "tree",
       mode: "40000",
-      hash: expect.stringMatching(/^[0-9a-f]{40}$/),
+      hash: expect.stringMatching(/^[0-9a-f]{40}$/u),
     });
 
     const src = await get(`${base}/tree/main/src`);
@@ -234,7 +234,7 @@ describe("GET /blob and /raw", () => {
       path: "src/a.ts",
       type: "blob",
       mode: "100644",
-      hash: expect.stringMatching(/^[0-9a-f]{40}$/),
+      hash: expect.stringMatching(/^[0-9a-f]{40}$/u),
       size: 20,
       binary: false,
       tooLarge: false,
@@ -500,7 +500,7 @@ describe("the OpenAPI document", () => {
     const { request } = await setup();
     const doc = (await (await request("/openapi.json")).json()) as Json;
     const paths = doc["paths"] as Json;
-    const browse = Object.keys(paths).filter((p) => /\/(refs|tree|blob|raw|commits?)(\/|$)/.test(p));
+    const browse = Object.keys(paths).filter((p) => /\/(refs|tree|blob|raw|commits?)(\/|$)/u.test(p));
     expect(browse.toSorted()).toEqual([
       "/projects/{owner}/{project}/blob/{ref}/{path}",
       "/projects/{owner}/{project}/commit/{sha}",

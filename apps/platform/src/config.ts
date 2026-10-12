@@ -14,7 +14,7 @@ export const MAX_CONFIG_BYTES = 64 * 1024;
 export const DEFAULT_CHECK_TIMEOUT_MS = 10 * 60 * 1000;
 export const MAX_CHECK_TIMEOUT_MS = 30 * 60 * 1000;
 /** Check and metric names. */
-export const CONFIG_NAME = /^[a-z0-9][a-z0-9_-]*$/;
+export const CONFIG_NAME = /^[a-z0-9][a-z0-9_-]*$/u;
 
 export interface MetricConfig {
   name: string;
@@ -53,9 +53,9 @@ export type ConfigResult =
   | { kind: "invalid"; error: string };
 
 const ORDERS = { ascending: "asc", asc: "asc", descending: "desc", desc: "desc" } as const;
-const DURATION = /^(\d+)(s|m|h)$/;
+const DURATION = /^(\d+)(s|m|h)$/u;
 const UNIT_MS = { s: 1000, m: 60 * 1000, h: 60 * 60 * 1000 } as const;
-const HOST = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
+const HOST = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/u;
 
 const name = (what: string) =>
   z.string({ error: `${what} must be a string` }).regex(CONFIG_NAME, `${what} must match ${CONFIG_NAME.source}`);

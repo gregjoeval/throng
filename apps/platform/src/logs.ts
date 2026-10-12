@@ -15,7 +15,7 @@ export const LOG_PREFIX = "logs/";
 /** The preview's log. Check names can't contain a dot, so it never collides with a check's. */
 export const PREVIEW_LOG = "preview.deploy";
 /** A check's log name is its own name; setup steps, the preview and checks never share one. */
-const LOG_NAME = /^[a-z0-9][a-z0-9_-]*(\.[a-z0-9_-]+)?$/;
+const LOG_NAME = /^[a-z0-9][a-z0-9_-]*(\.[a-z0-9_-]+)?$/u;
 
 /** The part of the logs R2 bucket Throng uses; tests pass one in memory. */
 export interface LogStore {

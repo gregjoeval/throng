@@ -14,7 +14,7 @@ import type { Database } from "./users.ts";
 export const PROJECT_ID_LENGTH = 6;
 export const MAX_PROJECT_HANDLE = 40;
 /** Lowercase letters and digits in runs joined by single dashes, like user handles. */
-export const PROJECT_HANDLE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+export const PROJECT_HANDLE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
 
 const MAX_ID_ATTEMPTS = 20;
 
@@ -102,7 +102,7 @@ export function projectService({ db, repos, newId = randomProjectId }: ProjectDe
           console.error({ event: "project.orphan_repo", repo: originRepo(id), error: String(deleteError) });
         });
         // Another request took the handle between the check and the insert.
-        if (/UNIQUE constraint failed: projects\.(owner_id|handle)/.test(String(error))) {
+        if (/UNIQUE constraint failed: projects\.(owner_id|handle)/u.test(String(error))) {
           throw duplicate(owner.handle, input.handle);
         }
         throw error;

@@ -78,7 +78,7 @@ describe("readLogScript", () => {
     const { stdout } = read({ test: log }, "test");
     expect(stdout.length).toBeLessThanOrEqual(MAX_LOG_BYTES);
     expect(stdout.length).toBeGreaterThan(MAX_LOG_BYTES - 1024);
-    expect(stdout).toMatch(/^h+\n\[throng: truncated \d+ of 10485760 bytes\]\nt+$/);
+    expect(stdout).toMatch(/^h+\n\[throng: truncated \d+ of 10485760 bytes\]\nt+$/u);
   });
 });
 

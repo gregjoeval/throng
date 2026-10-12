@@ -58,7 +58,7 @@ export async function userForEmail(db: Database, email: string, newId: () => str
     } catch (error) {
       // Collisions are expected; anything else is a real failure. An email collision means another
       // request created this user first, which the next lookup finds.
-      const column = /UNIQUE constraint failed: users\.(\w+)/.exec(String(error))?.[1];
+      const column = /UNIQUE constraint failed: users\.(\w+)/u.exec(String(error))?.[1];
       if (column === "id") id = newId();
       else if (column === "handle") suffix++;
       else if (column !== "email") throw error;
@@ -70,5 +70,5 @@ export async function userForEmail(db: Database, email: string, newId: () => str
 /** A handle from the email's local part, kept to lowercase letters, digits and single dashes. */
 function handleBase(email: string): string {
   const local = email.slice(0, email.lastIndexOf("@")).toLowerCase();
-  return local.replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "user";
+  return local.replace(/[^a-z0-9]+/gu, "-").replace(/^-|-$/gu, "") || "user";
 }

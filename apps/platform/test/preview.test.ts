@@ -29,7 +29,7 @@ describe("previewName", () => {
     const long = { project: "p".repeat(40), attempt: "t42a3" };
     const name = previewName(long, worker);
     expect(`${name}-${worker}`).toHaveLength(63);
-    expect(name).toMatch(/^t42a3-pppp+-[a-z0-9]{8}$/);
+    expect(name).toMatch(/^t42a3-pppp+-[a-z0-9]{8}$/u);
     expect(previewName(long, worker)).toBe(name);
     expect(previewName({ ...long, attempt: "t42a4" }, worker)).not.toBe(name);
     expect(previewName({ project: "p".repeat(40), attempt: "t1a1" }, worker)).not.toBe(

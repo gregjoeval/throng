@@ -81,15 +81,15 @@ describe("POST /api/tokens", () => {
     const { mint, env } = setup();
     const minted = await mint();
     expect(minted).toEqual({
-      id: expect.stringMatching(/^[a-z0-9]{12}$/),
+      id: expect.stringMatching(/^[a-z0-9]{12}$/u),
       agent: null,
-      token: expect.stringMatching(/^thr_[A-Za-z0-9_-]{43}$/),
+      token: expect.stringMatching(/^thr_[A-Za-z0-9_-]{43}$/u),
       createdAt: "2026-10-10T12:00:00.000Z",
       expiresAt: "2026-10-11T12:00:00.000Z",
       revokedAt: null,
     });
     const row = await env.DB.prepare("SELECT * FROM tokens WHERE id = ?").bind(minted["id"]).first<Json>();
-    expect(row?.["hash"]).toMatch(/^[0-9a-f]{64}$/);
+    expect(row?.["hash"]).toMatch(/^[0-9a-f]{64}$/u);
     expect(Object.values(row ?? {})).not.toContain(minted["token"]);
   });
 
@@ -211,7 +211,7 @@ describe("POST /api/projects", () => {
     const res = await call("POST", "/projects", bearer, { handle: "throng" });
     expect(res.status).toBe(201);
     expect(res.body).toEqual({
-      id: expect.stringMatching(/^[a-z0-9]{6}$/),
+      id: expect.stringMatching(/^[a-z0-9]{6}$/u),
       handle: "throng",
       owner: { id: expect.any(String), handle: "greg" },
       createdAt: expect.any(String),

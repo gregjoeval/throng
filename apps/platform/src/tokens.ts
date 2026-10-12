@@ -35,9 +35,9 @@ function newPlaintext(): string {
   return (
     TOKEN_PREFIX +
     btoa(String.fromCharCode(...bytes))
-      .replace(/\+/g, "-")
-      .replace(/\//g, "_")
-      .replace(/=+$/, "")
+      .replace(/\+/gu, "-")
+      .replace(/\//gu, "_")
+      .replace(/=+$/u, "")
   );
 }
 

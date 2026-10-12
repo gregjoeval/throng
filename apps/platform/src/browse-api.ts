@@ -58,7 +58,7 @@ const AttemptQuerySchema = z.object({
 
 const ShaSchema = z
   .string()
-  .regex(/^[0-9a-fA-F]{40}$/, "sha must be 40 hex characters")
+  .regex(/^[0-9a-fA-F]{40}$/u, "sha must be 40 hex characters")
   .openapi({ example: "4b825dc642cb6eb9a060e54bf8d69288fbee4904" });
 
 const ResolvedSchema = {

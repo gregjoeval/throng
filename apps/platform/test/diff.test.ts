@@ -267,7 +267,7 @@ describe("diffCommit caps", () => {
     const [a, b, c] = diff.files;
     expect(a!.flags).toEqual([]);
     expect(b!.flags).toEqual(["truncated"]);
-    expect(b!.patch!.match(/^@@/gm)).toHaveLength(1);
+    expect(b!.patch!.match(/^@@/gmu)).toHaveLength(1);
     expect(b).toMatchObject({ additions: 2, deletions: 2 });
     expect(c!.flags).toEqual(["truncated"]);
     expect(c).not.toHaveProperty("patch");
@@ -359,6 +359,6 @@ describe("diffFile", () => {
       { path: "b.txt", mode: "100644", hash: newHash },
     );
     expect(moved.status).toBe("renamed");
-    expect(moved.patch).toMatch(/^diff --git a\/a.txt b\/b.txt\nrename from a.txt\nrename to b.txt\nindex /);
+    expect(moved.patch).toMatch(/^diff --git a\/a.txt b\/b.txt\nrename from a.txt\nrename to b.txt\nindex /u);
   });
 });

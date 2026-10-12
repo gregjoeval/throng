@@ -804,7 +804,7 @@ describe("migrate", () => {
         at,
         at,
       ),
-    ).toThrow(/UNIQUE/);
+    ).toThrow(/UNIQUE/u);
   });
 
   it("drops the spike's push inbox tables", () => {
@@ -861,7 +861,7 @@ describe("push-to-create", () => {
 
     // A second push of the branch while the first is in flight is refused, by anyone.
     expect((await failure(store.routeBranchPush(PROJECT, ada, { branch: "search" }))).message).toMatch(
-      /another push of branch search is creating its attempt/,
+      /another push of branch search is creating its attempt/u,
     );
     // Only the pusher may complete or abandon it.
     await store.abandonBranchPush(PROJECT, bob, { task: 1, number: 1 });
@@ -907,7 +907,7 @@ describe("push-to-create", () => {
       attempt: done.attempt,
     });
     expect((await failure(store.routeBranchPush(PROJECT, ada, { branch: "t1/bob" }))).message).toMatch(
-      /branch t1\/bob belongs to t1a2, another user's attempt on t1/,
+      /branch t1\/bob belongs to t1a2, another user's attempt on t1/u,
     );
   });
 

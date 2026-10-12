@@ -283,7 +283,7 @@ describe("landScript", () => {
       author: { name: "ada", email: "ada@x" },
       committedAt: 1,
     });
-    expect(script).not.toMatch(/\bnpm\b|\bnode\b|\bcheckout\b/);
+    expect(script).not.toMatch(/\bnpm\b|\bnode\b|\bcheckout\b/u);
     expect(script).toContain("core.hooksPath /dev/null");
     expect(script).toContain("GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null");
   });

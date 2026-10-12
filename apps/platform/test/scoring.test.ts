@@ -335,7 +335,7 @@ describe("the scoring queue", () => {
     await store.scoring.drain();
     expect(runs(ref!)).toMatchObject([{ status: "errored" }]);
     expect(journal().find((e) => e.kind === "scoringErrored")).toMatchObject({
-      error: expect.stringMatching(/unavailable/),
+      error: expect.stringMatching(/unavailable/u),
     });
   });
 

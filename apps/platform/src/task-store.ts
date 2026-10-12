@@ -1989,9 +1989,9 @@ export function attemptLimitFromConfig(result: ConfigResult): number {
  * after its branch.
  */
 export function taskFromCommit(message: string, branch: string): { title: string; body: string } {
-  const text = message.replace(/\r\n/g, "\n").trim();
-  const split = text.search(/\n[ \t]*\n/);
-  const subject = (split === -1 ? text : text.slice(0, split)).replace(/\s+/g, " ").trim();
+  const text = message.replace(/\r\n/gu, "\n").trim();
+  const split = text.search(/\n[ \t]*\n/u);
+  const subject = (split === -1 ? text : text.slice(0, split)).replace(/\s+/gu, " ").trim();
   const body = split === -1 ? "" : text.slice(split).trim();
   return { title: (subject || branch).slice(0, MAX_TITLE).trim(), body };
 }

@@ -134,7 +134,7 @@ describe("git proxy", () => {
     const before = (await git(dir, env, "rev-parse", "HEAD")).trim();
     const sha = await commit(dir, "fix");
     const pushed = await tryGit(dir, env, "push", "origin", "HEAD:main");
-    expect(pushed.stderr).not.toMatch(/rejected/);
+    expect(pushed.stderr).not.toMatch(/rejected/u);
     expect(pushed.ok).toBeTruthy();
     expect(await host.head(forkRepo(project.id, "t1a1"))).toBe(sha);
 
@@ -142,7 +142,7 @@ describe("git proxy", () => {
     expect(journal()[0]).toMatchObject({ kind: "pushed", user_id: ada.user.id, task: 1, attempt: 1 });
     expect(JSON.parse(journal()[0]!.detail)).toEqual({ ref: "t1a1", gitRef: "refs/heads/main", before, after: sha });
     // A draft isn't scored on push.
-    expect(pushed.stderr).not.toMatch(/scoring/);
+    expect(pushed.stderr).not.toMatch(/scoring/u);
   });
 
   it("queues scoring of an open attempt's new head on push, and says so", async () => {
@@ -153,8 +153,8 @@ describe("git proxy", () => {
     const sha = await commit(dir, "fix");
     const pushed = await tryGit(dir, env, "push", "origin", "HEAD:main");
     expect(pushed.ok).toBeTruthy();
-    expect(pushed.stderr).toMatch(new RegExp(`remote: scoring queued for t1a1 \\(${sha}\\)`));
-    expect(pushed.stderr).toMatch(/HEAD -> main/);
+    expect(pushed.stderr).toMatch(new RegExp(`remote: scoring queued for t1a1 \\(${sha}\\)`, "u"));
+    expect(pushed.stderr).toMatch(/HEAD -> main/u);
     expect(
       store(project.id)
         .scoring.listRuns({ task: 1, attempt: 1 })
@@ -167,7 +167,7 @@ describe("git proxy", () => {
     // Pushing the same head to another ref of the fork queues nothing more.
     const again = await tryGit(dir, env, "push", "origin", "HEAD:refs/heads/copy");
     expect(again.ok).toBeTruthy();
-    expect(again.stderr).not.toMatch(/scoring/);
+    expect(again.stderr).not.toMatch(/scoring/u);
   });
 
   it("rejects a push by anyone but the author when git asks to push", async () => {
@@ -177,8 +177,8 @@ describe("git proxy", () => {
     const before = await host.head(forkRepo(project.id, "t1a1"));
     const pushed = await tryGit(dir, env, "push", "origin", "HEAD:main");
     expect(pushed.ok).toBeFalsy();
-    expect(pushed.stderr).toMatch(/Push rejected: only the author of t1a1 may/);
-    expect(pushed.stderr).toMatch(/403/);
+    expect(pushed.stderr).toMatch(/Push rejected: only the author of t1a1 may/u);
+    expect(pushed.stderr).toMatch(/403/u);
     expect(await host.head(forkRepo(project.id, "t1a1"))).toBe(before);
     expect(journal()).toEqual([]);
   });
@@ -191,7 +191,7 @@ describe("git proxy", () => {
     const before = await host.head(forkRepo(project.id, "t1a1"));
     const pushed = await tryGit(dir, env, "push", "origin", "HEAD:main");
     expect(pushed.ok).toBeFalsy();
-    expect(pushed.stderr).toMatch(/Push rejected: t1a1 is closed/);
+    expect(pushed.stderr).toMatch(/Push rejected: t1a1 is closed/u);
     expect(await host.head(forkRepo(project.id, "t1a1"))).toBe(before);
   });
 
@@ -212,7 +212,7 @@ describe("git proxy", () => {
       });
     const probe = await post("0000");
     expect(probe.status).toBe(403);
-    expect(await probe.text()).toMatch(/t1a1 is closed/);
+    expect(await probe.text()).toMatch(/t1a1 is closed/u);
 
     const command = `${"a".repeat(40)} ${"b".repeat(40)} refs/heads/main\0report-status\n`;
     const push = await post(`${(command.length + 4).toString(16).padStart(4, "0")}${command}0000PACK`);
@@ -228,7 +228,7 @@ describe("git proxy", () => {
     const before = await host.head(origin);
     const pushed = await tryGit(dir, env, "push", "origin", "HEAD:main");
     expect(pushed.ok).toBeFalsy();
-    expect(pushed.stderr).toMatch(/\[remote rejected\] HEAD -> main \(main only advances through the merge queue/);
+    expect(pushed.stderr).toMatch(/\[remote rejected\] HEAD -> main \(main only advances through the merge queue/u);
     expect(await host.head(origin)).toBe(before);
     // The pack never reached the repo host.
     expect(host.requests.filter((r) => r.method === "POST" && r.path.endsWith("git-receive-pack"))).toEqual([]);
@@ -240,8 +240,8 @@ describe("git proxy", () => {
     await commit(dir, "feature");
     const pushed = await tryGit(dir, env, "push", "origin", "HEAD:refs/heads/feature", "HEAD:refs/heads/t1/x");
     expect(pushed.ok).toBeFalsy();
-    expect(pushed.stderr).toMatch(/\[remote rejected\] HEAD -> feature \(push one branch at a time to the origin/);
-    expect(pushed.stderr).toMatch(/\[remote rejected\] HEAD -> t1\/x/);
+    expect(pushed.stderr).toMatch(/\[remote rejected\] HEAD -> feature \(push one branch at a time to the origin/u);
+    expect(pushed.stderr).toMatch(/\[remote rejected\] HEAD -> t1\/x/u);
     expect(await host.head(origin, "refs/heads/feature")).toBeNull();
     expect(await host.list(`${project.id}-t1a2`)).toEqual([]);
   });
@@ -258,7 +258,7 @@ describe("git proxy", () => {
       body: `${(command.length + 4).toString(16).padStart(4, "0")}${command}0000PACK`,
     });
     expect(res.status).toBe(403);
-    expect(await res.text()).toMatch(/main only advances through the merge queue/);
+    expect(await res.text()).toMatch(/main only advances through the merge queue/u);
     expect(host.requests.filter((r) => r.path.endsWith("git-receive-pack"))).toEqual([]);
   });
 
@@ -268,7 +268,7 @@ describe("git proxy", () => {
     advance(2 * 60 * 60 * 1000);
     const cloned = await tryGit(work, env, "clone", "-q", remote("throng.git", ada.token), join(work, "late"));
     expect(cloned.ok).toBeFalsy();
-    expect(cloned.stderr).toMatch(/Authentication failed|401/);
+    expect(cloned.stderr).toMatch(/Authentication failed|401/u);
   });
 
   it("rejects unknown projects and attempts, and dumb HTTP", async () => {
@@ -353,7 +353,7 @@ describe("merge request notices on a push to the source attempt", () => {
     await commit(dir, "fix");
     const pushed = await tryGit(dir, env, "push", "origin", "HEAD:main");
     expect(pushed.ok).toBeTruthy();
-    expect(pushed.stderr).not.toMatch(/merge request/);
+    expect(pushed.stderr).not.toMatch(/merge request/u);
   });
 
   it("prints a conflict dequeue with its file count once, and that the push needs review", async () => {
@@ -370,7 +370,7 @@ describe("merge request notices on a push to the source attempt", () => {
     await commit(dir, "more");
     const again = await tryGit(dir, env, "push", "origin", "HEAD:main");
     expect(again.ok).toBeTruthy();
-    expect(again.stderr).not.toMatch(/merge request/);
+    expect(again.stderr).not.toMatch(/merge request/u);
   });
 
   it("prints a dequeue without a file count when there is none, on a push that moves no head", async () => {
@@ -380,11 +380,11 @@ describe("merge request notices on a push to the source attempt", () => {
     const pushed = await tryGit(dir, env, "push", "origin", "HEAD:refs/heads/copy");
     expect(pushed.ok).toBeTruthy();
     expect(pushed.stderr).toContain(`remote: merge request t1 dequeued (errored) — ${dequeueUrl}`);
-    expect(pushed.stderr).not.toMatch(/needs review/);
+    expect(pushed.stderr).not.toMatch(/needs review/u);
 
     const again = await tryGit(dir, env, "push", "origin", "HEAD:refs/heads/copy2");
     expect(again.ok).toBeTruthy();
-    expect(again.stderr).not.toMatch(/merge request/);
+    expect(again.stderr).not.toMatch(/merge request/u);
   });
 
   it("says a push to a queued merge request's source needs review, not that it was dequeued for it", async () => {
@@ -393,11 +393,11 @@ describe("merge request notices on a push to the source attempt", () => {
     const pushed = await tryGit(dir, env, "push", "origin", "HEAD:main");
     expect(pushed.ok).toBeTruthy();
     expect(pushed.stderr).toContain(`remote: merge request t1 needs review: new head ${sha}`);
-    expect(pushed.stderr).not.toMatch(/dequeued/);
+    expect(pushed.stderr).not.toMatch(/dequeued/u);
 
     await commit(dir, "more");
     const again = await tryGit(dir, env, "push", "origin", "HEAD:main");
     expect(again.ok).toBeTruthy();
-    expect(again.stderr).not.toMatch(/merge request/);
+    expect(again.stderr).not.toMatch(/merge request/u);
   });
 });

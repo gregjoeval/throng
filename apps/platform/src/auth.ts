@@ -33,13 +33,13 @@ const BASIC_CHALLENGE = { "WWW-Authenticate": 'Basic realm="throng"' };
 
 /** The token in an `Authorization: Bearer <token>` header, or null. */
 export function bearerToken(header: string | undefined): string | null {
-  const match = /^Bearer[ ]+(\S+)[ ]*$/i.exec(header ?? "");
+  const match = /^Bearer[ ]+(\S+)[ ]*$/iu.exec(header ?? "");
   return match?.[1] ?? null;
 }
 
 /** The password in an `Authorization: Basic <base64(user:password)>` header, or null. */
 export function basicPassword(header: string | undefined): string | null {
-  const match = /^Basic[ ]+([A-Za-z0-9+/=]+)[ ]*$/i.exec(header ?? "");
+  const match = /^Basic[ ]+([A-Za-z0-9+/=]+)[ ]*$/iu.exec(header ?? "");
   if (match?.[1] === undefined) return null;
   let decoded: string;
   try {

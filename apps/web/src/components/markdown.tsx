@@ -28,7 +28,7 @@ function rehypeShiki() {
 const remarkPlugins = [remarkGfm];
 const rehypePlugins = [rehypeSanitize, rehypeShiki];
 
-const scheme = /^[a-z][a-z\d+.-]*:/i;
+const scheme = /^[A-Za-z][A-Za-z\d+.-]*:/u;
 
 /** Resolves a relative URL against `base`. Absolute URLs and fragments are left alone. */
 export function resolveUrl(url: string, base: string | undefined): string {

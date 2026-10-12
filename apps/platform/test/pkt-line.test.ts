@@ -157,7 +157,7 @@ describe("readReport and writeReport", () => {
 describe("rejectionReport", () => {
   it("marks every ref ng with its reason", () => {
     const rejected = rejectionReport(twoRefPush(["report-status"]), ["no\nway", "nope"]);
-    expect(text(rejected!).split(/(?=[0-9a-f]{4}(?:unpack|ng|$))/)).toEqual([
+    expect(text(rejected!).split(/(?=[0-9a-f]{4}(?:unpack|ng|$))/u)).toEqual([
       "000eunpack ok\n",
       "001eng refs/heads/main no way\n",
       "0019ng refs/heads/x nope\n",

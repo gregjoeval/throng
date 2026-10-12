@@ -4,8 +4,8 @@
 /** Artifacts caps repo names at 63 characters. */
 export const MAX_REPO_NAME = 63;
 
-const PROJECT_ID = /^[a-z0-9]+$/;
-const ATTEMPT = /^t[1-9]\d*a[1-9]\d*$/;
+const PROJECT_ID = /^[a-z0-9]+$/u;
+const ATTEMPT = /^t[1-9]\d*a[1-9]\d*$/u;
 const ORIGIN_SUFFIX = "main";
 
 /** What a repo name says: a project's origin, or the fork of one of its attempts. */

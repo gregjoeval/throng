@@ -1,9 +1,9 @@
 // Task and attempt references, `t42` and `t42a3`, and the task a reserved branch belongs to.
 // Kept apart from the task store so the scoring queue can name attempts without importing it.
 
-const TASK_REF = /^t?([1-9]\d*)$/;
-const ATTEMPT_REF = /^t?([1-9]\d*)a([1-9]\d*)$/;
-const RESERVED_BRANCH = /^t([1-9]\d*)\//;
+const TASK_REF = /^t?([1-9]\d*)$/u;
+const ATTEMPT_REF = /^t?([1-9]\d*)a([1-9]\d*)$/u;
+const RESERVED_BRANCH = /^t([1-9]\d*)\//u;
 
 /** A task reference, `t42` or `42`, as its number; null when it isn't one. */
 export function parseTaskRef(ref: string): number | null {

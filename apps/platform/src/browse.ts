@@ -29,7 +29,7 @@ const HEAD_CONCURRENCY = 6;
 const TEXT_TYPE = "text/plain; charset=utf-8";
 const BINARY_TYPE = "application/octet-stream";
 
-const SHA = /^[0-9a-f]{40}$/i;
+const SHA = /^[0-9a-f]{40}$/iu;
 
 export interface BrowseDeps {
   db: Database;

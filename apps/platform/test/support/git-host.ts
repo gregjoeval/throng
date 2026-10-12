@@ -209,7 +209,7 @@ export class LocalGitHost implements Repos {
     if (!found.ok) return [];
     return found.stdout
       .split("\x1e")
-      .map((entry) => entry.replace(/^\n/, ""))
+      .map((entry) => entry.replace(/^\n/u, ""))
       .filter((entry) => entry !== "")
       .map((entry) => {
         const [
@@ -267,11 +267,11 @@ export class LocalGitHost implements Repos {
   /** Checks the bearer as Artifacts would, then runs `git http-backend` as a CGI. */
   async #handle(req: IncomingMessage): Promise<HostResponse> {
     const url = new URL(req.url ?? "/", this.origin);
-    const bearer = /^Bearer (\S+)$/.exec(req.headers.authorization ?? "")?.[1] ?? null;
+    const bearer = /^Bearer (\S+)$/u.exec(req.headers.authorization ?? "")?.[1] ?? null;
     this.requests.push({ method: req.method ?? "GET", path: url.pathname + url.search, bearer });
     const body = await readAll(req);
 
-    const repo = /^\/([^/]+)\.git\//.exec(url.pathname)?.[1];
+    const repo = /^\/([^/]+)\.git\//u.exec(url.pathname)?.[1];
     const write = url.pathname.endsWith("/git-receive-pack") || url.searchParams.get("service") === "git-receive-pack";
     const minted = bearer === null ? undefined : this.#tokens.get(bearer);
     if (

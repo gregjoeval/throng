@@ -120,14 +120,14 @@ describe("push-to-create", () => {
     const sha = await commit(dir, "Add search\n\nIndex titles and bodies.\n\nCloses nothing yet.");
 
     const pushed = await push(dir, "search");
-    expect(pushed.stderr).not.toMatch(/rejected|error/);
+    expect(pushed.stderr).not.toMatch(/rejected|error/u);
     expect(pushed.ok).toBeTruthy();
-    expect(pushed.stderr).toMatch(/\* \[new branch\]\s+HEAD -> search/);
-    expect(pushed.stderr).toMatch(/remote: Created t2 "Add search" with attempt t2a1, opened, from branch search\./);
+    expect(pushed.stderr).toMatch(/\* \[new branch\]\s+HEAD -> search/u);
+    expect(pushed.stderr).toMatch(/remote: Created t2 "Add search" with attempt t2a1, opened, from branch search\./u);
     expect(pushed.stderr).toMatch(
-      /remote:\s+Task:\s+http:\/\/127\.0\.0\.1:\d+\/api\/projects\/greg\/throng\/tasks\/t2/,
+      /remote:\s+Task:\s+http:\/\/127\.0\.0\.1:\d+\/api\/projects\/greg\/throng\/tasks\/t2/u,
     );
-    expect(pushed.stderr).toMatch(/remote:\s+Attempt:\s+http:\/\/127\.0\.0\.1:\d+\/git\/greg\/throng\/t2a1\.git/);
+    expect(pushed.stderr).toMatch(/remote:\s+Attempt:\s+http:\/\/127\.0\.0\.1:\d+\/git\/greg\/throng\/t2a1\.git/u);
 
     const task = tasks.getTask(project, ada.actor, { task: 2 });
     expect(task).toMatchObject({
@@ -154,7 +154,7 @@ describe("push-to-create", () => {
       ["pushed", 1],
       ["scoringQueued", 1],
     ]);
-    expect(pushed.stderr).toMatch(new RegExp(`remote: scoring queued for t2a1 \\(${sha}\\)`));
+    expect(pushed.stderr).toMatch(new RegExp(`remote: scoring queued for t2a1 \\(${sha}\\)`, "u"));
     expect(JSON.parse(events[3]!.detail)).toEqual({
       ref: "t2a1",
       gitRef: "refs/heads/main",
@@ -172,7 +172,7 @@ describe("push-to-create", () => {
     const second = await commit(dir, "Search bodies too");
     const again = await push(dir, "search");
     expect(again.ok).toBeTruthy();
-    expect(again.stderr).toMatch(/remote: Updated t2a1 on t2 from branch search\./);
+    expect(again.stderr).toMatch(/remote: Updated t2a1 on t2 from branch search\./u);
     expect(await host.head(fork("t2a1"))).toBe(second);
     expect(tasks.listTasks(project, ada.actor, {}).map((t) => t.number)).toEqual([1, 2]);
     expect(tasks.listAttempts(project, ada.actor, { task: 2 })).toHaveLength(1);
@@ -199,7 +199,7 @@ describe("push-to-create", () => {
     const rejected = await push(theirs, "search");
     expect(rejected.ok).toBeFalsy();
     expect(rejected.stderr).toMatch(
-      /\[remote rejected\] HEAD -> search \(branch search belongs to t2a1, another user's attempt on t2; push a branch named t2\/<name>/,
+      /\[remote rejected\] HEAD -> search \(branch search belongs to t2a1, another user's attempt on t2; push a branch named t2\/<name>/u,
     );
     expect(await host.head(fork("t2a1"))).toBe(sha);
     expect(tasks.listTasks(project, bob.actor, {})).toHaveLength(2);
@@ -225,7 +225,7 @@ describe("push-to-create", () => {
     expect(results.filter((r) => r.ok)).toHaveLength(1);
     const loser = results.find((r) => !r.ok)!;
     expect(loser.stderr).toMatch(
-      /\[remote rejected\] HEAD -> search \((another push of branch search|branch search belongs to)/,
+      /\[remote rejected\] HEAD -> search \((another push of branch search|branch search belongs to)/u,
     );
 
     const made = tasks.listTasks(project, ada.actor, {}).filter((t) => t.number !== 1);
@@ -248,7 +248,7 @@ describe("push-to-create", () => {
 
     const failed = await push(dir, "search");
     expect(failed.ok).toBeFalsy();
-    expect(failed.stderr).toMatch(/502|The push of search to t2a1 failed/);
+    expect(failed.stderr).toMatch(/502|The push of search to t2a1 failed/u);
     expect(read).toHaveBeenCalled();
     expect(await host.list(`${project.id}-t2`)).toEqual([]);
     expect(tasks.listTasks(project, ada.actor, {}).map((t) => t.number)).toEqual([1]);
@@ -259,7 +259,7 @@ describe("push-to-create", () => {
     // The branch is free again; the failed push's number is never reused.
     const retried = await push(dir, "search");
     expect(retried.ok).toBeTruthy();
-    expect(retried.stderr).toMatch(/Created t3 "Add search" with attempt t3a1/);
+    expect(retried.stderr).toMatch(/Created t3 "Add search" with attempt t3a1/u);
   });
 
   it("leaves nothing behind when the fork refuses the pushed objects", async () => {
@@ -278,7 +278,7 @@ describe("push-to-create", () => {
 
     const failed = await push(dir, "search");
     expect(failed.ok).toBeFalsy();
-    expect(failed.stderr).toMatch(/\[remote rejected\] HEAD -> search \(pre-receive hook declined\)/);
+    expect(failed.stderr).toMatch(/\[remote rejected\] HEAD -> search \(pre-receive hook declined\)/u);
     expect(await host.list(`${project.id}-t2`)).toEqual([]);
     expect(tasks.listTasks(project, ada.actor, {}).map((t) => t.number)).toEqual([1]);
     expect(pending()).toEqual([]);
@@ -293,7 +293,7 @@ describe("push-to-create", () => {
     await git(dir, env, "tag", "v1");
     const tagged = await tryGit(dir, env, "push", "origin", "v1");
     expect(tagged.ok).toBeFalsy();
-    expect(tagged.stderr).toMatch(/\[remote rejected\] v1 -> v1 \(the origin keeps no refs but main/);
+    expect(tagged.stderr).toMatch(/\[remote rejected\] v1 -> v1 \(the origin keeps no refs but main/u);
     expect(await originRefs()).toBe("refs/heads/main");
   });
 });
@@ -306,8 +306,8 @@ describe("joining a task with a t<n>/ branch", () => {
 
     const joined = await push(dir, "t1/bob");
     expect(joined.ok).toBeTruthy();
-    expect(joined.stderr).toMatch(/remote: Added attempt t1a2, opened, to t1 "Fix login" from branch t1\/bob\./);
-    expect(joined.stderr).toMatch(/remote:\s+Attempt:\s+\S+\/git\/greg\/throng\/t1a2\.git/);
+    expect(joined.stderr).toMatch(/remote: Added attempt t1a2, opened, to t1 "Fix login" from branch t1\/bob\./u);
+    expect(joined.stderr).toMatch(/remote:\s+Attempt:\s+\S+\/git\/greg\/throng\/t1a2\.git/u);
     expect(tasks.getAttempt(project, bob.actor, { task: 1, number: 2 })).toMatchObject({
       author: bob.user.id,
       state: "open",
@@ -334,7 +334,7 @@ describe("joining a task with a t<n>/ branch", () => {
     const rejection = async (branch: string) => {
       const result = await push(dir, branch);
       expect(result.ok).toBeFalsy();
-      return /\[remote rejected\] HEAD -> \S+ \((.*)\)/.exec(result.stderr)?.[1];
+      return /\[remote rejected\] HEAD -> \S+ \((.*)\)/u.exec(result.stderr)?.[1];
     };
 
     expect(await rejection("t9/x")).toBe("branch t9/x is for t9, which doesn't exist");

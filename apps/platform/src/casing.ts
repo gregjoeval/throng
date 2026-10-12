@@ -7,7 +7,7 @@ import type { Sql } from "./task-store.ts";
 
 /** `needs_review` → `needsReview`, `fork-ready` → `forkReady`; a camelCase name is unchanged. */
 export function camelCase(name: string): string {
-  return name.replace(/[_-]([a-z0-9])/g, (_, c: string) => c.toUpperCase());
+  return name.replace(/[_-]([a-z0-9])/gu, (_, c: string) => c.toUpperCase());
 }
 
 /** An object with its own keys in camelCase, one level deep. */

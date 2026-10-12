@@ -42,7 +42,7 @@ describe("bearerAuth", () => {
     for (const header of [undefined, basic("x", plaintext), "Bearer thr_unknown", `Bearer ${plaintext}x`]) {
       const res = await get("/api/x", header);
       expect(res.status).toBe(401);
-      expect(res.headers.get("WWW-Authenticate")).toMatch(/^Bearer/);
+      expect(res.headers.get("WWW-Authenticate")).toMatch(/^Bearer/u);
     }
   });
 

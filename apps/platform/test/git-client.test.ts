@@ -52,7 +52,7 @@ async function setup() {
   /** Checks a repo has every object `sha` reaches, so a copy left nothing behind. */
   const complete = async (repo: string, sha: string) => {
     const listed = await tryGit(host.path(repo), env, "rev-list", "--objects", "--missing=print", sha);
-    return listed.ok && listed.stdout.includes(sha) && !/^\?/m.test(listed.stdout);
+    return listed.ok && listed.stdout.includes(sha) && !/^\?/mu.test(listed.stdout);
   };
   return { host, env, seed, push, remote, complete };
 }

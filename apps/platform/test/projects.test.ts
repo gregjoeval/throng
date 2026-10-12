@@ -39,7 +39,7 @@ describe("projectService.create", () => {
     const { repos, ada, service } = await setup();
     const project = await service.create(ada, { handle: "throng" });
     expect(project).toEqual({
-      id: expect.stringMatching(/^[a-z0-9]{6}$/),
+      id: expect.stringMatching(/^[a-z0-9]{6}$/u),
       handle: "throng",
       owner: { id: ada.user.id, handle: "ada" },
       createdAt: expect.any(String),

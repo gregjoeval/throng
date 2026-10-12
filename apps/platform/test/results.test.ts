@@ -166,7 +166,7 @@ describe("buildResult", () => {
         durationMs: 0,
         metrics: {},
         notes: [],
-        error: expect.stringMatching(/checks\[0\]\.name/),
+        error: expect.stringMatching(/checks\[0\]\.name/u),
       },
     ]);
   });

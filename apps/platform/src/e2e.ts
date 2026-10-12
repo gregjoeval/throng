@@ -61,7 +61,7 @@ export async function e2eProject(
 
 /** Whether `name` is an e2e project id or a run's prefix of one. */
 export function isE2eName(name: string): boolean {
-  return name.startsWith(E2E_PROJECT_PREFIX) && /^[a-z0-9]+$/.test(name);
+  return name.startsWith(E2E_PROJECT_PREFIX) && /^[a-z0-9]+$/u.test(name);
 }
 
 /** Whether the repo `name` belongs to an e2e project. */

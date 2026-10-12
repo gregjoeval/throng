@@ -121,91 +121,91 @@ describe("parseConfig", () => {
     "rejects a check's timeout out of bounds or malformed: %s",
     (timeout) => {
       const result = parseConfig(check(`timeout: "${timeout}"`));
-      expect(result).toMatchObject({ kind: "invalid", error: expect.stringMatching(/^checks\[0\]\.timeout: /) });
+      expect(result).toMatchObject({ kind: "invalid", error: expect.stringMatching(/^checks\[0\]\.timeout: /u) });
     },
   );
 
   it.each([
     // YAML
-    ["malformed YAML", "checks: [", /^yaml: /],
-    ["a duplicate YAML key", "setup: []\nsetup: []\n", /^yaml: Map keys must be unique/],
-    ["a scalar document", "just text", /^the config must be a mapping$/],
-    ["a list document", "- a\n", /^the config must be a mapping$/],
+    ["malformed YAML", "checks: [", /^yaml: /u],
+    ["a duplicate YAML key", "setup: []\nsetup: []\n", /^yaml: Map keys must be unique/u],
+    ["a scalar document", "just text", /^the config must be a mapping$/u],
+    ["a list document", "- a\n", /^the config must be a mapping$/u],
     // unknown keys, at every level
-    ["an unknown top-level key", "scoring: {}\n", /^scoring: unknown key$/],
-    ["an unknown network key", "network: { deny: [] }\n", /^network\.deny: unknown key$/],
-    ["an unknown check key", check("image: node"), /^checks\[0\]\.image: unknown key$/],
+    ["an unknown top-level key", "scoring: {}\n", /^scoring: unknown key$/u],
+    ["an unknown network key", "network: { deny: [] }\n", /^network\.deny: unknown key$/u],
+    ["an unknown check key", check("image: node"), /^checks\[0\]\.image: unknown key$/u],
     [
       "an unknown metric key",
       metric("name: x, order: asc, weight: 2"),
-      /^checks\[0\]\.metrics\[0\]\.weight: unknown key$/,
+      /^checks\[0\]\.metrics\[0\]\.weight: unknown key$/u,
     ],
-    ["an unknown preview key", "preview: { url: x }\n", /^preview\.url: unknown key$/],
-    ["an unknown attempts key", "attempts: { max: 2 }\n", /^attempts\.max: unknown key$/],
+    ["an unknown preview key", "preview: { url: x }\n", /^preview\.url: unknown key$/u],
+    ["an unknown attempts key", "attempts: { max: 2 }\n", /^attempts\.max: unknown key$/u],
     // target
     [
       "a metric target",
       metric("name: x, order: asc, target: 90"),
-      /^checks\[0\]\.metrics\[0\]\.target: target is reserved/,
+      /^checks\[0\]\.metrics\[0\]\.target: target is reserved/u,
     ],
-    ["a null metric target", metric("name: x, order: asc, target:"), /target is reserved/],
+    ["a null metric target", metric("name: x, order: asc, target:"), /target is reserved/u],
     // setup and network
-    ["setup that isn't a list", "setup: pnpm install\n", /^setup: /],
-    ["an empty setup command", 'setup: [""]\n', /^setup\[0\]: must not be empty$/],
-    ["a non-string setup command", "setup: [1]\n", /^setup\[0\]: must be a string$/],
+    ["setup that isn't a list", "setup: pnpm install\n", /^setup: /u],
+    ["an empty setup command", 'setup: [""]\n', /^setup\[0\]: must not be empty$/u],
+    ["a non-string setup command", "setup: [1]\n", /^setup\[0\]: must be a string$/u],
     [
       "a host with a scheme",
       "network: { allow: [https://api.github.com] }\n",
-      /^network\.allow\[0\]: must be a hostname/,
+      /^network\.allow\[0\]: must be a hostname/u,
     ],
-    ["a host with a port", 'network: { allow: ["api.github.com:443"] }\n', /^network\.allow\[0\]: must be a hostname/],
-    ["a bare host", "network: { allow: [localhost] }\n", /^network\.allow\[0\]: must be a hostname/],
+    ["a host with a port", 'network: { allow: ["api.github.com:443"] }\n', /^network\.allow\[0\]: must be a hostname/u],
+    ["a bare host", "network: { allow: [localhost] }\n", /^network\.allow\[0\]: must be a hostname/u],
     // checks
-    ["checks that aren't a list", "checks: { test: pnpm test }\n", /^checks: checks must be a list$/],
-    ["a check without a name", "checks: [{ command: pnpm test }]\n", /^checks\[0\]\.name: /],
-    ["a check without a command", "checks: [{ name: test }]\n", /^checks\[0\]\.command: /],
+    ["checks that aren't a list", "checks: { test: pnpm test }\n", /^checks: checks must be a list$/u],
+    ["a check without a name", "checks: [{ command: pnpm test }]\n", /^checks\[0\]\.name: /u],
+    ["a check without a command", "checks: [{ name: test }]\n", /^checks\[0\]\.command: /u],
     [
       "an empty check command",
       "checks: [{ name: test, command: '  ' }]\n",
-      /^checks\[0\]\.command: must not be empty$/,
+      /^checks\[0\]\.command: must not be empty$/u,
     ],
-    ["an uppercase check name", "checks: [{ name: Test, command: x }]\n", /^checks\[0\]\.name: check name must match/],
-    ["a check name starting with a dash", "checks: [{ name: -t, command: x }]\n", /^checks\[0\]\.name: /],
-    ["a check name with a dot", "checks: [{ name: a.b, command: x }]\n", /^checks\[0\]\.name: /],
-    ["a non-boolean required", check("required: yes"), /^checks\[0\]\.required: required must be true or false$/],
-    ["a numeric timeout", check("timeout: 600"), /^checks\[0\]\.timeout: /],
+    ["an uppercase check name", "checks: [{ name: Test, command: x }]\n", /^checks\[0\]\.name: check name must match/u],
+    ["a check name starting with a dash", "checks: [{ name: -t, command: x }]\n", /^checks\[0\]\.name: /u],
+    ["a check name with a dot", "checks: [{ name: a.b, command: x }]\n", /^checks\[0\]\.name: /u],
+    ["a non-boolean required", check("required: yes"), /^checks\[0\]\.required: required must be true or false$/u],
+    ["a numeric timeout", check("timeout: 600"), /^checks\[0\]\.timeout: /u],
     [
       "a duplicate check name",
       "checks: [{ name: t, command: a }, { name: t, command: b }]\n",
-      /^checks\[1\]\.name: duplicate check name t$/,
+      /^checks\[1\]\.name: duplicate check name t$/u,
     ],
     // metrics
-    ["a metric without an order", metric("name: x"), /^checks\[0\]\.metrics\[0\]\.order: order is required/],
-    ["an unknown order", metric("name: x, order: up"), /^checks\[0\]\.metrics\[0\]\.order: order must be/],
-    ["a metric without a name", metric("order: asc"), /^checks\[0\]\.metrics\[0\]\.name: /],
+    ["a metric without an order", metric("name: x"), /^checks\[0\]\.metrics\[0\]\.order: order is required/u],
+    ["an unknown order", metric("name: x, order: up"), /^checks\[0\]\.metrics\[0\]\.order: order must be/u],
+    ["a metric without a name", metric("order: asc"), /^checks\[0\]\.metrics\[0\]\.name: /u],
     [
       "a bad metric name",
       metric("name: Bundle KB, order: asc"),
-      /^checks\[0\]\.metrics\[0\]\.name: metric name must match/,
+      /^checks\[0\]\.metrics\[0\]\.name: metric name must match/u,
     ],
-    ["a non-string unit", metric("name: x, order: asc, unit: 1"), /^checks\[0\]\.metrics\[0\]\.unit: /],
+    ["a non-string unit", metric("name: x, order: asc, unit: 1"), /^checks\[0\]\.metrics\[0\]\.unit: /u],
     [
       "a duplicate metric name within a check",
       metric("name: x, order: asc }, { name: x, order: desc"),
-      /^checks\[0\]\.metrics\[1\]\.name: duplicate metric name x$/,
+      /^checks\[0\]\.metrics\[1\]\.name: duplicate metric name x$/u,
     ],
     [
       "a duplicate metric name across checks",
       "checks:\n  - { name: a, command: a, metrics: [{ name: x, order: asc }] }\n" +
         "  - { name: b, command: b, metrics: [{ name: x, order: asc }] }\n",
-      /^checks\[1\]\.metrics\[0\]\.name: duplicate metric name x$/,
+      /^checks\[1\]\.metrics\[0\]\.name: duplicate metric name x$/u,
     ],
     // preview and attempts
-    ["a preview that isn't a mapping", "preview: pnpm build\n", /^preview: preview must be a mapping$/],
-    ["an empty preview command", "preview: { command: '' }\n", /^preview\.command: must not be empty$/],
-    ["a zero limit", "attempts: { limit: 0 }\n", /^attempts\.limit: limit must be a positive integer$/],
-    ["a fractional limit", "attempts: { limit: 1.5 }\n", /^attempts\.limit: limit must be a positive integer$/],
-    ["a string limit", "attempts: { limit: two }\n", /^attempts\.limit: limit must be a positive integer$/],
+    ["a preview that isn't a mapping", "preview: pnpm build\n", /^preview: preview must be a mapping$/u],
+    ["an empty preview command", "preview: { command: '' }\n", /^preview\.command: must not be empty$/u],
+    ["a zero limit", "attempts: { limit: 0 }\n", /^attempts\.limit: limit must be a positive integer$/u],
+    ["a fractional limit", "attempts: { limit: 1.5 }\n", /^attempts\.limit: limit must be a positive integer$/u],
+    ["a string limit", "attempts: { limit: two }\n", /^attempts\.limit: limit must be a positive integer$/u],
   ])("rejects %s", (_, text, error) => {
     const result = parseConfig(text);
     expect(result.kind).toBe("invalid");
@@ -233,7 +233,7 @@ describe("parseConfig", () => {
   it("rejects YAML alias bombs", () => {
     const text =
       'a: &a ["x","x","x","x","x","x","x","x","x"]\nb: &b [*a,*a,*a,*a,*a,*a,*a,*a,*a]\nc: &c [*b,*b,*b,*b,*b,*b,*b,*b,*b]\nd: [*c,*c,*c,*c,*c,*c,*c,*c,*c]\n';
-    expect(parseConfig(text)).toMatchObject({ kind: "invalid", error: expect.stringMatching(/^yaml: /) });
+    expect(parseConfig(text)).toMatchObject({ kind: "invalid", error: expect.stringMatching(/^yaml: /u) });
   });
 });
 

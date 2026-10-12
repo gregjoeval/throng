@@ -46,11 +46,11 @@ const TEST_CHECK = `checks:
 `;
 const CHECK_TIMEOUT_MS = 10 * 60 * 1000;
 
-const baseUrl = requireEnv("THRONG_URL").replace(/\/$/, "");
+const baseUrl = requireEnv("THRONG_URL").replace(/\/$/u, "");
 const e2eSecret = requireEnv("SPIKE_TOKEN");
 const projectPrefix = process.env.E2E_PROJECT_PREFIX || "e2e";
 assert(
-  /^e2e[a-z0-9]*$/.test(projectPrefix),
+  /^e2e[a-z0-9]*$/u.test(projectPrefix),
   `E2E_PROJECT_PREFIX must be lowercase alphanumeric and start with e2e: ${projectPrefix}`,
 );
 
@@ -365,7 +365,7 @@ async function conflict(): Promise<void> {
     p,
     a2,
     "src/greeting.js",
-    (s) => s.replace(/<<<<<<<[\s\S]*>>>>>>> [^\n]*\n/, 'export const GREETING = "hello from a1 and a2";\n'),
+    (s) => s.replace(/<<<<<<<[\s\S]*>>>>>>> [^\n]*\n/u, 'export const GREETING = "hello from a1 and a2";\n'),
     "a2: merge main",
   );
   timeline.mark("t2a1 merged main and pushed");
@@ -624,7 +624,7 @@ async function intrusion(): Promise<void> {
   const timeline = new Timeline();
   const { project, work } = await setUpProject(timeline, { ".throng/config.yml": TEST_CHECK });
   const origin = (await git(work, "remote", "get-url", "origin")).trim();
-  const accountId = /"CF_ACCOUNT_ID":\s*"(\w+)"/.exec(await readFile(WRANGLER_CONFIG, "utf8"))?.[1];
+  const accountId = /"CF_ACCOUNT_ID":\s*"(\w+)"/u.exec(await readFile(WRANGLER_CONFIG, "utf8"))?.[1];
   assert(accountId !== undefined, "CF_ACCOUNT_ID not found in wrangler.jsonc");
   const fork = await createAttempt(project, "t1a1", timeline);
 

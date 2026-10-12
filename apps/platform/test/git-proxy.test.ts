@@ -146,6 +146,18 @@ describe("git proxy", () => {
     expect(pushed.stderr).not.toMatch(/scoring/u);
   });
 
+  it("takes the token as an `Authorization: Bearer` header, as the clone command sends it", async () => {
+    const { ada, commit, env, host, project, server, work } = await setup();
+    const header = ["-c", `http.extraHeader=Authorization: Bearer ${ada.token}`];
+    const dir = join(work, "bearer");
+    await git(work, env, ...header, "clone", "-q", `${server.origin}/git/greg/throng/t1a1.git`, dir);
+    const sha = await commit(dir, "fix");
+    const pushed = await tryGit(dir, env, ...header, "push", "origin", "HEAD:main");
+    expect(pushed.stderr).not.toMatch(/rejected/u);
+    expect(pushed.ok).toBeTruthy();
+    expect(await host.head(forkRepo(project.id, "t1a1"))).toBe(sha);
+  });
+
   it("queues scoring of an open attempt's new head on push, and says so", async () => {
     const { ada, clone, commit, env, project, store, attempt } = await setup();
     const ref = { task: attempt.task, number: attempt.number };

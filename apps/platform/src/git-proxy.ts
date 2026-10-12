@@ -5,7 +5,7 @@
 //
 // and passes `info/refs`, `git-upload-pack` and `git-receive-pack` through to Artifacts with a
 // token minted by Throng, which never reaches the client. Callers authenticate with a Throng token
-// as the Basic password. Any valid token may read; pushes are checked against claims first. A push
+// as the Basic password or a bearer header. Any valid token may read; pushes are checked against claims first. A push
 // of a branch to the origin never lands there: push-to-create sends it to an attempt's fork (see
 // `pushToCreate`). See the spec's "Git proxy" and "Push-to-create" sections and
 // `docs/research/git-proxy.md`.

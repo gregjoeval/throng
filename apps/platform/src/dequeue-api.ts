@@ -92,7 +92,10 @@ const FailedChecksDetailsSchema = z
         log: z.string().nullable().openapi({ description: "For `GET …/merge-request/dequeue/logs/{name}`." }),
       }),
     ),
-    error: z.string().optional().openapi({ description: "The config's errors, when `main`'s config is invalid." }),
+    error: z
+      .string()
+      .optional()
+      .openapi({ description: "The config's errors, when the merged tree's config is invalid." }),
   })
   .openapi("FailedChecksDetails");
 

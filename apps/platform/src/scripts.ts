@@ -1,6 +1,7 @@
 // Bash run inside a run's Sandbox. Each script is idempotent, so a retried Workflow step can rerun it
 // on a fresh container. The last stdout line is the result: `THRONG_RESULT <json>`.
 
+import { CONFIG_PATH, MAX_CONFIG_BYTES } from "./config.ts";
 import { CONFLICT_CAPS, MERGE_LABELS, type ConflictCaps, type Remerge } from "./conflicts.ts";
 import { THRONG_COMMITTER } from "./landing.ts";
 import { PREVIEW_LOG, setupLogName } from "./logs.ts";
@@ -159,8 +160,8 @@ result "{\\"ok\\":false,\\"stage\\":\\"deploy\\",\\"output\\":$(json < ../previe
 
 /**
  * The conflict check's result: `main`'s sha, the merge base (null with no shared history), the raw
- * `merge-tree` output for `parseMergeTree`, and each content conflict's zdiff3 re-merge for
- * `conflictFiles`.
+ * `merge-tree` output for `parseMergeTree`, each content conflict's zdiff3 re-merge for
+ * `conflictFiles`, and for a clean merge the merged tree's config (`parseConfig` it), null with none.
  */
 export interface ConflictCheckResult {
   main: string;
@@ -168,6 +169,8 @@ export interface ConflictCheckResult {
   base: string | null;
   output: string;
   remerges: Remerge[];
+  /** The merged tree's `.throng/config.yml`, cut one byte past `MAX_CONFIG_BYTES` so an oversized one stays invalid. */
+  config: string | null;
 }
 
 /** The merge the Landing Workflow lands: the approved head onto `main`, giving `tree`. */
@@ -186,6 +189,9 @@ export interface MergePlan {
  * lines outside the conflicts blanked so the output stays small but keeps its line numbers. A
  * re-merge whose conflicting lines are over twice the per-file cap, or that would take all of them
  * over twice the total cap, is `too_large`; `conflictFiles` applies the exact caps.
+ *
+ * On a clean merge it reads `.throng/config.yml` from the merged tree, before any repository code
+ * runs: the retest runs under the config the merge would land, not `main`'s.
  */
 export function conflictCheckScript(
   originRemote: string,
@@ -257,7 +263,15 @@ for (let i = 0; i + 1 < list.length; i += 2) {
 }
 process.stdout.write(JSON.stringify(out));
 ') || exit 16
-result "{\\"main\\":\\"$main\\",\\"clean\\":$clean,\\"base\\":$base,\\"output\\":$output,\\"remerges\\":$remerges}"
+config=null
+if [ "$code" = 0 ]; then
+  tree=$(head -z -n 1 ../merge-tree.out | tr -d '\\0')
+  if [ "$(git cat-file -t "$tree:${CONFIG_PATH}" 2> /dev/null)" = blob ]; then
+    git cat-file blob "$tree:${CONFIG_PATH}" > ../config.yml || exit 16
+    config=$(head -c ${MAX_CONFIG_BYTES + 1} ../config.yml | node -e 'process.stdout.write(JSON.stringify(require("fs").readFileSync(0, "utf8")))') || exit 16
+  fi
+fi
+result "{\\"main\\":\\"$main\\",\\"clean\\":$clean,\\"base\\":$base,\\"output\\":$output,\\"remerges\\":$remerges,\\"config\\":$config}"
 `;
 }
 

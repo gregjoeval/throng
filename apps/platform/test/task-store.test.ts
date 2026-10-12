@@ -114,7 +114,7 @@ describe("tasks", () => {
       closed_at: null,
       closed_by: null,
       attempt_limit: null,
-      definitions: { metrics: [] },
+      definitions: { checks: [], metrics: [] },
     });
     expect(t2).toMatchObject({ number: 2, body: "**md**", attempt_limit: 2 });
     await store.obsoleteTask(PROJECT, owner, { task: 2 });
@@ -166,12 +166,12 @@ describe("tasks", () => {
       source: "task",
     } as const;
     store.createTask(PROJECT, ada, { title: "a", metrics: [lines] });
-    expect(store.taskDefinitions(1)).toEqual({ metrics: [lines] });
+    expect(store.taskDefinitions(1)).toEqual({ checks: [], metrics: [lines] });
     store.editTask(PROJECT, ada, { task: 1, title: "A" });
-    expect(store.taskDefinitions(1)).toEqual({ metrics: [lines] });
+    expect(store.taskDefinitions(1)).toEqual({ checks: [], metrics: [lines] });
     store.editTask(PROJECT, ada, { task: 1, metrics: [] });
-    expect(store.taskDefinitions(1)).toEqual({ metrics: [] });
-    expect(store.taskDefinitions(7)).toEqual({ metrics: [] });
+    expect(store.taskDefinitions(1)).toEqual({ checks: [], metrics: [] });
+    expect(store.taskDefinitions(7)).toEqual({ checks: [], metrics: [] });
   });
 
   it("lets the owner or the creator edit, close and reopen, and nobody else", async () => {

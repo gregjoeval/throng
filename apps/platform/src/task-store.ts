@@ -11,7 +11,7 @@ import { taskBranchHead } from "./base.ts";
 import { migrateValues, normaliseLandingOutcome } from "./casing.ts";
 import { addColumns, renameColumns } from "./columns.ts";
 import { CONFIG_PATH, loadConfig } from "./config.ts";
-import type { ConfigResult, MetricConfig } from "./config.ts";
+import type { CheckConfig, ConfigResult, MetricConfig } from "./config.ts";
 import { ServiceError } from "./errors.ts";
 import type { ErrorCode } from "./errors.ts";
 import { Follows } from "./follows.ts";
@@ -44,7 +44,7 @@ import type {
   ScoringTrigger,
   StoredRun,
 } from "./scoring.ts";
-import { NO_TASK_DEFINITIONS } from "./task-definitions.ts";
+import { defines, NO_TASK_DEFINITIONS } from "./task-definitions.ts";
 import type { TaskDefinitions } from "./task-definitions.ts";
 import { attemptRef, reservedTask, taskBranchRef, taskRef } from "./task-refs.ts";
 import type { Actor } from "./tokens.ts";
@@ -214,6 +214,8 @@ export interface CreateTaskInput {
   body?: string | undefined;
   attemptLimit?: number | null | undefined;
   /** Already checked against the project's config (`taskDefinitionsFrom`). */
+  checks?: CheckConfig[] | undefined;
+  /** Already checked against the project's config (`taskDefinitionsFrom`). */
   metrics?: MetricConfig[] | undefined;
 }
 
@@ -222,6 +224,8 @@ export interface EditTaskInput {
   title?: string | undefined;
   body?: string | undefined;
   attemptLimit?: number | null | undefined;
+  /** Replaces the task's checks; already checked against the project's config (`taskDefinitionsFrom`). */
+  checks?: CheckConfig[] | undefined;
   /** Replaces the task's metrics; already checked against the project's config (`taskDefinitionsFrom`). */
   metrics?: MetricConfig[] | undefined;
 }
@@ -489,7 +493,7 @@ export class TaskStore {
         actor.user.id,
         this.#stamp(),
         input.attemptLimit ?? null,
-        storedDefinitions({ ...NO_TASK_DEFINITIONS, metrics: input.metrics ?? [] }),
+        storedDefinitions({ checks: input.checks ?? [], metrics: input.metrics ?? [] }),
       );
       this.#journal(actor, "created", number, null);
       return this.#task(number);
@@ -533,7 +537,7 @@ export class TaskStore {
     };
   }
 
-  /** Edits a task's title, body, attempt limit or metrics. The project owner or the task's creator may. */
+  /** Edits a task's title, body, attempt limit, checks or metrics. The project owner or the task's creator may. */
   editTask(project: ProjectContext, actor: Actor, input: EditTaskInput): StoredTask {
     const current = this.#task(input.task);
     this.#mayManageTask(project, actor, current);
@@ -543,7 +547,10 @@ export class TaskStore {
       input.title ?? current.title,
       input.body ?? current.body,
       input.attemptLimit === undefined ? current.attempt_limit : input.attemptLimit,
-      storedDefinitions({ ...current.definitions, metrics: input.metrics ?? current.definitions.metrics }),
+      storedDefinitions({
+        checks: input.checks ?? current.definitions.checks,
+        metrics: input.metrics ?? current.definitions.metrics,
+      }),
       current.number,
     );
     return this.#task(current.number);
@@ -2527,7 +2534,7 @@ function toTask(row: TaskRow): StoredTask {
 
 /** A task's definitions as stored: null for none. */
 function storedDefinitions(definitions: TaskDefinitions): string | null {
-  return definitions.metrics.length === 0 ? null : JSON.stringify(definitions);
+  return defines(definitions) ? JSON.stringify(definitions) : null;
 }
 
 function toAttempt(row: AttemptRow): Omit<StoredAttempt, "scoring" | "merge_request" | "verdicts"> {

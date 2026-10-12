@@ -336,7 +336,7 @@ function configScored(
   return {
     check: {
       name: check.name,
-      source: "project",
+      source: check.source,
       required: check.required,
       outcome,
       durationMs: ran?.durationMs ?? 0,

@@ -11,11 +11,11 @@ describe("previewPathAllowed", () => {
   });
 
   it("refuses other Workers, other accounts, and everything else", () => {
-    expect(previewPathAllowed("/client/v4/accounts/acct/workers/scripts/throng", grant)).toBe(false);
-    expect(previewPathAllowed("/client/v4/accounts/acct/workers/scripts/fixture-other", grant)).toBe(false);
-    expect(previewPathAllowed("/client/v4/accounts/other/workers/scripts/fixture", grant)).toBe(false);
-    expect(previewPathAllowed("/client/v4/user/tokens", grant)).toBe(false);
-    expect(previewPathAllowed("/client/v4/accounts/acct/r2/buckets", grant)).toBe(false);
+    expect(previewPathAllowed("/client/v4/accounts/acct/workers/scripts/throng", grant)).toBeFalsy();
+    expect(previewPathAllowed("/client/v4/accounts/acct/workers/scripts/fixture-other", grant)).toBeFalsy();
+    expect(previewPathAllowed("/client/v4/accounts/other/workers/scripts/fixture", grant)).toBeFalsy();
+    expect(previewPathAllowed("/client/v4/user/tokens", grant)).toBeFalsy();
+    expect(previewPathAllowed("/client/v4/accounts/acct/r2/buckets", grant)).toBeFalsy();
   });
 });
 

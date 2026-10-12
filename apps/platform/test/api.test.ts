@@ -90,7 +90,7 @@ describe("POST /api/tokens", () => {
     });
     const row = await env.DB.prepare("SELECT * FROM tokens WHERE id = ?").bind(minted["id"]).first<Json>();
     expect(row?.["hash"]).toMatch(/^[0-9a-f]{64}$/);
-    expect(Object.values(row ?? {}).includes(minted["token"])).toBe(false);
+    expect(Object.values(row ?? {}).includes(minted["token"])).toBeFalsy();
   });
 
   it("accepts an agent alias and an expiry of up to 7 days", async () => {

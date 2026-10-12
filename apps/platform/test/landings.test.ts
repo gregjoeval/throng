@@ -312,8 +312,8 @@ describe("a merge request leaving the queue while landing", () => {
     expect(mr(t1.task)).toMatchObject({ state: "needsReview", last_dequeue: { reason: "newPush" } });
     expect(landingWorkflow.terminated).toEqual(["abc123-t1a1-landing-1"]);
     expect(tornDown).toEqual(["abc123-t1a1-landing-1"]);
-    expect(store.claimLandingPush(1)).toBe(false);
-    expect(await store.landingFinished(1, landed())).toBe(false);
+    expect(store.claimLandingPush(1)).toBeFalsy();
+    expect(await store.landingFinished(1, landed())).toBeFalsy();
     expect(mr(t1.task).state).toBe("needsReview");
     expect(mr(t2.task).state).toBe("landing");
   });
@@ -326,7 +326,7 @@ describe("a merge request leaving the queue while landing", () => {
     await drain();
     expect(mr(t1.task).state).toBe("cancelled");
     expect(landingWorkflow.terminated).toEqual(["abc123-t1a1-landing-1"]);
-    expect(await store.landingFinished(1, landed())).toBe(false);
+    expect(await store.landingFinished(1, landed())).toBeFalsy();
   });
 
   it("lets a landing that is pushing to main finish: a push doesn't dequeue it and a cancel is refused", async () => {
@@ -388,7 +388,7 @@ describe("a merge request leaving the queue while landing", () => {
     await new Promise((r) => setTimeout(r, 0));
     repos.copyRef = copyRef;
 
-    expect(await store.landingFinished(1, landed())).toBe(false);
+    expect(await store.landingFinished(1, landed())).toBeFalsy();
     expect(mr(t1.task).state).toBe("merged");
     expect(store.landings.get(1)?.status).toBe("landed");
     expect(journalKinds().filter((k) => k === "mainAdvanced")).toHaveLength(1);

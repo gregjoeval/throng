@@ -61,7 +61,7 @@ describe("forwardToPlatform", () => {
     expect(forwarded.headers.get("X-Throng-Access-Email")).toBe("ada@example.com");
     expect(forwarded.headers.get("Accept")).toBe("application/json");
     for (const name of ["Authorization", "Cookie", "Cf-Access-Jwt-Assertion"]) {
-      expect(forwarded.headers.has(name)).toBe(false);
+      expect(forwarded.headers.has(name)).toBeFalsy();
     }
   });
 

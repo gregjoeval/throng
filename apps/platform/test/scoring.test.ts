@@ -272,7 +272,7 @@ describe("the scoring queue", () => {
     expect(journal().find((e) => e.kind === "scoringCancelled")).toMatchObject({ run: 1, superseded_by: head });
 
     // A late report from the cancelled run is discarded, and a second drain stops nothing more.
-    expect(store.scoring.finish(running!.id, done())).toBe(false);
+    expect(store.scoring.finish(running!.id, done())).toBeFalsy();
     expect(store.scoring.getRun(running!.id)?.status).toBe("cancelled");
     await store.scoring.drain();
     expect(workflow.terminated).toHaveLength(1);

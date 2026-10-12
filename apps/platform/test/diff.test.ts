@@ -49,7 +49,7 @@ describe("diffCommit", () => {
       ].join("\n"),
     );
     expect(diff.totals).toEqual({ files: 1, additions: 1, deletions: 1 });
-    expect(diff.truncated).toBe(false);
+    expect(diff.truncated).toBeFalsy();
   });
 
   it("writes an added file against /dev/null, with no newline at its end marked", async () => {
@@ -222,7 +222,7 @@ describe("diffCommit caps", () => {
 
   it("is not truncated when exactly maxFiles changed", async () => {
     const diff = await diffWith(numbered(3, "a\n"), numbered(3, "b\n"), caps({ maxFiles: 3 }));
-    expect(diff.truncated).toBe(false);
+    expect(diff.truncated).toBeFalsy();
   });
 
   it("lists files past maxPatchedFiles without a patch, flagged truncated", async () => {
@@ -233,7 +233,7 @@ describe("diffCommit caps", () => {
       [["truncated"], false],
       [["truncated"], false],
     ]);
-    expect(diff.truncated).toBe(false);
+    expect(diff.truncated).toBeFalsy();
   });
 
   it("flags a file with either side over maxBlobBytes tooLarge, without a patch", async () => {

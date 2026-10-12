@@ -31,7 +31,7 @@ describe("FakeRepos", () => {
     const repos = new FakeRepos();
     await repos.create("k3x9q2-main");
     expect(await repos.delete("k3x9q2-main")).toBeTruthy();
-    expect(await repos.delete("k3x9q2-main")).toBe(false);
+    expect(await repos.delete("k3x9q2-main")).toBeFalsy();
     await expect(repos.get("k3x9q2-main")).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
 

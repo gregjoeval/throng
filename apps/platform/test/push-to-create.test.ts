@@ -197,7 +197,7 @@ describe("push-to-create", () => {
     const theirs = await clone(bob.token);
     await commit(theirs, "Search, my way");
     const rejected = await push(theirs, "search");
-    expect(rejected.ok).toBe(false);
+    expect(rejected.ok).toBeFalsy();
     expect(rejected.stderr).toMatch(
       /\[remote rejected\] HEAD -> search \(branch search belongs to t2a1, another user's attempt on t2; push a branch named t2\/<name>/,
     );
@@ -247,7 +247,7 @@ describe("push-to-create", () => {
     const read = vi.spyOn(host, "listCommits").mockRejectedValueOnce(new Error("Artifacts is down"));
 
     const failed = await push(dir, "search");
-    expect(failed.ok).toBe(false);
+    expect(failed.ok).toBeFalsy();
     expect(failed.stderr).toMatch(/502|The push of search to t2a1 failed/);
     expect(read).toHaveBeenCalled();
     expect(await host.list(`${project.id}-t2`)).toEqual([]);
@@ -277,7 +277,7 @@ describe("push-to-create", () => {
     });
 
     const failed = await push(dir, "search");
-    expect(failed.ok).toBe(false);
+    expect(failed.ok).toBeFalsy();
     expect(failed.stderr).toMatch(/\[remote rejected\] HEAD -> search \(pre-receive hook declined\)/);
     expect(await host.list(`${project.id}-t2`)).toEqual([]);
     expect(tasks.listTasks(project, ada.actor, {}).map((t) => t.number)).toEqual([1]);
@@ -289,10 +289,10 @@ describe("push-to-create", () => {
     const dir = await clone(ada.token);
     await commit(dir, "tagged");
     const deleted = await tryGit(dir, env, "push", "origin", ":refs/heads/gone");
-    expect(deleted.ok).toBe(false);
+    expect(deleted.ok).toBeFalsy();
     await git(dir, env, "tag", "v1");
     const tagged = await tryGit(dir, env, "push", "origin", "v1");
-    expect(tagged.ok).toBe(false);
+    expect(tagged.ok).toBeFalsy();
     expect(tagged.stderr).toMatch(/\[remote rejected\] v1 -> v1 \(the origin keeps no refs but main/);
     expect(await originRefs()).toBe("refs/heads/main");
   });
@@ -333,7 +333,7 @@ describe("joining a task with a t<n>/ branch", () => {
     await commit(dir, "Join");
     const rejection = async (branch: string) => {
       const result = await push(dir, branch);
-      expect(result.ok).toBe(false);
+      expect(result.ok).toBeFalsy();
       return /\[remote rejected\] HEAD -> \S+ \((.*)\)/.exec(result.stderr)?.[1];
     };
 

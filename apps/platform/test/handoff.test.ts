@@ -221,7 +221,7 @@ describe("hand-off through the API and the git proxy", () => {
     const before = await host.head(fork);
     await commit(adaDir, "second");
     const refused = await tryGit(adaDir, env, "push", "origin", "HEAD:main");
-    expect(refused.ok).toBe(false);
+    expect(refused.ok).toBeFalsy();
     expect(refused.stderr).toMatch(/only the author of t1a1 may/);
     expect(await host.head(fork)).toBe(before);
 

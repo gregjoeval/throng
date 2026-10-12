@@ -176,7 +176,7 @@ describe("git proxy", () => {
     await commit(dir, "intrusion");
     const before = await host.head(forkRepo(project.id, "t1a1"));
     const pushed = await tryGit(dir, env, "push", "origin", "HEAD:main");
-    expect(pushed.ok).toBe(false);
+    expect(pushed.ok).toBeFalsy();
     expect(pushed.stderr).toMatch(/Push rejected: only the author of t1a1 may/);
     expect(pushed.stderr).toMatch(/403/);
     expect(await host.head(forkRepo(project.id, "t1a1"))).toBe(before);
@@ -190,7 +190,7 @@ describe("git proxy", () => {
     await store(project.id).closeAttempt(project, ada.actor, { task: 1, number: 1 });
     const before = await host.head(forkRepo(project.id, "t1a1"));
     const pushed = await tryGit(dir, env, "push", "origin", "HEAD:main");
-    expect(pushed.ok).toBe(false);
+    expect(pushed.ok).toBeFalsy();
     expect(pushed.stderr).toMatch(/Push rejected: t1a1 is closed/);
     expect(await host.head(forkRepo(project.id, "t1a1"))).toBe(before);
   });
@@ -227,7 +227,7 @@ describe("git proxy", () => {
     await commit(dir, "direct");
     const before = await host.head(origin);
     const pushed = await tryGit(dir, env, "push", "origin", "HEAD:main");
-    expect(pushed.ok).toBe(false);
+    expect(pushed.ok).toBeFalsy();
     expect(pushed.stderr).toMatch(/\[remote rejected\] HEAD -> main \(main only advances through the merge queue/);
     expect(await host.head(origin)).toBe(before);
     // The pack never reached the repo host.
@@ -239,7 +239,7 @@ describe("git proxy", () => {
     const dir = await clone("throng.git", ada.token);
     await commit(dir, "feature");
     const pushed = await tryGit(dir, env, "push", "origin", "HEAD:refs/heads/feature", "HEAD:refs/heads/t1/x");
-    expect(pushed.ok).toBe(false);
+    expect(pushed.ok).toBeFalsy();
     expect(pushed.stderr).toMatch(/\[remote rejected\] HEAD -> feature \(push one branch at a time to the origin/);
     expect(pushed.stderr).toMatch(/\[remote rejected\] HEAD -> t1\/x/);
     expect(await host.head(origin, "refs/heads/feature")).toBeNull();
@@ -267,7 +267,7 @@ describe("git proxy", () => {
     await clone("throng.git", ada.token);
     advance(2 * 60 * 60 * 1000);
     const cloned = await tryGit(work, env, "clone", "-q", remote("throng.git", ada.token), join(work, "late"));
-    expect(cloned.ok).toBe(false);
+    expect(cloned.ok).toBeFalsy();
     expect(cloned.stderr).toMatch(/Authentication failed|401/);
   });
 
@@ -307,7 +307,7 @@ describe("git proxy", () => {
 
     for (const token of host.tokens()) {
       for (const response of server.responses) {
-        expect(response.body.includes(token)).toBe(false);
+        expect(response.body.includes(token)).toBeFalsy();
         expect(JSON.stringify(response.headers)).not.toContain(token);
       }
     }
@@ -315,7 +315,7 @@ describe("git proxy", () => {
       server.responses.some((r) =>
         r.headers.some(([name]) => name.toLowerCase() === "www-authenticate" && r.status !== 401),
       ),
-    ).toBe(false);
+    ).toBeFalsy();
   });
 });
 

@@ -583,7 +583,7 @@ describe("archive", () => {
     const closed = await store.closeAttempt(PROJECT, ada, t1a1);
     expect(closed).toMatchObject({ state: "closed", archived_sha: null });
     expect(await repos.list("abc123-t")).toEqual(["abc123-t1a1"]);
-    expect(repos.calls.some((c) => c.method === "delete")).toBe(false);
+    expect(repos.calls.some((c) => c.method === "delete")).toBeFalsy();
   });
 
   it("archives every active attempt when the task closes, is made obsolete, or merges", async () => {
@@ -872,7 +872,7 @@ describe("push-to-create", () => {
     );
 
     await store.abandonBranchPush(PROJECT, ada, { task: 1, number: 1 });
-    expect(await exists("abc123-t1a1")).toBe(false);
+    expect(await exists("abc123-t1a1")).toBeFalsy();
     // Numbers are never reused: the next push takes t2.
     expect(await store.routeBranchPush(PROJECT, ada, { branch: "search" })).toMatchObject({ task: 2, number: 1 });
   });
@@ -921,7 +921,7 @@ describe("push-to-create", () => {
       "invalidState",
     );
     await store.abandonBranchPush(PROJECT, bob, { task: 1, number: 1 });
-    expect(await exists("abc123-t1a1")).toBe(false);
+    expect(await exists("abc123-t1a1")).toBeFalsy();
     expect(store.listAttempts(PROJECT, bob, { task: 1 })).toEqual([]);
   });
 
@@ -939,7 +939,7 @@ describe("push-to-create", () => {
     await store.routeBranchPush(PROJECT, ada, { branch: "search" });
     advance(BRANCH_PUSH_TTL_MS + 1);
     expect(await store.routeBranchPush(PROJECT, bob, { branch: "search" })).toMatchObject({ task: 2 });
-    expect(await exists("abc123-t1a1")).toBe(false);
+    expect(await exists("abc123-t1a1")).toBeFalsy();
     expect(await exists("abc123-t2a1")).toBeTruthy();
   });
 
@@ -956,6 +956,6 @@ describe("push-to-create", () => {
   it("has no open merge requests until merge requests exist (#139)", () => {
     const { store } = clocked();
     store.createTask(PROJECT, ada, { title: "Fix it" });
-    expect(store.hasOpenMergeRequest(PROJECT, ada, { task: 1 })).toBe(false);
+    expect(store.hasOpenMergeRequest(PROJECT, ada, { task: 1 })).toBeFalsy();
   });
 });

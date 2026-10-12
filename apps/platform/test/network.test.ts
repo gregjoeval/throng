@@ -15,13 +15,13 @@ describe("registryAllows", () => {
 
   it("refuses anything that writes: publish, unpublish, login", () => {
     for (const method of ["PUT", "POST", "DELETE", "PATCH"]) {
-      expect(registryAllows(method, registry("/is-number"))).toBe(false);
+      expect(registryAllows(method, registry("/is-number"))).toBeFalsy();
     }
   });
 
   it("only covers the npm registry, over HTTPS", () => {
-    expect(registryAllows("GET", new URL("https://registry.yarnpkg.com/is-number"))).toBe(false);
-    expect(registryAllows("GET", new URL("http://registry.npmjs.org/is-number"))).toBe(false);
+    expect(registryAllows("GET", new URL("https://registry.yarnpkg.com/is-number"))).toBeFalsy();
+    expect(registryAllows("GET", new URL("http://registry.npmjs.org/is-number"))).toBeFalsy();
   });
 });
 

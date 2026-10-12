@@ -5,7 +5,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { EllipsisIcon } from "lucide-react";
+import { useState } from "react";
 import type { ReactNode } from "react";
+import { AttemptDetails } from "@/components/attempt-details";
 import { CommitFiles } from "@/components/commit-files";
 import { ErrorState, Loading } from "@/components/states";
 import { Button } from "@/components/ui/button";
@@ -30,10 +32,9 @@ interface InProject {
 
 /**
  * A lane for `attempt`. `note` is the author's note from the attempt itself; `actions` goes in the
- * header beside the menu (the selection slice's Select); `onDetails` opens the attempt details sheet,
- * and the menu's Details item is disabled until it's given. Its change set is against `reference`,
- * its diffs laid out by `layout`; with `files` false it lists no files, only its notices (the arena's
- * by-file arrangement shows the files in rows instead).
+ * header beside the menu (the selection slice's Select). The menu opens the attempt's details. Its
+ * change set is against `reference`, its diffs laid out by `layout`; with `files` false it lists no
+ * files, only its notices (the arena's by-file arrangement shows the files in rows instead).
  */
 export function Lane({
   owner,
@@ -41,7 +42,6 @@ export function Lane({
   attempt,
   note,
   actions,
-  onDetails,
   reference = "base",
   layout = "split",
   files = true,
@@ -49,11 +49,11 @@ export function Lane({
   attempt: ArenaAttempt;
   note: string;
   actions?: ReactNode;
-  onDetails?: () => void;
   reference?: Reference;
   layout?: Layout;
   files?: boolean;
 }) {
+  const [details, setDetails] = useState(false);
   return (
     <section aria-label={`Lane ${attempt.ref}`} className="flex min-w-0 flex-col gap-3">
       <header className="flex flex-col gap-2 rounded-xl border px-3 py-2">
@@ -64,7 +64,7 @@ export function Lane({
           </div>
           <div className="flex items-center gap-1">
             {actions}
-            <LaneMenu owner={owner} project={project} attempt={attempt} onDetails={onDetails} />
+            <LaneMenu owner={owner} project={project} attempt={attempt} onDetails={() => setDetails(true)} />
           </div>
         </div>
         <VerdictCounts verdicts={attempt.verdicts} />
@@ -78,6 +78,7 @@ export function Lane({
         layout={layout}
         files={files}
       />
+      <AttemptDetails owner={owner} project={project} attempt={attempt} open={details} onOpenChange={setDetails} />
     </section>
   );
 }
@@ -88,7 +89,7 @@ function LaneMenu({
   project,
   attempt,
   onDetails,
-}: InProject & { attempt: ArenaAttempt; onDetails?: () => void }) {
+}: InProject & { attempt: ArenaAttempt; onDetails: () => void }) {
   const navigate = useNavigate();
   const preview = attempt.result?.preview;
   return (
@@ -97,9 +98,7 @@ function LaneMenu({
         <EllipsisIcon />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-auto min-w-48">
-        <DropdownMenuItem disabled={onDetails === undefined} onClick={onDetails}>
-          Checks, logs and verdicts
-        </DropdownMenuItem>
+        <DropdownMenuItem onClick={onDetails}>Checks, logs and verdicts</DropdownMenuItem>
         {preview?.status === "ready" ? (
           <DropdownMenuItem render={<a href={preview.url} target="_blank" rel="noreferrer" />}>
             Open preview

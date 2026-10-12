@@ -4,15 +4,13 @@ import { publicApp, webApp } from "./app";
 import { reposFor } from "./artifacts";
 import { walk } from "./browse";
 import { gitRoutes, type GitProxyOptions } from "./git-proxy";
-import { forkRepo, originRepo } from "./repos";
-import { spikeProject, spikeToken } from "./spike";
+import { e2eRoutes } from "./e2e";
 
 export { ProjectCoordinator } from "./project";
 export { RunSandbox, OutboundAuth } from "./sandbox";
 export { ScoringWorkflow } from "./workflows";
 export { LandingWorkflow } from "./landing-workflow";
 
-const FORK_READY_TIMEOUT_MS = 60_000;
 const PUSH_TOKEN_TTL_SECONDS = 60 * 60;
 
 // The API and the git proxy are typed against the bindings they read; at runtime their env is this Worker's.
@@ -41,105 +39,38 @@ export class WebEntrypoint extends WorkerEntrypoint<Env> {
   }
 }
 
-// Spike-only control plane; the real product API is backlog.
+// The e2e suite's routes (`scripts/e2e.ts`). Their bearer secret keeps its old name, SPIKE_TOKEN, so
+// no deployment or CI secret has to change.
+app.route(
+  "/",
+  e2eRoutes<Env>({
+    db: (env) => env.DB,
+    repos: (env) => reposFor(env),
+    logs: (env) => ({
+      list: (options) => env.LOGS.list(options),
+      delete: (keys) => env.LOGS.delete(keys),
+    }),
+    project: (env, id) => {
+      const stub = env.PROJECT.getByName(id);
+      return {
+        note: (kind, detail) => stub.note(kind, detail),
+        journal: (since) => stub.journal(since),
+        score: (project, attempt, sha) => stub.spikeScore(project, attempt, sha),
+        run: (run) => stub.spikeRun(run),
+        destroy: () => stub.destroy(),
+      };
+    },
+    secret: (env) => env.SPIKE_TOKEN,
+  }),
+);
+
+// Spike-only control plane, not used by the e2e suite.
 app.use("/spike/*", async (c, next) => {
   if (c.req.header("Authorization") !== `Bearer ${c.env.SPIKE_TOKEN}`) return c.text("Unauthorized", 401);
   await next();
 });
 
-/**
- * Creates a real project owned by the e2e user, whose id and handle are both `:project`, and returns
- * a write token for its origin so the caller can push the fixture to `main`.
- */
-app.post("/spike/projects/:project", async (c) => {
-  const project = c.req.param("project");
-  const began = Date.now();
-  const made = await spikeProject(c.env.DB, reposFor(c.env), project);
-  const createMs = Date.now() - began;
-  await c.env.PROJECT.getByName(project).note("repo-created", { project, createMs });
-  return c.json({ remote: made.remote, token: made.token, createMs, owner: made.project.owner.handle });
-});
-
-/** A Throng token for the e2e user, for the product API (`/api`) and the git proxy (`/git`). */
-app.post("/spike/token", async (c) => {
-  const { token, user } = await spikeToken(c.env.DB, new Date());
-  return c.json({ token, user: { id: user.id, handle: user.handle } });
-});
-
-/** Forks the origin for an attempt (`t1a1`), waits until the fork is usable, and mints a write token. */
-app.post("/spike/projects/:project/attempts/:attempt", async (c) => {
-  const project = c.req.param("project");
-  const name = forkRepo(project, c.req.param("attempt"));
-  const repos = reposFor(c.env);
-  const began = Date.now();
-  await repos.fork(originRepo(project), name);
-  const forkMs = Date.now() - began;
-
-  let polls = 0;
-  for (;;) {
-    polls++;
-    try {
-      const fork = await repos.get(name);
-      const readyMs = Date.now() - began;
-      const { token } = await repos.mintToken(name, "write", PUSH_TOKEN_TTL_SECONDS);
-      await c.env.PROJECT.getByName(project).note("fork-ready", { name, forkMs, readyMs, polls });
-      return c.json({ remote: fork.remote, token, forkMs, readyMs, polls });
-    } catch (cause) {
-      if (Date.now() - began > FORK_READY_TIMEOUT_MS) throw cause;
-      await new Promise((r) => setTimeout(r, 250));
-    }
-  }
-});
-
-/**
- * Queues scoring of `sha`, which the caller pushed straight to an attempt's fork (`t1a1`). Pushes
- * through the git proxy queue scoring themselves; the spike's pushes bypass it.
- */
-app.post("/spike/projects/:project/attempts/:attempt/score", async (c) => {
-  const sha = c.req.query("sha");
-  if (sha === undefined) return c.json({ error: "sha is required" }, 400);
-  const project = c.req.param("project");
-  return c.json(await c.env.PROJECT.getByName(project).spikeScore(project, c.req.param("attempt"), sha));
-});
-
-/** One scoring run of the project, with its result once it is done. */
-app.get("/spike/projects/:project/runs/:run", async (c) => {
-  const run = await c.env.PROJECT.getByName(c.req.param("project")).spikeRun(Number(c.req.param("run")));
-  return run === null ? c.json({ error: "no such run" }, 404) : c.json(run);
-});
-
-app.get("/spike/projects/:project/journal", async (c) => {
-  const since = Number(c.req.query("since") ?? 0);
-  return c.json(await c.env.PROJECT.getByName(c.req.param("project")).journal(since));
-});
-
-/** Head of a repo's branch, read through the binding (no clone). */
-app.get("/spike/repos/:name/head", async (c) => {
-  const ref = c.req.query("ref") ?? "main";
-  const [head] = await reposFor(c.env).listCommits(c.req.param("name"), { ref, limit: 1 });
-  return c.json({ sha: head?.hash ?? null, message: head?.message ?? null });
-});
-
-/**
- * Copies a ref between repos the way closing and reopening an attempt does (`Repos.copyRef`), so
- * the e2e suite can check the Worker-side git client against real Artifacts.
- */
-app.post("/spike/repos/:name/copy-ref", async (c) => {
-  const [fromRef, to, toRef] = [c.req.query("from_ref"), c.req.query("to"), c.req.query("to_ref")];
-  if (fromRef === undefined || to === undefined || toRef === undefined) {
-    return c.json({ error: "from_ref, to and to_ref are required" }, 400);
-  }
-  const sha = await reposFor(c.env).copyRef({ from: c.req.param("name"), fromRef, to, toRef });
-  return c.json({ sha });
-});
-
 // Read-only views a file/commit browser could use. All through the binding; nothing is cloned.
-
-app.get("/spike/repos/:name/log", async (c) => {
-  const ref = c.req.query("ref") ?? "main";
-  const limit = Math.min(Number(c.req.query("limit") ?? 20), 100);
-  return c.json(await reposFor(c.env).listCommits(c.req.param("name"), { ref, limit }));
-});
 
 /** Directory listing at `path` (repo root by default) for a ref. */
 app.get("/spike/repos/:name/tree", async (c) => {
@@ -167,17 +98,6 @@ app.get("/spike/repos/:name/file", async (c) => {
 app.post("/spike/repos/:name/read-token", async (c) => {
   const { token } = await reposFor(c.env).mintToken(c.req.param("name"), "read", PUSH_TOKEN_TTL_SECONDS);
   return c.json({ token });
-});
-
-/** Names of the repos starting with `prefix`, so a spike run can find everything it created. */
-app.get("/spike/repos", async (c) => {
-  const prefix = c.req.query("prefix") ?? "";
-  if (prefix === "") return c.json({ error: "prefix is required" }, 400);
-  return c.json(await reposFor(c.env).list(prefix));
-});
-
-app.delete("/spike/repos/:name", async (c) => {
-  return c.json({ deleted: await reposFor(c.env).delete(c.req.param("name")) });
 });
 
 app.onError((err, c) => {

@@ -5,6 +5,7 @@ import type { ScoringOutcome, ScoringParams, ScoringWorkflow } from "../src/scor
 import { TaskStore, type AttemptInput, type ProjectContext } from "../src/task-store.ts";
 import type { Actor } from "../src/tokens.ts";
 import { FakeRepos } from "./fake-repos.ts";
+import { conflictDetails, ERRORED } from "./support/conflicts.ts";
 import { testSql } from "./support/task-backend.ts";
 
 const PROJECT: ProjectContext = { id: "abc123", owner: "owner001" };
@@ -393,7 +394,7 @@ describe("the queue", () => {
     expect(store.startLanding(PROJECT, null)).toBeNull();
     expect(store.getMergeRequest(PROJECT, cat, { task: t3 }).position).toBe(2);
 
-    store.dequeueMergeRequest(PROJECT, null, { task: t2, reason: "errored" });
+    store.dequeueMergeRequest(PROJECT, null, { task: t2, reason: "errored", details: ERRORED });
     expect(queue()).toEqual([
       [t3, "queued", 1],
       [t4, "queued", 2],
@@ -415,13 +416,18 @@ describe("dequeue", () => {
       await score(ref1);
       await store.selectAttempt(PROJECT, cat, ref1);
       store.startLanding(PROJECT, null);
-      const details = reason === "conflict" ? { files: [{ path: "README.md" }] } : undefined;
-      store.dequeueMergeRequest(PROJECT, null, { task: 1, reason, details });
+      const cause =
+        reason === "conflict"
+          ? { reason, details: conflictDetails(["README.md"]) }
+          : reason === "failed_checks"
+            ? { reason, details: { checks: [{ name: "test", outcome: "failed" as const, log: "test" }] } }
+            : { reason, details: ERRORED };
+      store.dequeueMergeRequest(PROJECT, null, { task: 1, ...cause });
       expect(mr()).toMatchObject({
         state: "pending",
         approved_head: base.hash,
         position: null,
-        last_dequeue: { reason, at: expect.any(String), ...(details === undefined ? {} : { details }) },
+        last_dequeue: { ...cause, at: expect.any(String) },
       });
       await store.rescore(PROJECT, cat, ref1);
       await score(ref1);
@@ -435,7 +441,7 @@ describe("dequeue", () => {
     await open(ref1);
     await score(ref1);
     await store.selectAttempt(PROJECT, cat, ref1);
-    store.dequeueMergeRequest(PROJECT, null, { task: 1, reason: "errored" });
+    store.dequeueMergeRequest(PROJECT, null, { task: 1, reason: "errored", details: ERRORED });
     expect(await store.approveMergeRequest(PROJECT, cat, { task: 1 })).toMatchObject({ state: "queued" });
     expect(mr().last_dequeue).toMatchObject({ reason: "errored" });
   });
@@ -445,7 +451,7 @@ describe("dequeue", () => {
     await open(ref1);
     await score(ref1);
     await store.selectAttempt(PROJECT, cat, ref1);
-    store.dequeueMergeRequest(PROJECT, null, { task: 1, reason: "conflict" });
+    store.dequeueMergeRequest(PROJECT, null, { task: 1, reason: "conflict", details: conflictDetails(["README.md"]) });
     push(ref1);
     expect(mr()).toMatchObject({ state: "needs_review", last_dequeue: { reason: "conflict" } });
     await store.approveMergeRequest(PROJECT, cat, { task: 1 });
@@ -457,7 +463,12 @@ describe("dequeue", () => {
     const { store, ref1, open } = await setup();
     await open(ref1);
     await store.selectAttempt(PROJECT, cat, ref1);
-    const dequeue = () => store.dequeueMergeRequest(PROJECT, null, { task: 1, reason: "conflict" });
+    const dequeue = () =>
+      store.dequeueMergeRequest(PROJECT, null, {
+        task: 1,
+        reason: "conflict",
+        details: conflictDetails(["README.md"]),
+      });
     expect(await code(dequeue)).toBe("invalid_state");
   });
 });

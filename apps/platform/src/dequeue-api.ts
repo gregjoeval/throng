@@ -3,12 +3,20 @@
 // retest behind a `failed_checks` dequeue. Mounted by `api.ts`. Like the other merge request reads,
 // they take a bearer token or throng-web's forwarded identity.
 
-import { createRoute, OpenAPIHono, z, type RouteConfig } from "@hono/zod-openapi";
+import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import type { AccessBindings } from "./access.ts";
 import type { AuthEnv, bearerOrForwarded } from "./auth.ts";
-import { wantsPatch } from "./browse-api.ts";
+import {
+  diffContent,
+  diffResponse,
+  FileDiffSchema,
+  ProjectPathSchema,
+  publicFileDiff,
+  TAIL,
+  tailedRoutes,
+} from "./api-shared.ts";
 import { CONFLICT_CAPS, CONFLICT_TYPES } from "./conflicts.ts";
-import { diffFile, type FileDiff, type FileSide } from "./diff.ts";
+import { diffFile, type FileSide } from "./diff.ts";
 import { errorBody, errorResponse, ServiceError } from "./errors.ts";
 import { CHECK_OUTCOMES } from "./results.ts";
 import { DEQUEUE_REASONS } from "./merge-requests.ts";
@@ -23,9 +31,7 @@ export interface DequeueOptions {
   logs: (env: AccessBindings) => LogStore;
 }
 
-const TaskPathSchema = z.object({
-  owner: z.string().openapi({ description: "The owner's handle.", example: "greg" }),
-  project: z.string().openapi({ description: "The project's handle.", example: "throng" }),
+const TaskPathSchema = ProjectPathSchema.extend({
   t: z.string().openapi({ description: "A task reference: `t42` or `42`.", example: "t42" }),
 });
 
@@ -86,7 +92,10 @@ const FailedChecksDetailsSchema = z
         log: z.string().nullable().openapi({ description: "For `GET …/merge-request/dequeue/logs/{name}`." }),
       }),
     ),
-    error: z.string().optional().openapi({ description: "The config's errors, when `main`'s config is invalid." }),
+    error: z
+      .string()
+      .optional()
+      .openapi({ description: "The config's errors, when the merged tree's config is invalid." }),
   })
   .openapi("FailedChecksDetails");
 
@@ -108,28 +117,7 @@ const DequeueSchema = z
   })
   .openapi("MergeRequestDequeue");
 
-const FileDiffSchema = z
-  .object({
-    path: z.string(),
-    old_path: z.string().optional().openapi({ description: "Never set here: both sides have the file's path." }),
-    status: z.enum(["added", "deleted", "modified", "renamed"]),
-    old_mode: z.string().nullable(),
-    new_mode: z.string().nullable(),
-    old_hash: z.string().nullable().openapi({ description: "The base's blob; null when the base has no file." }),
-    new_hash: z.string().nullable().openapi({ description: "The side's blob; null when it has no file." }),
-    additions: z.number().int(),
-    deletions: z.number().int(),
-    flags: z.array(z.enum(["truncated", "tooLarge", "tooComplex", "binary"])).openapi({
-      description: "`binary`, `tooLarge` and `tooComplex` files get no patch.",
-    }),
-    patch: z.string().optional().openapi({ description: "The git-style unified patch, headers included." }),
-  })
-  .openapi("ConflictFileDiff");
-
 const SIDES = ["main", "attempt"] as const;
-
-/** Hono matches `{path{.+}}` across slashes; the OpenAPI document shows it as plain `{path}`. */
-const TAIL = "{path{.+}}";
 
 const security: Record<string, string[]>[] = [{ bearer: [] }, { web: [] }];
 const json = <T>(schema: T) => ({ content: { "application/json": { schema } } });
@@ -150,12 +138,7 @@ export function dequeueRoutes({ auth, repos, tasks, logs }: DequeueOptions) {
     },
   });
 
-  /** Routes whose path holds a multi-segment `{path}`: routed with the tail, documented without it. */
-  const tailed = <R extends { path: string }>(config: R): R & { hide: true } => {
-    const { middleware: _middleware, hide: _hide, ...documented } = config as R & RouteConfig;
-    api.openAPIRegistry.registerPath({ ...documented, path: config.path.replace(TAIL, "{path}") } as RouteConfig);
-    return { ...config, hide: true };
-  };
+  const tailed = tailedRoutes(api);
 
   const base = "/projects/{owner}/{project}/tasks/{t}/merge-request/dequeue";
   return api
@@ -200,13 +183,7 @@ export function dequeueRoutes({ auth, repos, tasks, logs }: DequeueOptions) {
             query: z.object({ side: z.enum(SIDES) }),
           },
           responses: {
-            200: {
-              description: "The file's diff.",
-              content: {
-                "application/json": { schema: FileDiffSchema },
-                "text/x-diff": { schema: z.string().openapi({ description: "The unified patch." }) },
-              },
-            },
+            200: { description: "The file's diff.", content: diffContent(FileDiffSchema) },
             ...errors,
             404: errorResponse("No such project or task, or the latest dequeue has no conflict in that path."),
           },
@@ -229,12 +206,11 @@ export function dequeueRoutes({ auth, repos, tasks, logs }: DequeueOptions) {
         // The attempt's blob is in its fork while the attempt is active, and in origin once it's archived.
         const file =
           side === "main" ? await diff(found.origin) : await diff(found.fork).catch(() => diff(found.origin));
-        c.header("Vary", "Accept");
-        if (wantsPatch(c.req.header("Accept"))) {
-          c.header("Content-Type", "text/x-diff; charset=utf-8");
-          return c.body(file.patch ?? "", 200) as never;
-        }
-        return c.json(publicFileDiff(file), 200);
+        return diffResponse(
+          c,
+          () => file.patch ?? "",
+          () => publicFileDiff(file),
+        ) as never;
       },
     )
     .openapi(
@@ -264,16 +240,4 @@ export function dequeueRoutes({ auth, repos, tasks, logs }: DequeueOptions) {
         return c.body(log.body, 200, { "Content-Type": LOG_CONTENT_TYPE }) as never;
       },
     );
-}
-
-/** A file diff with its field names in snake_case, like the rest of the merge queue API. */
-function publicFileDiff({ oldPath, oldMode, newMode, oldHash, newHash, ...diff }: FileDiff) {
-  return {
-    ...diff,
-    ...(oldPath === undefined ? {} : { old_path: oldPath }),
-    old_mode: oldMode,
-    new_mode: newMode,
-    old_hash: oldHash,
-    new_hash: newHash,
-  };
 }

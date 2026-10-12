@@ -87,7 +87,7 @@ export interface FailedCheck {
 /** What `lastDequeue.details` holds for `failed_checks`. */
 export interface FailedChecksDetails {
   checks: FailedCheck[];
-  /** The config's errors, when `origin/main`'s config is invalid. */
+  /** The config's errors, when the merged tree's config is invalid. */
   error?: string;
 }
 
@@ -105,7 +105,7 @@ export type LandingOutcome =
   | { kind: "errored"; details: ErroredDetails };
 
 /**
- * The config the retest runs under: `origin/main`'s, with only its required checks. Null skips the
+ * The config the retest runs under: the merged tree's, with only its required checks. Null skips the
  * retest: no config, or no required checks. An invalid config is kept, and fails (see `buildResult`).
  */
 export function retestConfig(config: ConfigResult): ConfigResult | null {

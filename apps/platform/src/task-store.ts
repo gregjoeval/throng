@@ -9,12 +9,14 @@
 import { archiveRef } from "./archive.ts";
 import { CONFIG_PATH, loadConfig, type ConfigResult } from "./config.ts";
 import { ServiceError, type ErrorCode } from "./errors.ts";
-import type { FailedChecksDetails, LandingOutcome, LandingParams, LandingRunner } from "./landing.ts";
+import type { LandingOutcome, LandingParams, LandingRunner } from "./landing.ts";
 import { Landings, type StoredLanding } from "./landings.ts";
 import { isLogName, landingLogKey, logKey, missingLog } from "./logs.ts";
 import {
+  dequeueCause,
   MergeRequests,
   type Dequeue,
+  type DequeueCause,
   type DequeueReason,
   type MergeRequestEvent,
   type MergeRequestState,
@@ -179,8 +181,7 @@ export interface PushNotice {
 
 /** How many files a dequeue's details name (a conflict's), or null when they name none. */
 function fileCount(dequeue: Dequeue): number | null {
-  const files = (dequeue.details as { files?: unknown } | null | undefined)?.files;
-  return Array.isArray(files) ? files.length : null;
+  return dequeue.reason === "conflict" ? dequeue.details.files.length : null;
 }
 
 /** An attempt as the scoring queue keys it. */
@@ -1169,8 +1170,7 @@ export class TaskStore {
     const dequeue = mr.last_dequeue;
     const missing = new ServiceError("not_found", `${taskRef(input.task)}'s last dequeue has no log ${input.name}`);
     if (dequeue?.reason !== "failed_checks" || !isLogName(input.name)) throw missing;
-    const details = dequeue.details as FailedChecksDetails | undefined;
-    if (!details?.checks.some((check) => check.log === input.name)) throw missing;
+    if (!dequeue.details.checks.some((check) => check.log === input.name)) throw missing;
     const landing = this.landings.lastDequeued(mr.id);
     if (landing === null) throw missing;
     return landingLogKey(
@@ -1219,12 +1219,12 @@ export class TaskStore {
   dequeueMergeRequest(
     _project: ProjectContext,
     actor: Actor | null,
-    input: { task: number; reason: "conflict" | "failed_checks" | "errored"; details?: unknown },
+    { task, ...cause }: { task: number } & Extract<DequeueCause, { details: unknown }>,
   ): StoredMergeRequest {
     return this.#sql.transaction(() => {
-      const mr = this.#openMergeRequest(input.task);
+      const mr = this.#openMergeRequest(task);
       this.#expectMergeRequest(mr, ["queued", "landing"], "dequeue");
-      return this.mergeRequests.dequeue(actor, mr, input.reason, "pending", input.details);
+      return this.mergeRequests.dequeue(actor, mr, cause, "pending");
     });
   }
 
@@ -1237,17 +1237,23 @@ export class TaskStore {
     actor: Actor | null,
     input: { task: number; sha: string },
   ): Promise<StoredMergeRequest> {
+    const { merged, source } = this.#sql.transaction(() => this.#landRows(actor, input));
+    await this.#archive(project, [source]);
+    return merged;
+  }
+
+  /** `landMergeRequest`'s row changes, in the caller's transaction; the caller archives `source` after it. */
+  #landRows(
+    actor: Actor | null,
+    input: { task: number; sha: string },
+  ): { merged: StoredMergeRequest; source: StoredAttempt } {
     const mr = this.#openMergeRequest(input.task);
     this.#expectMergeRequest(mr, ["landing"], "land");
     const source = this.#attempt(sourceOf(mr));
     this.#checkMergeable(source);
-    const merged = this.#sql.transaction(() => {
-      const landed = this.mergeRequests.merged(actor, mr, input.sha);
-      this.#markMergedRows(actor, source, input.sha);
-      return landed;
-    });
-    await this.#archive(project, [source]);
-    return merged;
+    const merged = this.mergeRequests.merged(actor, mr, input.sha);
+    this.#markMergedRows(actor, source, input.sha);
+    return { merged, source };
   }
 
   // --- landings --------------------------------------------------------------------------------
@@ -1287,36 +1293,70 @@ export class TaskStore {
    * `needs_review` if its source moved while it was pushing. A report from a landing that was stopped,
    * or already reported, is discarded. Returns whether it was recorded. The caller drains afterwards,
    * which starts the next landing.
+   *
+   * An `errored` landing that claimed its push may have pushed anyway (its result lost after the
+   * push, say). When `main`'s head is its merge commit it is recorded as landed, so its merge request
+   * never returns to `pending` and lands twice. A landing's merge and its `main_advanced` are
+   * recorded in one transaction before the source is archived, so a report retried after an
+   * interrupted archive finds the landing already recorded.
    */
   async landingFinished(landing: number, outcome: LandingOutcome): Promise<boolean> {
+    let current = this.#reportable(landing);
+    if (current === null) return false;
+    let sha = outcome.kind === "landed" ? outcome.sha : null;
+    if (outcome.kind === "errored" && current.status === "pushing") {
+      sha = await this.#mergedOnMain(current);
+      current = this.#reportable(landing);
+      if (current === null) return false;
+    }
+    const { task, attempt, head, project } = current;
+    if (sha !== null) {
+      const landedSha = sha;
+      const { source } = this.#sql.transaction(() => {
+        const landed = this.#landRows(null, { task, sha: landedSha });
+        this.landings.move(landing, "landed");
+        this.#journal(null, "main_advanced", task, attempt, { merge_request: taskRef(task), head, sha: landedSha });
+        return landed;
+      });
+      await this.#archive({ id: project, owner: "" }, [source]);
+      return true;
+    }
+    if (outcome.kind === "landed") return false;
+    this.#sql.transaction(() => {
+      this.landings.move(landing, "dequeued");
+      const mr = this.#openMergeRequest(task);
+      const source = this.#attempt(sourceOf(mr));
+      const moved = this.scoring.statusFor(scoredAttempt(source)).sha !== mr.approved_head;
+      this.mergeRequests.dequeue(null, mr, dequeueCause(outcome), moved ? "needs_review" : "pending");
+    });
+    return true;
+  }
+
+  /**
+   * The landing, while a report from it can still be recorded: it is running or pushing and its
+   * merge request is still landing. A landing whose merge request left the queue is marked stopped.
+   */
+  #reportable(landing: number): StoredLanding | null {
     const current = this.landings.get(landing);
     if (current === null || (current.status !== "running" && current.status !== "pushing")) {
       console.log({ event: "landing.discarded_report", landing, status: current?.status ?? null });
-      return false;
+      return null;
     }
     if (!this.#landingCurrent(current)) {
       this.#sql.transaction(() => this.landings.move(landing, "stopped"));
-      return false;
+      return null;
     }
-    const project = { id: current.project, owner: "" };
-    if (outcome.kind === "landed") {
-      await this.landMergeRequest(project, null, { task: current.task, sha: outcome.sha });
-      this.landings.move(landing, "landed");
-      this.#journal(null, "main_advanced", current.task, current.attempt, {
-        merge_request: taskRef(current.task),
-        head: current.head,
-        sha: outcome.sha,
-      });
-      return true;
-    }
-    this.#sql.transaction(() => {
-      this.landings.move(landing, "dequeued");
-      const mr = this.#openMergeRequest(current.task);
-      const source = this.#attempt(sourceOf(mr));
-      const moved = this.scoring.statusFor(scoredAttempt(source)).sha !== mr.approved_head;
-      this.mergeRequests.dequeue(null, mr, outcome.kind, moved ? "needs_review" : "pending", outcome.details);
-    });
-    return true;
+    return current;
+  }
+
+  /**
+   * The landing's merge commit when `main`'s head is one: a merge whose second parent is the
+   * landing's head. Only the merge queue writes `main`, one landing at a time, so nothing else can
+   * have put it there. A failed read throws, so the report is retried rather than recorded wrongly.
+   */
+  async #mergedOnMain(landing: StoredLanding): Promise<string | null> {
+    const [tip] = await this.#repos.listCommits(originRepo(landing.project), { ref: "main", limit: 1 });
+    return tip !== undefined && tip.parents.length === 2 && tip.parents[1] === landing.head ? tip.hash : null;
   }
 
   /** The landing's merge request is still open and landing. */
@@ -1473,7 +1513,7 @@ export class TaskStore {
     // A landing pushing to main lands the approved head; the compare-and-swap on main decides.
     if (this.#pushing(mr)) return false;
     if (mr.state === "queued" || mr.state === "landing") {
-      this.mergeRequests.dequeue(actor, mr, "new_push", "needs_review");
+      this.mergeRequests.dequeue(actor, mr, { reason: "new_push" }, "needs_review");
     } else {
       this.mergeRequests.move(actor, mr, "needs_review", { head });
     }
@@ -1486,7 +1526,7 @@ export class TaskStore {
       throw invalidState(`${taskRef(mr.task)}'s merge request is landing on main; try again once it has landed`);
     }
     if (mr.state === "queued" || mr.state === "landing") {
-      return this.mergeRequests.dequeue(actor, mr, "cancelled", "cancelled");
+      return this.mergeRequests.dequeue(actor, mr, { reason: "cancelled" }, "cancelled");
     }
     return this.mergeRequests.move(actor, mr, "cancelled");
   }

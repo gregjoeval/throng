@@ -1,6 +1,5 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep, type WorkflowStepConfig } from "cloudflare:workers";
-import { reposFor } from "./artifacts";
-import { loadConfig } from "./config";
+import { parseConfig } from "./config";
 import { conflictFiles, parseMergeTree, type ConflictDetails } from "./conflicts";
 import { LANDING_ROLES, sandboxName } from "./grants";
 import {
@@ -45,11 +44,13 @@ const NOTHING_RUN: RawScore = { base: null, shortstat: "", builtinMs: 0, setupFa
  *
  * 1. Conflict check, in the untrusted `check` container (read grants on the origin and the fork):
  *    `git merge-tree` of `main` and the approved head. A conflict ends it `conflict`; a clean merge
- *    records the tree and `main`'s sha.
- * 2. Retest, in the same container, only when `origin/main`'s config has required checks: setup and
- *    the required checks on the merged tree, with the scoring runner, outbound policy and logs. A
- *    required check not passing ends it `failed_checks`.
- * 3. Land, in the trusted `land` container (origin write, fork read, no repository code): it first
+ *    records the tree, `main`'s sha and the merged tree's `.throng/config.yml`.
+ * 2. Retest, in the same container, only when the merged tree's config has required checks: setup
+ *    and the required checks on the merged tree, with the scoring runner, outbound policy and logs. A
+ *    required check not passing, or an invalid config, ends it `failed_checks`. Reading the merged
+ *    tree's config rather than `main`'s lets a merge request that fixes a broken config land.
+ * 3. Land, in the trusted `land` container (origin write, fork read, no repository code). The `check`
+ *    container is destroyed first, so the landing's one Sandbox slot holds one container. It first
  *    claims the push from the project's DO, which fails if the merge request left the queue, then
  *    commits the merge (author the approver, committer Throng), checks its tree against step 1's
  *    and pushes with a lease on step 1's `main`. A moved `main` or another tree ends it `errored`.
@@ -118,10 +119,7 @@ export class LandingWorkflow extends WorkflowEntrypoint<Env, LandingParams> {
     }
     const merge: MergePlan = { head: params.head, main: checked.main, tree: merged.tree };
 
-    const config = await this.#step(step, "config", { retries: STEP_RETRIES, timeout: "1 minute" }, () =>
-      loadConfig(reposFor(this.env), params.project),
-    );
-    const retest = retestConfig(config);
+    const retest = retestConfig(parseConfig(checked.config));
     if (retest !== null) {
       const plan = scorePlan(retest);
       const timeoutMs = scoreTimeoutMs(plan);
@@ -154,6 +152,10 @@ export class LandingWorkflow extends WorkflowEntrypoint<Env, LandingParams> {
       if (result.gate !== "passed") return { kind: "failed_checks", details: failedChecks(result, logs) };
     }
 
+    // The landing holds one Sandbox slot: the `check` container goes before the `land` one starts.
+    await this.#step(step, "release check", { retries: STEP_RETRIES, timeout: "1 minute" }, () =>
+      this.env.SANDBOX.getByName(sandboxName(instanceId, "check")).destroy(),
+    );
     const signers = await this.#step(step, "signers", { retries: STEP_RETRIES, timeout: "1 minute" }, () =>
       this.#signers(params),
     );

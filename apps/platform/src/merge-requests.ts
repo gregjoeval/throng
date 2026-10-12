@@ -8,6 +8,8 @@
 //   conflict, failed_checks or errored in queued or landing ─► pending (held until approved or pushed)
 //   cancel, or the source attempt ending, from any open state ─► cancelled
 
+import type { ConflictDetails } from "./conflicts.ts";
+import type { ErroredDetails, FailedChecksDetails, LandingOutcome } from "./landing.ts";
 import type { Sql } from "./task-store.ts";
 import type { Actor } from "./tokens.ts";
 
@@ -39,11 +41,30 @@ export interface ActedBy {
   agent: string | null;
 }
 
-/** Why a merge request last left the queue without landing. `details` carries the conflict, say. */
-export interface Dequeue {
-  reason: DequeueReason;
-  at: string;
-  details?: unknown;
+/**
+ * Why a merge request left the queue without landing, with the details its reason carries: the
+ * conflict, the checks that failed, or the step that errored. A new push and a cancel carry none.
+ */
+export type DequeueCause =
+  | { reason: "conflict"; details: ConflictDetails }
+  | { reason: "failed_checks"; details: FailedChecksDetails }
+  | { reason: "errored"; details: ErroredDetails }
+  | { reason: "new_push" }
+  | { reason: "cancelled" };
+
+/** A merge request's last dequeue: its cause, and when. */
+export type Dequeue = DequeueCause & { at: string };
+
+/** The dequeue a landing outcome other than `landed` records. */
+export function dequeueCause(outcome: Exclude<LandingOutcome, { kind: "landed" }>): DequeueCause {
+  switch (outcome.kind) {
+    case "conflict":
+      return { reason: "conflict", details: outcome.details };
+    case "failed_checks":
+      return { reason: "failed_checks", details: outcome.details };
+    case "errored":
+      return { reason: "errored", details: outcome.details };
+  }
 }
 
 export interface StoredMergeRequest {
@@ -247,18 +268,18 @@ export class MergeRequests {
   }
 
   /**
-   * Takes a queued or landing merge request out of the queue for `reason`, recording it as
+   * Takes a queued or landing merge request out of the queue for `cause`, recording it as
    * `last_dequeue`, and moves it to `to`: `pending` (held) for conflict, failed checks and errors,
    * `needs_review` for a new push, `cancelled` for a cancel.
    */
   dequeue(
     actor: Actor | null,
     mr: StoredMergeRequest,
-    reason: DequeueReason,
+    cause: DequeueCause,
     to: "pending" | "needs_review" | "cancelled",
-    details?: unknown,
   ): StoredMergeRequest {
-    const dequeue: Dequeue = { reason, at: this.#stamp(), ...(details === undefined ? {} : { details }) };
+    const { reason } = cause;
+    const dequeue: Dequeue = { ...cause, at: this.#stamp() };
     this.#sql.exec(
       "UPDATE merge_requests SET state = ?, queued_at = NULL, last_dequeue = ?, dequeue_seen = 0, held = ? WHERE id = ?",
       to,

@@ -8,6 +8,7 @@
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import type { AccessBindings } from "./access.ts";
 import { bearerAuth, bearerOrAccess, bearerOrForwarded, type AuthEnv, type AuthOptions } from "./auth.ts";
+import { ProjectPathSchema } from "./api-shared.ts";
 import { browseRoutes } from "./browse-api.ts";
 import { dequeueRoutes } from "./dequeue-api.ts";
 import { CONFIG_NAME, MAX_CHECK_TIMEOUT_MS, MAX_CONFIG_BYTES, parseConfig } from "./config.ts";
@@ -91,11 +92,6 @@ const CreateProjectSchema = z
       .openapi({ description: "The project's handle, unique among the owner's projects.", example: "throng" }),
   })
   .openapi("CreateProject");
-
-const ProjectPathSchema = z.object({
-  owner: z.string().openapi({ description: "The owner's handle.", example: "greg" }),
-  project: z.string().openapi({ description: "The project's handle.", example: "throng" }),
-});
 
 const UserRefSchema = z.object({ id: z.string(), handle: z.string().openapi({ example: "greg" }) }).openapi("UserRef");
 

@@ -42,8 +42,10 @@ export const READ_CONCURRENCY = 6;
 /** Lines of context around each change. */
 export const CONTEXT_LINES = 3;
 
-export type DiffFlag = "truncated" | "tooLarge" | "tooComplex" | "binary";
-export type FileStatus = "added" | "deleted" | "modified" | "renamed";
+export const DIFF_FLAGS = ["truncated", "tooLarge", "tooComplex", "binary"] as const;
+export type DiffFlag = (typeof DIFF_FLAGS)[number];
+export const FILE_STATUSES = ["added", "deleted", "modified", "renamed"] as const;
+export type FileStatus = (typeof FILE_STATUSES)[number];
 
 /** One side of a file: where it is, its git mode (`100644`, `100755`, `120000`, `160000`) and its object sha. */
 export interface FileSide {

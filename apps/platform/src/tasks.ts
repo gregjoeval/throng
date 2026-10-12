@@ -422,10 +422,7 @@ export function taskService({ db, backend }: TaskServiceDeps) {
       const ctx = await project(input);
       const mr = await invoke("getMergeRequest", ctx, actor, { task: taskNumber(input.task) });
       const dequeue = lastDequeue(mr);
-      const file =
-        dequeue.reason === "conflict"
-          ? (dequeue.details as ConflictDetails).files.find((f) => f.path === input.path)
-          : undefined;
+      const file = dequeue.reason === "conflict" ? dequeue.details.files.find((f) => f.path === input.path) : undefined;
       if (file === undefined) {
         throw new ServiceError("not_found", `${taskRef(mr.task)}'s last dequeue has no conflict in ${input.path}`);
       }
@@ -526,10 +523,11 @@ function lastDequeue(mr: StoredMergeRequest): Dequeue {
   return mr.last_dequeue;
 }
 
-function publicDequeue({ reason, at, details }: Dequeue): MergeRequestDequeue {
-  if (details === undefined) return { reason, at, details: null };
-  if (reason !== "conflict") return { reason, at, details: details as FailedChecksDetails | ErroredDetails };
-  const conflict = details as ConflictDetails;
+function publicDequeue(dequeue: Dequeue): MergeRequestDequeue {
+  const { reason, at } = dequeue;
+  if (dequeue.reason === "new_push" || dequeue.reason === "cancelled") return { reason, at, details: null };
+  if (dequeue.reason !== "conflict") return { reason, at, details: dequeue.details };
+  const conflict = dequeue.details;
   const files = conflict.files.map(({ hunks, ...file }) =>
     hunks === undefined
       ? file

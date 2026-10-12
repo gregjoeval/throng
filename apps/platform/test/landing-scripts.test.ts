@@ -2,10 +2,11 @@
 // the conflict check, the retest of the merged tree and the trusted land step.
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { MAX_CONFIG_BYTES } from "../src/config.ts";
 import { conflictFiles, parseMergeTree } from "../src/conflicts.ts";
 import type { RawScore, ScorePlan } from "../src/results.ts";
 import {
@@ -33,6 +34,7 @@ let work: string;
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, env: ENV, encoding: "utf8" }).trim();
 
 function commit(file: string, content: string, message: string): string {
+  mkdirSync(dirname(join(work, file)), { recursive: true });
   writeFileSync(join(work, file), content);
   git(work, "add", "-A");
   git(work, "commit", "-q", "-m", message);
@@ -99,6 +101,29 @@ describe("conflictCheckScript", () => {
       tree: git(work, "merge-tree", "--write-tree", main, head),
       files: [],
     });
+  });
+
+  it("reports the merged tree's config, not main's, and none without one", () => {
+    expect(run<ConflictCheckResult>(conflictCheckScript(origin, fork, diverged().head)).config).toBeNull();
+
+    git(work, "reset", "-q", "--hard", git(origin, "rev-parse", "main"));
+    git(work, "checkout", "-q", "-b", "side");
+    commit(".throng/config.yml", "checks: 3\n", "broken config on main");
+    git(work, "push", "-q", origin, "HEAD:main");
+    const fixed = "checks:\n  - name: test\n    command: npm test\n";
+    // The attempt is based on the broken config and fixes it.
+    const head = commit(".throng/config.yml", fixed, "fix the config");
+    git(work, "push", "-q", "-f", fork, "HEAD:main");
+    const result = run<ConflictCheckResult>(conflictCheckScript(origin, fork, head));
+    expect(result).toMatchObject({ clean: true, config: fixed });
+  });
+
+  it("reads at most one byte past the config cap from the merged tree", () => {
+    const big = `# ${"x".repeat(MAX_CONFIG_BYTES)}\n`;
+    const head = commit(".throng/config.yml", big, "big config");
+    git(work, "push", "-q", fork, "main");
+    const result = run<ConflictCheckResult>(conflictCheckScript(origin, fork, head));
+    expect(result.config).toHaveLength(MAX_CONFIG_BYTES + 1);
   });
 
   it("detects a conflict and lists the conflicting paths", () => {

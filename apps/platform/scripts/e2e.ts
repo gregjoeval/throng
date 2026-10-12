@@ -11,7 +11,7 @@
 // queued or landing merge request's source dequeues it with `new_push` to `needs_review`, and it
 // doesn't requeue on its own once the new head passes).
 //
-// Scoring scenarios, through the spike's control plane: metrics (a passing project whose checks report metrics), failing (a required check fails the gate),
+// Scoring scenarios, through the e2e routes (`/e2e/*`): metrics (a passing project whose checks report metrics), failing (a required check fails the gate),
 // invalid (an invalid config fails the gate with a config entry), preview (a passing gate deploys a
 // Worker Preview built with `preview.command`, and its URL serves it), coalesce (two quick pushes; the first
 // run is cancelled and only the newest sha is scored), intrusion (an attempt's checks try to push to
@@ -19,9 +19,11 @@
 // registry), refs (attempt archive refs: pushable, listed, kept across pushes to main, and copied by
 // the Worker).
 //
-// Every project id starts with E2E_PROJECT_PREFIX (default `e2e`; lowercase alphanumeric).
-// `pnpm e2e cleanup` deletes every repo whose name starts with an explicitly set E2E_PROJECT_PREFIX,
-// including those a failed or cancelled run left behind.
+// Every project id starts with E2E_PROJECT_PREFIX (default `e2e`; lowercase alphanumeric, starting
+// with `e2e`, which the Worker's e2e routes insist on). Each scenario deletes what its projects made
+// (D1 rows, Durable Object storage, logs and repos), and the run revokes its token when it ends.
+// `pnpm e2e cleanup` deletes every project under an explicitly set E2E_PROJECT_PREFIX, including those
+// a failed or cancelled run left behind.
 
 import { execFile } from "node:child_process";
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -29,7 +31,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { ARCHIVE_REF_PREFIX, archiveRef } from "../src/archive.ts";
-import { forkRepo, originRepo } from "../src/repos.ts";
+import { originRepo } from "../src/repos.ts";
 import { basicAuthHeader, type Commit, parseCommit } from "./e2e-git.ts";
 
 const run = promisify(execFile);
@@ -44,9 +46,12 @@ const TEST_CHECK = `checks:
 const CHECK_TIMEOUT_MS = 10 * 60 * 1_000;
 
 const baseUrl = requireEnv("THRONG_URL").replace(/\/$/, "");
-const spikeToken = requireEnv("SPIKE_TOKEN");
+const e2eSecret = requireEnv("SPIKE_TOKEN");
 const projectPrefix = process.env.E2E_PROJECT_PREFIX || "e2e";
-assert(/^[a-z0-9]+$/.test(projectPrefix), `E2E_PROJECT_PREFIX must be lowercase alphanumeric: ${projectPrefix}`);
+assert(
+  /^e2e[a-z0-9]*$/.test(projectPrefix),
+  `E2E_PROJECT_PREFIX must be lowercase alphanumeric and start with e2e: ${projectPrefix}`,
+);
 
 interface JournalEntry {
   id: number;
@@ -183,30 +188,34 @@ async function main(): Promise<void> {
   if (names[0] === "cleanup") return deleteRun();
   const chosen = names.length > 0 ? names : Object.keys(scenarios);
   let failed = false;
-  for (const name of chosen) {
-    const scenario = scenarios[name];
-    if (scenario === undefined) throw new Error(`unknown scenario ${name}`);
-    console.log(`\n== ${name}`);
-    try {
-      await scenario();
-      console.log(`== ${name}: PASS`);
-    } catch (cause) {
-      failed = true;
-      console.error(`== ${name}: FAIL`, cause);
+  try {
+    for (const name of chosen) {
+      const scenario = scenarios[name];
+      if (scenario === undefined) throw new Error(`unknown scenario ${name}`);
+      console.log(`\n== ${name}`);
+      try {
+        await scenario();
+        console.log(`== ${name}: PASS`);
+      } catch (cause) {
+        failed = true;
+        console.error(`== ${name}: FAIL`, cause);
+      }
     }
+  } finally {
+    await revokeE2eToken();
   }
   process.exitCode = failed ? 1 : 0;
 }
 
-/** Deletes every repo under E2E_PROJECT_PREFIX. It must be set explicitly, so the default never sweeps. */
+/**
+ * Deletes everything every project under E2E_PROJECT_PREFIX made. It must be set explicitly, so the
+ * default never sweeps.
+ */
 async function deleteRun(): Promise<void> {
   requireEnv("E2E_PROJECT_PREFIX");
-  const names = await api<string[]>("GET", `/spike/repos?prefix=${projectPrefix}`);
-  console.log(`deleting ${names.length} repo(s) starting with ${projectPrefix}`);
-  for (const name of names) {
-    await api("DELETE", `/spike/repos/${name}`);
-    console.log(`  deleted ${name}`);
-  }
+  const { deleted } = await api<{ deleted: string[] }>("DELETE", `/e2e/projects?prefix=${projectPrefix}`);
+  console.log(`deleted ${deleted.length} project(s) starting with ${projectPrefix}`);
+  for (const project of deleted) console.log(`  deleted ${project}`);
 }
 
 /**
@@ -245,7 +254,7 @@ async function zeroconfig(): Promise<void> {
   timeline.mark("t1 merged");
   const mainSha = merged.merge_sha;
   assert(mainSha !== null, "a merged merge request has no merge_sha");
-  const onMain = await api<{ sha: string }>("GET", `/spike/repos/${originRepo(p.project)}/head`);
+  const onMain = await api<{ sha: string }>("GET", `/e2e/repos/${originRepo(p.project)}/head`);
   assert(onMain.sha === mainSha, `main is ${onMain.sha}, expected the merge commit ${mainSha}`);
 
   const commit = await readCommit(p, mainSha);
@@ -272,7 +281,7 @@ async function zeroconfig(): Promise<void> {
   assert(task.state === "closed", `landing left ${t1} ${task.state}`);
   await assertArchived(p, a1, head);
   await assertArchived(p, a2, fixture);
-  await finish(p.project, [a1, a2], p.work, timeline);
+  await finish(p.project, p.work, timeline);
 }
 
 /**
@@ -380,7 +389,7 @@ async function conflict(): Promise<void> {
   await assertArchived(p, a1, first);
   await assertArchived(p, a2, resolved);
   report(timeline, journal);
-  await cleanUp(p.project, [a1, a2], p.work);
+  await cleanUp(p.project, p.work);
 }
 
 /**
@@ -430,11 +439,11 @@ async function needsreview(): Promise<void> {
   assert(after.state === "needs_review", `the merge request requeued on its own: ${after.state}`);
   const queue = await throng<{ queue: unknown[] }>(p, "GET", "/merge-queue");
   assert(queue.queue.length === 0, `the merge queue isn't empty: ${JSON.stringify(queue.queue)}`);
-  const onMain = await api<{ sha: string }>("GET", `/spike/repos/${originRepo(p.project)}/head`);
+  const onMain = await api<{ sha: string }>("GET", `/e2e/repos/${originRepo(p.project)}/head`);
   assert(onMain.sha === fixture, `main moved to ${onMain.sha}`);
   assert(!journal.some((e) => e.kind === "main_advanced"), "something landed");
   report(timeline, journal);
-  await cleanUp(p.project, [a1], p.work);
+  await cleanUp(p.project, p.work);
 }
 
 /** A passing project whose checks report metrics: declared ones are kept, the rest noted. */
@@ -475,7 +484,7 @@ writeFileSync(process.env.THRONG_METRICS, JSON.stringify({ coverage: 87.5, stray
     JSON.stringify(result.logs) === JSON.stringify(["test", "coverage"]),
     `expected both checks' logs stored: ${JSON.stringify(result.logs)}`,
   );
-  await finish(project, ["t1a1"], work, timeline);
+  await finish(project, work, timeline);
 }
 
 /** A required check that fails fails the gate; an optional one that passes doesn't save it. */
@@ -500,7 +509,7 @@ async function failing(): Promise<void> {
     result.checks.map((c) => c.outcome).join() === "failed,passed",
     `expected failed then passed, got ${JSON.stringify(result.checks)}`,
   );
-  await finish(project, ["t1a1"], work, timeline);
+  await finish(project, work, timeline);
 }
 
 /** An invalid config fails the gate with a single `config` entry, and runs no checks. */
@@ -523,7 +532,7 @@ async function invalid(): Promise<void> {
     `expected one config entry, got ${JSON.stringify(result.checks)}`,
   );
   assert(result.builtin.filesChanged === 1, "the built-in metrics were not recorded");
-  await finish(project, ["t1a1"], work, timeline);
+  await finish(project, work, timeline);
 }
 
 /**
@@ -565,7 +574,7 @@ async function preview(): Promise<void> {
   }
   timeline.mark("preview answered");
   assert(last === "200 hello from a1, built, e2e", `the Preview at ${url} answered ${last}`);
-  await finish(project, ["t1a1"], work, timeline);
+  await finish(project, work, timeline);
 }
 
 /** Two quick pushes to one attempt: the first run is cancelled; only the newest sha is scored. */
@@ -603,7 +612,7 @@ async function coalesce(): Promise<void> {
     "the first run was not cancelled",
   );
   report(timeline, journal);
-  await cleanUp(project, ["t1a1"], work);
+  await cleanUp(project, work);
 }
 
 /**
@@ -643,9 +652,9 @@ test("cannot reach the Cloudflare API", async () => {
 
   const result = (await scored(project, sha)).result!;
   assert(result.gate === "passed", `expected the probes to be blocked and pass, got ${JSON.stringify(result.checks)}`);
-  const log = await api<{ message: string }[]>("GET", `/spike/repos/${originRepo(project)}/log?ref=main&limit=20`);
+  const log = await api<{ message: string }[]>("GET", `/e2e/repos/${originRepo(project)}/log?ref=main&limit=20`);
   assert(!log.some((c) => c.message === "intrusion"), "the forged commit reached main");
-  await finish(project, ["t1a1"], work, timeline);
+  await finish(project, work, timeline);
 }
 
 /** An attempt adds an npm dependency: setup installs it from the registry and the checks use it. */
@@ -690,7 +699,7 @@ test("the dependency is installed", () => {
     result.gate === "passed",
     `expected the dependency to install and the tests to pass: ${JSON.stringify(result.checks)}`,
   );
-  await finish(project, ["t1a1"], work, timeline);
+  await finish(project, work, timeline);
 }
 
 /**
@@ -718,7 +727,7 @@ async function refs(): Promise<void> {
   const bMain = (await git(b.work, "rev-parse", "HEAD")).trim();
   const copied = await api<{ sha: string | null }>(
     "POST",
-    `/spike/repos/${originRepo(b.project)}/copy-ref?from_ref=refs/heads/main&to=${originRepo(a.project)}&to_ref=${archiveRef("t1a1")}`,
+    `/e2e/repos/${originRepo(b.project)}/copy-ref?from_ref=refs/heads/main&to=${originRepo(a.project)}&to_ref=${archiveRef("t1a1")}`,
   );
   timeline.mark("worker archived b's main into a");
   assert(copied.sha === bMain, `copy-ref returned ${copied.sha}, expected ${bMain}`);
@@ -737,7 +746,7 @@ async function refs(): Promise<void> {
   // And back out of an archive ref into another repo, as reopening an attempt does.
   const restored = await api<{ sha: string | null }>(
     "POST",
-    `/spike/repos/${originRepo(a.project)}/copy-ref?from_ref=${raw}&to=${originRepo(b.project)}&to_ref=${archiveRef("t9a9")}`,
+    `/e2e/repos/${originRepo(a.project)}/copy-ref?from_ref=${raw}&to=${originRepo(b.project)}&to_ref=${archiveRef("t9a9")}`,
   );
   timeline.mark("worker restored a's archive into b");
   assert(restored.sha === archived, `copy-ref returned ${restored.sha}, expected ${archived}`);
@@ -749,8 +758,8 @@ async function refs(): Promise<void> {
     assert(!kinds.has("scoring_queued"), `${project} queued scoring on an archive push`);
   }
   timeline.print();
-  await cleanUp(a.project, [], a.work);
-  await cleanUp(b.project, [], b.work);
+  await cleanUp(a.project, a.work);
+  await cleanUp(b.project, b.work);
 }
 
 /** The sha `ref` points at in a remote, through `git ls-remote`; null if it isn't listed. */
@@ -779,7 +788,7 @@ async function setUpProject(
   await git(work, "commit", "-q", "-m", "fixture");
 
   timeline.mark("create requested");
-  const repo = await api<Grant & { createMs: number }>("POST", `/spike/projects/${project}`);
+  const repo = await api<Grant & { createMs: number }>("POST", `/e2e/projects/${project}`);
   timeline.mark("repo created");
   await git(work, ...auth(repo.token), "push", "-q", repo.remote, "main:refs/heads/main");
   timeline.mark("fixture pushed to main");
@@ -791,7 +800,7 @@ async function createAttempt(project: string, attempt: string, timeline: Timelin
   timeline.mark(`fork ${attempt} requested`);
   const fork = await api<Grant & { forkMs: number; readyMs: number; polls: number }>(
     "POST",
-    `/spike/projects/${project}/attempts/${attempt}`,
+    `/e2e/projects/${project}/attempts/${attempt}`,
   );
   timeline.mark(`fork ${attempt} ready (fork() ${fork.forkMs} ms, ready ${fork.readyMs} ms, ${fork.polls} polls)`);
   return { ...fork, project, attempt };
@@ -810,7 +819,7 @@ async function commitAndPush(
   await git(work, ...auth(fork.token), "push", "-q", "--force", fork.remote, "HEAD:refs/heads/main");
   const sha = (await git(work, "rev-parse", "HEAD")).trim();
   // The push went straight to Artifacts, around the git proxy that would queue scoring, so ask for it.
-  await api("POST", `/spike/projects/${fork.project}/attempts/${fork.attempt}/score?sha=${sha}`);
+  await api("POST", `/e2e/projects/${fork.project}/attempts/${fork.attempt}/score?sha=${sha}`);
   return sha;
 }
 
@@ -828,7 +837,7 @@ async function scored(project: string, sha: string): Promise<Run> {
     project,
     (e) => (e.kind === "scored" || e.kind === "scoring_errored") && e.detail.sha === sha,
   );
-  const found = await api<Run>("GET", `/spike/projects/${project}/runs/${String(event.detail.run)}`);
+  const found = await api<Run>("GET", `/e2e/projects/${project}/runs/${String(event.detail.run)}`);
   const { result } = found;
   assert(found.status === "done" && result !== null, `run ${found.id} ended ${found.status}: ${found.error ?? ""}`);
   console.log(`  gate ${result.gate}: ${JSON.stringify(result.checks.map((c) => [c.name, c.outcome]))}`);
@@ -836,8 +845,8 @@ async function scored(project: string, sha: string): Promise<Run> {
 }
 
 /**
- * A project with task rows, for the merge queue scenarios: made through the spike (so its id
- * carries E2E_PROJECT_PREFIX and cleanup finds its repos) and then driven only through `/api` and
+ * A project with task rows, for the merge queue scenarios: made through the e2e routes (so its id
+ * carries E2E_PROJECT_PREFIX and cleanup finds it) and then driven only through `/api` and
  * the git proxy as the e2e user. Only the fixture is pushed around the proxy, which refuses pushes
  * to the origin's `main`.
  */
@@ -847,12 +856,19 @@ async function setUpRealProject(timeline: Timeline, files: Record<string, string
   return { project, owner: user.handle, work, origin, token, user };
 }
 
-let e2eUserToken: Promise<{ token: string; user: { id: string; handle: string } }> | null = null;
+let e2eUserToken: Promise<{ token: string; id: string; user: { id: string; handle: string } }> | null = null;
 
 /** The e2e user's Throng token, minted once per run. */
-function e2eUser(): Promise<{ token: string; user: { id: string; handle: string } }> {
-  e2eUserToken ??= api("POST", "/spike/token");
+function e2eUser(): Promise<{ token: string; id: string; user: { id: string; handle: string } }> {
+  e2eUserToken ??= api("POST", "/e2e/token");
   return e2eUserToken;
+}
+
+/** Revokes the run's token, if it minted one. */
+async function revokeE2eToken(): Promise<void> {
+  if (e2eUserToken === null || process.env.E2E_KEEP === "1") return;
+  const { id } = await e2eUserToken;
+  await api("DELETE", `/e2e/tokens/${id}`).catch((cause) => console.warn("could not revoke the run's token", cause));
 }
 
 /** Creates the task the scenario expects to be `expected` (numbers are per project, from 1). */
@@ -1006,22 +1022,22 @@ function proxyAuth(p: RealProject): string[] {
 }
 
 /** Reports a scenario's journal and deletes what it made. */
-async function finish(project: string, attempts: string[], work: string, timeline: Timeline): Promise<void> {
+async function finish(project: string, work: string, timeline: Timeline): Promise<void> {
   report(timeline, await settle(project, 5_000));
-  await cleanUp(project, attempts, work);
+  await cleanUp(project, work);
 }
 
 /** Waits a little after the last expected event so stray runs show up. */
 async function settle(project: string, quietMs = 15_000): Promise<JournalEntry[]> {
   await new Promise((r) => setTimeout(r, quietMs));
-  return api<JournalEntry[]>("GET", `/spike/projects/${project}/journal`);
+  return api<JournalEntry[]>("GET", `/e2e/projects/${project}/journal`);
 }
 
 async function waitFor(project: string, match: (e: JournalEntry) => boolean): Promise<JournalEntry> {
   const deadline = Date.now() + CHECK_TIMEOUT_MS;
   let lastKinds = "";
   while (Date.now() < deadline) {
-    const journal = await api<JournalEntry[]>("GET", `/spike/projects/${project}/journal`);
+    const journal = await api<JournalEntry[]>("GET", `/e2e/projects/${project}/journal`);
     const hit = journal.find(match);
     if (hit !== undefined) return hit;
     const kinds = journal.map((e) => e.kind).join(", ");
@@ -1032,18 +1048,17 @@ async function waitFor(project: string, match: (e: JournalEntry) => boolean): Pr
   throw new Error(`timed out waiting on ${project}'s journal`);
 }
 
-async function cleanUp(project: string, attempts: string[], work: string): Promise<void> {
+/** Deletes everything the project made: its rows, its Durable Object's storage, its logs and its repos. */
+async function cleanUp(project: string, work: string): Promise<void> {
   if (process.env.E2E_KEEP === "1") return;
-  for (const name of [originRepo(project), ...attempts.map((a) => forkRepo(project, a))]) {
-    await api("DELETE", `/spike/repos/${name}`).catch((cause) => console.warn(`could not delete ${name}`, cause));
-  }
+  await api("DELETE", `/e2e/projects/${project}`).catch((cause) => console.warn(`could not delete ${project}`, cause));
   await rm(work, { recursive: true, force: true });
 }
 
 async function api<T>(method: string, path: string): Promise<T> {
   const response = await fetch(`${baseUrl}${path}`, {
     method,
-    headers: { Authorization: `Bearer ${spikeToken}` },
+    headers: { Authorization: `Bearer ${e2eSecret}` },
   });
   const body = await response.text();
   if (!response.ok) throw new Error(`${method} ${path}: ${response.status} ${body}`);

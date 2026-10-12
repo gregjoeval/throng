@@ -1,9 +1,10 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import type userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { buildPath } from "@/lib/paths";
 import { renderApp } from "./app";
+import { serveRepo } from "./repo";
 import { me, project, projects, server } from "./server";
 
 const header = () => screen.getByRole("banner");
@@ -99,13 +100,17 @@ describe("create project", () => {
 });
 
 describe("views", () => {
-  it.each([
-    ["/ada/alpha", "The root directory at main"],
-    ["/ada/alpha/tree/main", "This directory's entries"],
-    ["/ada/alpha/tree/t42a3/src/lib", "This directory's entries"],
-    ["/ada/alpha/blob/main/README.md", "This file's contents"],
-    ["/ada/alpha/raw/main/README.md", "Open the raw file"],
-  ])("renders %s", async (path, text) => {
+  beforeEach(() => {
+    const files = {
+      "README.md": "# Alpha\n",
+      "docs/my notes/naïve 日本語 #1.md": "notes\n",
+      "a é/b#c/d.txt": "d\n",
+      "src/a.ts": "a\n",
+    };
+    serveRepo({ main: files, ["b".repeat(40)]: files });
+  });
+
+  it.each([["/ada/alpha/raw/main/README.md", "Open the raw file"]])("renders %s", async (path, text) => {
     await renderApp(path);
     expect(await screen.findByText(new RegExp(text, "u"))).toBeInTheDocument();
   });
@@ -126,7 +131,10 @@ describe("views", () => {
     const crumbs = await screen.findByRole("navigation", { name: "Breadcrumbs" });
     await user.click(within(crumbs).getByRole("link", { name: "b#c" }));
     await waitFor(() => expect(path()).toBe("/ada/alpha/tree/main/a%20%C3%A9/b%23c"));
-    expect(await screen.findByText("This directory's entries will show here.")).toBeInTheDocument();
+    expect(await screen.findByRole("link", { name: "d.txt" })).toHaveAttribute(
+      "href",
+      "/ada/alpha/blob/main/a%20%C3%A9/b%23c/d.txt",
+    );
     const after = screen.getByRole("navigation", { name: "Breadcrumbs" });
     expect(within(after).getByText("b#c")).toHaveAttribute("aria-current", "page");
   });

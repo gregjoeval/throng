@@ -25,6 +25,9 @@ export type ProjectLocation =
   | (InProject & { view: "commits"; ref: string; attempt?: string; offset?: number })
   | (InProject & { view: "commit"; sha: string; attempt?: string });
 
+/** A place addressed by a ref and a path: a directory, a file or a file's raw bytes. */
+export type BrowseLocation = Extract<ProjectLocation, { path: string }>;
+
 const segment = (value: string) => encodeURIComponent(value);
 
 /** The pathname (and `?attempt=` query, if any) for a location. */

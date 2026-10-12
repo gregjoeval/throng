@@ -14,11 +14,12 @@ import { useSelect } from "@/components/selection";
 import { ErrorState, Loading } from "@/components/states";
 import { Button } from "@/components/ui/button";
 import { mainHeadQuery, meQuery, reopenAttempt, taskArenaQuery, taskKey } from "@/lib/api";
-import { bestValues, formatValue, isActiveAttempt, isPassing, metricColumns, sortRail, toggleLane } from "@/lib/arena";
+import { bestValues, formatValue, isPassing, metricColumns, sortRail, toggleLane } from "@/lib/arena";
 import type { ArenaAttempt, MetricColumn, RailSort } from "@/lib/arena";
 import { arenaView, fileRows, parseArenaSearch, readStoredView, storageKey, storeView } from "@/lib/arena-view";
 import type { ArenaSearch, ArenaView, Arrangement, Layout, Reference } from "@/lib/arena-view";
 import { apiError } from "@/lib/errors";
+import { isActive } from "@/lib/tasks";
 import type { Attempt } from "@/lib/tasks";
 
 /** Past this many lanes, each keeps a minimum width and the lanes scroll sideways. */
@@ -65,7 +66,7 @@ function ArenaLayout({
   columns: MetricColumn[];
   notes: Map<string, string>;
 }) {
-  const active = attempts.filter(isActiveAttempt);
+  const active = attempts.filter(isActive);
   const closed = attempts.filter((a) => a.state === "closed");
   const [view, change] = useArenaView(owner, project, task, active);
   const shown = view.lanes.flatMap((ref) => active.filter((a) => a.ref === ref));

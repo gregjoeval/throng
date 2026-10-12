@@ -57,7 +57,9 @@ export type TaskState = (typeof TASK_STATES)[number];
 export type AttemptState = (typeof ATTEMPT_STATES)[number];
 
 /** Draft and open attempts are active: they have a fork and a claim, and count toward the cap. */
-export const ACTIVE = ["draft", "open"] as const;
+const ACTIVE = ["draft", "open"] as const;
+
+export const isActive = (state: AttemptState): boolean => (ACTIVE as readonly AttemptState[]).includes(state);
 
 /** The longest task title; a push-created task's title is cut to it. */
 export const MAX_TITLE = 200;
@@ -900,7 +902,7 @@ export class TaskStore {
     mayOwn(project, actor);
     this.#expect(current, ["draft", "open", "closed"], "make obsolete");
     this.#sql.transaction(() => this.#endAttempt(actor, current, "obsolete"));
-    if ((ACTIVE as readonly AttemptState[]).includes(current.state)) await this.#archive(project, [current]);
+    if (isActive(current.state)) await this.#archive(project, [current]);
     return this.#attempt(current);
   }
 
@@ -969,7 +971,7 @@ export class TaskStore {
    */
   authorizePush(_project: ProjectContext, actor: Actor, input: AttemptInput): StoredAttempt {
     const current = this.#attempt(input);
-    if (!(ACTIVE as readonly AttemptState[]).includes(current.state)) {
+    if (!isActive(current.state)) {
       throw invalidState(`${current.fork} is ${current.state}; only an active attempt's fork takes pushes`);
     }
     mayAuthor(actor, current);
@@ -1029,7 +1031,7 @@ export class TaskStore {
       attempt.task,
       attempt.number,
     );
-    if (row?.needs_update != null && (ACTIVE as readonly AttemptState[]).includes(attempt.state)) {
+    if (row?.needs_update != null && isActive(attempt.state)) {
       this.follows.request({
         project: project.id,
         task: attempt.task,
@@ -1083,7 +1085,7 @@ export class TaskStore {
       const current = this.follows.get(follow);
       if (current?.status !== "running") return false;
       const attempt = this.#attempt(followed(current));
-      if (!(ACTIVE as readonly AttemptState[]).includes(attempt.state)) {
+      if (!isActive(attempt.state)) {
         this.follows.end(follow, "stopped");
         return false;
       }
@@ -1109,7 +1111,7 @@ export class TaskStore {
       if (current?.status !== "running") return false;
       this.follows.end(follow, "done");
       const attempt = this.#attempt(followed(current));
-      if (!(ACTIVE as readonly AttemptState[]).includes(attempt.state)) return false;
+      if (!isActive(attempt.state)) return false;
       const project: ProjectContext = { id: current.project, owner: "" };
       switch (outcome.kind) {
         case "merged":
@@ -1221,7 +1223,7 @@ export class TaskStore {
       const starting: (StoredFollow & { params: FollowParams })[] = [];
       for (const follow of this.follows.startable()) {
         const attempt = this.#attempt(followed(follow));
-        if (!(ACTIVE as readonly AttemptState[]).includes(attempt.state)) {
+        if (!isActive(attempt.state)) {
           this.follows.end(follow.id, "stopped");
           continue;
         }
@@ -2240,7 +2242,7 @@ export class TaskStore {
       );
     }
     const source = this.#attempt(from);
-    if (!(ACTIVE as readonly AttemptState[]).includes(source.state) && source.archived_sha === null) {
+    if (!isActive(source.state) && source.archived_sha === null) {
       throw invalidState(`${source.fork} has no archived head to fork`);
     }
     return source;
@@ -2253,7 +2255,7 @@ export class TaskStore {
   async #seed(project: ProjectContext, from: AttemptInput, numbers: number[]): Promise<void> {
     // Read again: the source may have ended while the forks were made.
     const source = this.#checkForkSource(from.task, from);
-    const head = (ACTIVE as readonly AttemptState[]).includes(source.state)
+    const head = isActive(source.state)
       ? { from: forkRepo(project.id, source.fork), fromRef: FORK_HEAD }
       : {
           from: originRepo(project.id),

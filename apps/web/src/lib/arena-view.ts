@@ -4,8 +4,9 @@
 // `localStorage` per task, so the arena opens as the viewer left it. The URL wins on load.
 
 import type { FileDiff } from "@/lib/api";
-import { initialLanes, isActiveAttempt } from "@/lib/arena";
+import { initialLanes } from "@/lib/arena";
 import type { ArenaAttempt } from "@/lib/arena";
+import { isActive } from "@/lib/tasks";
 
 export const ARRANGEMENTS = ["attempt", "file"] as const;
 export type Arrangement = (typeof ARRANGEMENTS)[number];
@@ -51,7 +52,7 @@ export function parseArenaSearch(search: Record<string, unknown>): ArenaSearch {
  * fall back to `initialLanes` when none is left.
  */
 export function arenaView(search: ArenaSearch, attempts: ArenaAttempt[]): ArenaView {
-  const active = attempts.filter(isActiveAttempt);
+  const active = attempts.filter(isActive);
   const lanes = (search.lanes?.split(",") ?? []).filter((ref) => active.some((a) => a.ref === ref));
   return {
     lanes: lanes.length === 0 ? initialLanes(active) : [...new Set(lanes)],

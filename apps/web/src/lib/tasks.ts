@@ -41,7 +41,7 @@ export type Dequeue = InferResponseType<MergeRequestApi["dequeue"]["$get"], 200>
 export type DequeueReason = Dequeue["reason"];
 
 /** Draft and open attempts are active: they have a fork and a claim. */
-export const isActive = (attempt: Attempt) => attempt.state === "draft" || attempt.state === "open";
+export const isActive = (attempt: Pick<Attempt, "state">) => attempt.state === "draft" || attempt.state === "open";
 
 /** What a task page's body shows, by the task's state (the arena spec's **Body by state**). */
 export type TaskBody =

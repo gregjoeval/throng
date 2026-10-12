@@ -31,7 +31,7 @@ import type {
   TaskStore,
   VerdictDetail,
 } from "./task-store.ts";
-import { ACTIVE } from "./task-store.ts";
+import { isActive } from "./task-store.ts";
 import type { Actor } from "./tokens.ts";
 import type { Database } from "./users.ts";
 import type { VerdictRecommendation, VerdictSummary } from "./verdicts.ts";
@@ -430,11 +430,7 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
           db,
           list.map((a) => a.author),
         ),
-        Promise.all(
-          list.map(({ fork, state }) =>
-            (ACTIVE as readonly AttemptState[]).includes(state) ? currentBase(repos, ctx.id, fork) : null,
-          ),
-        ),
+        Promise.all(list.map(({ fork, state }) => (isActive(state) ? currentBase(repos, ctx.id, fork) : null))),
         loadConfig(repos, ctx.id),
       ]);
       return {

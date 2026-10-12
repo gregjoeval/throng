@@ -3,6 +3,7 @@
 
 import type { InferResponseType } from "hono/client";
 import type { client } from "@/lib/api";
+import { isActive } from "@/lib/tasks";
 
 type Tasks = (typeof client.api.projects)[":owner"][":project"]["tasks"];
 export type TaskArena = InferResponseType<Tasks[":t"]["arena"]["$get"], 200>;
@@ -29,9 +30,6 @@ export const GATE_STATE_LABELS: Record<GateState, string> = {
   noChecks: "No checks configured",
   failed: "Gate failed",
 };
-
-/** Draft and open attempts are active; the arena's lanes and rail cards are theirs. */
-export const isActiveAttempt = (attempt: ArenaAttempt) => attempt.state === "draft" || attempt.state === "open";
 
 /** An open attempt whose current head passed the gate (`GLOSSARY.md`). */
 export const isPassing = (attempt: ArenaAttempt) => attempt.state === "open" && attempt.result?.gate === "passed";
@@ -143,7 +141,7 @@ export function attemptNumber(attempt: { ref: string }): number {
  * others by number when fewer than two pass.
  */
 export function initialLanes(attempts: ArenaAttempt[]): string[] {
-  const active = attempts.filter(isActiveAttempt).toSorted((a, b) => attemptNumber(a) - attemptNumber(b));
+  const active = attempts.filter(isActive).toSorted((a, b) => attemptNumber(a) - attemptNumber(b));
   const passing = active.filter(isPassing);
   const others = active.filter((a) => !isPassing(a));
   return [...passing, ...others]

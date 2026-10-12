@@ -45,6 +45,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.#sql = ctx.storage.sql;
+    this.#project = ctx.storage.kv.get<string>(PROJECT_KEY) ?? null;
     const sql: Sql = {
       exec: <T>(query: string, ...bindings: unknown[]) =>
         ctx.storage.sql.exec(query, ...(bindings as SqlStorageValue[])).toArray() as T[],
@@ -150,11 +151,14 @@ export class ProjectCoordinator extends DurableObject<Env> {
     );
   }
 
-  /** Publishes changed tasks and attempts to the D1 projection, setting itself again while some remain or after a failure. */
+  /**
+   * Publishes changed tasks and attempts to the D1 projection, setting itself again while some remain
+   * or after a failure. A project's tasks only change through calls that name it, so its id is known
+   * whenever anything is pending.
+   */
   override async alarm(): Promise<void> {
-    const project = this.ctx.storage.kv.get<string>(PROJECT_KEY);
-    if (project === undefined) return;
-    const next = await this.#tasks.projection.publish(batchDatabase(this.env.DB), project);
+    if (this.#project === null) return;
+    const next = await this.#tasks.projection.publish(batchDatabase(this.env.DB), this.#project);
     if (next !== null) await this.ctx.storage.setAlarm(Date.now() + next);
   }
 
@@ -172,7 +176,8 @@ export class ProjectCoordinator extends DurableObject<Env> {
   /**
    * Starts and stops landings and scoring runs; a failure here never fails the call that triggered
    * it. Landings need the project's id, which every call names (a project's DO is named by it), and
-   * is remembered for calls that can't tell.
+   * is stored once for calls that can't tell, and for alarms. Then sets the alarm that publishes any
+   * pending change to the projection, unless one is already set.
    */
   async #drain(project: string | undefined): Promise<void> {
     if (project !== undefined && project !== this.#project) {
@@ -185,8 +190,10 @@ export class ProjectCoordinator extends DurableObject<Env> {
     } catch (error) {
       console.error({ event: "project.drain_failed", error: String(error) });
     }
-    // An alarm already set (say, a retry backing off) publishes these changes too.
-    if (this.#project !== null && this.#tasks.projection.hasChanges() && (await this.ctx.storage.getAlarm()) === null) {
+    // An alarm already set publishes these changes too. One more than a moment away is a retry backing
+    // off after D1 failed, up to `MAX_PROJECTION_RETRY_MS`: these changes wait for it, as they would
+    // fail too until D1 is back.
+    if (this.#tasks.projection.hasChanges() && (await this.ctx.storage.getAlarm()) === null) {
       await this.ctx.storage.setAlarm(Date.now());
     }
   }

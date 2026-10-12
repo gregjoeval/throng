@@ -22,7 +22,10 @@ import type { BatchDatabase } from "./users.ts";
 export const PROJECTION_BATCH = 50;
 /** How long the first retry after a failed delivery waits; each further failure doubles it. */
 export const PROJECTION_RETRY_MS = 60_000;
-/** The longest a retry waits. */
+/**
+ * The longest a retry waits. Changes made meanwhile wait for it too (`ProjectCoordinator.#drain` keeps
+ * an alarm already set), so while D1 is failing a listing can trail its project by this much.
+ */
 export const MAX_PROJECTION_RETRY_MS = 60 * 60_000;
 
 const SCHEMA = [
@@ -84,7 +87,9 @@ export interface ProjectionBatch {
 
 /**
  * Creates the outbox and its triggers, starting a new epoch at `now`. A store that had tasks before
- * the projection existed queues all of them, so its first publish backfills D1.
+ * the projection existed queues all of them, so its first publish backfills D1. That publish waits
+ * for the project's next call: a Durable Object only runs when called, and nothing sweeps the
+ * projects that aren't.
  */
 export function migrateProjection(sql: Sql, now: Date): void {
   const fresh =

@@ -37,6 +37,7 @@ import { LOG_CONTENT_TYPE, LOG_RETENTION_DAYS, MAX_LOG_BYTES, missingLog } from 
 import type { LogStore } from "./logs.ts";
 import { DEQUEUE_REASONS, MERGE_REQUEST_STATES } from "./merge-requests.ts";
 import { DEFAULT_LISTING_PAGE, MAX_LISTING_PAGE, myListings } from "./my-listings.ts";
+import { MAX_PROJECTION_RETRY_MS } from "./projection.ts";
 import { MAX_PROJECT_HANDLE, PROJECT_HANDLE, projectService } from "./projects.ts";
 import type { Repos } from "./repos.ts";
 import { CHECK_OUTCOMES, GATES } from "./results.ts";
@@ -192,7 +193,8 @@ const ListedTaskSchema = TaskSchema.extend({
 }).openapi("ListedTask");
 
 const PROJECTION_NOTE =
-  "Read from a copy every project publishes after each change, so it can trail the project by a moment. " +
+  "Read from a copy every project publishes after each change, so it trails the project: usually by seconds, " +
+  `but by up to ${MAX_PROJECTION_RETRY_MS / 60_000} minutes while that copy can't be written. ` +
   "Obsolete ones are left out unless `state=obsolete` asks for them. " +
   `Paged by \`offset\` and \`limit\`: ${DEFAULT_LISTING_PAGE} by default, at most ${MAX_LISTING_PAGE}.`;
 

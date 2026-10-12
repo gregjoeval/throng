@@ -1,6 +1,8 @@
 // The caller's tasks and attempts across every project, read from the D1 projection that each
-// project's Durable Object publishes to (`projection.ts`). They trail the Durable Objects by a
-// moment, and nothing that writes reads them.
+// project's Durable Object publishes to (`projection.ts`). They trail the Durable Objects by one
+// alarm, usually seconds, but up to `MAX_PROJECTION_RETRY_MS` while D1 is failing; and a project's
+// tasks from before the projection existed show up only after its next call. Nothing that writes
+// reads them.
 
 import type { StoredProjectedAttempt, StoredProjectedTask } from "./projection.ts";
 import { projectsById } from "./projects.ts";

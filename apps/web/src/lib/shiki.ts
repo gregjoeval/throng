@@ -3,7 +3,7 @@ import type { HighlighterGeneric, ShikiTransformer } from "shiki/core";
 import { createBundledHighlighter } from "shiki/core";
 import { createJavaScriptRegexEngine } from "shiki/engine/javascript";
 import { bundledLanguages, bundledLanguagesInfo } from "shiki/langs";
-import { plainText, themes } from "./highlighter";
+import { PLAIN_TEXT, themes } from "./highlighter";
 import type { HighlightOptions } from "./highlighter";
 
 // The Shiki side of `./highlighter`, which imports this module lazily. Each
@@ -37,13 +37,13 @@ const specialLanguages = new Set(["text", "txt", "plain", "plaintext", "ansi"]);
 export async function loadLanguage(lang: string): Promise<string> {
   const name = lang.toLowerCase();
   if (specialLanguages.has(name)) return name;
-  if (!Object.hasOwn(bundledLanguages, name)) return plainText;
+  if (!Object.hasOwn(bundledLanguages, name)) return PLAIN_TEXT;
   const hl = await getHighlighter();
   try {
     await hl.loadLanguage(name);
     return name;
   } catch {
-    return plainText;
+    return PLAIN_TEXT;
   }
 }
 
@@ -68,8 +68,8 @@ const extraExtensions: Record<string, string> = {
   bash: "shellscript",
   conf: "ini",
   cfg: "ini",
-  txt: plainText,
-  lock: plainText,
+  txt: PLAIN_TEXT,
+  lock: PLAIN_TEXT,
 };
 
 const fileNames: Record<string, string> = {
@@ -93,7 +93,7 @@ for (const info of bundledLanguagesInfo) {
 for (const [ext, lang] of Object.entries(extraExtensions)) extensions.set(ext, lang);
 
 function known(lang: string | undefined): lang is string {
-  return lang !== undefined && (lang === plainText || Object.hasOwn(bundledLanguages, lang));
+  return lang !== undefined && (lang === PLAIN_TEXT || Object.hasOwn(bundledLanguages, lang));
 }
 
 export function languageForPath(path: string): string {
@@ -101,9 +101,9 @@ export function languageForPath(path: string): string {
   const byName = fileNames[name];
   if (known(byName)) return byName;
   const dot = name.lastIndexOf(".");
-  if (dot === -1) return plainText;
+  if (dot === -1) return PLAIN_TEXT;
   const byExtension = extensions.get(name.slice(dot + 1));
-  return known(byExtension) ? byExtension : plainText;
+  return known(byExtension) ? byExtension : PLAIN_TEXT;
 }
 
 function lineTransformer({ lineNumbers, highlightLines }: HighlightOptions): ShikiTransformer {
@@ -125,7 +125,7 @@ function lineTransformer({ lineNumbers, highlightLines }: HighlightOptions): Shi
 }
 
 export async function highlight(code: string, options: HighlightOptions): Promise<string> {
-  const requested = options.lang ?? (options.path ? languageForPath(options.path) : plainText);
+  const requested = options.lang ?? (options.path ? languageForPath(options.path) : PLAIN_TEXT);
   const [hl, lang] = await Promise.all([getHighlighter(), loadLanguage(requested)]);
   return hl.codeToHtml(code, {
     lang,
@@ -144,7 +144,7 @@ export async function highlightTree(...args: Parameters<RehypeTransformer>): Pro
     themes,
     defaultColor: "light",
     lazy: true,
-    fallbackLanguage: plainText,
-    defaultLanguage: plainText,
+    fallbackLanguage: PLAIN_TEXT,
+    defaultLanguage: PLAIN_TEXT,
   })(...args);
 }

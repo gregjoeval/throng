@@ -10,8 +10,11 @@ is in `.oxlintrc.json` (`pnpm lint`). Apply each rule below when writing code an
 - **SQL:** columns, and the `Stored*` row types that mirror them, are snake_case.
 - **All other TypeScript** is camelCase: variables, functions, properties and enum values. Types and classes are
   PascalCase.
+- **Module-level constants** that hold a fixed value (a number, string, regular expression or list of literals) are
+  UPPER_SNAKE (`DIFF_FLAGS`, `TASK_REF`). Module-level functions and object instances (`encoder`) stay camelCase.
 - **File names** are kebab-case (`merge-requests.ts`). TanStack route files under `apps/web/src/routes/` take the names
-  the router gives them (`$owner/$project/index.tsx`, `__root.tsx`).
+  the router gives them (`$owner/$project/index.tsx`, `__root.tsx`). Generated files keep the names their generator
+  gives them (`apps/web/src/routeTree.gen.ts`, `worker-configuration.d.ts`).
 
 ## Conventions
 

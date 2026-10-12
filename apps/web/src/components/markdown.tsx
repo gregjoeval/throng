@@ -28,15 +28,15 @@ function rehypeShiki() {
 const remarkPlugins = [remarkGfm];
 const rehypePlugins = [rehypeSanitize, rehypeShiki];
 
-const scheme = /^[A-Za-z][A-Za-z\d+.-]*:/u;
+const SCHEME = /^[A-Za-z][A-Za-z\d+.-]*:/u;
 
 /** Resolves a relative URL against `base`. Absolute URLs and fragments are left alone. */
 export function resolveUrl(url: string, base: string | undefined): string {
-  if (!base || url === "" || scheme.test(url) || url.startsWith("#") || url.startsWith("//")) {
+  if (!base || url === "" || SCHEME.test(url) || url.startsWith("#") || url.startsWith("//")) {
     return url;
   }
   const resolved = new URL(url, new URL(base, "https://base.invalid"));
-  return scheme.test(base) ? resolved.href : resolved.pathname + resolved.search + resolved.hash;
+  return SCHEME.test(base) ? resolved.href : resolved.pathname + resolved.search + resolved.hash;
 }
 
 const components: Components = {

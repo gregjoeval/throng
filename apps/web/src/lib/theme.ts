@@ -1,11 +1,11 @@
 export type Theme = "light" | "dark";
 
-const storageKey = "theme";
+const STORAGE_KEY = "theme";
 
 /** Runs in the document head before hydration: applies the saved theme, else the OS preference. */
 export const themeScript = `(() => {
   try {
-    const saved = localStorage.getItem(${JSON.stringify(storageKey)});
+    const saved = localStorage.getItem(${JSON.stringify(STORAGE_KEY)});
     const dark = saved ? saved === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
     document.documentElement.classList.toggle("dark", dark);
   } catch {}
@@ -25,7 +25,7 @@ function applyTheme(theme: Theme) {
 export function setTheme(theme: Theme) {
   applyTheme(theme);
   try {
-    localStorage.setItem(storageKey, theme);
+    localStorage.setItem(STORAGE_KEY, theme);
   } catch {
     // Storage can be unavailable (private mode); the class still applies for this page.
   }
@@ -33,7 +33,7 @@ export function setTheme(theme: Theme) {
 
 function hasSavedTheme(): boolean {
   try {
-    return localStorage.getItem(storageKey) !== null;
+    return localStorage.getItem(STORAGE_KEY) !== null;
   } catch {
     return false;
   }

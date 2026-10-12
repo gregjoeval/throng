@@ -8,7 +8,7 @@
 export const themes = { light: "github-light", dark: "github-dark" } as const;
 
 /** The language unknown code falls back to. */
-export const plainText = "text";
+export const PLAIN_TEXT = "text";
 
 /** An inclusive, 1-based range of lines. */
 export interface LineRange {

@@ -11,6 +11,11 @@
 // queued or landing merge request's source dequeues it with `newPush` to `needsReview`, and it
 // doesn't requeue on its own once the new head passes).
 //
+// The agent loop over MCP, mcp, through `/mcp` and git only (see `e2e-mcp.ts`): the e2e user's agent
+// creates a task, starts two attempts, clones one with its clone command, pushes and opens it, and
+// waits until it is scored; a second e2e user, the reviewer, posts a verdict on it; the first selects
+// it and waits until it merges.
+//
 // The arena scenario, arena, drives throng-web in Playwright's Chromium (THRONG_WEB_URL; see
 // `e2e-browser.ts`): two scored attempts load as lanes against their base, by file lines up their
 // files, and selecting one there lands its merge request and closes the task.
@@ -25,7 +30,7 @@
 //
 // Every project id starts with E2E_PROJECT_PREFIX (default `e2e`; lowercase alphanumeric, starting
 // with `e2e`, which the Worker's e2e routes insist on). Each scenario deletes what its projects made
-// (D1 rows, Durable Object storage, logs and repos), and the run revokes its token when it ends.
+// (D1 rows, Durable Object storage, logs and repos), and the run revokes its tokens when it ends.
 // `pnpm e2e cleanup` deletes every project under an explicitly set E2E_PROJECT_PREFIX, including those
 // a failed or cancelled run left behind.
 
@@ -34,12 +39,15 @@ import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { ARCHIVE_REF_PREFIX, archiveRef } from "../src/archive.ts";
 import { originRepo } from "../src/repos.ts";
 import { openBrowser } from "./e2e-browser.ts";
 import type { BrowserSession } from "./e2e-browser.ts";
 import { basicAuthHeader, parseCommit } from "./e2e-git.ts";
 import type { Commit } from "./e2e-git.ts";
+import { agentLoop, toolCaller } from "./e2e-mcp.ts";
+import type { LoopAttempt } from "./e2e-mcp.ts";
 
 const run = promisify(execFile);
 const FIXTURE = new URL("../fixtures/fixture-worker/", import.meta.url).pathname;
@@ -180,6 +188,7 @@ const scenarios: Record<string, () => Promise<void>> = {
   zeroconfig,
   conflict,
   needsreview,
+  mcp,
   arena,
   metrics,
   failing,
@@ -210,7 +219,7 @@ async function main(): Promise<void> {
       }
     }
   } finally {
-    await revokeE2eToken();
+    await revokeE2eTokens();
   }
   process.exitCode = failed ? 1 : 0;
 }
@@ -819,6 +828,79 @@ test("the dependency is installed", () => {
 }
 
 /**
+ * The agent loop through `/mcp` and git only (`agentLoop` in `e2e-mcp.ts`), with no config, so the
+ * gate passes with no checks. The e2e user's agent is the task's creator; the second e2e user's
+ * agent reviews.
+ */
+async function mcp(): Promise<void> {
+  const timeline = new Timeline();
+  const p = await setUpRealProject(timeline);
+  const reviewer = await e2eReviewer();
+  const clones = await mkdtemp(join(tmpdir(), `${p.project}-clones-`));
+  const [creatorClient, reviewerClient] = await Promise.all([connectMcp(p.token), connectMcp(reviewer.token)]);
+  timeline.mark("connected to /mcp");
+  try {
+    await agentLoop({
+      creator: toolCaller(creatorClient),
+      reviewer: toolCaller(reviewerClient),
+      project: `${p.owner}/${p.project}`,
+      push: (attempt) => cloneAndPush(p, attempt, join(clones, attempt.ref)),
+      wait: 30,
+      timeoutMs: CHECK_TIMEOUT_MS,
+      log: (line) => {
+        console.log(`  ${line}`);
+        timeline.mark(line);
+      },
+    });
+  } finally {
+    await Promise.all([creatorClient.close(), reviewerClient.close()]);
+    await rm(clones, { recursive: true, force: true });
+  }
+  await finish(p.project, p.work, timeline);
+}
+
+/** An MCP client on the Worker's `/mcp`, with `token` as its bearer. */
+async function connectMcp(token: string): Promise<Client> {
+  const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
+    requestInit: { headers: { Authorization: `Bearer ${token}` } },
+  });
+  const client = new Client({ name: "throng-e2e", version: "0.0.0" });
+  await client.connect(transport);
+  return client;
+}
+
+/**
+ * Clones the attempt into `dir` by running its own clone command (the token in `THRONG_TOKEN`), edits
+ * the greeting, commits and pushes to its `main`. A new fork can take a moment to serve, so the clone
+ * retries.
+ */
+async function cloneAndPush(p: RealProject, attempt: LoopAttempt & { clone: string }, dir: string): Promise<string> {
+  await retrying(() =>
+    run("sh", ["-c", `${attempt.clone} "$1"`, "sh", dir], {
+      env: { ...process.env, THRONG_TOKEN: p.token, GIT_TERMINAL_PROMPT: "0" },
+    }),
+  );
+  const file = join(dir, "src/greeting.js");
+  await writeFile(file, (await readFile(file, "utf8")).replace('"hello"', `"hello from ${attempt.ref}"`));
+  await git(dir, "commit", "-q", "-am", `${attempt.ref}: greet over MCP`);
+  await git(dir, ...auth(p.token), "push", "-q", "origin", "HEAD:refs/heads/main");
+  return (await git(dir, "rev-parse", "HEAD")).trim();
+}
+
+/** Runs `step` until it succeeds, for up to a minute. */
+async function retrying<T>(step: () => Promise<T>): Promise<T> {
+  const deadline = Date.now() + 60_000;
+  for (;;) {
+    try {
+      return await step();
+    } catch (error) {
+      if (Date.now() > deadline) throw error;
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
+}
+
+/**
  * Attempt archives: a custom ref under ARCHIVE_REF_PREFIX can be pushed to an origin, is listed by
  * ls-remote, survives a later push to main, and queues no scoring. Then the Worker's own git client
  * (what closing and reopening an attempt use) copies a ref into an origin's archive namespace and
@@ -980,11 +1062,22 @@ function e2eUser(): Promise<{ token: string; id: string; user: { id: string; han
   return e2eUserToken;
 }
 
-/** Revokes the run's token, if it minted one. */
-async function revokeE2eToken(): Promise<void> {
-  if (e2eUserToken === null || process.env.E2E_KEEP === "1") return;
-  const { id } = await e2eUserToken;
-  await api("DELETE", `/e2e/tokens/${id}`).catch((error) => console.warn("could not revoke the run's token", error));
+let e2eReviewerToken: Promise<{ token: string; id: string; user: { id: string; handle: string } }> | null = null;
+
+/** The second e2e user's Throng token, minted once per run: a reviewer that isn't the attempts' author. */
+function e2eReviewer(): Promise<{ token: string; id: string; user: { id: string; handle: string } }> {
+  e2eReviewerToken ??= api("POST", "/e2e/token?as=reviewer");
+  return e2eReviewerToken;
+}
+
+/** Revokes the run's tokens, if it minted any. */
+async function revokeE2eTokens(): Promise<void> {
+  if (process.env.E2E_KEEP === "1") return;
+  for (const minted of [e2eUserToken, e2eReviewerToken]) {
+    if (minted === null) continue;
+    const { id } = await minted;
+    await api("DELETE", `/e2e/tokens/${id}`).catch((error) => console.warn("could not revoke a run's token", error));
+  }
 }
 
 /** Creates the task the scenario expects to be `expected` (numbers are per project, from 1). */

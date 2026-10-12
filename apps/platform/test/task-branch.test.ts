@@ -2,15 +2,20 @@
 // for Artifacts: the task creator or project owner pushes `refs/tasks/t<n>` to the origin, and new
 // attempts start from its head.
 
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { Hono } from "hono";
 import { afterEach, describe, expect, it } from "vitest";
+import { followMessage } from "../src/follows.ts";
 import type { FollowParams } from "../src/follows.ts";
 import { gitRoutes } from "../src/git-proxy.ts";
 import { projectService } from "../src/projects.ts";
 import { forkRepo, originRepo } from "../src/repos.ts";
+import { followScript, parseResult } from "../src/scripts.ts";
+import type { FollowResult } from "../src/scripts.ts";
 import type { ProjectContext } from "../src/task-store.ts";
 import { mintToken } from "../src/tokens.ts";
 import type { Actor } from "../src/tokens.ts";
@@ -271,38 +276,47 @@ describe("following the task branch", () => {
   });
 });
 
+/** The file the task branch adds: its tests. */
+const TESTS = "login.test";
+
 /**
- * `setup` and what a task branch's follows need: `pushTaskBranch`, as ada, and `runFollow`, which
- * does what the latest Follow Workflow of an attempt does: merges the task head into the fork's
- * `main` and reports it.
+ * `setup` and what a task branch's follows need: `pushTaskBranch`, as ada, which adds `TESTS`, and
+ * `runFollow`, which does what the latest Follow Workflow of an attempt does: runs the follow script
+ * against the fork and reports its result.
  */
 async function following() {
   const s = await setup();
-  const { ada, env, host, work, clone, commit, push, tasks, project, fork, origin, followed } = s;
+  const { ada, env, host, work, clone, push, tasks, project, fork, origin, followed } = s;
   const pushTaskBranch = async () => {
     const dir = await clone(ada.token);
-    const head = await commit(dir, "Add login tests");
+    await writeFile(join(dir, TESTS), "the task's tests\n");
+    await git(dir, env, "add", "-A");
+    await git(dir, env, "commit", "-q", "-m", "Add login tests");
     expect((await push(dir, "refs/tasks/t1")).ok).toBeTruthy();
-    return head;
+    return (await git(dir, env, "rev-parse", "HEAD")).trim();
   };
   let runs = 0;
-  /** Runs the latest follow of attempt `t1a<attempt>`, as its Workflow would, and returns its merge. */
-  const runFollow = async (attempt: number) => {
+  /** Runs the latest follow of attempt `t1a<attempt>`, as its Workflow would, and returns its result. */
+  const runFollow = async (attempt: number): Promise<FollowResult> => {
     await s.settled();
     await tasks.drain(project.id);
     const follow = followed.findLast((f) => f.attempt === attempt);
     if (follow === undefined) throw new Error(`no follow of t1a${attempt}`);
-    const dir = join(work, `follow${++runs}`);
-    await git(work, env, "clone", "-q", host.path(fork(`t1a${attempt}`)), dir);
-    const before = (await git(dir, env, "rev-parse", "HEAD")).trim();
-    await git(dir, env, "fetch", "-q", host.path(origin), "refs/tasks/t1");
-    await git(dir, env, "merge", "-q", "--no-edit", "FETCH_HEAD");
-    const head = (await git(dir, env, "rev-parse", "HEAD")).trim();
-    await git(dir, env, "push", "-q", "origin", "HEAD:main");
+    const sandbox = join(work, `follow${++runs}`);
+    await mkdir(sandbox);
+    const script = followScript(host.path(origin), host.path(fork(`t1a${attempt}`)), {
+      task: 1,
+      taskHead: follow.taskHead,
+      message: followMessage(1, attempt),
+      committedAt: Math.floor(follow.startedAt / 1000),
+    });
     expect(tasks.claimFollowPush(follow.follow)).toBeTruthy();
-    await tasks.followFinished(follow.follow, { kind: "merged", before, head });
+    const { stdout } = await promisify(execFile)("bash", ["-c", script], { cwd: sandbox, env });
+    const result = parseResult<FollowResult>(stdout);
+    if (result === null) throw new Error(`no follow result in: ${stdout}`);
+    await tasks.followFinished(follow.follow, result);
     await tasks.drain(project.id);
-    return head;
+    return result;
   };
   /** How many follows of `t1a<attempt>` have started, once the pushes so far are checked. */
   const follows = async (attempt: number) => {
@@ -321,8 +335,9 @@ async function followedAttempt() {
   const s = await following();
   const mine = await bobsAttempt(s);
   const tests = await s.pushTaskBranch();
-  const merged = await s.runFollow(1);
-  return { ...s, mine, tests, merged };
+  const followed = await s.runFollow(1);
+  if (followed.kind !== "merged") throw new Error(`the follow of t1a1 was ${followed.kind}`);
+  return { ...s, mine, tests, merged: followed.head };
 }
 
 /** Starts bob's attempt t1a1 and pushes a first commit to it from his clone, which it returns. */
@@ -356,20 +371,19 @@ describe("an author's push that drops the task branch", () => {
 
     const again = await runFollow(1);
     expect(await follows(1)).toBe(count + 1);
-    expect(await host.head(fork("t1a1"))).toBe(again);
+    expect(again).toEqual({ kind: "merged", before: fix, head: await host.head(fork("t1a1")) });
   });
 
   it("marks the attempt needs update when following again conflicts", async () => {
-    const { env, commit, tasks, project, bob, followed, mine, tests, settled } = await followedAttempt();
-    const fix = await commit(mine, "More of the fix");
+    const { env, tasks, project, bob, mine, runFollow } = await followedAttempt();
+    // bob writes tests of his own where the task branch has its tests, and forces his push.
+    await writeFile(join(mine, TESTS), "bob's tests\n");
+    await git(mine, env, "add", "-A");
+    await git(mine, env, "commit", "-q", "-m", "My own tests");
+    const fix = (await git(mine, env, "rev-parse", "HEAD")).trim();
     expect((await tryGit(mine, env, "push", "--force", "attempt", "HEAD:main")).ok).toBeTruthy();
-    await settled();
-    await tasks.drain(project.id);
-    const follow = followed.findLast((f) => f.attempt === 1);
-    if (follow === undefined) throw new Error("no follow of t1a1");
-    expect(follow.taskHead).toBe(tests);
-    expect(tasks.claimFollowPush(follow.follow)).toBeTruthy();
-    await tasks.followFinished(follow.follow, { kind: "conflict", head: fix });
+
+    expect(await runFollow(1)).toEqual({ kind: "conflict", head: fix });
     expect(tasks.getAttempt(project, bob.actor, { task: 1, number: 1 })).toMatchObject({ needs_update: true });
   });
 

@@ -17,8 +17,8 @@
 import { normaliseResult } from "./casing.ts";
 import { forkRepo } from "./repos.ts";
 import type { ScoringResult } from "./results.ts";
-import type { Sql } from "./task-store.ts";
 import { attemptRef } from "./task-refs.ts";
+import type { Sql } from "./task-store.ts";
 import type { Actor } from "./tokens.ts";
 
 /** Most Sandbox-holding runs (scoring runs and the landing) one project may have running at once. */

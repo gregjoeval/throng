@@ -3,8 +3,8 @@
 // way. `loadConfig` always reads it from the origin's `main`, so an attempt can't change its own
 // checks.
 
-import { z } from "zod";
 import { parseDocument } from "yaml";
+import { z } from "zod";
 import { originRepo } from "./repos.ts";
 import type { Repos } from "./repos.ts";
 

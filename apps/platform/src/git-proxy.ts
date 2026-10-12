@@ -12,6 +12,7 @@
 
 import { Hono } from "hono";
 import type { Context } from "hono";
+import type { AccessBindings } from "./access.ts";
 import { gitAuth } from "./auth.ts";
 import type { AuthEnv, AuthOptions } from "./auth.ts";
 import { ServiceError } from "./errors.ts";
@@ -32,6 +33,9 @@ import type { PushReport, PushRequest, RefUpdate } from "./pkt-line.ts";
 import { resolveProject } from "./projects.ts";
 import { forkRepo, originRepo } from "./repos.ts";
 import type { Repos, TokenScope } from "./repos.ts";
+import { headAttemptRef } from "./scoring.ts";
+import type { ScoringRequest } from "./scoring.ts";
+import { attemptRef, parseAttemptRef, taskRef } from "./task-refs.ts";
 import type {
   AttemptInput,
   BranchRoute,
@@ -42,11 +46,7 @@ import type {
   StoredTask,
   TaskMethod,
 } from "./task-store.ts";
-import { attemptRef, parseAttemptRef, taskRef } from "./task-refs.ts";
-import { headAttemptRef } from "./scoring.ts";
-import type { ScoringRequest } from "./scoring.ts";
 import type { TaskBackend } from "./tasks.ts";
-import type { AccessBindings } from "./access.ts";
 
 /** How long a minted Artifacts token lives. */
 export const UPSTREAM_TOKEN_TTL_SECONDS = 60 * 60;

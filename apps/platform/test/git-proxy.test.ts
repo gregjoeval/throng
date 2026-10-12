@@ -14,10 +14,10 @@ import type { ProjectContext } from "../src/task-store.ts";
 import { mintToken } from "../src/tokens.ts";
 import type { Actor } from "../src/tokens.ts";
 import { userForEmail } from "../src/users.ts";
+import { conflictDetails, ERRORED } from "./support/conflicts.ts";
 import { testDatabase } from "./support/d1.ts";
 import { git, gitEnv, LocalGitHost, serve, tryGit } from "./support/git-host.ts";
 import { testTaskBackends } from "./support/task-backend.ts";
-import { conflictDetails, ERRORED } from "./support/conflicts.ts";
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {

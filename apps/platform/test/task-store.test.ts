@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { archiveRef } from "../src/archive.ts";
 import { CONFIG_PATH, parseConfig } from "../src/config.ts";
 import { ServiceError } from "../src/errors.ts";
+import { parseAttemptRef, parseTaskRef, reservedTask } from "../src/task-refs.ts";
 import {
   attemptLimitFromConfig,
   BRANCH_PUSH_TTL_MS,
@@ -12,7 +13,6 @@ import {
   TaskStore,
 } from "../src/task-store.ts";
 import type { AttemptState, ProjectContext, StoredAttempt } from "../src/task-store.ts";
-import { parseAttemptRef, parseTaskRef, reservedTask } from "../src/task-refs.ts";
 import type { Actor } from "../src/tokens.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testSql } from "./support/task-backend.ts";

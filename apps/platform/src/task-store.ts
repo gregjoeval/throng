@@ -7,6 +7,7 @@
 // handles when it answers.
 
 import { archiveRef } from "./archive.ts";
+import { migrateValues, normaliseLandingOutcome } from "./casing.ts";
 import { CONFIG_PATH, loadConfig } from "./config.ts";
 import type { ConfigResult } from "./config.ts";
 import { ServiceError } from "./errors.ts";
@@ -14,7 +15,6 @@ import type { ErrorCode } from "./errors.ts";
 import type { LandingOutcome, LandingParams, LandingRunner } from "./landing.ts";
 import { Landings } from "./landings.ts";
 import type { StoredLanding } from "./landings.ts";
-import { migrateValues, normaliseLandingOutcome } from "./casing.ts";
 import { isLogName, landingLogKey, logKey, missingLog } from "./logs.ts";
 import { dequeueCause, MergeRequests } from "./merge-requests.ts";
 import type {
@@ -26,7 +26,6 @@ import type {
   StoredMergeRequest,
 } from "./merge-requests.ts";
 import { isZeroId } from "./pkt-line.ts";
-import { attemptRef, reservedTask, taskRef } from "./task-refs.ts";
 import { forkRepo, originRepo } from "./repos.ts";
 import type { Repos } from "./repos.ts";
 import { headAttemptRef, SCORING_CAP, ScoringQueue } from "./scoring.ts";
@@ -39,6 +38,7 @@ import type {
   ScoringTrigger,
   StoredRun,
 } from "./scoring.ts";
+import { attemptRef, reservedTask, taskRef } from "./task-refs.ts";
 import type { Actor } from "./tokens.ts";
 
 /** Active attempts a task may have when neither the project config nor the task overrides it. */

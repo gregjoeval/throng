@@ -1,6 +1,6 @@
+import { hc, parseResponse } from "hono/client";
 import { describe, expect, it } from "vitest";
 import type { AccessVerifier } from "../src/access.ts";
-import { hc, parseResponse } from "hono/client";
 import { apiRoutes } from "../src/api.ts";
 import type { ApiRoutes } from "../src/api.ts";
 import type { ScoringResult } from "../src/results.ts";

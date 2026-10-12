@@ -2,15 +2,16 @@
 // machine in the project's Durable Object (`task-store.ts`), where the permission checks sit next
 // to the state they guard. Answers carry users as `{id, handle}`, resolved from D1 at read time.
 
-import { ServiceError } from "./errors.ts";
-import { resolveProject } from "./projects.ts";
-import type { ScoringResult } from "./results.ts";
 import type { ConflictDetails, ConflictFile } from "./conflicts.ts";
+import { ServiceError } from "./errors.ts";
 import type { ErroredDetails, FailedChecksDetails } from "./landing.ts";
 import type { Dequeue, DequeueReason, StoredMergeRequest } from "./merge-requests.ts";
+import { resolveProject } from "./projects.ts";
 import { forkRepo, originRepo } from "./repos.ts";
+import type { ScoringResult } from "./results.ts";
 import { headAttemptRef } from "./scoring.ts";
 import type { AttemptScoring, ScoringRequest, StoredRun } from "./scoring.ts";
+import { attemptRef, parseAttemptRef, parseTaskRef, taskRef } from "./task-refs.ts";
 import type {
   AttemptMergeRequest,
   AttemptInput,
@@ -24,7 +25,6 @@ import type {
   TaskState,
   TaskStore,
 } from "./task-store.ts";
-import { attemptRef, parseAttemptRef, parseTaskRef, taskRef } from "./task-refs.ts";
 import type { Actor } from "./tokens.ts";
 import type { Database } from "./users.ts";
 

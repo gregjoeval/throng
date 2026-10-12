@@ -4,7 +4,7 @@ import { apiRoutes } from "../src/api.ts";
 import { webApp } from "../src/app.ts";
 import { ARCHIVE_REF_PREFIX } from "../src/archive.ts";
 import { IMMUTABLE, REF_MAX_AGE_SECONDS } from "../src/browse-api.ts";
-import { MAX_TEXT_BYTES } from "../src/browse.ts";
+import { MAX_SIZED_FILES, MAX_TEXT_BYTES } from "../src/browse.ts";
 import { FORWARDED_EMAIL_HEADER } from "../src/forwarded.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
@@ -221,6 +221,28 @@ describe("GET /tree", () => {
     ]);
     const src = defined((await get(`${base}/tree/main/src?sizes=true`)).body)["entries"];
     expect(src.map((e: Json) => [e.name, e.size])).toEqual([["a.ts", 1]]);
+  });
+
+  it("sizes only the first files of a big directory, leaving the rest null", async () => {
+    const { repos, get, origin, base } = await setup();
+    const names = Array.from({ length: MAX_SIZED_FILES + 2 }, (_, i) => `f${String(i).padStart(4, "0")}.txt`);
+    repos.commit(origin, { files: { "sub/a": "a", ...Object.fromEntries(names.map((name) => [name, "xy"])) } });
+    const entries: Json[] = defined((await get(`${base}/tree/main?sizes=true`)).body)["entries"];
+    expect(entries.map((e) => e.size)).toEqual([null, ...names.map((_, i) => (i < MAX_SIZED_FILES ? 2 : null))]);
+  });
+
+  it("serves a repeated listing's sizes from the cache, reading no blobs", async () => {
+    const store = new Map<string, Response>();
+    const cache = {
+      match: async (key: Request) => store.get(key.url)?.clone(),
+      put: async (key: Request, res: Response) => void store.set(key.url, res.clone()),
+    };
+    const { repos, get, origin, base } = await setup({ diffCache: () => cache });
+    repos.commit(origin, { files: { "a.md": "a", "b.md": "bb" } });
+    const first = await get(`${base}/tree/main?sizes=true`);
+    const reads = repos.calls.length;
+    expect((await get(`${base}/tree/main?sizes=true`)).body).toEqual(first.body);
+    expect(repos.calls.slice(reads).map((c) => c.method)).not.toContain("readBlob");
   });
 
   it("reads no blobs for a listing unless sizes are asked for", async () => {

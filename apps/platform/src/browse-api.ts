@@ -23,7 +23,14 @@ import {
   tailedRoutes,
 } from "./api-shared.ts";
 import type { AuthEnv, bearerOrForwarded } from "./auth.ts";
-import { browseService, DEFAULT_COMMITS_PAGE, MAX_COMMITS_PAGE, MAX_TEXT_BYTES, SHA } from "./browse.ts";
+import {
+  browseService,
+  DEFAULT_COMMITS_PAGE,
+  MAX_COMMITS_PAGE,
+  MAX_SIZED_FILES,
+  MAX_TEXT_BYTES,
+  SHA,
+} from "./browse.ts";
 import type { BrowseService, Resolved } from "./browse.ts";
 import { DIFF_CAPS, diffCommit, diffCommits, unifiedPatch } from "./diff.ts";
 import type { DiffCache } from "./diff.ts";
@@ -90,7 +97,11 @@ const ListedEntrySchema = EntrySchema.extend({
     .int()
     .nullable()
     .optional()
-    .openapi({ description: "With `?sizes=true`: a file's bytes; null for a folder or a submodule." }),
+    .openapi({
+      description:
+        `With \`?sizes=true\`: a file's bytes. Null for a folder, a submodule, or a file past the ` +
+        `first ${MAX_SIZED_FILES} files listed.`,
+    }),
 }).openapi("ListedTreeEntry");
 
 const TreeQuerySchema = AttemptQuerySchema.extend({
@@ -99,7 +110,9 @@ const TreeQuerySchema = AttemptQuerySchema.extend({
     .optional()
     .transform((sizes) => sizes === "true")
     .openapi({
-      description: "`true` adds each file's size. Each costs a blob read, so leave it off when sizes aren't shown.",
+      description:
+        `\`true\` adds a \`size\` to each of the first ${MAX_SIZED_FILES} files. Each costs a blob read ` +
+        "(cached by the blob's hash), so leave it off when sizes aren't shown.",
     }),
 });
 
@@ -206,7 +219,8 @@ const refErrors = {
 };
 
 export function browseRoutes({ auth, repos, tasks, diffCache }: BrowseOptions) {
-  const browse = (env: AccessBindings) => browseService({ db: env.DB, repos: repos(env), backend: tasks(env) });
+  const browse = (env: AccessBindings) =>
+    browseService({ db: env.DB, repos: repos(env), backend: tasks(env), cache: diffCache(env) });
 
   const api = new OpenAPIHono<AuthEnv>({
     defaultHook: (result, c) => {
@@ -219,7 +233,8 @@ export function browseRoutes({ auth, repos, tasks, diffCache }: BrowseOptions) {
 
   const treeResponses = { 200: { description: "The directory.", ...json(TreeSchema) }, ...refErrors };
   const treeDescription =
-    "Resolves the ref, then lists one directory. A path that is missing or isn't a directory is a 404.";
+    "Resolves the ref, then lists one directory. A path that is missing or isn't a directory is a 404. " +
+    `With \`?sizes=true\`, each of the first ${MAX_SIZED_FILES} files has its \`size\` in bytes.`;
 
   return api
     .openapi(

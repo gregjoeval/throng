@@ -7,6 +7,7 @@
 // Each read resolves the ref to a commit in one repo first, so a response can say which sha it read.
 
 import { archiveRef } from "./archive.ts";
+import type { DiffCache } from "./diff.ts";
 import { ServiceError } from "./errors.ts";
 import { resolveProject } from "./projects.ts";
 import { forkRepo, missingAsNull, originRepo } from "./repos.ts";
@@ -25,8 +26,12 @@ export const DEFAULT_COMMITS_PAGE = 50;
 export const MAX_COMMITS_PAGE = 100;
 /** Head lookups for `/refs` run at most this many at a time. */
 const HEAD_CONCURRENCY = 6;
-/** Blob reads for a directory's file sizes run at most this many at a time. */
-const SIZE_CONCURRENCY = 6;
+/** A listing sizes at most this many files, in its order; the rest get a null size. Each is a blob read. */
+export const MAX_SIZED_FILES = 100;
+/** Blob reads for a listing's sizes run at most this many at a time. A blob may be tens of MB, so few. */
+const SIZE_CONCURRENCY = 2;
+/** How long a blob's size stays cached. A blob never changes, so this only bounds the cache. */
+const SIZE_CACHE_SECONDS = 30 * 24 * 60 * 60;
 
 const TEXT_TYPE = "text/plain; charset=utf-8";
 const BINARY_TYPE = "application/octet-stream";
@@ -38,6 +43,8 @@ export interface BrowseDeps {
   db: Database;
   repos: Repos;
   backend: (projectId: string) => TaskBackend;
+  /** Where blob sizes are kept by hash, so a listing reads each blob once; none outside a Worker. */
+  cache?: DiffCache | undefined;
 }
 
 interface ProjectPath {
@@ -109,7 +116,7 @@ export interface CommitPage {
 }
 
 /** The browse services. Any signed-in actor may read any project in P0. */
-export function browseService({ db, repos, backend }: BrowseDeps) {
+export function browseService({ db, repos, backend, cache }: BrowseDeps) {
   async function project(path: ProjectPath): Promise<ProjectContext> {
     const found = await resolveProject(db, path.owner, path.project);
     if (found === null) throw new ServiceError("notFound", `no project ${path.owner}/${path.project}`);
@@ -220,14 +227,16 @@ export function browseService({ db, repos, backend }: BrowseDeps) {
     },
 
     /**
-     * Each entry with its size. `readTree` gives none, so every file's blob is read for its own: a
-     * cost only callers that show sizes should pay.
+     * Each entry with its size. `readTree` gives none, so a file's blob is read for its own: a cost
+     * only callers that show sizes should pay. Only the first `MAX_SIZED_FILES` files are sized.
      */
     async sized(at: Resolved, entries: Entry[]): Promise<SizedEntry[]> {
-      return mapLimit(entries, SIZE_CONCURRENCY, async (e) => {
-        const size = e.type === "tree" || e.type === "gitlink" ? null : await blobSize(at.repo, e.hash);
-        return { ...e, size };
-      });
+      const files = entries.filter((e) => e.type !== "tree" && e.type !== "gitlink");
+      const sizing = new Set(files.slice(0, MAX_SIZED_FILES));
+      return mapLimit(entries, SIZE_CONCURRENCY, async (e) => ({
+        ...e,
+        size: sizing.has(e) ? await blobSize(at.repo, e.hash) : null,
+      }));
     },
 
     /** A file's metadata, with its text when it's text and at most `MAX_TEXT_BYTES`. */
@@ -269,9 +278,17 @@ export function browseService({ db, repos, backend }: BrowseDeps) {
     return { entry, blob };
   }
 
-  /** A blob's bytes, or null when the repo has no such blob. */
+  /** A blob's bytes, or null when the repo has no such blob. Kept in `cache`, keyed by the hash. */
   async function blobSize(repo: string, hash: string): Promise<number | null> {
-    return (await repos.readBlob(repo, hash))?.size ?? null;
+    const key = new Request(`https://blob-size.throng.invalid/${hash}`);
+    const hit = await cache?.match(key);
+    if (hit !== undefined) return Number(await hit.text());
+    const size = (await repos.readBlob(repo, hash))?.size ?? null;
+    if (size !== null) {
+      const headers = { "Cache-Control": `public, max-age=${SIZE_CACHE_SECONDS}` };
+      await cache?.put(key, new Response(String(size), { headers }));
+    }
+    return size;
   }
 }
 

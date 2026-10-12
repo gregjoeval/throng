@@ -5,8 +5,10 @@
 import { ServiceError } from "./errors.ts";
 import { resolveProject } from "./projects.ts";
 import type { CheckResult, ScoringResult } from "./results.ts";
+import type { DequeueReason, StoredMergeRequest } from "./merge-requests.ts";
 import { headAttemptRef, type AttemptScoring, type ScoringRequest, type StoredRun } from "./scoring.ts";
 import {
+  attemptRef,
   parseAttemptRef,
   parseTaskRef,
   taskRef,
@@ -49,6 +51,38 @@ export interface Task extends Omit<StoredTask, "creator" | "closed_by"> {
 export interface Attempt extends Omit<StoredAttempt, "author"> {
   ref: string;
   author: UserRef;
+}
+
+/** Who approved or created a merge request: a user, and the agent they acted under. */
+export interface ActorRef extends UserRef {
+  agent: string | null;
+}
+
+/** A merge request as the API shows it. Its latest dequeue's details are read separately. */
+export interface MergeRequest {
+  /** The task, `t42`, which also names its merge request. */
+  task: string;
+  /** The source attempt, `t42a3`. */
+  attempt: string;
+  state: StoredMergeRequest["state"];
+  approved_head: string;
+  approved_by: ActorRef;
+  approved_at: string;
+  queued_at: string | null;
+  position: number | null;
+  last_dequeue: { reason: DequeueReason; at: string } | null;
+  merge_sha: string | null;
+  merged_at: string | null;
+  created_at: string;
+  created_by: ActorRef;
+}
+
+/** One entry of a project's merge queue. */
+export interface MergeQueueEntry {
+  position: number;
+  task: string;
+  attempt: string;
+  state: StoredMergeRequest["state"];
 }
 
 /** A scoring run as the API shows it. */
@@ -178,6 +212,15 @@ export function taskService({ db, backend }: TaskServiceDeps) {
       const request = await invoke(method, await project(input), actor, attemptRefOf(input.attempt));
       return publicScoring(request, await handles(db, [request.run.user_id]));
     };
+
+  const mergeRequest = async (mr: StoredMergeRequest): Promise<MergeRequest> =>
+    publicMergeRequest(mr, await handles(db, [mr.approved_by.user, mr.created_by.user]));
+
+  /** A merge request action on a task: resolves the project and task reference, then runs `method`. */
+  const mergeRequestMove =
+    (method: "approveMergeRequest" | "cancelMergeRequest" | "getMergeRequest") =>
+    async (actor: Actor, input: TaskPath): Promise<MergeRequest> =>
+      mergeRequest(await invoke(method, await project(input), actor, { task: taskNumber(input.task) }));
 
   return {
     /** Creates an open task; the caller's human is its creator. Any signed-in user may. */
@@ -314,6 +357,37 @@ export function taskService({ db, backend }: TaskServiceDeps) {
       if (to === null) throw new ServiceError("not_found", `no user ${input.to}`);
       return one(await invoke("handOffAttempt", ctx, actor, { ...ref, to: to.id }), attempts);
     },
+
+    /**
+     * Selects one of the task's open attempts as its merge request, approving its current head and
+     * closing the task's other active attempts. The task's creator or the project owner may.
+     */
+    async selectAttempt(actor: Actor, input: TaskPath & { attempt: string }): Promise<MergeRequest> {
+      const task = taskNumber(input.task);
+      const ref = attemptRefOf(input.attempt);
+      if (ref.task !== task) {
+        throw new ServiceError("invalid_request", `${input.attempt} is not an attempt of ${taskRef(task)}`);
+      }
+      return mergeRequest(await invoke("selectAttempt", await project(input), actor, ref));
+    },
+
+    /** Approves the source attempt's current head. The task's creator or the project owner may. */
+    approveMergeRequest: mergeRequestMove("approveMergeRequest"),
+    /** Cancels the task's open merge request. The task's creator or the project owner may. */
+    cancelMergeRequest: mergeRequestMove("cancelMergeRequest"),
+    /** The task's latest merge request. Any signed-in user may read it. */
+    getMergeRequest: mergeRequestMove("getMergeRequest"),
+
+    /** The project's merge queue, front first. Any signed-in user may read it. */
+    async mergeQueue(actor: Actor, input: ProjectPath): Promise<MergeQueueEntry[]> {
+      const queue = await invoke("mergeQueue", await project(input), actor);
+      return queue.map((mr) => ({
+        position: mr.position ?? 0,
+        task: taskRef(mr.task),
+        attempt: attemptRef(mr.task, mr.attempt),
+        state: mr.state,
+      }));
+    },
   };
 }
 
@@ -364,6 +438,28 @@ function publicTask(t: StoredTask, users: Map<string, string>): Task {
 
 function publicAttempt(a: StoredAttempt, users: Map<string, string>): Attempt {
   return { ...a, ref: a.fork, author: userRef(a.author, users) };
+}
+
+function actorRef(acted: { user: string; agent: string | null }, users: Map<string, string>): ActorRef {
+  return { ...userRef(acted.user, users), agent: acted.agent };
+}
+
+function publicMergeRequest(mr: StoredMergeRequest, users: Map<string, string>): MergeRequest {
+  return {
+    task: taskRef(mr.task),
+    attempt: attemptRef(mr.task, mr.attempt),
+    state: mr.state,
+    approved_head: mr.approved_head,
+    approved_by: actorRef(mr.approved_by, users),
+    approved_at: mr.approved_at,
+    queued_at: mr.queued_at,
+    position: mr.position,
+    last_dequeue: mr.last_dequeue === null ? null : { reason: mr.last_dequeue.reason, at: mr.last_dequeue.at },
+    merge_sha: mr.merge_sha,
+    merged_at: mr.merged_at,
+    created_at: mr.created_at,
+    created_by: actorRef(mr.created_by, users),
+  };
 }
 
 function publicScoring(request: ScoringRequest, users: Map<string, string>): ScoringAnswer {

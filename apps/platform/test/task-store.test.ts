@@ -155,6 +155,25 @@ describe("tasks", () => {
     expect(store.editTask(PROJECT, owner, { task: 1, attemptLimit: null })).toMatchObject({ attempt_limit: null });
   });
 
+  it("gives a scoring run a task's definitions, and none for an attempt with no task row", () => {
+    const { store } = setup();
+    const lines = {
+      name: "lines",
+      from: "test.report.lines",
+      type: "number",
+      unit: null,
+      order: "asc",
+      source: "task",
+    } as const;
+    store.createTask(PROJECT, ada, { title: "a", metrics: [lines] });
+    expect(store.taskDefinitions(1)).toEqual({ metrics: [lines] });
+    store.editTask(PROJECT, ada, { task: 1, title: "A" });
+    expect(store.taskDefinitions(1)).toEqual({ metrics: [lines] });
+    store.editTask(PROJECT, ada, { task: 1, metrics: [] });
+    expect(store.taskDefinitions(1)).toEqual({ metrics: [] });
+    expect(store.taskDefinitions(7)).toEqual({ metrics: [] });
+  });
+
   it("lets the owner or the creator edit, close and reopen, and nobody else", async () => {
     const { store } = setup();
     store.createTask(PROJECT, ada, { title: "a" });

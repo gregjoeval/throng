@@ -302,7 +302,7 @@ function configScored(
       metricsFrom(check.name, metrics).map((metric): [string, MetricResult] => [
         metric.name,
         {
-          source: "project",
+          source: metric.source,
           type: metric.type,
           order: metric.order,
           ...(metric.unit === null ? {} : { unit: metric.unit }),

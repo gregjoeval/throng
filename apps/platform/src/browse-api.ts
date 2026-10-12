@@ -84,11 +84,15 @@ const EntrySchema = z
   })
   .openapi("TreeEntry");
 
+const ListedEntrySchema = EntrySchema.extend({
+  size: z.number().int().nullable().openapi({ description: "A file's bytes; null for a folder or a submodule." }),
+}).openapi("ListedTreeEntry");
+
 const TreeSchema = z
   .object({
     ...ResolvedSchema,
     path: z.string().openapi({ description: "The directory; empty for the root." }),
-    entries: z.array(EntrySchema).openapi({ description: "Directories first, then files, each by name." }),
+    entries: z.array(ListedEntrySchema).openapi({ description: "Directories first, then files, each by name." }),
   })
   .openapi("Tree");
 

@@ -25,6 +25,8 @@ export const DEFAULT_COMMITS_PAGE = 50;
 export const MAX_COMMITS_PAGE = 100;
 /** Head lookups for `/refs` run at most this many at a time. */
 const HEAD_CONCURRENCY = 6;
+/** Blob reads for a directory's file sizes run at most this many at a time. */
+const SIZE_CONCURRENCY = 6;
 
 const TEXT_TYPE = "text/plain; charset=utf-8";
 const BINARY_TYPE = "application/octet-stream";
@@ -73,6 +75,11 @@ export interface Refs {
 export interface Entry extends TreeEntry {
   /** The entry's repository-relative path. */
   path: string;
+}
+
+export interface ListedEntry extends Entry {
+  /** A file's bytes; null for a folder or a submodule. */
+  size: number | null;
 }
 
 export interface FileContent extends Entry {
@@ -199,15 +206,19 @@ export function browseService({ db, repos, backend }: BrowseDeps) {
       };
     },
 
-    /** A directory's entries, folders first and then by name. */
-    async tree(at: Resolved, path: string): Promise<Entry[]> {
+    /** A directory's entries, folders first and then by name, each file with its size. */
+    async tree(at: Resolved, path: string): Promise<ListedEntry[]> {
       const dir = await entryAt(at, path);
       if (dir === null) throw new ServiceError("notFound", `no ${describe(path)} at ${at.sha}`);
       if (dir.type !== "tree") throw new ServiceError("notFound", `${dir.path} is not a directory`);
-      const entries = (await repos.readTree(at.repo, dir.hash)) ?? [];
-      return entries
-        .map((e) => ({ ...e, path: join(dir.path, e.name) }))
-        .toSorted((a, b) => Number(b.type === "tree") - Number(a.type === "tree") || byteOrder(a.name, b.name));
+      const entries = ((await repos.readTree(at.repo, dir.hash)) ?? []).toSorted(
+        (a, b) => Number(b.type === "tree") - Number(a.type === "tree") || byteOrder(a.name, b.name),
+      );
+      // `readTree` gives no sizes, so each file's blob is read for its own.
+      return mapLimit(entries, SIZE_CONCURRENCY, async (e) => {
+        const size = e.type === "tree" || e.type === "gitlink" ? null : await blobSize(at.repo, e.hash);
+        return { ...e, path: join(dir.path, e.name), size };
+      });
     },
 
     /** A file's metadata, with its text when it's text and at most `MAX_TEXT_BYTES`. */
@@ -246,6 +257,11 @@ export function browseService({ db, repos, backend }: BrowseDeps) {
     const blob = await repos.readBlob(at.repo, entry.hash);
     if (blob === null) throw new ServiceError("notFound", `no blob ${entry.hash}`);
     return { entry, blob };
+  }
+
+  /** A blob's bytes, or null when the repo has no such blob. */
+  async function blobSize(repo: string, hash: string): Promise<number | null> {
+    return (await repos.readBlob(repo, hash))?.size ?? null;
   }
 }
 

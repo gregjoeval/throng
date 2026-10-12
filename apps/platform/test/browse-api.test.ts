@@ -191,6 +191,7 @@ describe("GET /tree", () => {
       path: "docs",
       type: "tree",
       mode: "40000",
+      size: null,
       hash: expect.stringMatching(/^[0-9a-f]{40}$/u),
     });
 
@@ -200,6 +201,25 @@ describe("GET /tree", () => {
       entries: [{ name: "index.ts", path: "src/index.ts", mode: "100644" }],
     });
     expect((await get(`${base}/tree/main/src/`)).body).toMatchObject({ path: "src" });
+  });
+
+  it("gives each file's size in bytes, and none for a folder", async () => {
+    const { repos, get, origin, base } = await setup();
+    repos.commit(origin, {
+      files: {
+        "src/a.ts": "a",
+        "héllo.md": "héllo\n",
+        "logo.png": PNG,
+        link: { content: "héllo.md", type: "symlink" },
+      },
+    });
+    const entries = defined((await get(`${base}/tree/main`)).body)["entries"];
+    expect(entries.map((e: Json) => [e.name, e.size])).toEqual([
+      ["src", null],
+      ["héllo.md", 7],
+      ["link", 9],
+      ["logo.png", 12],
+    ]);
   });
 
   it("handles paths with spaces and unicode", async () => {

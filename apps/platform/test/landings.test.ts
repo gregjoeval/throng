@@ -54,8 +54,9 @@ async function setup() {
   const scoringWorkflow = new FakeWorkflows<ScoringParams>();
   const landingWorkflow = new FakeWorkflows<LandingParams>();
   const tornDown: string[] = [];
+  const sql = testSql();
   const store = new TaskStore({
-    sql: testSql(),
+    sql,
     repos,
     now: () => new Date((clock += 1000)),
     scoring: { workflow: scoringWorkflow satisfies ScoringWorkflow, teardown: async () => {} },
@@ -97,8 +98,11 @@ async function setup() {
     store.recordPush(PROJECT, as, { ...ref, updates: [{ ref: "refs/heads/main", before, after }] });
     return after;
   };
+  const journalKinds = () =>
+    (sql.db.prepare("SELECT kind FROM journal ORDER BY id").all() as { kind: string }[]).map((e) => e.kind);
   return {
     store,
+    journalKinds,
     repos,
     base,
     drain,
@@ -328,6 +332,53 @@ describe("a merge request leaving the queue while landing", () => {
 
     expect(await store.landingFinished(1, landed())).toBe(true);
     expect(mr(t1.task).state).toBe("merged");
+  });
+
+  it("records an errored landing as merged when main already holds its merge commit", async () => {
+    const { store, drain, attempt, score, push, repos, base, mr } = await setup();
+    const ref = await attempt("First");
+    const head = push(ref);
+    await drain();
+    score(ref);
+    await store.selectAttempt(PROJECT, owner, ref);
+    await drain();
+    expect(store.claimLandingPush(1)).toBe(true);
+    // The push went through, but the land step's result was lost and its retries ran out.
+    const merge = repos.commit("abc123-main", { files: { "README.md": "merged\n" }, parents: [base.hash, head] });
+
+    const errored = { kind: "errored" as const, details: { step: "land", error: "land gave no result" } };
+    expect(await store.landingFinished(1, errored)).toBe(true);
+    expect(mr(ref.task)).toMatchObject({ state: "merged", merge_sha: merge.hash, last_dequeue: null });
+    expect(store.getAttempt(PROJECT, owner, ref).state).toBe("merged");
+    expect(store.landings.get(1)?.status).toBe("landed");
+  });
+
+  it("still dequeues an errored landing that never claimed its push, whatever main holds", async () => {
+    const { store, drain, queued, repos, base, mr } = await setup();
+    const t1 = await queued("First");
+    await drain();
+    repos.commit("abc123-main", { files: { "README.md": "other\n" }, parents: [base.hash, base.hash] });
+    const errored = { kind: "errored" as const, details: { step: "retest", error: "boom" } };
+    await store.landingFinished(1, errored);
+    expect(mr(t1.task)).toMatchObject({ state: "pending", last_dequeue: { reason: "errored" } });
+  });
+
+  it("records a landing and its main_advanced before archiving, so a report retried mid-archive loses neither", async () => {
+    const { store, drain, queued, repos, mr, journalKinds } = await setup();
+    const t1 = await queued("First");
+    await drain();
+    expect(store.claimLandingPush(1)).toBe(true);
+    // The archive never finishes, as if the Durable Object were reset during it.
+    const copyRef = repos.copyRef.bind(repos);
+    repos.copyRef = () => new Promise(() => {});
+    void store.landingFinished(1, landed());
+    await new Promise((r) => setTimeout(r, 0));
+    repos.copyRef = copyRef;
+
+    expect(await store.landingFinished(1, landed())).toBe(false);
+    expect(mr(t1.task).state).toBe("merged");
+    expect(store.landings.get(1)?.status).toBe("landed");
+    expect(journalKinds().filter((k) => k === "main_advanced")).toHaveLength(1);
   });
 
   it("sends a failed landing whose source moved while pushing to needs_review", async () => {

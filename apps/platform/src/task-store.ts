@@ -45,7 +45,7 @@ import type {
   StoredRun,
 } from "./scoring.ts";
 import { NO_TASK_DEFINITIONS, taskDefinitionsFrom } from "./task-definitions.ts";
-import type { TaskDefinitions } from "./task-definitions.ts";
+import type { TaskDefinitions, TaskDefinitionsInput } from "./task-definitions.ts";
 import { attemptRef, reservedTask, taskBranchRef, taskRef } from "./task-refs.ts";
 import type { Actor } from "./tokens.ts";
 import { Verdicts } from "./verdicts.ts";
@@ -219,15 +219,12 @@ export interface CreateTaskInput {
   metrics?: MetricConfig[] | undefined;
 }
 
-export interface EditTaskInput {
+/** The checks and metrics it gives replace the task's, once checked against the project's config. */
+export interface EditTaskInput extends TaskDefinitionsInput {
   task: number;
   title?: string | undefined;
   body?: string | undefined;
   attemptLimit?: number | null | undefined;
-  /** Replaces the task's checks, as a request gave them; checked against the project's config. */
-  checks?: unknown;
-  /** Replaces the task's metrics, as a request gave them; checked against the project's config. */
-  metrics?: unknown;
 }
 
 export interface CreateAttemptsInput {
@@ -2561,7 +2558,7 @@ function storedDefinitions(definitions: TaskDefinitions): string | null {
  * left out, checked against the project's config on `main`.
  */
 function editedDefinitions(
-  input: { checks?: unknown; metrics?: unknown },
+  input: TaskDefinitionsInput,
   current: TaskDefinitions,
   config: ConfigResult,
 ): TaskDefinitions {

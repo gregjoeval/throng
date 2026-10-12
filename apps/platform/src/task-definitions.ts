@@ -26,6 +26,12 @@ export interface TaskDefinitions {
   metrics: MetricConfig[];
 }
 
+/** A task's checks and metrics as a request gives them, before they're checked; either may be left out. */
+export interface TaskDefinitionsInput {
+  checks?: unknown;
+  metrics?: unknown;
+}
+
 export const NO_TASK_DEFINITIONS: TaskDefinitions = { checks: [], metrics: [] };
 
 const TaskSchema = z
@@ -43,7 +49,7 @@ const TaskSchema = z
  * with one line per problem (`metrics[0].from: …`) when they don't merge with it.
  */
 export function taskDefinitionsFrom(
-  input: { checks?: unknown; metrics?: unknown },
+  input: TaskDefinitionsInput,
   current: TaskDefinitions,
   project: ConfigResult,
 ): { definitions: TaskDefinitions } | { error: string } {

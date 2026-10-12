@@ -17,7 +17,7 @@ import type { Gate, ScoringResult } from "./results.ts";
 import { headAttemptRef } from "./scoring.ts";
 import type { AttemptScoring, ScoringRequest, StoredRun } from "./scoring.ts";
 import { NO_TASK_DEFINITIONS, taskDefinitionsFrom } from "./task-definitions.ts";
-import type { TaskDefinitions } from "./task-definitions.ts";
+import type { TaskDefinitions, TaskDefinitionsInput } from "./task-definitions.ts";
 import { attemptRef, parseAttemptRef, parseTaskRef, taskRef } from "./task-refs.ts";
 import type {
   AttemptInput,
@@ -272,10 +272,7 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
    * `main`; none when it gave neither. Anyone may create a task; an edit's are checked by the store,
    * after who may edit.
    */
-  async function newTaskDefinitions(
-    ctx: ProjectContext,
-    input: { checks?: unknown; metrics?: unknown },
-  ): Promise<TaskDefinitions> {
+  async function newTaskDefinitions(ctx: ProjectContext, input: TaskDefinitionsInput): Promise<TaskDefinitions> {
     if (input.checks === undefined && input.metrics === undefined) return NO_TASK_DEFINITIONS;
     const checked = taskDefinitionsFrom(input, NO_TASK_DEFINITIONS, await loadConfig(repos, ctx.id));
     if ("error" in checked) throw new ServiceError("invalidRequest", checked.error);
@@ -338,13 +335,12 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
     /** Creates an open task; the caller's user is its creator. Any signed-in user may. */
     async createTask(
       actor: Actor,
-      input: ProjectPath & {
-        title: string;
-        body?: string | undefined;
-        attemptLimit?: number | null | undefined;
-        checks?: unknown;
-        metrics?: unknown;
-      },
+      input: ProjectPath &
+        TaskDefinitionsInput & {
+          title: string;
+          body?: string | undefined;
+          attemptLimit?: number | null | undefined;
+        },
     ): Promise<Task> {
       const { title, body, attemptLimit } = input;
       const ctx = await project(input);
@@ -373,13 +369,12 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
     /** Edits a task. The project owner or the task's creator may. */
     async editTask(
       actor: Actor,
-      input: TaskPath & {
-        title?: string | undefined;
-        body?: string | undefined;
-        attemptLimit?: number | null | undefined;
-        checks?: unknown;
-        metrics?: unknown;
-      },
+      input: TaskPath &
+        TaskDefinitionsInput & {
+          title?: string | undefined;
+          body?: string | undefined;
+          attemptLimit?: number | null | undefined;
+        },
     ): Promise<Task> {
       const { title, body, attemptLimit } = input;
       const ctx = await project(input);

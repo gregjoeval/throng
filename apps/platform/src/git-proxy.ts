@@ -17,6 +17,7 @@ import { gitAuth } from "./auth.ts";
 import type { AuthEnv, AuthOptions } from "./auth.ts";
 import { taskBranchHead } from "./base.ts";
 import { ServiceError } from "./errors.ts";
+import { attemptRemote } from "./git-remotes.ts";
 import {
   commandList,
   concat,
@@ -468,7 +469,7 @@ function links(c: GitContext, task: number, attempt: string): string[] {
   const [, owner = "", project = ""] = REMOTE_PATH.exec(pathname) ?? [];
   return [
     `  Task:    ${projectApi(c)}/tasks/${taskRef(task)}`,
-    `  Attempt: ${origin}/git/${owner}/${project}/${attempt}.git`,
+    `  Attempt: ${attemptRemote(origin, owner, project, attempt)}`,
   ];
 }
 

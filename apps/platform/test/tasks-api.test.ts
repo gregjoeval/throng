@@ -167,6 +167,8 @@ describe("attempt routes", () => {
         scoring: { status: "none", sha: null },
         mergeRequest: null,
         verdicts: { head: null, merge: 0, revise: 0, reject: 0 },
+        remote: expect.any(String),
+        clone: expect.any(String),
       })),
     );
     expect(await repos.list(`${project["id"]}-t`)).toEqual([`${project["id"]}-t1a1`, `${project["id"]}-t1a2`]);
@@ -175,9 +177,22 @@ describe("attempt routes", () => {
     expect(one.body["attempts"].map((a: Json) => a["ref"])).toEqual(["t1a3"]);
     const list = await call("GET", `${base}/tasks/t1/attempts`, bob);
     expect(list.body["attempts"].map((a: Json) => a["ref"])).toEqual(["t1a1", "t1a2", "t1a3"]);
-    expect((await call("GET", `${base}/attempts/t1a2`, bob)).body).toEqual(created.body["attempts"][1]);
+    expect(created.body["attempts"][1]).toMatchObject((await call("GET", `${base}/attempts/t1a2`, bob)).body);
     expect((await call("GET", `${base}/attempts/t1a9`, bob)).status).toBe(404);
     expect((await call("GET", `${base}/attempts/t1`, bob)).status).toBe(400);
+  });
+
+  it("gives each new attempt its git remote and a clone command that never holds the token", async () => {
+    const { call, adaClaude, bob, base } = await setup();
+    await call("POST", `${base}/tasks`, bob, { title: "a" });
+    const created = await call("POST", `${base}/tasks/t1/attempts`, adaClaude, { count: 2 });
+    expect(created.body["attempts"].map((a: Json) => [a["remote"], a["clone"]])).toEqual(
+      [1, 2].map((n) => [
+        `http://localhost/git/greg/throng/t1a${n}.git`,
+        `git -c http.extraHeader="Authorization: Bearer $THRONG_TOKEN" clone http://localhost/git/greg/throng/t1a${n}.git`,
+      ]),
+    );
+    expect(JSON.stringify(created.body)).not.toContain(adaClaude);
   });
 
   it("forks an attempt of the same task, recording forkedFrom, and refuses one from another task", async () => {

@@ -8,6 +8,7 @@ import { loadConfig } from "./config.ts";
 import type { MetricConfig } from "./config.ts";
 import type { ConflictDetails, ConflictFile } from "./conflicts.ts";
 import { ServiceError } from "./errors.ts";
+import { attemptRemote, cloneCommand } from "./git-remotes.ts";
 import type { ErroredDetails, FailedChecksDetails } from "./landing.ts";
 import type { Dequeue, DequeueReason, StoredMergeRequest } from "./merge-requests.ts";
 import { resolveProject } from "./projects.ts";
@@ -113,6 +114,14 @@ export interface Attempt extends AttemptStanding {
   archivedSha: string | null;
   scoring: AttemptScoring;
   mergeRequest: { state: AttemptMergeRequest["state"]; lastDequeue: { reason: DequeueReason } | null } | null;
+}
+
+/** A new attempt, with where to clone it from. */
+export interface StartedAttempt extends Attempt {
+  /** Its git remote. */
+  remote: string;
+  /** A command that clones `remote`, naming the token as `$THRONG_TOKEN`. */
+  clone: string;
 }
 
 /** A reviewer's verdict on one head of an attempt, as the API shows it. */
@@ -366,18 +375,30 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
     obsoleteTask: taskMove("obsoleteTask"),
     restoreTask: taskMove("restoreTask"),
 
-    /** Creates `count` draft attempts, each with its own fork. Any signed-in user may. */
+    /**
+     * Creates `count` draft attempts, each with its own fork, and gives each its remote under
+     * `baseUrl` and a clone command. Any signed-in user may.
+     */
     async createAttempts(
       actor: Actor,
-      input: TaskPath & { count?: number | undefined; note?: string | undefined; from?: string | undefined },
-    ): Promise<Attempt[]> {
+      input: TaskPath & {
+        count?: number | undefined;
+        note?: string | undefined;
+        from?: string | undefined;
+        baseUrl: string;
+      },
+    ): Promise<StartedAttempt[]> {
       const create = {
         task: taskNumber(input.task),
         count: input.count,
         note: input.note,
         from: input.from === undefined ? undefined : attemptRefOf(input.from),
       };
-      return attempts(await invoke("createAttempts", await project(input), actor, create));
+      const created = await attempts(await invoke("createAttempts", await project(input), actor, create));
+      return created.map((a) => {
+        const remote = attemptRemote(input.baseUrl, input.owner, input.project, a.ref);
+        return { ...a, remote, clone: cloneCommand(remote) };
+      });
     },
 
     async getAttempt(actor: Actor, input: AttemptPath): Promise<Attempt> {

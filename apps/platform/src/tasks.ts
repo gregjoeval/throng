@@ -394,15 +394,27 @@ export function taskService({ db, repos, backend, origin }: TaskServiceDeps) {
 
     /**
      * Holds until what `until` watches on the attempt changes, or `wait` seconds pass (see
-     * `TaskStore.waitForAttempt`), then answers with the attempt and whether it changed.
+     * `TaskStore.waitForAttempt`), then answers with the attempt and whether it changed. Waits live
+     * in the project's Durable Object's memory, so a deploy or an eviction drops them: one dropped
+     * answers with the attempt as it is now, unchanged, and the caller waits again.
      */
     async waitForAttempt(
       actor: Actor,
       input: AttemptPath & { wait: number; until: WaitCondition },
     ): Promise<WaitedAttempt> {
-      const waited = { ...attemptRefOf(input.attempt), wait: input.wait, until: input.until };
-      const { changed, ...attempt } = await invoke("waitForAttempt", await project(input), actor, waited);
-      return { ...(await one(attempt, attempts(input))), changed };
+      const ctx = await project(input);
+      const ref = attemptRefOf(input.attempt);
+      try {
+        const { changed, ...attempt } = await invoke("waitForAttempt", ctx, actor, {
+          ...ref,
+          wait: input.wait,
+          until: input.until,
+        });
+        return { ...(await one(attempt, attempts(input))), changed };
+      } catch (error) {
+        if (!droppedByReset(error)) throw error;
+        return { ...(await one(await invoke("getAttempt", ctx, actor, ref), attempts(input))), changed: false };
+      }
     },
 
     /** A task's attempts; obsolete ones only when `state` is `obsolete`. */
@@ -635,6 +647,16 @@ function publicTask(t: StoredTask, users: Map<string, string>, taskBranch: TaskB
 }
 
 /** `forkedFrom` for an attempt copied from another, and nothing for one that wasn't. */
+/**
+ * Whether a call to a Durable Object failed because the object was reset (a deploy, or an eviction)
+ * while it ran: the runtime marks such errors `durableObjectReset`, or `retryable`.
+ */
+function droppedByReset(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const marked = error as Error & { durableObjectReset?: unknown; retryable?: unknown };
+  return marked.durableObjectReset === true || marked.retryable === true;
+}
+
 function forkedFrom(source: string | null): { forkedFrom?: string } {
   return source === null ? {} : { forkedFrom: source };
 }

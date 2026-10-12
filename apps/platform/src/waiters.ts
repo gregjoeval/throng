@@ -1,7 +1,9 @@
 // Long-poll waits on an attempt (`GET …/attempts/{a}?wait=&until=`). The project's Durable Object
 // holds each request, snapshots what its condition watches, and answers once that changes or the
 // wait runs out. The store wakes its waiters after every call that may change an attempt's state,
-// its scoring runs or its merge request.
+// its scoring runs or its merge request. Waiters live in memory: an in-flight request keeps the
+// object awake, so it isn't hibernated under a wait, but a deploy or an eviction drops every wait,
+// and `taskService.waitForAttempt` answers each `changed: false` for the client to wait again.
 
 import type { MergeRequestState } from "./merge-requests.ts";
 import type { AttemptState } from "./task-store.ts";

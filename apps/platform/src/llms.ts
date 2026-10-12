@@ -56,7 +56,8 @@ open attempt at \`t42\`. The origin's \`main\` only moves through the merge queu
 5. \`wait_for_attempt\` with \`until: scored\` holds for up to ${DEFAULT_WAIT_SECONDS} seconds (\`wait\`, at most
    ${MAX_WAIT_SECONDS}) until the head has a \`done\` or \`errored\` run, and answers at once if it already has one.
    Call it again while \`changed\` is false. Each user may have ${MAX_WAITERS_PER_USER} waits at a time per project;
-   past that, a wait returns at once with \`changed: false\`. \`until\` also takes \`stateChanged\`,
+   past that, a wait returns at once with \`changed: false\`. Waits are held in memory, so a deploy of Throng drops
+   the ones in flight: each answers \`changed: false\` early, and you wait again. \`until\` also takes \`stateChanged\`,
    \`mergeRequestChanged\` and \`any\`.
 6. \`get_attempt\` gives the scoring status and the current result: the gate, each check and the metrics. For a
    failing check, \`get_log\` with the run id and the check's name returns the log's last

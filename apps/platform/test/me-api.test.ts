@@ -133,6 +133,42 @@ describe("GET /me/tasks and /me/attempts", () => {
     ]);
   });
 
+  it("are no part of any write or of reading one back: those go to the project's Durable Object", async () => {
+    const { call, env, ada, greg, publish } = await setup();
+    await call("POST", "/projects/greg/throng/tasks", ada, { title: "Fix login" });
+    await call("POST", "/projects/greg/throng/tasks/t1/attempts", ada, { count: 2 });
+    await publish();
+    // Without the projection's tables, any route that read them would fail.
+    await env.DB.prepare("DROP TABLE projected_attempts").all();
+    await env.DB.prepare("DROP TABLE projected_tasks").all();
+
+    const ok = async (method: string, path: string, bearer: string, body?: unknown) => {
+      const res = await call(method, path, bearer, body);
+      expect(res.status, `${method} ${path}: ${JSON.stringify(res.body)}`).toBeLessThan(300);
+      return res.body;
+    };
+    await ok("PATCH", "/projects/greg/throng/tasks/t1", ada, { title: "Fix the login" });
+    await ok("POST", "/projects/greg/throng/tasks", ada, { title: "Add search" });
+    await ok("POST", "/projects/greg/throng/tasks/t2/attempts", ada);
+    await ok("POST", "/projects/greg/throng/attempts/t1a1/open", ada);
+    await ok("POST", "/projects/greg/throng/attempts/t1a2/obsolete", greg);
+    await ok("POST", "/projects/greg/throng/attempts/t2a1/close", ada);
+    await ok("POST", "/projects/greg/throng/tasks/t2/close", ada);
+
+    expect(await ok("GET", "/projects/greg/throng/tasks/t1", ada)).toMatchObject({ title: "Fix the login" });
+    expect(
+      ((await ok("GET", "/projects/greg/throng/tasks?state=closed", ada))["tasks"] as Json[]).map((t) => t["ref"]),
+    ).toEqual(["t2"]);
+    expect(
+      ((await ok("GET", "/projects/greg/throng/tasks/t1/attempts", ada))["attempts"] as Json[]).map((a) => [
+        a["ref"],
+        a["state"],
+      ]),
+    ).toEqual([["t1a1", "open"]]);
+    expect(await ok("GET", "/projects/greg/throng/attempts/t2a1", ada)).toMatchObject({ state: "closed" });
+    expect((await call("GET", "/me/tasks", ada)).status).toBe(500);
+  });
+
   it("page by offset and limit", async () => {
     const { call, ada, publish } = await setup();
     await call("POST", "/projects/greg/throng/tasks", ada, { title: "Fix login" });

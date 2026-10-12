@@ -36,7 +36,14 @@ import { forkRepo, originRepo } from "./repos.ts";
 import type { Repos, TokenScope } from "./repos.ts";
 import { headAttemptRef } from "./scoring.ts";
 import type { ScoringRequest } from "./scoring.ts";
-import { attemptRef, parseAttemptRef, parseTaskRef, taskBranchRef, taskRef } from "./task-refs.ts";
+import {
+  attemptRef,
+  isTaskBranchNamespace,
+  parseAttemptRef,
+  parseTaskBranchRef,
+  taskBranchRef,
+  taskRef,
+} from "./task-refs.ts";
 import type {
   AttemptInput,
   BranchRoute,
@@ -65,7 +72,6 @@ const FORWARDED_RESPONSE_HEADERS = ["Cache-Control", "Content-Type", "Expires", 
 
 const MAIN = "refs/heads/main";
 const BRANCH_PREFIX = "refs/heads/";
-const TASK_BRANCH_PREFIX = "refs/tasks/";
 /** How long push-to-create waits for a new fork to be readable before giving up on the push. */
 const FORK_READY_TIMEOUT_MS = 60_000;
 const FORK_READY_POLL_MS = 250;
@@ -216,9 +222,8 @@ function originRefusal(push: PushRequest): Refusal | null {
   const { updates } = push;
   const reasons = updates.map((update): string | null => {
     if (update.ref === MAIN) return "main only advances through the merge queue; push to an attempt's fork instead";
-    if (update.ref.startsWith(TASK_BRANCH_PREFIX)) {
-      const task = parseTaskRef(update.ref.slice(TASK_BRANCH_PREFIX.length));
-      if (task === null || taskBranchRef(task) !== update.ref) return "task branches look like refs/tasks/t42";
+    if (isTaskBranchNamespace(update.ref)) {
+      if (parseTaskBranchRef(update.ref) === null) return "task branches look like refs/tasks/t42";
       if (isDelete(update)) return "a task branch can't be deleted";
       if (updates.length > 1) return "push a task branch on its own";
       return null;
@@ -238,8 +243,8 @@ function originRefusal(push: PushRequest): Refusal | null {
 
 /** The task whose task branch a push to the origin updates, or null when it updates none. */
 function taskBranchPush({ updates: [update, ...rest] }: PushRequest): number | null {
-  if (update === undefined || rest.length > 0 || !update.ref.startsWith(TASK_BRANCH_PREFIX)) return null;
-  return parseTaskRef(update.ref.slice(TASK_BRANCH_PREFIX.length));
+  if (update === undefined || rest.length > 0) return null;
+  return parseTaskBranchRef(update.ref);
 }
 
 /**

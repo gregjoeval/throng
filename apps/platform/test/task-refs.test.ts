@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { attemptRef, isAttemptRef, parseAttemptRef, parseTaskRef, reservedTask, taskRef } from "../src/task-refs.ts";
+import {
+  attemptRef,
+  isAttemptRef,
+  isTaskBranchNamespace,
+  parseAttemptRef,
+  parseTaskBranchRef,
+  parseTaskRef,
+  reservedTask,
+  taskBranchRef,
+  taskRef,
+} from "../src/task-refs.ts";
 
 describe("task references", () => {
   it("parse t42 and 42 as task 42", () => {
@@ -35,6 +45,21 @@ describe("attempt references", () => {
     expect(attemptRef(42, 3)).toBe("t42a3");
     expect(isAttemptRef("t42a3")).toBeTruthy();
     expect(isAttemptRef("42a3")).toBeFalsy();
+  });
+});
+
+describe("task branch refs", () => {
+  it("live at refs/tasks/t42, and parse back to their task", () => {
+    expect(taskBranchRef(42)).toBe("refs/tasks/t42");
+    expect(parseTaskBranchRef("refs/tasks/t42")).toBe(42);
+  });
+
+  it("reject refs outside refs/tasks/ and non-canonical ones inside it", () => {
+    for (const bad of ["refs/tasks/42", "refs/tasks/t42a3", "refs/tasks/t42/x", "refs/heads/t42", "refs/tasks/"]) {
+      expect(parseTaskBranchRef(bad), bad).toBeNull();
+    }
+    expect(isTaskBranchNamespace("refs/tasks/42")).toBeTruthy();
+    expect(isTaskBranchNamespace("refs/heads/t42")).toBeFalsy();
   });
 });
 

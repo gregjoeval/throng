@@ -29,7 +29,8 @@ const HEAD_CONCURRENCY = 6;
 const TEXT_TYPE = "text/plain; charset=utf-8";
 const BINARY_TYPE = "application/octet-stream";
 
-const SHA = /^[0-9a-f]{40}$/iu;
+/** A full commit sha, in either case. Spelled out rather than flagged `i`, which with `u` also folds Unicode. */
+export const SHA = /^[0-9a-fA-F]{40}$/u;
 
 export interface BrowseDeps {
   db: Database;

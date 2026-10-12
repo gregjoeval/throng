@@ -356,6 +356,8 @@ describe("GET /commits and /commit", () => {
     });
     expect((await get(`${base}/commit/${root.hash}`)).body).toMatchObject({ parents: [] });
     expect((await get(`${base}/commit/abc123`)).status).toBe(400);
+    // U+212A (Kelvin sign) case-folds to "k"; it must not pass as a hex digit.
+    expect((await get(`${base}/commit/${"a".repeat(39)}\u212A`)).status).toBe(400);
     expect((await get(`${base}/commit/${head.treeHash}`)).status).toBe(404);
   });
 });

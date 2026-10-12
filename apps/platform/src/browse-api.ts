@@ -19,7 +19,7 @@ import {
   tailedRoutes,
 } from "./api-shared.ts";
 import type { AuthEnv, bearerOrForwarded } from "./auth.ts";
-import { browseService, DEFAULT_COMMITS_PAGE, MAX_COMMITS_PAGE, MAX_TEXT_BYTES } from "./browse.ts";
+import { browseService, DEFAULT_COMMITS_PAGE, MAX_COMMITS_PAGE, MAX_TEXT_BYTES, SHA } from "./browse.ts";
 import type { BrowseService, Resolved } from "./browse.ts";
 import { DIFF_CAPS, diffCommit, unifiedPatch } from "./diff.ts";
 import type { DiffCache } from "./diff.ts";
@@ -67,7 +67,7 @@ const AttemptQuerySchema = z.object({
 
 const ShaSchema = z
   .string()
-  .regex(/^[0-9a-fA-F]{40}$/u, "sha must be 40 hex characters")
+  .regex(SHA, "sha must be 40 hex characters")
   .openapi({ example: "4b825dc642cb6eb9a060e54bf8d69288fbee4904" });
 
 const ResolvedSchema = {

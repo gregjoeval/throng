@@ -67,6 +67,16 @@ function code(fn: () => unknown): string {
 }
 
 describe("handOffAttempt", () => {
+  it("drops the alias the old author started the attempt under", async () => {
+    const { store } = storeSetup();
+    const task = store.createTask(PROJECT, adaUser, { title: "Fix it" });
+    const [a] = await store.createAttempts(PROJECT, claudeOfAda, { task: task.number });
+    if (a === undefined) throw new Error("no attempt");
+    expect(a.alias).toBe("claude");
+    const ref = { task: a.task, number: a.number };
+    expect(store.handOffAttempt(PROJECT, claudeOfAda, { ...ref, to: bobUser.user.id }).alias).toBeNull();
+  });
+
   it("makes the new user the author at once and journals both users", async () => {
     const { store, journal } = storeSetup();
     const ref = await attemptIn(store, "open");

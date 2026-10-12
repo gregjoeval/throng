@@ -426,7 +426,10 @@ export function RailCard({
           <span className="font-mono font-semibold">{attempt.ref}</span>
           <GatePill attempt={attempt} />
         </span>
-        <span className="text-xs text-muted-foreground">{attempt.author.handle}</span>
+        <span className="text-xs text-muted-foreground">
+          {attempt.author.handle}
+          {attempt.alias === null ? null : ` (${attempt.alias})`}
+        </span>
         <span className="flex flex-wrap gap-1 empty:hidden">
           {scoring === undefined ? null : <Badge>{scoring}</Badge>}
           {attempt.needsUpdate ? <Badge>Needs update</Badge> : null}

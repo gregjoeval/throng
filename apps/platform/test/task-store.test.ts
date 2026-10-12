@@ -232,6 +232,7 @@ describe("attempts", () => {
         task: 1,
         number,
         author: ada.user.id,
+        alias: "claude",
         state: "draft",
         fork: `t1a${number}`,
         branch: null,
@@ -781,6 +782,35 @@ describe("migrate", () => {
     migrate(sql);
     const store = new TaskStore({ sql, repos: new FakeRepos() });
     expect(store.getAttempt(PROJECT, ada, { task: 1, number: 1 }).forked_from).toBeNull();
+  });
+
+  it("adds alias to attempts from before it, taking each from its created entry unless handed off since", () => {
+    const sql = testSql();
+    sql.exec(`CREATE TABLE tasks (number INTEGER PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL,
+      creator TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, closed_at TEXT, closed_by TEXT,
+      attempt_limit INTEGER)`);
+    sql.exec(`CREATE TABLE attempts (task INTEGER NOT NULL REFERENCES tasks (number), number INTEGER NOT NULL,
+      author TEXT NOT NULL, state TEXT NOT NULL, branch TEXT, note TEXT NOT NULL, created_at TEXT NOT NULL,
+      closed_at TEXT, merged_sha TEXT, archived_sha TEXT, forked_from INTEGER, needs_update TEXT,
+      followed_head TEXT, PRIMARY KEY (task, number))`);
+    sql.exec(`CREATE TABLE journal (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, kind TEXT NOT NULL,
+      detail TEXT NOT NULL, user_id TEXT, agent TEXT, task INTEGER, attempt INTEGER)`);
+    sql.exec("INSERT INTO tasks VALUES (1, 'a', '', 'ada00001', 'open', '', NULL, NULL, NULL)");
+    for (const n of [1, 2, 3]) {
+      sql.exec(
+        `INSERT INTO attempts VALUES (1, ${n}, 'ada00001', 'draft', NULL, '', '', NULL, NULL, NULL, NULL, NULL, NULL)`,
+      );
+    }
+    sql.exec(`INSERT INTO journal (at, kind, detail, user_id, agent, task, attempt) VALUES
+      (0, 'created', '{}', 'ada00001', 'claude', 1, 1),
+      (0, 'created', '{}', 'ada00001', NULL, 1, 2),
+      (0, 'created', '{}', 'bob00001', 'claude', 1, 3),
+      (1, 'handedOff', '{}', 'bob00001', 'claude', 1, 3)`);
+    migrate(sql);
+    migrate(sql);
+    const store = new TaskStore({ sql, repos: new FakeRepos() });
+    const alias = (number: number) => store.getAttempt(PROJECT, ada, { task: 1, number }).alias;
+    expect([alias(1), alias(2), alias(3)]).toEqual(["claude", null, null]);
   });
 
   it("moves values stored in snake_case to camelCase, and reads old JSON in camelCase", () => {

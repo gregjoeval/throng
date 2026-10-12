@@ -93,6 +93,8 @@ export interface StoredAttempt {
   number: number;
   /** The author's user id. */
   author: string;
+  /** The alias the author started it under (`claude`), or null: started as themselves, or handed off since. */
+  alias: string | null;
   state: AttemptState;
   /** The logical fork name, `t42a3`; its repo is `<projectId>-t42a3`. */
   fork: string;
@@ -293,6 +295,7 @@ interface AttemptRow {
   task: number;
   number: number;
   author: string;
+  alias: string | null;
   state: AttemptState;
   branch: string | null;
   note: string;
@@ -335,6 +338,7 @@ const SCHEMA = [
     forked_from INTEGER,
     needs_update TEXT,
     followed_head TEXT,
+    alias TEXT,
     PRIMARY KEY (task, number)
   )`,
   // Branch names are unique per project among active attempts.
@@ -363,10 +367,10 @@ const DROPPED_TABLES = ["deliveries", "checks", "pending"];
 const JOURNAL_COLUMNS = ["user_id TEXT", "agent TEXT", "task INTEGER", "attempt INTEGER"];
 
 /**
- * Columns added to attempts after their table was made: where a forked attempt was copied from, and
- * how it follows its task branch.
+ * Columns added to attempts after their table was made: where a forked attempt was copied from, how
+ * it follows its task branch, and the alias its author started it under.
  */
-const ATTEMPT_COLUMNS = ["forked_from INTEGER", "needs_update TEXT", "followed_head TEXT"];
+const ATTEMPT_COLUMNS = ["forked_from INTEGER", "needs_update TEXT", "followed_head TEXT", "alias TEXT"];
 
 /**
  * Creates the store's tables, adds the journal's and attempts' newer columns to tables that predate
@@ -376,14 +380,31 @@ export function migrate(sql: Sql): void {
   for (const statement of SCHEMA) sql.exec(statement);
   for (const table of DROPPED_TABLES) sql.exec(`DROP TABLE IF EXISTS ${table}`);
   addColumns(sql, "journal", JOURNAL_COLUMNS);
-  addColumns(sql, "attempts", ATTEMPT_COLUMNS);
+  const added = addColumns(sql, "attempts", ATTEMPT_COLUMNS);
+  if (added.includes("alias")) {
+    // Attempts made before `alias` take it from their `created` entry, unless handed off since.
+    sql.exec(
+      `UPDATE attempts SET alias = (
+         SELECT agent FROM journal WHERE kind = 'created' AND journal.task = attempts.task AND journal.attempt = attempts.number
+       )
+       WHERE NOT EXISTS (
+         SELECT 1 FROM journal WHERE kind = 'handedOff' AND journal.task = attempts.task AND journal.attempt = attempts.number
+       )`,
+    );
+  }
 }
 
-function addColumns(sql: Sql, table: string, add: string[]): void {
+/** Adds each of `add` that `table` lacks, and returns the names of those it added. */
+function addColumns(sql: Sql, table: string, add: string[]): string[] {
   const columns = new Set(sql.exec<{ name: string }>(`PRAGMA table_info(${table})`).map((c) => c.name));
+  const added: string[] = [];
   for (const column of add) {
-    if (!columns.has(column.split(" ")[0] ?? "")) sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column}`);
+    const name = column.split(" ")[0] ?? "";
+    if (columns.has(name)) continue;
+    sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column}`);
+    added.push(name);
   }
+  return added;
 }
 
 export interface TaskStoreDeps {
@@ -626,11 +647,12 @@ export class TaskStore {
         const at = this.#stamp();
         for (const number of numbers) {
           this.#sql.exec(
-            `INSERT INTO attempts (task, number, author, state, branch, note, created_at, forked_from)
-             VALUES (?, ?, ?, 'draft', ?, ?, ?, ?)`,
+            `INSERT INTO attempts (task, number, author, alias, state, branch, note, created_at, forked_from)
+             VALUES (?, ?, ?, ?, 'draft', ?, ?, ?, ?)`,
             current.number,
             number,
             actor.user.id,
+            actor.agent,
             input.branch ?? null,
             input.note ?? "",
             at,
@@ -939,7 +961,7 @@ export class TaskStore {
     }
     return this.#sql.transaction(() => {
       this.#sql.exec(
-        "UPDATE attempts SET author = ? WHERE task = ? AND number = ?",
+        "UPDATE attempts SET author = ?, alias = NULL WHERE task = ? AND number = ?",
         input.to,
         current.task,
         current.number,
@@ -1391,11 +1413,12 @@ export class TaskStore {
         this.#expect(this.#task(row.task), ["open"], "add attempts to");
       }
       this.#sql.exec(
-        `INSERT INTO attempts (task, number, author, state, branch, note, created_at)
-         VALUES (?, ?, ?, 'open', ?, '', ?)`,
+        `INSERT INTO attempts (task, number, author, alias, state, branch, note, created_at)
+         VALUES (?, ?, ?, ?, 'open', ?, '', ?)`,
         row.task,
         row.attempt,
         actor.user.id,
+        actor.agent,
         row.branch,
         at,
       );
@@ -2485,6 +2508,7 @@ function toAttempt(row: AttemptRow): Omit<StoredAttempt, "scoring" | "merge_requ
     task: row.task,
     number: row.number,
     author: row.author,
+    alias: row.alias,
     state: row.state,
     fork: attemptRef(row.task, row.number),
     branch: row.branch,

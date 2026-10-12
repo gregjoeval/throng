@@ -154,6 +154,7 @@ describe("attempt routes", () => {
         task: 1,
         number: n,
         author: { id: expect.any(String), handle: "ada" },
+        alias: "claude",
         state: "draft",
         fork: `t1a${n}`,
         branch: null,

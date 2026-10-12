@@ -408,6 +408,13 @@ describe("the arena's rail", () => {
       expect(Object.values(cardMetrics(ref)).some((v) => v.endsWith("*"))).toBeFalsy();
   });
 
+  it("shows each card's author, with the alias they started it under", async () => {
+    await openArena([arenaAttempt(1, 1, { alias: "claude" }), arenaAttempt(1, 2)]);
+    expect(card("t1a1")).toHaveTextContent("bob (claude)");
+    expect(card("t1a2")).toHaveTextContent("bob");
+    expect(card("t1a2")).not.toHaveTextContent("(");
+  });
+
   it("tells a gate with no checks configured from one that passed, and shows scoring in progress", async () => {
     await openArena([
       arenaAttempt(1, 1, { status: "done", result: result({ config: { kind: "none" }, checks: [] }) }),

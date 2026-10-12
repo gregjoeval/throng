@@ -178,6 +178,11 @@ const ListedTaskSchema = TaskSchema.extend({
 }).openapi("ListedTask");
 
 /** Where an attempt was copied from: provenance only, never its base. */
+const AliasSchema = z.string().nullable().openapi({
+  description:
+    "The alias its author started it under (`claude`); null when they acted as themselves, or after a hand-off.",
+});
+
 const ForkedFromSchema = z
   .string()
   .optional()
@@ -200,6 +205,7 @@ const AttemptSchema = z
     task: z.number().int().openapi({ example: 42 }),
     number: z.number().int().openapi({ description: "Per task, 1-based and never reused.", example: 3 }),
     author: UserRefSchema,
+    alias: AliasSchema,
     state: z.enum(ATTEMPT_STATES),
     fork: z.string().openapi({ description: "The logical fork name, kept for the attempt's life.", example: "t42a3" }),
     branch: z.string().nullable().openapi({ description: "The origin branch a push created it from." }),
@@ -382,6 +388,7 @@ const TaskArenaSchema = z
         ref: z.string().openapi({ example: "t42a3" }),
         state: z.enum(ATTEMPT_STATES),
         author: UserRefSchema,
+        alias: AliasSchema,
         forkedFrom: ForkedFromSchema,
         needsUpdate: NeedsUpdateSchema,
         base: BaseSchema.nullable().openapi({

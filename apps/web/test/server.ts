@@ -57,6 +57,7 @@ export function attempt(taskNumber: number, number: number, fields: Partial<Atte
     task: taskNumber,
     number,
     author: bob,
+    alias: null,
     state: "draft",
     fork: ref,
     branch: null,
@@ -100,7 +101,9 @@ export function serveTasks(tasks: ListedTask[], attempts: Attempt[] = []) {
       if (found === undefined) return notFound(`no task ${params["t"]}`);
       const arena = attempts
         .filter((a) => a.task === found.number)
-        .map((a) => arenaAttempt(a.task, a.number, { state: a.state, author: a.author, sha: null, base: null }));
+        .map((a) =>
+          arenaAttempt(a.task, a.number, { state: a.state, author: a.author, alias: a.alias, sha: null, base: null }),
+        );
       return HttpResponse.json({ task: found.ref, metrics: [], attempts: arena });
     }),
   ];
@@ -135,6 +138,7 @@ export function arenaAttempt(taskNumber: number, number: number, fields: Partial
     ref: `t${taskNumber}a${number}`,
     state: "open",
     author: bob,
+    alias: null,
     status: "none",
     sha: `${taskNumber}${number}`.padEnd(40, "c"),
     base: { sha: BASE, on: "main" },

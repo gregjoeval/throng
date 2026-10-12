@@ -87,8 +87,10 @@ export interface ListedTask extends Task {
 }
 
 /** An attempt as the API shows it. */
-/** What every view of an attempt shows beside its state: where it came from, whether it needs update, its verdicts. */
+/** What every view of an attempt shows beside its state: its alias, where it came from, whether it needs update, its verdicts. */
 interface AttemptStanding {
+  /** The alias its author started it under; null when they acted as themselves, or after a hand-off. */
+  alias: string | null;
   /** The attempt of the same task it was copied from when it was started; absent when it wasn't. Never its base. */
   forkedFrom?: string;
   /** Its task branch moved and merging it in conflicted; its author merges it to clear this. */
@@ -435,10 +437,11 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
       return {
         task: taskRef(number),
         metrics: config.kind === "valid" ? config.config.checks.flatMap((check) => check.metrics) : [],
-        attempts: list.map(({ scoring, fork, state, author, verdicts, forked_from, needs_update }, i) => ({
+        attempts: list.map(({ scoring, fork, state, author, alias, verdicts, forked_from, needs_update }, i) => ({
           ref: fork,
           state,
           author: userRef(author, users),
+          alias,
           ...scoringStatus(scoring),
           base: bases[i] ?? null,
           ...forkedFrom(forked_from),
@@ -622,6 +625,7 @@ function publicAttempt(a: StoredAttempt, users: Map<string, string>): Attempt {
     task: a.task,
     number: a.number,
     author: userRef(a.author, users),
+    alias: a.alias,
     state: a.state,
     fork: a.fork,
     branch: a.branch,

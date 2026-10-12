@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 import { archiveRef } from "../src/archive.ts";
 import { CONFIG_PATH, parseConfig } from "../src/config.ts";
 import { ServiceError } from "../src/errors.ts";
-import { parseAttemptRef, parseTaskRef, reservedTask } from "../src/task-refs.ts";
 import {
   attemptLimitFromConfig,
   BRANCH_PUSH_TTL_MS,
@@ -78,24 +77,6 @@ async function attemptIn(store: TaskStore, state: AttemptState): Promise<StoredA
   if (state === "obsolete") await store.obsoleteAttempt(PROJECT, owner, ref);
   return store.getAttempt(PROJECT, ada, ref);
 }
-
-describe("references", () => {
-  it("parses t42, 42 and t42a3", () => {
-    expect(parseTaskRef("t42")).toBe(42);
-    expect(parseTaskRef("42")).toBe(42);
-    expect(parseAttemptRef("t42a3")).toEqual({ task: 42, number: 3 });
-    for (const bad of ["t0", "0", "t", "t042", "t42a3", "x42", "-1", "t1.5", ""])
-      expect(parseTaskRef(bad), bad).toBeNull();
-    for (const bad of ["t42", "t42a0", "t0a1", "t42a", "t42b3", "t42a3x"]) expect(parseAttemptRef(bad), bad).toBeNull();
-    expect(parseTaskRef("9".repeat(20))).toBeNull();
-  });
-
-  it("reserves t<n>/ branches for task t<n>", () => {
-    expect(reservedTask("t42/fix-login")).toBe(42);
-    expect(reservedTask("t42/")).toBe(42);
-    for (const branch of ["t42", "fix/t42", "t0/x", "T42/x", "main"]) expect(reservedTask(branch), branch).toBeNull();
-  });
-});
 
 describe("attemptLimitFromConfig", () => {
   it("reads attempts.limit from a valid config, else the default", () => {

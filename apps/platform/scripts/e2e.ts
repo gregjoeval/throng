@@ -372,14 +372,14 @@ async function conflict(): Promise<void> {
   const approved = await throng<MergeRequest>(p, "POST", `/tasks/${t2}/merge-request/approve`);
   assert(approved.approvedHead === resolved, `approved ${approved.approvedHead}, expected ${resolved}`);
   timeline.mark("t2 approved");
-  const t2Merge = await mergedSha(p, t2);
+  const newMainSha = await mergedSha(p, t2);
   timeline.mark("t2 merged");
-  const commit = await readCommit(p, t2Merge);
+  const commit = await readCommit(p, newMainSha);
   assert(
     JSON.stringify(commit.parents) === JSON.stringify([mainSha, resolved]),
     `expected parents [t1's merge, t2a1's head], got ${JSON.stringify(commit.parents)}`,
   );
-  const greeting = await git(p.work, "show", `${t2Merge}:src/greeting.js`);
+  const greeting = await git(p.work, "show", `${newMainSha}:src/greeting.js`);
   assert(greeting.includes("hello from a1 and a2"), "main does not contain the resolution");
 
   const journal = await settle(p.project);

@@ -84,12 +84,12 @@ function setup() {
 }
 
 async function code(promise: Promise<unknown>): Promise<string> {
-  const err = await promise.then(
+  const rejection = await promise.then(
     () => null,
     (error: unknown) => error,
   );
-  expect(err).toBeInstanceOf(ServiceError);
-  return (err as ServiceError).code;
+  expect(rejection).toBeInstanceOf(ServiceError);
+  return (rejection as ServiceError).code;
 }
 
 function result(overrides: Partial<ScoringResult> = {}): ScoringResult {

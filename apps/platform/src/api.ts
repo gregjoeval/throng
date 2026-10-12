@@ -11,7 +11,7 @@ import { ProjectPathSchema } from "./api-shared.ts";
 import { bearerAuth, bearerOrAccess, bearerOrForwarded } from "./auth.ts";
 import type { AuthEnv, AuthOptions } from "./auth.ts";
 import { browseRoutes } from "./browse-api.ts";
-import { CONFIG_NAME, MAX_CHECK_TIMEOUT_MS, MAX_CONFIG_BYTES, parseConfig } from "./config.ts";
+import { CONFIG_NAME, MAX_CHECK_TIMEOUT_MS, MAX_CONFIG_BYTES, METRIC_ORDERS, parseConfig } from "./config.ts";
 import { dequeueRoutes } from "./dequeue-api.ts";
 import type { DiffCache } from "./diff.ts";
 import { errorBody, errorResponse, ServiceError } from "./errors.ts";
@@ -407,7 +407,7 @@ const ConfigSchema = z
               name: ConfigNameSchema.openapi({ example: "coverage" }),
               unit: z.string().nullable().openapi({ example: "%" }),
               order: z
-                .enum(["asc", "desc"])
+                .enum(METRIC_ORDERS)
                 .openapi({ description: "`asc` when lower is better, `desc` when higher is." }),
             }),
           ),

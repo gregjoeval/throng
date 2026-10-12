@@ -15,12 +15,15 @@ export const DEFAULT_CHECK_TIMEOUT_MS = 10 * 60 * 1000;
 export const MAX_CHECK_TIMEOUT_MS = 30 * 60 * 1000;
 /** Check and metric names. */
 export const CONFIG_NAME = /^[a-z0-9][a-z0-9_-]*$/u;
+/** A metric's stored `order`: `asc` when lower values are better, `desc` when higher are. */
+export const METRIC_ORDERS = ["asc", "desc"] as const;
+export type MetricOrder = (typeof METRIC_ORDERS)[number];
 
 export interface MetricConfig {
   name: string;
   unit: string | null;
   /** Which way is better: `asc` when lower values are better, `desc` when higher are. */
-  order: "asc" | "desc";
+  order: MetricOrder;
 }
 
 export interface CheckConfig {
@@ -52,7 +55,14 @@ export type ConfigResult =
   /** One line per problem, each prefixed with its path, e.g. `checks[0].name: …`. */
   | { kind: "invalid"; error: string };
 
-const ORDERS = { ascending: "asc", asc: "asc", descending: "desc", desc: "desc" } as const;
+/** The `order` spellings a config may use, and the stored order each one means. */
+const ORDER_ALIASES = ["ascending", "asc", "descending", "desc"] as const;
+const ORDERS: Record<(typeof ORDER_ALIASES)[number], MetricOrder> = {
+  ascending: "asc",
+  asc: "asc",
+  descending: "desc",
+  desc: "desc",
+};
 const DURATION = /^(\d+)(s|m|h)$/u;
 const UNIT_MS = { s: 1000, m: 60 * 1000, h: 60 * 60 * 1000 } as const;
 const HOST = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/u;
@@ -64,7 +74,7 @@ const command = z.string({ error: "must be a string" }).trim().min(1, "must not 
 const MetricSchema = z.strictObject({
   name: name("metric name"),
   unit: z.string({ error: "unit must be a string" }).optional(),
-  order: z.enum(Object.keys(ORDERS) as [keyof typeof ORDERS], {
+  order: z.enum(ORDER_ALIASES, {
     error: (issue) =>
       issue.input === undefined
         ? "order is required: ascending, asc, descending or desc"

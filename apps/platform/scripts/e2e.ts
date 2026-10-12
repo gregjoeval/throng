@@ -809,8 +809,11 @@ process.exit(ok ? 0 : 1);
     ref === t1 && checks.map((c) => `${c.name}:${c.source}:${String(c.required)}`).join() === "smoke:task:true",
     `unexpected task ${ref}: ${JSON.stringify(checks)}`,
   );
+  const fixture = (await git(p.work, "rev-parse", "HEAD")).trim();
   await createAttempts(p, t1, [a1, a2], timeline);
   const passing = await editAndPush(p, a1, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
+  // Start a2 from the same main, not from a1's edit.
+  await git(p.work, "checkout", "-q", "--detach", fixture);
   const unsigned = await editAndPush(p, a2, "src/greeting.js", (s) => s.replace('"hello"', '"bye"'), "a2");
   for (const attempt of [a1, a2]) await throng(p, "POST", `/attempts/${attempt}/open`);
   const passed = (await scoredHead(p, a1, passing)).result;

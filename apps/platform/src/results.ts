@@ -3,11 +3,20 @@
 // gate live here so they're tested without a container.
 
 import { DEFAULT_CHECK_TIMEOUT_MS } from "./config.ts";
-import type { ConfigResult } from "./config.ts";
+import type { CheckConfig, ConfigResult, MetricOrder } from "./config.ts";
 import type { PreviewScriptResult } from "./scripts.ts";
 
-export const CHECK_OUTCOMES = ["passed", "failed", "timedOut", "skipped"] as const;
+/** A check's outcome, best first; they are also the values of the check's outcome metric. */
+export const CHECK_OUTCOMES = ["passed", "failed", "timedOut", "errored", "skipped"] as const;
 export type CheckOutcome = (typeof CHECK_OUTCOMES)[number];
+
+/** Who defined a check or metric: Throng itself, the project's config, or the task. */
+export const METRIC_SOURCES = ["platform", "project", "task"] as const;
+export type MetricSource = (typeof METRIC_SOURCES)[number];
+
+/** How a string metric's value is shown. */
+export const METRIC_FORMATS = ["url"] as const;
+type MetricFormat = (typeof METRIC_FORMATS)[number];
 
 /** Longest a `setup` command may run; the spec gives setup no timeout of its own. */
 export const SETUP_TIMEOUT_MS = DEFAULT_CHECK_TIMEOUT_MS;
@@ -16,36 +25,33 @@ export const MAX_METRICS_BYTES = 64 * 1024;
 /** Exit codes `timeout` gives a command it stopped: TERM (124), then KILL after the grace (128 + 9). */
 const TIMED_OUT_EXITS = new Set([124, 137]);
 
+/** Throng's own checks: finding the base and diffing, and deploying the Preview. */
+const DIFF_CHECK = "_diff";
+const PREVIEW_CHECK = "_preview";
+
+/** A check: a process the run ran, or skipped. Its outcome is also a metric named after it. */
 export interface CheckResult {
   name: string;
+  source: MetricSource;
+  /** Whether the gate needs it to pass. */
   required: boolean;
   outcome: CheckOutcome;
   durationMs: number;
-  /** The metrics the check declared and reported, by name. */
-  metrics: Record<string, number>;
   /** What the run noticed about the check: ignored metrics, why it was skipped. */
   notes: string[];
-  /** Only on the `config` entry of an invalid config: the config's errors. */
-  error?: string;
 }
 
-/** Diff size against the base, recorded for every run whatever the config. */
-export interface BuiltinMetrics {
-  filesChanged: number;
-  additions: number;
-  deletions: number;
-  durationMs: number;
+interface MetricFields {
+  source: MetricSource;
+  /** Why the value is null. */
+  note?: string;
 }
 
-/**
- * The Preview's outcome: `failed` when its build or deploy failed, `errored` when the infrastructure
- * kept failing (container start, lost Sandbox, a script crash). Neither changes the gate.
- */
-export type PreviewResult =
-  | { status: "none" }
-  | { status: "ready"; url: string }
-  | { status: "failed" }
-  | { status: "errored"; error: string };
+/** One typed, nullable value in a run's score. An enum lists its `values` best first. */
+export type MetricResult =
+  | (MetricFields & { type: "number"; value: number | null; order: MetricOrder; unit?: string })
+  | (MetricFields & { type: "string"; value: string | null; format?: MetricFormat })
+  | (MetricFields & { type: "enum"; value: string | null; values: string[] });
 
 export const GATES = ["passed", "failed"] as const;
 export type Gate = (typeof GATES)[number];
@@ -57,11 +63,12 @@ export interface ScoringResult {
    */
   base: string | null;
   config: { kind: "none" } | { kind: "valid" } | { kind: "invalid"; error: string };
-  /** Passed when every required check passed, including when there are none. */
+  /** Passed when every required check passed, including when there are none; failed on an invalid config. */
   gate: Gate;
+  /** Every check in run order: `_diff`, the config's checks, then `_preview`. */
   checks: CheckResult[];
-  builtin: BuiltinMetrics;
-  preview: PreviewResult;
+  /** Every metric by name: each check's outcome metric, followed by that check's own metrics. */
+  metrics: Record<string, MetricResult>;
   /**
    * The run's stored logs, by name (`setup.<n>`, a check's name, `preview.deploy`), in run order. A
    * step that never ran has none; see `logs.ts` for where each is kept.
@@ -117,7 +124,7 @@ export function checkOutcome(exit: number | null, durationMs: number, timeoutMs:
 }
 
 /** Files changed, lines added and lines deleted from a `git diff --shortstat` line; zeros when empty. */
-export function parseShortstat(line: string): Omit<BuiltinMetrics, "durationMs"> {
+export function parseShortstat(line: string): { filesChanged: number; additions: number; deletions: number } {
   const count = (pattern: RegExp) => Number(pattern.exec(line)?.[1] ?? 0);
   return {
     filesChanged: count(/(\d+) files? changed/u),
@@ -126,38 +133,41 @@ export function parseShortstat(line: string): Omit<BuiltinMetrics, "durationMs">
   };
 }
 
+/** A declared metric's reported value, or null with why. */
+type Reported = { value: number } | { value: null; note: string };
+
 /**
- * A check's `$THRONG_METRICS` file: a JSON object of `name → number`. Only metrics the check
- * declares, with finite numbers, are kept; everything else is noted and ignored.
+ * A check's `$THRONG_METRICS` file: a JSON object of `name → number`. Each declared metric gets its
+ * finite number, or null with a note saying why. What isn't declared is noted on the check and ignored.
  */
 export function parseMetrics(
   text: string | null,
   declared: string[],
-): { metrics: Record<string, number>; notes: string[] } {
-  const metrics: Record<string, number> = {};
-  const notes: string[] = [];
-  if (text !== null && text.trim() !== "") {
-    let value: unknown;
-    try {
-      value = JSON.parse(text);
-    } catch {
-      return { metrics, notes: ["ignored $THRONG_METRICS: not JSON"] };
-    }
-    if (typeof value !== "object" || value === null || Array.isArray(value)) {
-      return { metrics, notes: ["ignored $THRONG_METRICS: not a JSON object of name to number"] };
-    }
-    for (const [name, reported] of Object.entries(value)) {
-      if (!declared.includes(name)) notes.push(`ignored metric ${name}: not declared by this check`);
-      else if (typeof reported !== "number" || !Number.isFinite(reported))
-        notes.push(`ignored metric ${name}: not a number`);
-      else metrics[name] = reported;
-    }
+): { metrics: Record<string, Reported>; notes: string[] } {
+  const every = (note: string) => Object.fromEntries(declared.map((name) => [name, { value: null, note }]));
+  if (text === null || text.trim() === "") return { metrics: every("not reported"), notes: [] };
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return { metrics: every("$THRONG_METRICS was not JSON"), notes: ["ignored $THRONG_METRICS: not JSON"] };
   }
-  for (const name of declared) {
-    if (!(name in metrics) && !notes.some((n) => n.startsWith(`ignored metric ${name}:`))) {
-      notes.push(`metric ${name} was not reported`);
-    }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    const why = "not a JSON object of name to number";
+    return { metrics: every(`$THRONG_METRICS was ${why}`), notes: [`ignored $THRONG_METRICS: ${why}`] };
   }
+  const reported = new Map(Object.entries(value));
+  const notes = [...reported.keys()]
+    .filter((name) => !declared.includes(name))
+    .map((name) => `ignored metric ${name}: not declared by this check`);
+  const metrics = Object.fromEntries(
+    declared.map((name): [string, Reported] => {
+      const v = reported.get(name);
+      if (v === undefined) return [name, { value: null, note: "not reported" }];
+      if (typeof v !== "number" || !Number.isFinite(v)) return [name, { value: null, note: "not a number" }];
+      return [name, { value: v }];
+    }),
+  );
   return { metrics, notes };
 }
 
@@ -174,70 +184,208 @@ export interface PreviewPlan {
 
 /**
  * Whether to deploy a Preview, its build step and its `network.allow`: only when the config has a
- * `preview` section and the gate passed. Null means no Preview, and the result keeps `preview: none`.
+ * `preview` section and the gate passed. Null means no Preview, and `_preview` stays skipped.
  */
 export function previewPlan(config: ConfigResult, result: ScoringResult): PreviewPlan | null {
   if (config.kind !== "valid" || config.config.preview === null || result.gate !== "passed") return null;
   return { command: config.config.preview.command, allow: config.config.network.allow };
 }
 
+/** A check with its metrics, before its outcome metric is added. */
+interface Scored {
+  check: CheckResult;
+  metrics: Record<string, MetricResult>;
+}
+
+/** The check's outcome metric, then its own metrics. */
+function metricsOf({ check, metrics }: Scored): Record<string, MetricResult> {
+  const outcome: MetricResult = {
+    source: check.source,
+    type: "enum",
+    value: check.outcome,
+    values: [...CHECK_OUTCOMES],
+  };
+  return { [check.name]: outcome, ...metrics };
+}
+
+function platformCheck(name: string, outcome: CheckOutcome, durationMs: number, notes: string[]): CheckResult {
+  return { name, source: "platform", required: false, outcome, durationMs, notes };
+}
+
+/** One of `_diff`'s sizes: a smaller change is better. */
+function diffMetric(value: number): MetricResult {
+  return { source: "platform", type: "number", value, order: "asc" };
+}
+
+/** `_diff`: finding the base and diffing, with the diff's size. */
+function diffScored(size: ReturnType<typeof parseShortstat>, durationMs: number): Scored {
+  return {
+    check: platformCheck(DIFF_CHECK, "passed", durationMs, []),
+    metrics: {
+      [`${DIFF_CHECK}.filesChanged`]: diffMetric(size.filesChanged),
+      [`${DIFF_CHECK}.additions`]: diffMetric(size.additions),
+      [`${DIFF_CHECK}.deletions`]: diffMetric(size.deletions),
+    },
+  };
+}
+
+/** `_preview` with its outcome, and `_preview.url`: null with a note unless it passed. */
+function previewScored(outcome: CheckOutcome, durationMs: number, notes: string[], url: string | null): Scored {
+  const what = `${PREVIEW_CHECK} ${outcome === "skipped" ? "was skipped" : outcome}`;
+  const note = notes.length === 0 ? what : `${what}: ${notes.join("; ")}`;
+  const base = { source: "platform", type: "string", format: "url" } as const;
+  return {
+    check: platformCheck(
+      PREVIEW_CHECK,
+      outcome,
+      durationMs,
+      notes.map((n) => `${outcome}: ${n}`),
+    ),
+    metrics: { [`${PREVIEW_CHECK}.url`]: url === null ? { ...base, value: null, note } : { ...base, value: url } },
+  };
+}
+
+/** Why `_preview` is skipped before any deploy: the reason `previewPlan` gives no plan. */
+function previewSkipped(config: ConfigResult, gate: Gate): string {
+  if (config.kind === "invalid") return "the config is invalid";
+  if (config.kind === "none" || config.config.preview === null) return "the config has no preview section";
+  return gate === "failed" ? "the gate failed" : "it wasn't deployed";
+}
+
 /**
- * The result with the Preview's outcome recorded: `ready` with its URL when it deployed, `failed`
- * otherwise (null when the preview script gave no result), or `errored` with the error the step kept
- * failing on. The gate and checks never change.
+ * The result with the Preview's outcome recorded on `_preview`: `passed` with `_preview.url` when it
+ * deployed, `failed` otherwise (null when the preview script gave no result), or `errored` with the
+ * error the step kept failing on. The gate and the other checks never change.
  */
 export function withPreview(
   result: ScoringResult,
   deployed: PreviewScriptResult | null | { error: string },
+  durationMs: number,
 ): ScoringResult {
-  let preview: PreviewResult;
-  if (deployed !== null && "error" in deployed) preview = { status: "errored", error: deployed.error };
-  else if (deployed?.ok === true) preview = { status: "ready", url: deployed.url };
-  else preview = { status: "failed" };
-  return { ...result, preview };
+  let scored: Scored;
+  if (deployed !== null && "error" in deployed) scored = previewScored("errored", durationMs, [deployed.error], null);
+  else if (deployed === null) scored = previewScored("failed", durationMs, ["the preview script gave no result"], null);
+  else if (deployed.ok) scored = previewScored("passed", durationMs, [], deployed.url);
+  else scored = previewScored("failed", durationMs, [`its ${deployed.stage} step failed`], null);
+  return {
+    ...result,
+    checks: result.checks.map((check) => (check.name === PREVIEW_CHECK ? scored.check : check)),
+    metrics: { ...result.metrics, ...metricsOf(scored) },
+  };
 }
 
-/**
- * The run's result from the config it was scored under and the score script's raw output. Its
- * `logs` are empty: the run stores its logs, with each check's notes, once the result is built.
- */
-export function buildResult(config: ConfigResult, raw: RawScore): ScoringResult {
-  const builtin = { ...parseShortstat(raw.shortstat), durationMs: raw.builtinMs };
-  const common = { base: raw.base, builtin, preview: { status: "none" } as const, logs: [] };
-  if (config.kind === "none") return { ...common, config: { kind: "none" }, gate: "passed", checks: [] };
-  if (config.kind === "invalid") {
-    const entry: CheckResult = {
-      name: "config",
-      required: true,
-      outcome: "failed",
-      durationMs: 0,
-      metrics: {},
-      notes: [],
-      error: config.error,
-    };
-    return { ...common, config: { kind: "invalid", error: config.error }, gate: "failed", checks: [entry] };
-  }
-  const checks = config.config.checks.map((check, i): CheckResult => {
-    const ran = raw.checks[i];
-    const outcome = checkOutcome(ran?.exit ?? null, ran?.durationMs ?? 0, check.timeoutMs);
-    const parsed =
-      outcome === "skipped"
-        ? { metrics: {}, notes: [] }
-        : parseMetrics(
-            ran?.metrics ?? null,
-            check.metrics.map((m) => m.name),
-          );
-    const notes = [...parsed.notes];
-    if (outcome === "skipped" && raw.setupFailed !== null)
-      notes.push(`skipped: setup command ${raw.setupFailed} failed`);
-    return {
+/** A config check from its run: its outcome, its declared metrics as project numbers, and its notes. */
+function configScored(
+  check: CheckConfig,
+  ran: RawScore["checks"][number] | undefined,
+  setupFailed: number | null,
+): Scored {
+  const outcome = checkOutcome(ran?.exit ?? null, ran?.durationMs ?? 0, check.timeoutMs);
+  const skipped = setupFailed === null ? "skipped" : `skipped: setup command ${setupFailed} failed`;
+  const parsed =
+    outcome === "skipped"
+      ? {
+          metrics: Object.fromEntries(
+            check.metrics.map((m) => [m.name, { value: null, note: `${check.name} was ${skipped}` }]),
+          ),
+          notes: [],
+        }
+      : parseMetrics(
+          ran?.metrics ?? null,
+          check.metrics.map((m) => m.name),
+        );
+  const notes = outcome === "skipped" && setupFailed !== null ? [...parsed.notes, skipped] : parsed.notes;
+  const metrics = Object.fromEntries(
+    check.metrics.map(({ name, order, unit }): [string, MetricResult] => [
+      name,
+      {
+        source: "project",
+        type: "number",
+        order,
+        ...(unit === null ? {} : { unit }),
+        ...(parsed.metrics[name] ?? { value: null, note: "not reported" }),
+      },
+    ]),
+  );
+  return {
+    check: {
       name: check.name,
+      source: "project",
       required: check.required,
       outcome,
       durationMs: ran?.durationMs ?? 0,
-      metrics: parsed.metrics,
       notes,
-    };
-  });
-  return { ...common, config: { kind: "valid" }, gate: gateFor(checks), checks };
+    },
+    metrics,
+  };
+}
+
+/**
+ * The run's result from the config it was scored under and the score script's raw output: `_diff`,
+ * the config's checks, then `_preview`, skipped until `withPreview` records a deploy. Its `logs` are
+ * empty: the run stores its logs, with each check's notes, once the result is built.
+ */
+export function buildResult(config: ConfigResult, raw: RawScore): ScoringResult {
+  const checks =
+    config.kind === "valid"
+      ? config.config.checks.map((check, i) => configScored(check, raw.checks[i], raw.setupFailed))
+      : [];
+  const gate = config.kind === "invalid" ? "failed" : gateFor(checks.map((s) => s.check));
+  const scored = [
+    diffScored(parseShortstat(raw.shortstat), raw.builtinMs),
+    ...checks,
+    previewScored("skipped", 0, [previewSkipped(config, gate)], null),
+  ];
+  const kind = config.kind === "invalid" ? { kind: "invalid" as const, error: config.error } : { kind: config.kind };
+  return { base: raw.base, config: kind, gate, ...flatten(scored), logs: [] };
+}
+
+/** The checks, and every metric by name: each check's outcome metric, then its own metrics. */
+function flatten(scored: Scored[]): Pick<ScoringResult, "checks" | "metrics"> {
+  return {
+    checks: scored.map((s) => s.check),
+    metrics: Object.assign({}, ...scored.map(metricsOf)) as Record<string, MetricResult>,
+  };
+}
+
+/**
+ * A result as runs stored it before Throng's own work became checks: `builtin` held the diff's size,
+ * `preview` the Preview's status, each check its reported metrics, and an invalid config a synthetic
+ * `config` check carrying the error.
+ */
+export interface LegacyResult extends Pick<ScoringResult, "base" | "config" | "gate" | "logs"> {
+  checks: (Omit<CheckResult, "source"> & { metrics: Record<string, number>; error?: string })[];
+  builtin: { filesChanged: number; additions: number; deletions: number; durationMs: number };
+  preview:
+    | { status: "none" }
+    | { status: "ready"; url: string }
+    | { status: "failed" }
+    | { status: "errored"; error: string };
+}
+
+/**
+ * A stored result in the current shape. A legacy one becomes `_diff`, its checks with their metrics
+ * as project numbers (the order a config gives a number by default, since no order was stored), and
+ * `_preview`; its synthetic `config` check is dropped, as `config` already holds the error.
+ */
+export function upgradeResult(stored: ScoringResult | LegacyResult): ScoringResult {
+  if (!("builtin" in stored)) return stored;
+  const { builtin, preview } = stored;
+  const checks = stored.checks
+    .filter((check) => check.error === undefined)
+    .map(({ metrics, error: _error, ...check }): Scored => ({
+      check: { ...check, source: "project" },
+      metrics: Object.fromEntries(
+        Object.entries(metrics).map(([name, value]): [string, MetricResult] => [
+          name,
+          { source: "project", type: "number", value, order: "desc" },
+        ]),
+      ),
+    }));
+  let deployed: Scored;
+  if (preview.status === "ready") deployed = previewScored("passed", 0, [], preview.url);
+  else if (preview.status === "errored") deployed = previewScored("errored", 0, [preview.error], null);
+  else deployed = previewScored(preview.status === "none" ? "skipped" : "failed", 0, [], null);
+  const scored = [diffScored(builtin, builtin.durationMs), ...checks, deployed];
+  return { base: stored.base, config: stored.config, gate: stored.gate, ...flatten(scored), logs: stored.logs };
 }

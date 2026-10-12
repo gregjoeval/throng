@@ -94,7 +94,7 @@ describe("retestConfig", () => {
 });
 
 describe("failedChecks", () => {
-  it("names each check that didn't pass, with its stored log", () => {
+  it("names each config check that didn't pass, with its stored log, leaving out Throng's own", () => {
     const config = parseConfig(
       "checks:\n  - name: test\n    command: a\n  - name: build\n    command: b\n  - name: e2e\n    command: c\n",
     );
@@ -117,7 +117,7 @@ describe("failedChecks", () => {
     });
   });
 
-  it("fails the config check of an invalid config, with its error", () => {
+  it("gives an invalid config's error, with no checks", () => {
     const result = buildResult(parseConfig("checks: 3\n"), {
       base: null,
       shortstat: "",
@@ -126,7 +126,7 @@ describe("failedChecks", () => {
       checks: [],
     });
     expect(failedChecks(result, [])).toEqual({
-      checks: [{ name: "config", outcome: "failed", log: null }],
+      checks: [],
       error: expect.stringContaining("checks"),
     });
   });

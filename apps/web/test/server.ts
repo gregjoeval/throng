@@ -109,19 +109,65 @@ export function serveTasks(tasks: ListedTask[], attempts: Attempt[] = []) {
   ];
 }
 
-/** A done result whose gate passed with a `test` check, its built-in measures as given. */
-export function result(fields: Partial<NonNullable<ArenaAttempt["result"]>> = {}): NonNullable<ArenaAttempt["result"]> {
+type Result = NonNullable<ArenaAttempt["result"]>;
+
+/** One of `_diff`'s sizes. */
+const diffMetric = (value: number) => ({ source: "platform", type: "number", value, order: "asc" }) as const;
+
+/**
+ * A result's metrics: `_diff`'s sizes, `values` as project numbers (higher is better), and
+ * `_preview.url`, null unless a URL is given.
+ */
+export function scoredMetrics({
+  files = 1,
+  additions = 2,
+  values = {},
+  preview = null,
+}: {
+  files?: number;
+  additions?: number;
+  values?: Record<string, number>;
+  preview?: string | null;
+} = {}): Result["metrics"] {
+  return {
+    "_diff.filesChanged": diffMetric(files),
+    "_diff.additions": diffMetric(additions),
+    ...Object.fromEntries(
+      Object.entries(values).map(([name, value]) => [
+        name,
+        { source: "project", type: "number", value, order: "desc" } as const,
+      ]),
+    ),
+    "_preview.url": { source: "platform", type: "string", format: "url", value: preview },
+  };
+}
+
+/** A config check that ran: required, or optional. */
+export function check(
+  name: string,
+  required: boolean,
+  outcome: Result["checks"][number]["outcome"],
+  durationMs = 900,
+): Result["checks"][number] {
+  return { name, source: "project", required, outcome, durationMs, notes: [] };
+}
+
+/** One of Throng's own checks, `_diff` or `_preview`: never required. */
+export function platformCheck(name: string, outcome: Result["checks"][number]["outcome"]): Result["checks"][number] {
+  return { name, source: "platform", required: false, outcome, durationMs: 0, notes: [] };
+}
+
+/** A done result whose gate passed with a `test` check, its metrics as `scoredMetrics()` gives them. */
+export function result(fields: Partial<Result> = {}): Result {
   return {
     base: "b".repeat(40),
     config: { kind: "valid" },
     gate: "passed",
-    checks: [{ name: "test", required: true, outcome: "passed", durationMs: 900, metrics: {}, notes: [] }],
-    builtin: { filesChanged: 1, additions: 2, deletions: 0, durationMs: 5 },
-    preview: { status: "none" },
+    checks: [check("test", true, "passed")],
+    metrics: scoredMetrics(),
     logs: [],
     run: 1,
     finishedAt: me.user.createdAt,
-    metrics: {},
     ...fields,
   };
 }

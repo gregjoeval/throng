@@ -183,13 +183,20 @@ describe("scoreScript", () => {
     expect(result).toMatchObject({
       config: { kind: "valid" },
       gate: "passed",
-      builtin: { filesChanged: 2, additions: 2, deletions: 2 },
       checks: [
-        { name: "test", required: true, outcome: "passed", metrics: { coverage: 90 } },
-        { name: "lint", required: false, outcome: "failed", metrics: {} },
+        { name: "_diff", outcome: "passed" },
+        { name: "test", required: true, outcome: "passed" },
+        { name: "lint", required: false, outcome: "failed" },
+        { name: "_preview", outcome: "skipped" },
       ],
+      metrics: {
+        "_diff.filesChanged": { value: 2 },
+        "_diff.additions": { value: 2 },
+        "_diff.deletions": { value: 2 },
+        coverage: { source: "project", type: "number", value: 90 },
+      },
     });
-    expect(at(result.checks, 0).notes).toEqual(["ignored metric junk: not declared by this check"]);
+    expect(at(result.checks, 1).notes).toEqual(["ignored metric junk: not declared by this check"]);
   });
 });
 

@@ -10,6 +10,7 @@ const OUTCOME_LABELS: Record<CheckOutcome, string> = {
   passed: "Passed",
   failed: "Failed",
   timedOut: "Timed out",
+  errored: "Errored",
   skipped: "Skipped",
 };
 

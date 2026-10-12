@@ -133,6 +133,8 @@ const ConfigSchema = z
     { error: "the config must be a mapping" },
   )
   .superRefine((config, ctx) => {
+    // Each check's outcome is a metric named after it, so checks and metrics share one namespace.
+    const checkNames = new Set(config.checks?.map((check) => check.name));
     const checks = new Set<string>();
     const metrics = new Set<string>();
     config.checks?.forEach((check, i) => {
@@ -141,8 +143,10 @@ const ConfigSchema = z
       }
       checks.add(check.name);
       check.metrics?.forEach((metric, j) => {
-        if (metrics.has(metric.name)) {
-          const path = ["checks", i, "metrics", j, "name"];
+        const path = ["checks", i, "metrics", j, "name"];
+        if (checkNames.has(metric.name)) {
+          ctx.addIssue({ code: "custom", path, message: `metric name ${metric.name} is also a check's name` });
+        } else if (metrics.has(metric.name)) {
           ctx.addIssue({ code: "custom", path, message: `duplicate metric name ${metric.name}` });
         }
         metrics.add(metric.name);

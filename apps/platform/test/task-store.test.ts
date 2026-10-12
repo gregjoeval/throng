@@ -897,7 +897,8 @@ describe("migrate", () => {
     });
     const run = store.getScoringRun(PROJECT, ada, { run: 1 });
     expect(run.trigger).toBe("scoreNow");
-    expect(run.result?.checks[0]?.outcome).toBe("timedOut");
+    expect(run.result?.checks.find((c) => c.name === "test")?.outcome).toBe("timedOut");
+    expect(run.result?.metrics["test"]).toMatchObject({ type: "enum", value: "timedOut" });
     expect(sql.exec("SELECT kind FROM journal ORDER BY id")).toEqual(
       ["returnedToDraft", "handedOff", "madeObsolete", "mainAdvanced", "needsReview", "scoringQueued", "forkReady"].map(
         (kind) => ({ kind }),

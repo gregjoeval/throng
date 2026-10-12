@@ -17,7 +17,8 @@
 import { normaliseResult } from "./casing.ts";
 import { addColumns, renameColumns } from "./columns.ts";
 import { forkRepo } from "./repos.ts";
-import type { ScoringResult } from "./results.ts";
+import { upgradeResult } from "./results.ts";
+import type { LegacyResult, ScoringResult } from "./results.ts";
 import { attemptRef } from "./task-refs.ts";
 import type { Sql } from "./task-store.ts";
 import type { Actor } from "./tokens.ts";
@@ -494,17 +495,21 @@ function toRun(row: RunRow): StoredRun {
   };
 }
 
-/** A stored result; one stored before runs kept logs has none. */
+/** A stored result in the current shape; one stored before runs kept logs has none. */
 function storedResult(json: string): ScoringResult {
-  const result = JSON.parse(json) as Omit<ScoringResult, "logs"> & { logs?: string[] };
-  return normaliseResult({ ...result, logs: result.logs ?? [] });
+  const result = JSON.parse(json) as Partial<Pick<ScoringResult, "logs">> & (ScoringResult | LegacyResult);
+  return upgradeResult(normaliseResult({ ...result, logs: result.logs ?? [] }));
 }
 
-/** A result in a few words for the journal: `no checks configured`, `2 passed, 1 failed`, `config invalid`. */
+/**
+ * A result in a few words for the journal: `no checks configured`, `2 passed, 1 failed`, `config invalid`.
+ * It counts the config's checks only, not Throng's own.
+ */
 export function summarize(result: ScoringResult): string {
   if (result.config.kind === "invalid") return "config invalid";
-  if (result.checks.length === 0) return "no checks configured";
+  const checks = result.checks.filter((check) => check.source !== "platform");
+  if (checks.length === 0) return "no checks configured";
   const counts = new Map<string, number>();
-  for (const check of result.checks) counts.set(check.outcome, (counts.get(check.outcome) ?? 0) + 1);
+  for (const check of checks) counts.set(check.outcome, (counts.get(check.outcome) ?? 0) + 1);
   return [...counts].map(([outcome, n]) => `${n} ${outcome.replace("_", " ")}`).join(", ");
 }

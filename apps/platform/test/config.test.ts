@@ -200,6 +200,16 @@ describe("parseConfig", () => {
         "  - { name: b, command: b, metrics: [{ name: x, order: asc }] }\n",
       /^checks\[1\]\.metrics\[0\]\.name: duplicate metric name x$/u,
     ],
+    [
+      "a metric named like a check, whose outcome is a metric of that name",
+      "checks:\n  - { name: a, command: a, metrics: [{ name: b, order: asc }] }\n  - { name: b, command: b }\n",
+      /^checks\[0\]\.metrics\[0\]\.name: metric name b is also a check's name$/u,
+    ],
+    [
+      "a metric named like its own check",
+      metric("name: test, order: asc"),
+      /^checks\[0\]\.metrics\[0\]\.name: metric name test is also a check's name$/u,
+    ],
     // preview and attempts
     ["a preview that isn't a mapping", "preview: pnpm build\n", /^preview: preview must be a mapping$/u],
     ["an empty preview command", "preview: { command: '' }\n", /^preview\.command: must not be empty$/u],

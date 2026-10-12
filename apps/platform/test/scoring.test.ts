@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ServiceError } from "../src/errors.ts";
-import type { CheckResult, ScoringResult } from "../src/results.ts";
+import type { CheckResult, LegacyResult, ScoringResult } from "../src/results.ts";
 import { SCORING_CAP } from "../src/scoring.ts";
 import type { ScoringOutcome, ScoringParams, ScoringRequest, ScoringWorkflow } from "../src/scoring.ts";
 import { TaskStore } from "../src/task-store.ts";
@@ -98,8 +98,7 @@ function result(overrides: Partial<ScoringResult> = {}): ScoringResult {
     config: { kind: "none" },
     gate: "passed",
     checks: [],
-    builtin: { filesChanged: 1, additions: 2, deletions: 0, durationMs: 5 },
-    preview: { status: "none" },
+    metrics: {},
     logs: [],
     ...overrides,
   };
@@ -397,14 +396,16 @@ describe("the scoring queue", () => {
 });
 
 describe("results", () => {
-  it("stores a done run's result and journals scored with its gate and a summary", async () => {
+  it("stores a done run's result and journals scored with its gate and a summary of the config's checks", async () => {
     const { store, runs, draft, journal } = setup();
     const ref = await draft();
     await store.openAttempt(PROJECT, ada, ref);
     await store.scoring.drain();
     const checks: CheckResult[] = [
-      { name: "test", required: true, outcome: "passed", durationMs: 9, metrics: { coverage: 80 }, notes: [] },
-      { name: "lint", required: false, outcome: "failed", durationMs: 1, metrics: {}, notes: [] },
+      { name: "_diff", source: "platform", required: false, outcome: "passed", durationMs: 2, notes: [] },
+      { name: "test", source: "project", required: true, outcome: "passed", durationMs: 9, notes: [] },
+      { name: "lint", source: "project", required: false, outcome: "failed", durationMs: 1, notes: [] },
+      { name: "_preview", source: "platform", required: false, outcome: "skipped", durationMs: 0, notes: [] },
     ];
     expect(store.scoring.finish(at(runs(ref), 0).id, done({ config: { kind: "valid" }, checks }))).toBeTruthy();
 
@@ -424,6 +425,39 @@ describe("results", () => {
     store.scoring.finish(at(runs(ref), 0).id, { status: "done", result: older as ScoringResult });
 
     expect(at(runs(ref), 0).result).toEqual(result({ logs: [] }));
+  });
+
+  it("reads a result stored with builtin and preview in the current shape", async () => {
+    const { store, runs, draft } = setup();
+    const ref = await draft();
+    await store.openAttempt(PROJECT, ada, ref);
+    await store.scoring.drain();
+    const legacy: LegacyResult = {
+      base: null,
+      config: { kind: "valid" },
+      gate: "passed",
+      checks: [
+        { name: "test", required: true, outcome: "passed", durationMs: 9, metrics: { coverage: 80 }, notes: [] },
+      ],
+      builtin: { filesChanged: 2, additions: 5, deletions: 1, durationMs: 3 },
+      preview: { status: "ready", url: "https://x.workers.dev" },
+      logs: ["test"],
+    };
+    store.scoring.finish(at(runs(ref), 0).id, { status: "done", result: legacy as unknown as ScoringResult });
+
+    const read = at(runs(ref), 0).result;
+    expect(read?.checks.map((c) => [c.name, c.source, c.outcome])).toEqual([
+      ["_diff", "platform", "passed"],
+      ["test", "project", "passed"],
+      ["_preview", "platform", "passed"],
+    ]);
+    expect(read?.metrics).toMatchObject({
+      "_diff.filesChanged": { value: 2 },
+      coverage: { source: "project", type: "number", value: 80 },
+      "_preview.url": { value: "https://x.workers.dev" },
+    });
+    expect(read).not.toHaveProperty("builtin");
+    expect(read).not.toHaveProperty("preview");
   });
 
   it("keeps an errored run's error, with no result", async () => {

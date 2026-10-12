@@ -49,8 +49,20 @@ An author giving an active attempt, and with it the claim, to another user, who 
 _Avoid_: Transfer, reassignment
 
 **Base**:
-The commit an attempt's work starts from, as its git history reports it; an attempt whose base lies in another attempt's history builds on that attempt.
+The commit an attempt's change is measured from: where its history meets its task's task branch, or `origin/main` when the task has none. Read from git, never stored.
 _Avoid_: Parent, starting point
+
+**Task branch**:
+An optional line of work owned by a task, holding what every attempt should build on, such as the task's tests and fixtures. New attempts start from it, active attempts follow it as it moves, and it lands with the winning attempt.
+_Avoid_: Task base, spec branch
+
+**Needs update**:
+An active attempt whose task branch moved and could not be merged into it without conflicts; its author merges the task branch to clear it.
+_Avoid_: Behind, out of date, stale (when meaning this)
+
+**Forked from**:
+The attempt a new attempt was copied from when it was started; it records where the attempt began and never makes the other attempt its base.
+_Avoid_: Parent, builds on
 
 **Fork**:
 Any repo in a project other than its origin, where work is pushed; a fork made for an attempt is named after it (`t42a3`), and a personal fork belongs to the user who made it.

@@ -99,10 +99,13 @@ async function setup({ landing = true } = {}) {
     repos.setRef(ORIGIN, "refs/tasks/t1", head);
     return { head, following: store.recordTaskBranchPush(PROJECT, cat, { task: 1, head }) };
   };
-  /** The author pushes a new commit to their fork through the proxy. */
-  const push = async (ref: AttemptInput) => {
+  /**
+   * The author pushes a new commit to their fork through the proxy, on its head or, forced, on
+   * `parents`.
+   */
+  const push = async (ref: AttemptInput, parents?: string[]) => {
     const before = attempt(ref).scoring.sha ?? base.hash;
-    const after = repos.commit(fork(ref), { files: { "README.md": `push ${++n}\n` } }).hash;
+    const after = repos.commit(fork(ref), { files: { "README.md": `push ${++n}\n` }, parents }).hash;
     await store.recordPush(PROJECT, author(ref), { ...ref, updates: [{ ref: "refs/heads/main", before, after }] });
     return after;
   };
@@ -298,6 +301,24 @@ describe("a conflict", () => {
     await drain();
     await follow(t1a1, (before) => ({ kind: "conflict", head: before }));
     expect(attempt(t1a1).needs_update).toBeTruthy();
+  });
+});
+
+describe("an author's push that drops the task branch", () => {
+  it("follows the newer task head when the task branch moves while the push is checked", async () => {
+    const { repos, base, drain, t1a1, moveTaskBranch, push, started } = await setup();
+    moveTaskBranch();
+    // While the check reads the fork, the task branch moves again, and its push queues a follow.
+    let newer: string | undefined;
+    const readCommit = repos.readCommit.bind(repos);
+    repos.readCommit = async (name, hash) => {
+      if (newer === undefined && name === fork(t1a1)) newer = moveTaskBranch().head;
+      return readCommit(name, hash);
+    };
+    await push(t1a1, [base.hash]);
+    await drain();
+    expect(newer).toBeDefined();
+    expect(started(t1a1)?.params.taskHead).toBe(newer);
   });
 });
 

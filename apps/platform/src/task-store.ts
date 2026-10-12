@@ -291,6 +291,8 @@ interface TaskRow {
   closed_at: string | null;
   closed_by: string | null;
   attempt_limit: number | null;
+  /** The head its task branch's last recorded push left, or null when it has none. */
+  task_head: string | null;
 }
 
 /** A push-to-create between forking and creating its attempt. */
@@ -336,7 +338,8 @@ const SCHEMA = [
     created_at TEXT NOT NULL,
     closed_at TEXT,
     closed_by TEXT,
-    attempt_limit INTEGER
+    attempt_limit INTEGER,
+    task_head TEXT
   )`,
   `CREATE TABLE IF NOT EXISTS attempts (
     task INTEGER NOT NULL REFERENCES tasks (number),
@@ -383,6 +386,9 @@ const JOURNAL_COLUMNS = ["user_id TEXT", "alias TEXT", "task INTEGER", "attempt 
 /** The journal's `agent` column, from before an actor's alias was called an alias. */
 const JOURNAL_RENAMES = [["agent", "alias"]] as const;
 
+/** Columns added to tasks after their table was made: the head of its task branch. */
+const TASK_COLUMNS = ["task_head TEXT"];
+
 /**
  * Columns added to attempts after their table was made: where a forked attempt was copied from, how
  * it follows its task branch, and the alias its author started it under.
@@ -398,6 +404,15 @@ export function migrate(sql: Sql): void {
   for (const table of DROPPED_TABLES) sql.exec(`DROP TABLE IF EXISTS ${table}`);
   renameColumns(sql, "journal", JOURNAL_RENAMES);
   addColumns(sql, "journal", JOURNAL_COLUMNS);
+  if (addColumns(sql, "tasks", TASK_COLUMNS).includes("task_head")) {
+    // Tasks whose task branch was pushed before `task_head` take it from their latest push.
+    sql.exec(
+      `UPDATE tasks SET task_head = (
+         SELECT json_extract(detail, '$.head') FROM journal
+         WHERE kind = 'taskBranchPushed' AND journal.task = tasks.number ORDER BY id DESC LIMIT 1
+       )`,
+    );
+  }
   const added = addColumns(sql, "attempts", ATTEMPT_COLUMNS);
   if (added.includes("alias")) {
     // Attempts made before `alias` take it from their `created` entry (renamed above), unless handed off since.
@@ -457,7 +472,7 @@ export class TaskStore {
     this.#follow = follow;
     migrate(sql);
     this.landings = new Landings({ sql, now });
-    this.follows = new Follows({ sql, now });
+    this.follows = new Follows({ sql, now, taskHead: (task) => this.#taskHead(task) });
     this.verdicts = new Verdicts({ sql });
     this.scoring = new ScoringQueue({
       sql,
@@ -1115,6 +1130,7 @@ export class TaskStore {
   recordTaskBranchPush(project: ProjectContext, actor: Actor, input: { task: number; head: string }): string[] {
     return this.#sql.transaction(() => {
       this.#task(input.task);
+      this.#sql.exec("UPDATE tasks SET task_head = ? WHERE number = ?", input.head, input.task);
       this.#journal(actor, "taskBranchPushed", input.task, null, { head: input.head });
       const active = this.#activeAttempts(input.task);
       for (const attempt of active) {
@@ -1262,39 +1278,46 @@ export class TaskStore {
    * be read, or whose history is too long to walk, is followed: a follow of a head that contains the
    * task head changes nothing.
    */
-  async #followIfDropped(project: ProjectId, attempt: StoredAttempt, head: string): Promise<FollowNotice | null> {
-    if (!isActive(attempt.state) || this.#attemptRow(attempt)?.needs_update != null) return null;
-    const taskHead = await this.#readTaskHead(project, attempt.task);
+  async #followIfDropped(project: ProjectId, attempt: AttemptInput, head: string): Promise<FollowNotice | null> {
+    const taskHead = this.#taskHeadToCheck(attempt, head);
     if (taskHead === null) return null;
+    const fork = attemptRef(attempt.task, attempt.number);
     try {
-      if (await containsCommit(this.#repos, project.id, { attempt: attempt.fork, head }, taskHead)) return null;
+      if (await containsCommit(this.#repos, project.id, { attempt: fork, head }, taskHead)) return null;
     } catch (error) {
-      console.error({ event: "follow.head_unreadable", attempt: attempt.fork, error: String(error) });
+      console.error({ event: "follow.head_unreadable", attempt: fork, error: String(error) });
     }
-    // The attempt may have ended, or needed update, while the head was read.
     return this.#sql.transaction(() => {
-      const now = this.#attempt(attempt);
-      if (!isActive(now.state) || this.#attemptRow(now)?.needs_update != null) return null;
-      this.#queueFollow(project, now, taskHead);
-      return { task: now.task, attempt: now.fork, taskHead };
+      // The task branch, the attempt or its head may have moved on while the head was read: a newer
+      // push is checked on its own, and a task branch push queued a follow of its new head.
+      if (this.#taskHeadToCheck(attempt, head) !== taskHead) return null;
+      this.#queueFollow(project, attempt, taskHead);
+      return { task: attempt.task, attempt: fork, taskHead };
     });
+  }
+
+  /**
+   * The task head to check the attempt's head `head` against. Null when there is nothing to check:
+   * the attempt ended, or needs update (`#authorMoved` queued its follow), `head` is no longer its
+   * head, or its task has no task branch.
+   */
+  #taskHeadToCheck(input: AttemptInput, head: string): string | null {
+    const attempt = this.#attempt(input);
+    if (!isActive(attempt.state) || attempt.needs_update || attempt.scoring.sha !== head) return null;
+    return this.#taskHead(attempt.task);
   }
 
   /** Queues a follow of the task's task branch for an attempt that (re)starts, when the task has one. */
   async #catchUp(project: ProjectId, attempt: AttemptInput): Promise<void> {
-    const taskHead = await this.#readTaskHead(project, attempt.task);
-    if (taskHead === null) return;
-    this.#sql.transaction(() => this.#queueFollow(project, attempt, taskHead));
-  }
-
-  /** The head of the task's task branch, or null when it has none or the origin couldn't be read. */
-  async #readTaskHead(project: ProjectId, task: number): Promise<string | null> {
+    let head: { sha: string } | null;
     try {
-      return (await taskBranchHead(this.#repos, project.id, task))?.sha ?? null;
+      head = await taskBranchHead(this.#repos, project.id, attempt.task);
     } catch (error) {
-      console.error({ event: "follow.task_branch_unreadable", task, error: String(error) });
-      return null;
+      console.error({ event: "follow.task_branch_unreadable", task: attempt.task, error: String(error) });
+      return;
     }
+    if (head === null) return;
+    this.#sql.transaction(() => this.#queueFollow(project, attempt, head.sha));
   }
 
   /**
@@ -1929,6 +1952,12 @@ export class TaskStore {
     const [row] = this.#sql.exec<TaskRow>("SELECT * FROM tasks WHERE number = ?", number);
     if (row === undefined) throw new ServiceError("notFound", `no task ${taskRef(number)}`);
     return toTask(row);
+  }
+
+  /** The head of the task's task branch, as its last recorded push left it; null when it has none. */
+  #taskHead(task: number): string | null {
+    const [row] = this.#sql.exec<Pick<TaskRow, "task_head">>("SELECT task_head FROM tasks WHERE number = ?", task);
+    return row?.task_head ?? null;
   }
 
   #openMergeRequest(task: number): StoredMergeRequest {

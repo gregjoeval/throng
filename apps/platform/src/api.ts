@@ -203,7 +203,7 @@ const TaskChecksInputSchema = z.array(z.unknown()).openapi({
 const TaskMetricsInputSchema = z.array(z.unknown()).openapi({
   description:
     "The task's own metrics, read after the project's, in the shape of `.throng/config.yml`'s `metrics`: " +
-    "`name`, `from`, `type`, and optionally `unit` and `order`. Names must not start with `_` or clash with a " +
+    "`name`, `from`, `type`, and as its type allows `unit`, `order`, `values` and `format`. Names must not start with `_` or clash with a " +
     "check or metric in the project's config on `main`, or one of the task's checks, and each `from` must name " +
     "one of the project's or the task's checks. Replaces the task's metrics.",
   example: [{ name: "lines", from: "test.coverage-summary.total.lines.total", type: "number", order: "asc" }],
@@ -442,7 +442,10 @@ const ScoringResultSchema = z
             required: z.boolean(),
             outcome: z.enum(CHECK_OUTCOMES),
             durationMs: z.number(),
-            notes: z.array(z.string()).openapi({ description: "Ignored metrics, or why it was skipped." }),
+            notes: z.array(z.string()).openapi({
+              description:
+                "What the run noticed about it, such as why it was skipped or why the Preview didn't deploy.",
+            }),
           })
           .openapi("CheckResult"),
       )

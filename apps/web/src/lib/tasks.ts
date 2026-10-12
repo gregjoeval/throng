@@ -2,7 +2,7 @@
 // and which body a task page shows for a task's state.
 
 import type { InferResponseType } from "hono/client";
-import type { TasksApi as Tasks } from "@/lib/api";
+import type { ProjectRef, TasksApi as Tasks } from "@/lib/api";
 
 export type Task = InferResponseType<Tasks[":t"]["$get"], 200>;
 export type ListedTask = InferResponseType<Tasks["$get"], 200>["tasks"][number];
@@ -65,7 +65,7 @@ export function taskBody(task: Task, attempts: Attempt[]): TaskBody {
 }
 
 /** The platform path of a project's git remote: its origin, or an attempt's fork. */
-export function gitRemotePath(owner: string, project: string, attempt?: string): string {
+export function gitRemotePath({ owner, project }: ProjectRef, attempt?: string): string {
   const name = attempt === undefined ? project : `${project}/${attempt}`;
   return `/git/${encodeURIComponent(owner)}/${name.split("/").map(encodeURIComponent).join("/")}.git`;
 }

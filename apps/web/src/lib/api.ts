@@ -33,10 +33,16 @@ export const meQuery = apiQuery(["me"], (init) => client.api.me.$get(undefined, 
 /** The projects the signed-in user owns, by handle. */
 export const projectsQuery = apiQuery(["projects"], (init) => client.api.projects.$get(undefined, { init }));
 
+/** A project, by its owner's handle and its own: what every project API path starts with. */
+export interface ProjectRef {
+  owner: string;
+  project: string;
+}
+
 /** One project by its owner's handle and its own; a 404 means there's no such project. */
-export const projectQuery = (owner: string, project: string) =>
-  apiQuery(["projects", owner, project], (init) =>
-    client.api.projects[":owner"][":project"].$get({ param: { owner, project } }, { init }),
+export const projectQuery = (projectRef: ProjectRef) =>
+  apiQuery(["projects", projectRef.owner, projectRef.project], (init) =>
+    client.api.projects[":owner"][":project"].$get({ param: projectRef }, { init }),
   );
 
 const projectApi = client.api.projects[":owner"][":project"];
@@ -46,15 +52,14 @@ const projectApi = client.api.projects[":owner"][":project"];
  * in; `offset` is how many commits to skip.
  */
 export const commitsQuery = (
-  owner: string,
-  project: string,
+  projectRef: ProjectRef,
   ref: string,
   { attempt, offset = 0 }: { attempt?: string; offset?: number } = {},
 ) =>
-  apiQuery(["projects", owner, project, "commits", ref, { attempt, offset }], (init) =>
+  apiQuery(["projects", projectRef.owner, projectRef.project, "commits", ref, { attempt, offset }], (init) =>
     projectApi.commits[":ref"].$get(
       {
-        param: { owner, project, ref },
+        param: { ...projectRef, ref },
         query: { offset: String(offset), ...(attempt === undefined ? {} : { attempt }) },
       },
       { init },
@@ -62,10 +67,10 @@ export const commitsQuery = (
   );
 
 /** One commit's message, author, committer, parents and tree. */
-export const commitQuery = (owner: string, project: string, sha: string, attempt?: string) =>
-  apiQuery(["projects", owner, project, "commit", sha, { attempt }], (init) =>
+export const commitQuery = (projectRef: ProjectRef, sha: string, attempt?: string) =>
+  apiQuery(["projects", projectRef.owner, projectRef.project, "commit", sha, { attempt }], (init) =>
     projectApi.commit[":sha"].$get(
-      { param: { owner, project, sha }, query: attempt === undefined ? {} : { attempt } },
+      { param: { ...projectRef, sha }, query: attempt === undefined ? {} : { attempt } },
       { init },
     ),
   );
@@ -79,10 +84,10 @@ export type FileDiff = CommitDiff["files"][number];
 export type DiffFlag = FileDiff["flags"][number];
 
 /** One commit's diff against its first parent: a patch per file, flags where a cap left it out. */
-export const commitDiffQuery = (owner: string, project: string, sha: string, attempt?: string) => ({
-  ...apiQuery(["projects", owner, project, "commit", sha, "diff", { attempt }], (init) =>
+export const commitDiffQuery = (projectRef: ProjectRef, sha: string, attempt?: string) => ({
+  ...apiQuery(["projects", projectRef.owner, projectRef.project, "commit", sha, "diff", { attempt }], (init) =>
     projectApi.commit[":sha"].diff.$get(
-      { param: { owner, project, sha }, query: attempt === undefined ? {} : { attempt } },
+      { param: { ...projectRef, sha }, query: attempt === undefined ? {} : { attempt } },
       { init },
     ),
   ),
@@ -106,11 +111,10 @@ export async function createProject(handle: string) {
 export const TASK_POLL_MS = 3000;
 
 /** The key prefix of everything read from one project's tasks. */
-export const projectKey = (owner: string, project: string) => ["project", `${owner}/${project}`] as const;
+export const projectKey = (projectRef: ProjectRef) => ["project", `${projectRef.owner}/${projectRef.project}`] as const;
 
 /** The key prefix of everything read about one task: invalidate it after changing the task. */
-export const taskKey = (owner: string, project: string, task: string) =>
-  [...projectKey(owner, project), "task", task] as const;
+export const taskKey = (projectRef: ProjectRef, task: string) => [...projectKey(projectRef), "task", task] as const;
 
 const tasksApi = projectApi.tasks;
 /** The tasks API's client, for inferring its response types. */
@@ -118,28 +122,28 @@ export type TasksApi = typeof tasksApi;
 type TaskListState = NonNullable<Parameters<typeof tasksApi.$get>[0]["query"]["state"]>;
 
 /** The project's tasks in one state, by number, each with its attempt count, best gate and merge request state. */
-export const tasksQuery = (owner: string, project: string, state: TaskListState) =>
-  apiQuery([...projectKey(owner, project), "tasks", state], (init) =>
-    tasksApi.$get({ param: { owner, project }, query: { state } }, { init }),
+export const tasksQuery = (projectRef: ProjectRef, state: TaskListState) =>
+  apiQuery([...projectKey(projectRef), "tasks", state], (init) =>
+    tasksApi.$get({ param: projectRef, query: { state } }, { init }),
   );
 
 /** Creates an open task, created by the signed-in user. Rejects with hono's `DetailedError` on failure. */
-export async function createTask(owner: string, project: string, task: { title: string; body: string }) {
-  return parseResponse(tasksApi.$post({ param: { owner, project }, json: task }));
+export async function createTask(projectRef: ProjectRef, task: { title: string; body: string }) {
+  return parseResponse(tasksApi.$post({ param: projectRef, json: task }));
 }
 
 /**
  * Closes a task, and its active attempts with it, or makes it obsolete, and its active attempts
  * with it. Rejects with hono's `DetailedError` on failure.
  */
-export async function endTask(owner: string, project: string, task: string, how: "close" | "obsolete") {
-  return parseResponse(tasksApi[":t"][how].$post({ param: { owner, project, t: task } }));
+export async function endTask(projectRef: ProjectRef, task: string, how: "close" | "obsolete") {
+  return parseResponse(tasksApi[":t"][how].$post({ param: { ...projectRef, t: task } }));
 }
 
 /** One task by its reference (`t42`), polled while the page is visible. */
-export const taskQuery = (owner: string, project: string, task: string) => ({
-  ...apiQuery(taskKey(owner, project, task), (init) =>
-    tasksApi[":t"].$get({ param: { owner, project, t: task } }, { init }),
+export const taskQuery = (projectRef: ProjectRef, task: string) => ({
+  ...apiQuery(taskKey(projectRef, task), (init) =>
+    tasksApi[":t"].$get({ param: { ...projectRef, t: task } }, { init }),
   ),
   refetchInterval: TASK_POLL_MS,
 });
@@ -149,9 +153,9 @@ export const taskQuery = (owner: string, project: string, task: string) => ({
  * current result, base and verdict counts, and the metrics the config declares. Polled while the
  * page is visible.
  */
-export const taskArenaQuery = (owner: string, project: string, task: string) => ({
-  ...apiQuery([...taskKey(owner, project, task), "arena"], (init) =>
-    tasksApi[":t"].arena.$get({ param: { owner, project, t: task } }, { init }),
+export const taskArenaQuery = (projectRef: ProjectRef, task: string) => ({
+  ...apiQuery([...taskKey(projectRef, task), "arena"], (init) =>
+    tasksApi[":t"].arena.$get({ param: { ...projectRef, t: task } }, { init }),
   ),
   refetchInterval: TASK_POLL_MS,
 });
@@ -163,8 +167,8 @@ export type Compare = Pick<CommitDiff, "files" | "totals" | "truncated"> & {
 };
 
 /** A project's API path, `/api/projects/<owner>/<project>`, for URLs `hc` can't type. */
-export const projectPath = (owner: string, project: string) =>
-  `/api/projects/${[owner, project].map(encodeURIComponent).join("/")}`;
+export const projectPath = (projectRef: ProjectRef) =>
+  `/api/projects/${[projectRef.owner, projectRef.project].map(encodeURIComponent).join("/")}`;
 
 /** GETs a hand-built platform URL as JSON; any other status throws a `PlatformError`. */
 async function getJson<T>(url: string, signal: AbortSignal): Promise<T> {
@@ -178,20 +182,20 @@ async function getJson<T>(url: string, signal: AbortSignal): Promise<T> {
  * addressed by sha, so it's never refetched: a moved head is a new query. The route takes the range
  * as one path segment, which `hc` can't type, so the URL is built here.
  */
-export const compareQuery = (owner: string, project: string, from: string, to: string, attempt?: string) =>
+export const compareQuery = (projectRef: ProjectRef, from: string, to: string, attempt?: string) =>
   queryOptions({
-    queryKey: [...projectKey(owner, project), "compare", from, to, { attempt }] as const,
+    queryKey: [...projectKey(projectRef), "compare", from, to, { attempt }] as const,
     staleTime: Number.POSITIVE_INFINITY,
     queryFn: ({ signal }) => {
       const query = attempt === undefined ? "" : `?attempt=${encodeURIComponent(attempt)}`;
-      return getJson<Compare>(`${projectPath(owner, project)}/compare/${from}...${to}${query}`, signal);
+      return getJson<Compare>(`${projectPath(projectRef)}/compare/${from}...${to}${query}`, signal);
     },
   });
 
 /** The task's latest merge request, open or not, polled while the page is visible. */
-export const mergeRequestQuery = (owner: string, project: string, task: string) => ({
-  ...apiQuery([...taskKey(owner, project, task), "merge-request"], (init) =>
-    tasksApi[":t"]["merge-request"].$get({ param: { owner, project, t: task } }, { init }),
+export const mergeRequestQuery = (projectRef: ProjectRef, task: string) => ({
+  ...apiQuery([...taskKey(projectRef, task), "merge-request"], (init) =>
+    tasksApi[":t"]["merge-request"].$get({ param: { ...projectRef, t: task } }, { init }),
   ),
   refetchInterval: TASK_POLL_MS,
 });
@@ -200,33 +204,32 @@ export const mergeRequestQuery = (owner: string, project: string, task: string) 
  * Why the merge request last left the queue, with the conflict, failed checks or error. Keyed by
  * when it happened, so a later dequeue is a new query.
  */
-export const dequeueQuery = (owner: string, project: string, task: string, at: string) =>
-  apiQuery([...taskKey(owner, project, task), "dequeue", at], (init) =>
-    tasksApi[":t"]["merge-request"].dequeue.$get({ param: { owner, project, t: task } }, { init }),
+export const dequeueQuery = (projectRef: ProjectRef, task: string, at: string) =>
+  apiQuery([...taskKey(projectRef, task), "dequeue", at], (init) =>
+    tasksApi[":t"]["merge-request"].dequeue.$get({ param: { ...projectRef, t: task } }, { init }),
   );
 
 /** The URL of a log of the checks behind a `failedChecks` dequeue. */
-export const dequeueLogUrl = (owner: string, project: string, task: string, name: string) =>
-  `${projectPath(owner, project)}/tasks/${encodeURIComponent(task)}/merge-request/dequeue/logs/${encodeURIComponent(name)}`;
+export const dequeueLogUrl = (projectRef: ProjectRef, task: string, name: string) =>
+  `${projectPath(projectRef)}/tasks/${encodeURIComponent(task)}/merge-request/dequeue/logs/${encodeURIComponent(name)}`;
 
 /**
  * One conflicting file of the dequeue at `at`, diffed from the merge base to `main` or to the
  * attempt. The path is a tail of path segments, which `hc` can't type, so the URL is built here.
  */
 export const dequeueFileDiffQuery = (
-  owner: string,
-  project: string,
+  projectRef: ProjectRef,
   task: string,
   at: string,
   path: string,
   side: "main" | "attempt",
 ) =>
   queryOptions({
-    queryKey: [...taskKey(owner, project, task), "dequeue", at, "file", path, side] as const,
+    queryKey: [...taskKey(projectRef, task), "dequeue", at, "file", path, side] as const,
     staleTime: Number.POSITIVE_INFINITY,
     queryFn: ({ signal }) => {
       const tail = path.split("/").map(encodeURIComponent).join("/");
-      const base = `${projectPath(owner, project)}/tasks/${encodeURIComponent(task)}/merge-request/dequeue`;
+      const base = `${projectPath(projectRef)}/tasks/${encodeURIComponent(task)}/merge-request/dequeue`;
       return getJson<FileDiff>(`${base}/files/${tail}/diff?side=${side}`, signal);
     },
   });
@@ -235,55 +238,53 @@ export const dequeueFileDiffQuery = (
  * Selects `attempt` as the task's merge request, closing its other active attempts. Rejects with
  * hono's `DetailedError` on failure.
  */
-export async function selectAttempt(owner: string, project: string, task: string, attempt: string) {
-  return parseResponse(tasksApi[":t"].selection.$post({ param: { owner, project, t: task }, json: { attempt } }));
+export async function selectAttempt(projectRef: ProjectRef, task: string, attempt: string) {
+  return parseResponse(tasksApi[":t"].selection.$post({ param: { ...projectRef, t: task }, json: { attempt } }));
 }
 
 /** Approves the source attempt's current head, or cancels the merge request. Rejects on failure. */
-export async function actOnMergeRequest(owner: string, project: string, task: string, how: "approve" | "cancel") {
-  return parseResponse(tasksApi[":t"]["merge-request"][how].$post({ param: { owner, project, t: task } }));
+export async function actOnMergeRequest(projectRef: ProjectRef, task: string, how: "approve" | "cancel") {
+  return parseResponse(tasksApi[":t"]["merge-request"][how].$post({ param: { ...projectRef, t: task } }));
 }
 
 /** Reopens a closed attempt as a draft. Rejects with hono's `DetailedError` on failure. */
-export async function reopenAttempt(owner: string, project: string, attempt: string) {
-  return parseResponse(projectApi.attempts[":a"].reopen.$post({ param: { owner, project, a: attempt } }));
+export async function reopenAttempt(projectRef: ProjectRef, attempt: string) {
+  return parseResponse(projectApi.attempts[":a"].reopen.$post({ param: { ...projectRef, a: attempt } }));
 }
 
 /**
  * `main`'s current head (null before the first push), polled while the page is visible: the arena's
  * "current main" reference compares against it by sha, so a moved `main` is a new compare.
  */
-export const mainHeadQuery = (owner: string, project: string) => ({
-  ...apiQuery([...projectKey(owner, project), "refs"], (init) =>
-    projectApi.refs.$get({ param: { owner, project } }, { init }),
-  ),
+export const mainHeadQuery = (projectRef: ProjectRef) => ({
+  ...apiQuery([...projectKey(projectRef), "refs"], (init) => projectApi.refs.$get({ param: projectRef }, { init })),
   select: (refs: { main: { sha: string | null } }) => refs.main.sha,
   refetchInterval: TASK_POLL_MS,
 });
 
 /** Queues scoring of a draft's head now. Rejects with hono's `DetailedError` on failure. */
-export async function scoreNow(owner: string, project: string, attempt: string) {
-  return parseResponse(projectApi.attempts[":a"].score.$post({ param: { owner, project, a: attempt } }));
+export async function scoreNow(projectRef: ProjectRef, attempt: string) {
+  return parseResponse(projectApi.attempts[":a"].score.$post({ param: { ...projectRef, a: attempt } }));
 }
 
 /** The task's attempts by number, obsolete ones left out, polled while the page is visible. */
-export const taskAttemptsQuery = (owner: string, project: string, task: string) => ({
-  ...apiQuery([...taskKey(owner, project, task), "attempts"], (init) =>
-    tasksApi[":t"].attempts.$get({ param: { owner, project, t: task }, query: {} }, { init }),
+export const taskAttemptsQuery = (projectRef: ProjectRef, task: string) => ({
+  ...apiQuery([...taskKey(projectRef, task), "attempts"], (init) =>
+    tasksApi[":t"].attempts.$get({ param: { ...projectRef, t: task }, query: {} }, { init }),
   ),
   refetchInterval: TASK_POLL_MS,
 });
 
 /** The key prefix of everything read about one attempt: invalidate it after changing the attempt. */
-export const attemptKey = (owner: string, project: string, attempt: string) =>
-  [...projectKey(owner, project), "attempt", attempt] as const;
+export const attemptKey = (projectRef: ProjectRef, attempt: string) =>
+  [...projectKey(projectRef), "attempt", attempt] as const;
 
 const attemptApi = projectApi.attempts[":a"];
 
 /** An attempt's scoring runs, newest first, superseded and cancelled ones included, polled. */
-export const attemptRunsQuery = (owner: string, project: string, attempt: string) => ({
-  ...apiQuery([...attemptKey(owner, project, attempt), "runs"], (init) =>
-    attemptApi.runs.$get({ param: { owner, project, a: attempt } }, { init }),
+export const attemptRunsQuery = (projectRef: ProjectRef, attempt: string) => ({
+  ...apiQuery([...attemptKey(projectRef, attempt), "runs"], (init) =>
+    attemptApi.runs.$get({ param: { ...projectRef, a: attempt } }, { init }),
   ),
   refetchInterval: TASK_POLL_MS,
 });
@@ -291,9 +292,9 @@ export const attemptRunsQuery = (owner: string, project: string, attempt: string
 export type RunDetail = InferResponseType<typeof attemptApi.runs.$get, 200>["runs"][number];
 
 /** Every verdict on the attempt, on every head it has had, oldest first, polled. */
-export const verdictsQuery = (owner: string, project: string, attempt: string) => ({
-  ...apiQuery([...attemptKey(owner, project, attempt), "verdicts"], (init) =>
-    attemptApi.verdicts.$get({ param: { owner, project, a: attempt } }, { init }),
+export const verdictsQuery = (projectRef: ProjectRef, attempt: string) => ({
+  ...apiQuery([...attemptKey(projectRef, attempt), "verdicts"], (init) =>
+    attemptApi.verdicts.$get({ param: { ...projectRef, a: attempt } }, { init }),
   ),
   refetchInterval: TASK_POLL_MS,
 });
@@ -305,26 +306,25 @@ export type Verdict = InferResponseType<typeof attemptApi.verdicts.$get, 200>["v
  * Rejects with hono's `DetailedError` on failure.
  */
 export async function postVerdict(
-  owner: string,
-  project: string,
+  projectRef: ProjectRef,
   attempt: string,
   verdict: Pick<Verdict, "recommendation" | "body">,
 ) {
-  return parseResponse(attemptApi.verdicts.$post({ param: { owner, project, a: attempt }, json: verdict }));
+  return parseResponse(attemptApi.verdicts.$post({ param: { ...projectRef, a: attempt }, json: verdict }));
 }
 
 /**
  * One log of a scoring run, streamed: the text read so far, growing as chunks arrive. A stored log
  * never changes, so it's never refetched.
  */
-export const runLogQuery = (owner: string, project: string, run: number, name: string) =>
+export const runLogQuery = (projectRef: ProjectRef, run: number, name: string) =>
   queryOptions({
-    queryKey: [...projectKey(owner, project), "run", run, "log", name] as const,
+    queryKey: [...projectKey(projectRef), "run", run, "log", name] as const,
     staleTime: Number.POSITIVE_INFINITY,
     queryFn: streamedQuery({
       streamFn: async function* ({ signal }) {
         const res = await projectApi.runs[":runId"].logs[":name"].$get(
-          { param: { owner, project, runId: String(run), name } },
+          { param: { ...projectRef, runId: String(run), name } },
           { init: { signal } },
         );
         if (!res.ok || res.body === null) throw await PlatformError.from(res);

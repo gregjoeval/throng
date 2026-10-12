@@ -14,6 +14,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { endTask, meQuery, projectKey, projectQuery } from "@/lib/api";
+import type { ProjectRef } from "@/lib/api";
 import { apiError } from "@/lib/errors";
 import type { Task } from "@/lib/tasks";
 
@@ -29,19 +30,17 @@ const ACTIONS: Record<How, { label: string; question: (ref: string) => string; e
  * owner may close an open task; only the project owner may make a task obsolete.
  */
 export function TaskActions({
-  owner,
-  project,
+  projectRef,
   task,
   active,
 }: {
-  owner: string;
-  project: string;
+  projectRef: ProjectRef;
   task: Task;
   /** How many active attempts the task has, to say they end with it. */
   active: number;
 }) {
   const me = useQuery(meQuery);
-  const found = useQuery(projectQuery(owner, project));
+  const found = useQuery(projectQuery(projectRef));
   const [confirming, setConfirming] = useState<How | null>(null);
   if (!me.isSuccess || !found.isSuccess) return null;
   const viewer = me.data.user.id;
@@ -60,8 +59,7 @@ export function TaskActions({
       ))}
       {confirming === null ? null : (
         <ConfirmEnd
-          owner={owner}
-          project={project}
+          projectRef={projectRef}
           task={task}
           active={active}
           how={confirming}
@@ -73,15 +71,13 @@ export function TaskActions({
 }
 
 function ConfirmEnd({
-  owner,
-  project,
+  projectRef,
   task,
   active,
   how,
   onDone,
 }: {
-  owner: string;
-  project: string;
+  projectRef: ProjectRef;
   task: Task;
   active: number;
   how: How;
@@ -89,9 +85,9 @@ function ConfirmEnd({
 }) {
   const queryClient = useQueryClient();
   const end = useMutation({
-    mutationFn: () => endTask(owner, project, task.ref, how),
+    mutationFn: () => endTask(projectRef, task.ref, how),
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: projectKey(owner, project) });
+      await queryClient.invalidateQueries({ queryKey: projectKey(projectRef) });
       onDone();
     },
   });

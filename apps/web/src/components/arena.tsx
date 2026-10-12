@@ -14,6 +14,7 @@ import { useSelect } from "@/components/selection";
 import { ErrorState, Loading } from "@/components/states";
 import { Button } from "@/components/ui/button";
 import { mainHeadQuery, meQuery, reopenAttempt, taskArenaQuery, taskKey } from "@/lib/api";
+import type { ProjectRef } from "@/lib/api";
 import { bestValues, formatValue, isPassing, metricColumns, sortRail, toggleLane } from "@/lib/arena";
 import type { ArenaAttempt, MetricColumn, RailSort } from "@/lib/arena";
 import { arenaView, fileRows, parseArenaSearch, readStoredView, storageKey, storeView } from "@/lib/arena-view";
@@ -28,8 +29,7 @@ const SHARED_WIDTH_LANES = 2;
 const LANE_MIN_WIDTH = "520px";
 
 interface InTask {
-  owner: string;
-  project: string;
+  projectRef: ProjectRef;
   task: string;
 }
 
@@ -37,15 +37,14 @@ interface InTask {
  * The arena of a task with two or more active attempts. `attempts` are the task's attempts as the
  * attempts list gives them, for what the arena endpoint doesn't carry (the author's note).
  */
-export function Arena({ owner, project, task, attempts }: InTask & { attempts: Attempt[] }) {
-  const arena = useQuery(taskArenaQuery(owner, project, task));
+export function Arena({ projectRef, task, attempts }: InTask & { attempts: Attempt[] }) {
+  const arena = useQuery(taskArenaQuery(projectRef, task));
   if (arena.isPending) return <Loading />;
   if (arena.isError) return <ErrorState error={arena.error} />;
   const notes = new Map(attempts.map((a) => [a.ref, a.note]));
   return (
     <ArenaLayout
-      owner={owner}
-      project={project}
+      projectRef={projectRef}
       task={task}
       attempts={arena.data.attempts}
       columns={metricColumns(arena.data.metrics)}
@@ -55,8 +54,7 @@ export function Arena({ owner, project, task, attempts }: InTask & { attempts: A
 }
 
 function ArenaLayout({
-  owner,
-  project,
+  projectRef,
   task,
   attempts,
   columns,
@@ -68,15 +66,14 @@ function ArenaLayout({
 }) {
   const active = attempts.filter(isActive);
   const closed = attempts.filter((a) => a.state === "closed");
-  const [view, change] = useArenaView(owner, project, task, active);
+  const [view, change] = useArenaView(projectRef, task, active);
   const shown = view.lanes.flatMap((ref) => active.filter((a) => a.ref === ref));
   const sideways = shown.length > SHARED_WIDTH_LANES;
-  const select = useSelect(owner, project, task, active.length);
+  const select = useSelect(projectRef, task, active.length);
   return (
     <div data-testid="arena" className="grid gap-4 lg:grid-cols-[16rem_minmax(0,1fr)] lg:items-start">
       <Rail
-        owner={owner}
-        project={project}
+        projectRef={projectRef}
         task={task}
         attempts={active}
         closed={closed}
@@ -97,8 +94,7 @@ function ArenaLayout({
             {shown.map((attempt) => (
               <Lane
                 key={attempt.ref}
-                owner={owner}
-                project={project}
+                projectRef={projectRef}
                 attempt={attempt}
                 note={notes.get(attempt.ref) ?? ""}
                 reference={view.ref}
@@ -108,7 +104,7 @@ function ArenaLayout({
               />
             ))}
             {view.by === "file" ? (
-              <FileRows owner={owner} project={project} shown={shown} reference={view.ref} layout={view.layout} />
+              <FileRows projectRef={projectRef} shown={shown} reference={view.ref} layout={view.layout} />
             ) : null}
           </div>
         </section>
@@ -125,14 +121,13 @@ const taskRoute = getRouteApi("/$owner/$project/tasks/$t");
  * URL doesn't carry is copied into the URL, so the address always reproduces what's shown.
  */
 function useArenaView(
-  owner: string,
-  project: string,
+  projectRef: ProjectRef,
   task: string,
   active: ArenaAttempt[],
 ): [ArenaView, (change: Partial<ArenaView>) => void] {
   const search = taskRoute.useSearch();
   const navigate = taskRoute.useNavigate();
-  const key = storageKey(owner, project, task);
+  const key = storageKey(projectRef, task);
   const [stored] = useState(() => readStoredView(key));
   const wanted: ArenaSearch = { ...stored, ...parseArenaSearch(search) };
   const write = (next: ArenaSearch) =>
@@ -246,24 +241,22 @@ function Segmented<T extends string>({
  * saying how many changed it, with each lane's diff of it or a note that it left the file alone.
  */
 function FileRows({
-  owner,
-  project,
+  projectRef,
   shown,
   reference,
   layout,
 }: {
-  owner: string;
-  project: string;
+  projectRef: ProjectRef;
   shown: ArenaAttempt[];
   reference: Reference;
   layout: Layout;
 }) {
   const sides = shown.map((attempt) => laneReference(attempt, reference));
-  const main = useQuery({ ...mainHeadQuery(owner, project), enabled: sides.some((side) => side.onMain) });
+  const main = useQuery({ ...mainHeadQuery(projectRef), enabled: sides.some((side) => side.onMain) });
   const compares = useQueries({
     queries: shown.map((attempt, i) => {
       const from = sides[i]?.onMain ? (main.data ?? null) : (attempt.base?.sha ?? null);
-      return laneCompareQuery(owner, project, attempt, from);
+      return laneCompareQuery(projectRef, attempt, from);
     }),
   });
   const failed = compares.find((compare) => compare.isError);
@@ -321,8 +314,7 @@ const SORT_LABELS = { number: "Number", gate: "Gate" } as const;
 
 /** The attempt cards, sortable, then the closed attempts, collapsed. */
 function Rail({
-  owner,
-  project,
+  projectRef,
   task,
   attempts,
   closed,
@@ -381,7 +373,7 @@ function Rail({
         ))}
       </ul>
       <p className="text-xs text-muted-foreground">Click a card to add or remove its lane.</p>
-      {closed.length === 0 ? null : <ClosedGroup owner={owner} project={project} task={task} closed={closed} />}
+      {closed.length === 0 ? null : <ClosedGroup projectRef={projectRef} task={task} closed={closed} />}
     </aside>
   );
 }
@@ -488,7 +480,7 @@ function Badge({ children }: { children: ReactNode }) {
 }
 
 /** The task's closed attempts, collapsed under their count; each author may reopen theirs. */
-function ClosedGroup({ owner, project, task, closed }: InTask & { closed: ArenaAttempt[] }) {
+function ClosedGroup({ projectRef, task, closed }: InTask & { closed: ArenaAttempt[] }) {
   const me = useQuery(meQuery);
   return (
     <details className="rounded-xl border px-3 py-2 text-sm">
@@ -499,7 +491,7 @@ function ClosedGroup({ owner, project, task, closed }: InTask & { closed: ArenaA
             <span className="font-mono">{attempt.ref}</span>
             <span className="text-xs text-muted-foreground">{attempt.author.handle}</span>
             {me.data?.user.id === attempt.author.id ? (
-              <ReopenAttempt owner={owner} project={project} task={task} attempt={attempt.ref} />
+              <ReopenAttempt projectRef={projectRef} task={task} attempt={attempt.ref} />
             ) : null}
           </li>
         ))}
@@ -509,12 +501,12 @@ function ClosedGroup({ owner, project, task, closed }: InTask & { closed: ArenaA
 }
 
 /** Reopens a closed attempt as a draft; only its author may. */
-function ReopenAttempt({ owner, project, task, attempt }: InTask & { attempt: string }) {
+function ReopenAttempt({ projectRef, task, attempt }: InTask & { attempt: string }) {
   const queryClient = useQueryClient();
   const reopen = useMutation({
-    mutationFn: () => reopenAttempt(owner, project, attempt),
+    mutationFn: () => reopenAttempt(projectRef, attempt),
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: taskKey(owner, project, task) });
+      await queryClient.invalidateQueries({ queryKey: taskKey(projectRef, task) });
     },
   });
   return (

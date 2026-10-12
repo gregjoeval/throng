@@ -23,7 +23,7 @@ const SECTIONS: Record<ProjectLocation["view"], "code" | "commits" | "tasks"> = 
 };
 
 export function ProjectView({ location, children }: { location: ProjectLocation; children: ReactNode }) {
-  const project = useQuery(projectQuery(location.owner, location.project));
+  const project = useQuery(projectQuery({ owner: location.owner, project: location.project }));
   const { owner } = location;
   const ref = "ref" in location ? location.ref : "main";
   const home = buildPath({ view: "home", owner, project: location.project });

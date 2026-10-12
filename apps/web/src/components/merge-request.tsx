@@ -22,25 +22,25 @@ import {
   taskArenaQuery,
   taskKey,
 } from "@/lib/api";
+import type { ProjectRef } from "@/lib/api";
 import type { ArenaAttempt } from "@/lib/arena";
 import { apiError } from "@/lib/errors";
 import { isOpenMergeRequest } from "@/lib/tasks";
 import type { Attempt, Dequeue, MergeRequest, Task } from "@/lib/tasks";
 
 interface InTask {
-  owner: string;
-  project: string;
+  projectRef: ProjectRef;
   task: Task;
 }
 
-export function MergeRequestView({ owner, project, task, source }: InTask & { source: Attempt }) {
+export function MergeRequestView({ projectRef, task, source }: InTask & { source: Attempt }) {
   const mr = useQuery({
-    ...mergeRequestQuery(owner, project, task.ref),
+    ...mergeRequestQuery(projectRef, task.ref),
     refetchInterval: (query) =>
       query.state.data === undefined || isOpenMergeRequest(query.state.data.state) ? TASK_POLL_MS : false,
   });
-  const arena = useQuery(taskArenaQuery(owner, project, task.ref));
-  const mayAct = useMaySelect(owner, project, task);
+  const arena = useQuery(taskArenaQuery(projectRef, task.ref));
+  const mayAct = useMaySelect(projectRef, task);
   if (mr.isPending || arena.isPending) return <Loading />;
   if (mr.isError) return <ErrorState error={mr.error} />;
   if (arena.isError) return <ErrorState error={arena.error} />;
@@ -53,7 +53,7 @@ export function MergeRequestView({ owner, project, task, source }: InTask & { so
       <div className="flex flex-col gap-2 rounded-xl border px-4 py-3 text-sm">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <Banner mr={mr.data} />
-          {open && mayAct ? <CancelMergeRequest owner={owner} project={project} task={task} mr={mr.data} /> : null}
+          {open && mayAct ? <CancelMergeRequest projectRef={projectRef} task={task} mr={mr.data} /> : null}
         </div>
         <p className="text-muted-foreground">
           Approved <span className="font-mono text-foreground">{mr.data.approvedHead.slice(0, 7)}</span> by{" "}
@@ -65,19 +65,12 @@ export function MergeRequestView({ owner, project, task, source }: InTask & { so
         </p>
       </div>
       {state === "needsReview" ? (
-        <ChangesSinceApproval
-          owner={owner}
-          project={project}
-          task={task}
-          mr={mr.data}
-          attempt={attempt}
-          mayApprove={mayAct}
-        />
+        <ChangesSinceApproval projectRef={projectRef} task={task} mr={mr.data} attempt={attempt} mayApprove={mayAct} />
       ) : null}
       {mr.data.lastDequeue !== null && (state === "pending" || state === "needsReview") ? (
-        <Dequeued owner={owner} project={project} task={task} mr={mr.data} at={mr.data.lastDequeue.at} />
+        <Dequeued projectRef={projectRef} task={task} mr={mr.data} at={mr.data.lastDequeue.at} />
       ) : null}
-      <Lane owner={owner} project={project} attempt={attempt} note={source.note} />
+      <Lane projectRef={projectRef} attempt={attempt} note={source.note} />
     </div>
   );
 }
@@ -128,20 +121,20 @@ function Banner({ mr }: { mr: MergeRequest }) {
 }
 
 /** A mutation on the merge request that refreshes everything read about the task once it's done. */
-function useMergeRequestAction(owner: string, project: string, task: string, how: "approve" | "cancel") {
+function useMergeRequestAction(projectRef: ProjectRef, task: string, how: "approve" | "cancel") {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: () => actOnMergeRequest(owner, project, task, how),
+    mutationFn: () => actOnMergeRequest(projectRef, task, how),
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: taskKey(owner, project, task) });
+      await queryClient.invalidateQueries({ queryKey: taskKey(projectRef, task) });
     },
   });
 }
 
 /** Cancel merge request, behind an inline confirmation. */
-function CancelMergeRequest({ owner, project, task, mr }: InTask & { mr: MergeRequest }) {
+function CancelMergeRequest({ projectRef, task, mr }: InTask & { mr: MergeRequest }) {
   const [confirming, setConfirming] = useState(false);
-  const cancel = useMergeRequestAction(owner, project, task.ref, "cancel");
+  const cancel = useMergeRequestAction(projectRef, task.ref, "cancel");
   if (!confirming) {
     return (
       <Button variant="outline" size="sm" onClick={() => setConfirming(true)}>
@@ -179,17 +172,16 @@ function ActionError({ mutation }: { mutation: { isError: boolean; error: unknow
 
 /** What changed from the approved head to the source's new head, and Approve for it. */
 function ChangesSinceApproval({
-  owner,
-  project,
+  projectRef,
   task,
   mr,
   attempt,
   mayApprove,
 }: InTask & { mr: MergeRequest; attempt: ArenaAttempt; mayApprove: boolean }) {
-  const approve = useMergeRequestAction(owner, project, task.ref, "approve");
+  const approve = useMergeRequestAction(projectRef, task.ref, "approve");
   const head = attempt.sha;
   const changes = useQuery({
-    ...compareQuery(owner, project, mr.approvedHead, head ?? "", attempt.ref),
+    ...compareQuery(projectRef, mr.approvedHead, head ?? "", attempt.ref),
     enabled: head !== null,
   });
   return (
@@ -237,10 +229,10 @@ function reasonText(dequeue: { reason: Dequeue["reason"] }, attempt: string): st
 }
 
 /** The merge request's last dequeue: its reason and, for those that have them, the details. */
-function Dequeued({ owner, project, task, mr, at }: InTask & { mr: MergeRequest; at: string }) {
+function Dequeued({ projectRef, task, mr, at }: InTask & { mr: MergeRequest; at: string }) {
   const reason = mr.lastDequeue?.reason ?? "newPush";
   const detailed = reason === "conflict" || reason === "failedChecks" || reason === "errored";
-  const dequeue = useQuery({ ...dequeueQuery(owner, project, task.ref, at), enabled: detailed });
+  const dequeue = useQuery({ ...dequeueQuery(projectRef, task.ref, at), enabled: detailed });
   return (
     <section aria-label="Dequeued" className="flex flex-col gap-3 rounded-xl border px-4 py-3 text-sm">
       <h3 className="font-heading font-medium">
@@ -249,7 +241,7 @@ function Dequeued({ owner, project, task, mr, at }: InTask & { mr: MergeRequest;
       <p>{reasonText({ reason }, mr.attempt)}</p>
       {detailed && dequeue.isPending ? <Loading label="Loading details…" /> : null}
       {dequeue.isError ? <ErrorState error={dequeue.error} /> : null}
-      {dequeue.isSuccess ? <DequeueDetails owner={owner} project={project} task={task} dequeue={dequeue.data} /> : null}
+      {dequeue.isSuccess ? <DequeueDetails projectRef={projectRef} task={task} dequeue={dequeue.data} /> : null}
     </section>
   );
 }
@@ -262,7 +254,7 @@ const OUTCOME_LABELS: Record<FailedCheck["outcome"], string> = {
   skipped: "Skipped",
 };
 
-function DequeueDetails({ owner, project, task, dequeue }: InTask & { dequeue: Dequeue }) {
+function DequeueDetails({ projectRef, task, dequeue }: InTask & { dequeue: Dequeue }) {
   const { details } = dequeue;
   if (details === null) return null;
   if ("files" in details) {
@@ -271,8 +263,7 @@ function DequeueDetails({ owner, project, task, dequeue }: InTask & { dequeue: D
         {details.files.map((file) => (
           <ConflictFile
             key={file.path}
-            owner={owner}
-            project={project}
+            projectRef={projectRef}
             task={task}
             at={dequeue.at}
             attempt={details.attempt}
@@ -295,7 +286,7 @@ function DequeueDetails({ owner, project, task, dequeue }: InTask & { dequeue: D
               <span className="text-muted-foreground">{OUTCOME_LABELS[check.outcome]}</span>
               {check.log === null ? null : (
                 <a
-                  href={dequeueLogUrl(owner, project, task.ref, check.log)}
+                  href={dequeueLogUrl(projectRef, task.ref, check.log)}
                   target="_blank"
                   rel="noreferrer"
                   className="underline"
@@ -327,8 +318,7 @@ const CONFLICT_LABELS: Record<ConflictFileDetails["type"], string> = {
 
 /** One conflicting file: its type, each hunk's three sides, and its diff from the base to each side. */
 function ConflictFile({
-  owner,
-  project,
+  projectRef,
   task,
   at,
   attempt,
@@ -372,18 +362,9 @@ function ConflictFile({
         </table>
       ))}
       <div className="grid gap-3 lg:grid-cols-2">
+        <SideDiff projectRef={projectRef} task={task} at={at} path={file.path} side="main" label="Base → main" />
         <SideDiff
-          owner={owner}
-          project={project}
-          task={task}
-          at={at}
-          path={file.path}
-          side="main"
-          label="Base → main"
-        />
-        <SideDiff
-          owner={owner}
-          project={project}
+          projectRef={projectRef}
           task={task}
           at={at}
           path={file.path}
@@ -396,15 +377,14 @@ function ConflictFile({
 }
 
 function SideDiff({
-  owner,
-  project,
+  projectRef,
   task,
   at,
   path,
   side,
   label,
 }: InTask & { at: string; path: string; side: "main" | "attempt"; label: string }) {
-  const diff = useQuery(dequeueFileDiffQuery(owner, project, task.ref, at, path, side));
+  const diff = useQuery(dequeueFileDiffQuery(projectRef, task.ref, at, path, side));
   let body: ReactNode;
   if (diff.isPending) body = <Loading label="Loading diff…" />;
   else if (diff.isError) body = <ErrorState error={diff.error} />;

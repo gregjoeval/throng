@@ -13,18 +13,17 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { createTask, projectKey } from "@/lib/api";
+import type { ProjectRef } from "@/lib/api";
 import { apiError } from "@/lib/errors";
 import { buildPath } from "@/lib/paths";
 
 /** Creates a task in the project from a title and a markdown body, then opens it. */
 export function NewTaskDialog({
-  owner,
-  project,
+  projectRef,
   open,
   onOpenChange,
 }: {
-  owner: string;
-  project: string;
+  projectRef: ProjectRef;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
@@ -33,14 +32,16 @@ export function NewTaskDialog({
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const create = useMutation({
-    mutationFn: () => createTask(owner, project, { title: title.trim(), body }),
+    mutationFn: () => createTask(projectRef, { title: title.trim(), body }),
     onSuccess: async (task) => {
-      await queryClient.invalidateQueries({ queryKey: [...projectKey(owner, project), "tasks"] });
+      await queryClient.invalidateQueries({ queryKey: [...projectKey(projectRef), "tasks"] });
       onOpenChange(false);
       setTitle("");
       setBody("");
       create.reset();
-      await navigate({ href: buildPath({ view: "task", owner, project, task: task.ref }) });
+      await navigate({
+        href: buildPath({ view: "task", owner: projectRef.owner, project: projectRef.project, task: task.ref }),
+      });
     },
   });
   const error = create.isError ? apiError(create.error).message : null;

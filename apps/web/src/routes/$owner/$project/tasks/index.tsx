@@ -8,6 +8,7 @@ import { ProjectView } from "@/components/project-view";
 import { EmptyState, ErrorState, Loading } from "@/components/states";
 import { Button } from "@/components/ui/button";
 import { tasksQuery } from "@/lib/api";
+import type { ProjectRef } from "@/lib/api";
 import { buildPath } from "@/lib/paths";
 import { GATE_LABELS, mergeRequestLabel } from "@/lib/tasks";
 import { cn } from "@/lib/utils";
@@ -29,6 +30,7 @@ export const Route = createFileRoute("/$owner/$project/tasks/")({
 /** The project's tasks, open by default, with tabs for closed and obsolete ones. */
 function TaskList() {
   const { owner, project } = Route.useParams();
+  const projectRef = { owner, project };
   const state: TabState = Route.useSearch().state ?? "open";
   const [creating, setCreating] = useState(false);
   return (
@@ -39,7 +41,7 @@ function TaskList() {
             <Link
               key={tab.state}
               to="/$owner/$project/tasks"
-              params={{ owner, project }}
+              params={projectRef}
               search={tab.state === "open" ? {} : { state: tab.state }}
               activeOptions={{ exact: true }}
               aria-current={tab.state === state ? "page" : undefined}
@@ -57,14 +59,14 @@ function TaskList() {
           New task
         </Button>
       </div>
-      <Tasks owner={owner} project={project} state={state} />
-      <NewTaskDialog owner={owner} project={project} open={creating} onOpenChange={setCreating} />
+      <Tasks projectRef={projectRef} state={state} />
+      <NewTaskDialog projectRef={projectRef} open={creating} onOpenChange={setCreating} />
     </ProjectView>
   );
 }
 
-function Tasks({ owner, project, state }: { owner: string; project: string; state: TabState }) {
-  const tasks = useQuery(tasksQuery(owner, project, state));
+function Tasks({ projectRef, state }: { projectRef: ProjectRef; state: TabState }) {
+  const tasks = useQuery(tasksQuery(projectRef, state));
   if (tasks.isPending) return <Loading />;
   if (tasks.isError) return <ErrorState error={tasks.error} />;
   if (tasks.data.tasks.length === 0) return <EmptyState title={`No ${state} tasks`} />;
@@ -85,7 +87,7 @@ function Tasks({ owner, project, state }: { owner: string; project: string; stat
             <td className="px-2 py-2 font-mono text-muted-foreground">{task.ref}</td>
             <td className="px-2 py-2">
               <Link
-                to={buildPath({ view: "task", owner, project, task: task.ref })}
+                to={buildPath({ view: "task", owner: projectRef.owner, project: projectRef.project, task: task.ref })}
                 className="font-medium hover:underline"
               >
                 {task.title}

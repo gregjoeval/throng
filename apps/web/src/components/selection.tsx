@@ -6,6 +6,7 @@ import { useState } from "react";
 import type { ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { meQuery, projectQuery, selectAttempt, taskKey, taskQuery } from "@/lib/api";
+import type { ProjectRef } from "@/lib/api";
 import { apiError } from "@/lib/errors";
 import type { Task } from "@/lib/tasks";
 
@@ -13,9 +14,9 @@ import type { Task } from "@/lib/tasks";
  * Whether the viewer may select an attempt of `task`, and approve or cancel its merge request: the
  * platform lets its creator and the project owner. False until the viewer, project and task are known.
  */
-export function useMaySelect(owner: string, project: string, task: Task | undefined): boolean {
+export function useMaySelect(projectRef: ProjectRef, task: Task | undefined): boolean {
   const me = useQuery(meQuery);
-  const found = useQuery(projectQuery(owner, project));
+  const found = useQuery(projectQuery(projectRef));
   if (!me.isSuccess || !found.isSuccess || task === undefined) return false;
   return me.data.user.id === task.creator.id || me.data.user.id === found.data.owner.id;
 }
@@ -25,18 +26,15 @@ export function useMaySelect(owner: string, project: string, task: Task | undefi
  * the arena puts it on each lane and rail card.
  */
 export function useSelect(
-  owner: string,
-  project: string,
+  projectRef: ProjectRef,
   task: string,
   active: number,
 ): ((attempt: string) => ReactNode) | null {
-  const found = useQuery(taskQuery(owner, project, task));
-  const maySelect = useMaySelect(owner, project, found.data);
+  const found = useQuery(taskQuery(projectRef, task));
+  const maySelect = useMaySelect(projectRef, found.data);
   if (!maySelect || found.data === undefined) return null;
   const loaded = found.data;
-  return (attempt) => (
-    <SelectAttempt owner={owner} project={project} task={loaded} attempt={attempt} others={active - 1} />
-  );
+  return (attempt) => <SelectAttempt projectRef={projectRef} task={loaded} attempt={attempt} others={active - 1} />;
 }
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
@@ -55,15 +53,13 @@ function selectionQuestion(verb: string, attempt: string, others: number, task: 
  * other active attempts selection will close. Only render it for someone who may select.
  */
 export function SelectAttempt({
-  owner,
-  project,
+  projectRef,
   task,
   attempt,
   others,
   verb = "Select",
 }: {
-  owner: string;
-  project: string;
+  projectRef: ProjectRef;
   task: Task;
   attempt: string;
   others: number;
@@ -72,9 +68,9 @@ export function SelectAttempt({
   const [confirming, setConfirming] = useState(false);
   const queryClient = useQueryClient();
   const select = useMutation({
-    mutationFn: () => selectAttempt(owner, project, task.ref, attempt),
+    mutationFn: () => selectAttempt(projectRef, task.ref, attempt),
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: taskKey(owner, project, task.ref) });
+      await queryClient.invalidateQueries({ queryKey: taskKey(projectRef, task.ref) });
     },
   });
   if (!confirming) {

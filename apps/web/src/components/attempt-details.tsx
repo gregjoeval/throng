@@ -20,7 +20,7 @@ import {
   taskKey,
   verdictsQuery,
 } from "@/lib/api";
-import type { RunDetail, Verdict } from "@/lib/api";
+import type { ProjectRef, RunDetail, Verdict } from "@/lib/api";
 import { metricColumns, taskOf } from "@/lib/arena";
 import type { ArenaAttempt } from "@/lib/arena";
 import { shortSha } from "@/lib/commits";
@@ -28,16 +28,14 @@ import { apiError } from "@/lib/errors";
 import { GATE_LABELS } from "@/lib/tasks";
 
 interface InProject {
-  owner: string;
-  project: string;
+  projectRef: ProjectRef;
 }
 
 type Result = NonNullable<ArenaAttempt["result"]>;
 
 /** The attempt's details sheet, titled by its ref; the lane that owns it opens and closes it. */
 export function AttemptDetails({
-  owner,
-  project,
+  projectRef,
   attempt,
   open,
   onOpenChange,
@@ -52,13 +50,13 @@ export function AttemptDetails({
         <div className="flex flex-col gap-6 px-4 pb-4">
           {attempt.result === undefined ? null : (
             <>
-              <Checks owner={owner} project={project} result={attempt.result} />
-              <Metrics owner={owner} project={project} attempt={attempt} />
+              <Checks projectRef={projectRef} result={attempt.result} />
+              <Metrics projectRef={projectRef} attempt={attempt} />
             </>
           )}
-          <Runs owner={owner} project={project} attempt={attempt.ref} />
-          <Verdicts owner={owner} project={project} attempt={attempt.ref} />
-          <PostVerdict owner={owner} project={project} attempt={attempt} />
+          <Runs projectRef={projectRef} attempt={attempt.ref} />
+          <Verdicts projectRef={projectRef} attempt={attempt.ref} />
+          <PostVerdict projectRef={projectRef} attempt={attempt} />
         </div>
       </SheetContent>
     </Sheet>
@@ -66,7 +64,7 @@ export function AttemptDetails({
 }
 
 /** The result's checks, then its logs: one open at a time, streamed as it's read. */
-function Checks({ owner, project, result }: InProject & { result: Result }) {
+function Checks({ projectRef, result }: InProject & { result: Result }) {
   const [shown, setShown] = useState<string | null>(null);
   return (
     <DetailsSection title="Checks">
@@ -85,7 +83,7 @@ function Checks({ owner, project, result }: InProject & { result: Result }) {
           </Button>
         ))}
       </div>
-      {shown === null ? null : <RunLog owner={owner} project={project} run={result.run} name={shown} />}
+      {shown === null ? null : <RunLog projectRef={projectRef} run={result.run} name={shown} />}
     </DetailsSection>
   );
 }
@@ -97,8 +95,8 @@ function Checks({ owner, project, result }: InProject & { result: Result }) {
 const TRUNCATION_MARKER = /^\[throng: truncated (\d+) of (\d+) bytes\]$/mu;
 
 /** A run's log, streamed, with a notice when the platform kept only its head and tail. */
-function RunLog({ owner, project, run, name }: InProject & { run: number; name: string }) {
-  const log = useQuery(runLogQuery(owner, project, run, name));
+function RunLog({ projectRef, run, name }: InProject & { run: number; name: string }) {
+  const log = useQuery(runLogQuery(projectRef, run, name));
   if (log.isError) return <ErrorState error={log.error} />;
   const [, dropped, size] = TRUNCATION_MARKER.exec(log.data ?? "") ?? [];
   return (
@@ -127,9 +125,9 @@ function LogText({ name, text, streaming }: { name: string; text: string; stream
 }
 
 /** Every metric the config declares and the built-in measures, with units, then the preview link. */
-function Metrics({ owner, project, attempt }: InProject & { attempt: ArenaAttempt }) {
+function Metrics({ projectRef, attempt }: InProject & { attempt: ArenaAttempt }) {
   // The task's arena is already loaded (and polled) by the page this sheet opens from.
-  const arena = useQuery(taskArenaQuery(owner, project, taskOf(attempt)));
+  const arena = useQuery(taskArenaQuery(projectRef, taskOf(attempt)));
   const preview = attempt.result?.preview;
   return (
     <DetailsSection title="Metrics">
@@ -159,8 +157,8 @@ const TRIGGER_LABELS: Record<RunDetail["trigger"], string> = {
 };
 
 /** The attempt's scoring runs, newest first; those on an earlier head are dimmed. */
-function Runs({ owner, project, attempt }: InProject & { attempt: string }) {
-  const runs = useQuery(attemptRunsQuery(owner, project, attempt));
+function Runs({ projectRef, attempt }: InProject & { attempt: string }) {
+  const runs = useQuery(attemptRunsQuery(projectRef, attempt));
   return (
     <DetailsSection title="Run history">
       {runs.isPending ? <Loading label="Loading runs…" /> : null}
@@ -195,8 +193,8 @@ const RECOMMENDATION_LABELS: Record<Verdict["recommendation"], string> = {
 };
 
 /** Every verdict on the attempt, oldest first; those on an earlier head are dimmed. */
-function Verdicts({ owner, project, attempt }: InProject & { attempt: string }) {
-  const verdicts = useQuery(verdictsQuery(owner, project, attempt));
+function Verdicts({ projectRef, attempt }: InProject & { attempt: string }) {
+  const verdicts = useQuery(verdictsQuery(projectRef, attempt));
   return (
     <DetailsSection title="Verdicts">
       {verdicts.isPending ? <Loading label="Loading verdicts…" /> : null}
@@ -235,18 +233,18 @@ function Verdicts({ owner, project, attempt }: InProject & { attempt: string }) 
  * Shown to anyone signed in but the attempt's author, as the platform allows; posting refreshes the
  * task's and the attempt's queries, so the verdict counts and the list update.
  */
-function PostVerdict({ owner, project, attempt }: InProject & { attempt: ArenaAttempt }) {
+function PostVerdict({ projectRef, attempt }: InProject & { attempt: ArenaAttempt }) {
   const me = useQuery(meQuery);
   const [recommendation, setRecommendation] = useState<Verdict["recommendation"]>("merge");
   const [body, setBody] = useState("");
   const queryClient = useQueryClient();
   const post = useMutation({
-    mutationFn: () => postVerdict(owner, project, attempt.ref, { recommendation, body }),
+    mutationFn: () => postVerdict(projectRef, attempt.ref, { recommendation, body }),
     onSuccess: async () => {
       setBody("");
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: taskKey(owner, project, taskOf(attempt)) }),
-        queryClient.invalidateQueries({ queryKey: attemptKey(owner, project, attempt.ref) }),
+        queryClient.invalidateQueries({ queryKey: taskKey(projectRef, taskOf(attempt)) }),
+        queryClient.invalidateQueries({ queryKey: attemptKey(projectRef, attempt.ref) }),
       ]);
     },
   });

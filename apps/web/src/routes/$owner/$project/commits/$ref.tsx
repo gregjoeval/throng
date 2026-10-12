@@ -16,7 +16,7 @@ export const Route = createFileRoute("/$owner/$project/commits/$ref")({
 function CommitLog() {
   const { owner, project, ref } = Route.useParams();
   const search = commitsSearch(Route.useSearch());
-  const page = useQuery(commitsQuery(owner, project, ref, search));
+  const page = useQuery(commitsQuery({ owner, project }, ref, search));
   const attempt = search.attempt === undefined ? {} : { attempt: search.attempt };
   const pageAt = (offset: number) => buildPath({ view: "commits", owner, project, ref, ...attempt, offset });
 

@@ -18,7 +18,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { compareQuery, mainHeadQuery, meQuery, projectKey, scoreNow } from "@/lib/api";
-import type { Compare } from "@/lib/api";
+import type { Compare, ProjectRef } from "@/lib/api";
 import { GATE_STATE_LABELS, gateState } from "@/lib/arena";
 import type { ArenaAttempt } from "@/lib/arena";
 import type { Layout, Reference } from "@/lib/arena-view";
@@ -26,8 +26,7 @@ import { apiError } from "@/lib/errors";
 import { buildPath } from "@/lib/paths";
 
 interface InProject {
-  owner: string;
-  project: string;
+  projectRef: ProjectRef;
 }
 
 /**
@@ -37,8 +36,7 @@ interface InProject {
  * files, only its notices (the arena's by-file arrangement shows the files in rows instead).
  */
 export function Lane({
-  owner,
-  project,
+  projectRef,
   attempt,
   note,
   actions,
@@ -64,32 +62,20 @@ export function Lane({
           </div>
           <div className="flex items-center gap-1">
             {actions}
-            <LaneMenu owner={owner} project={project} attempt={attempt} onDetails={() => setDetails(true)} />
+            <LaneMenu projectRef={projectRef} attempt={attempt} onDetails={() => setDetails(true)} />
           </div>
         </div>
         <VerdictCounts verdicts={attempt.verdicts} />
         {note === "" ? null : <p className="text-sm text-muted-foreground">{note}</p>}
       </header>
-      <LaneChanges
-        owner={owner}
-        project={project}
-        attempt={attempt}
-        reference={reference}
-        layout={layout}
-        files={files}
-      />
-      <AttemptDetails owner={owner} project={project} attempt={attempt} open={details} onOpenChange={setDetails} />
+      <LaneChanges projectRef={projectRef} attempt={attempt} reference={reference} layout={layout} files={files} />
+      <AttemptDetails projectRef={projectRef} attempt={attempt} open={details} onOpenChange={setDetails} />
     </section>
   );
 }
 
 /** The lane's menu: the details sheet, the preview, and the attempt in the code browser. */
-function LaneMenu({
-  owner,
-  project,
-  attempt,
-  onDetails,
-}: InProject & { attempt: ArenaAttempt; onDetails: () => void }) {
+function LaneMenu({ projectRef, attempt, onDetails }: InProject & { attempt: ArenaAttempt; onDetails: () => void }) {
   const navigate = useNavigate();
   const preview = attempt.result?.preview;
   return (
@@ -107,7 +93,17 @@ function LaneMenu({
           <DropdownMenuItem disabled>No preview</DropdownMenuItem>
         )}
         <DropdownMenuItem
-          onClick={() => navigate({ href: buildPath({ view: "tree", owner, project, ref: attempt.ref, path: "" }) })}
+          onClick={() =>
+            navigate({
+              href: buildPath({
+                view: "tree",
+                owner: projectRef.owner,
+                project: projectRef.project,
+                ref: attempt.ref,
+                path: "",
+              }),
+            })
+          }
         >
           Open in browser
         </DropdownMenuItem>
@@ -118,14 +114,13 @@ function LaneMenu({
 
 /** The attempt's notices, then its change set against `reference` unless `files` is false. */
 function LaneChanges({
-  owner,
-  project,
+  projectRef,
   attempt,
   reference,
   layout,
   files,
 }: InProject & { attempt: ArenaAttempt; reference: Reference; layout: Layout; files: boolean }) {
-  const changes = useLaneCompare(owner, project, attempt, reference);
+  const changes = useLaneCompare(projectRef, attempt, reference);
   if (changes.state === "none") return <LaneNotice>Nothing has been pushed to {attempt.ref} yet.</LaneNotice>;
   return (
     <>
@@ -134,7 +129,7 @@ function LaneChanges({
           {attempt.ref} has no base (it shares no history with the task's line), so it's diffed against current main.
         </LaneNotice>
       ) : null}
-      <ScoreNow owner={owner} project={project} attempt={attempt} />
+      <ScoreNow projectRef={projectRef} attempt={attempt} />
       {changes.state === "noMain" ? <LaneNotice>main has no commits to diff {attempt.ref} against.</LaneNotice> : null}
       {files ? <LaneFiles changes={changes} attempt={attempt} layout={layout} /> : null}
     </>
@@ -179,17 +174,17 @@ export function laneReference(attempt: ArenaAttempt, reference: Reference) {
 }
 
 /** The compare query of the attempt's change set from `from` (a sha, or null while unknown). */
-export const laneCompareQuery = (owner: string, project: string, attempt: ArenaAttempt, from: string | null) => ({
-  ...compareQuery(owner, project, from ?? "", attempt.sha ?? "", attempt.ref),
+export const laneCompareQuery = (projectRef: ProjectRef, attempt: ArenaAttempt, from: string | null) => ({
+  ...compareQuery(projectRef, from ?? "", attempt.sha ?? "", attempt.ref),
   enabled: attempt.sha !== null && from !== null,
 });
 
 /** The attempt's change set against `reference`, both ends by sha (see `laneReference`). */
-function useLaneCompare(owner: string, project: string, attempt: ArenaAttempt, reference: Reference): LaneCompare {
+function useLaneCompare(projectRef: ProjectRef, attempt: ArenaAttempt, reference: Reference): LaneCompare {
   const { fellBack, onMain } = laneReference(attempt, reference);
-  const main = useQuery({ ...mainHeadQuery(owner, project), enabled: onMain });
+  const main = useQuery({ ...mainHeadQuery(projectRef), enabled: onMain });
   const from = onMain ? (main.data ?? null) : (attempt.base?.sha ?? null);
-  const compare = useQuery(laneCompareQuery(owner, project, attempt, from));
+  const compare = useQuery(laneCompareQuery(projectRef, attempt, from));
   if (attempt.sha === null) return { fellBack, state: "none" };
   if (onMain && main.isError) return { fellBack, state: "error", error: main.error };
   if (onMain && main.isSuccess && main.data === null) return { fellBack, state: "noMain" };
@@ -202,12 +197,12 @@ function useLaneCompare(owner: string, project: string, attempt: ArenaAttempt, r
  * Score now, for a draft's author while its head has no result, since drafts aren't scored on push.
  * Once asked, the arena's polling shows the run.
  */
-function ScoreNow({ owner, project, attempt }: InProject & { attempt: ArenaAttempt }) {
+function ScoreNow({ projectRef, attempt }: InProject & { attempt: ArenaAttempt }) {
   const me = useQuery(meQuery);
   const queryClient = useQueryClient();
   const score = useMutation({
-    mutationFn: () => scoreNow(owner, project, attempt.ref),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: projectKey(owner, project) }),
+    mutationFn: () => scoreNow(projectRef, attempt.ref),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: projectKey(projectRef) }),
   });
   const unscored = attempt.result === undefined && (attempt.status === "none" || attempt.status === "errored");
   const isAuthor = me.isSuccess && me.data.user.id === attempt.author.id;

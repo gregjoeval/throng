@@ -17,8 +17,8 @@ export const Route = createFileRoute("/$owner/$project/commit/$sha")({
 function Commit() {
   const { owner, project, sha } = Route.useParams();
   const hint = attemptSearch(Route.useSearch());
-  const commit = useQuery(commitQuery(owner, project, sha, hint.attempt));
-  const diff = useQuery(commitDiffQuery(owner, project, sha, hint.attempt));
+  const commit = useQuery(commitQuery({ owner, project }, sha, hint.attempt));
+  const diff = useQuery(commitDiffQuery({ owner, project }, sha, hint.attempt));
 
   return (
     <ProjectView location={{ view: "commit", owner, project, sha, ...hint }}>

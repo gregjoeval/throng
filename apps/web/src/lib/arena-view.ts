@@ -3,7 +3,7 @@
 // (`?lanes=t42a1,t42a3&by=file&ref=base&layout=split`), so a link reproduces it, and in
 // `localStorage` per task, so the arena opens as the viewer left it. The URL wins on load.
 
-import type { FileDiff } from "@/lib/api";
+import type { FileDiff, ProjectRef } from "@/lib/api";
 import { initialLanes } from "@/lib/arena";
 import type { ArenaAttempt } from "@/lib/arena";
 import { isActive } from "@/lib/tasks";
@@ -63,7 +63,7 @@ export function arenaView(search: ArenaSearch, attempts: ArenaAttempt[]): ArenaV
 }
 
 /** Where one task's view is stored. */
-export const storageKey = (owner: string, project: string, task: string) => `throng:arena:${owner}/${project}/${task}`;
+export const storageKey = ({ owner, project }: ProjectRef, task: string) => `throng:arena:${owner}/${project}/${task}`;
 
 /** The stored view of a task, or nothing when storage is empty, unreadable or unavailable. */
 export function readStoredView(key: string): ArenaSearch {

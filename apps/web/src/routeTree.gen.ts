@@ -13,6 +13,8 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as OwnerProjectIndexRouteImport } from './routes/$owner/$project/index'
 import { Route as OwnerProjectCommitShaRouteImport } from './routes/$owner/$project/commit/$sha'
 import { Route as OwnerProjectCommitsRefRouteImport } from './routes/$owner/$project/commits/$ref'
+import { Route as OwnerProjectTasksIndexRouteImport } from './routes/$owner/$project/tasks/index'
+import { Route as OwnerProjectTasksTRouteImport } from './routes/$owner/$project/tasks/$t'
 import { Route as OwnerProjectBlobRefSplatRouteImport } from './routes/$owner/$project/blob/$ref/$'
 import { Route as OwnerProjectRawRefSplatRouteImport } from './routes/$owner/$project/raw/$ref/$'
 import { Route as OwnerProjectTreeRefSplatRouteImport } from './routes/$owner/$project/tree/$ref/$'
@@ -35,6 +37,16 @@ const OwnerProjectCommitShaRoute = OwnerProjectCommitShaRouteImport.update({
 const OwnerProjectCommitsRefRoute = OwnerProjectCommitsRefRouteImport.update({
   id: '/$owner/$project/commits/$ref',
   path: '/$owner/$project/commits/$ref',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const OwnerProjectTasksIndexRoute = OwnerProjectTasksIndexRouteImport.update({
+  id: '/$owner/$project/tasks/',
+  path: '/$owner/$project/tasks/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const OwnerProjectTasksTRoute = OwnerProjectTasksTRouteImport.update({
+  id: '/$owner/$project/tasks/$t',
+  path: '/$owner/$project/tasks/$t',
   getParentRoute: () => rootRouteImport,
 } as any)
 const OwnerProjectBlobRefSplatRoute =
@@ -60,6 +72,8 @@ export interface FileRoutesByFullPath {
   '/$owner/$project/': typeof OwnerProjectIndexRoute
   '/$owner/$project/commit/$sha': typeof OwnerProjectCommitShaRoute
   '/$owner/$project/commits/$ref': typeof OwnerProjectCommitsRefRoute
+  '/$owner/$project/tasks/$t': typeof OwnerProjectTasksTRoute
+  '/$owner/$project/tasks/': typeof OwnerProjectTasksIndexRoute
   '/$owner/$project/blob/$ref/$': typeof OwnerProjectBlobRefSplatRoute
   '/$owner/$project/raw/$ref/$': typeof OwnerProjectRawRefSplatRoute
   '/$owner/$project/tree/$ref/$': typeof OwnerProjectTreeRefSplatRoute
@@ -69,6 +83,8 @@ export interface FileRoutesByTo {
   '/$owner/$project': typeof OwnerProjectIndexRoute
   '/$owner/$project/commit/$sha': typeof OwnerProjectCommitShaRoute
   '/$owner/$project/commits/$ref': typeof OwnerProjectCommitsRefRoute
+  '/$owner/$project/tasks/$t': typeof OwnerProjectTasksTRoute
+  '/$owner/$project/tasks': typeof OwnerProjectTasksIndexRoute
   '/$owner/$project/blob/$ref/$': typeof OwnerProjectBlobRefSplatRoute
   '/$owner/$project/raw/$ref/$': typeof OwnerProjectRawRefSplatRoute
   '/$owner/$project/tree/$ref/$': typeof OwnerProjectTreeRefSplatRoute
@@ -79,6 +95,8 @@ export interface FileRoutesById {
   '/$owner/$project/': typeof OwnerProjectIndexRoute
   '/$owner/$project/commit/$sha': typeof OwnerProjectCommitShaRoute
   '/$owner/$project/commits/$ref': typeof OwnerProjectCommitsRefRoute
+  '/$owner/$project/tasks/$t': typeof OwnerProjectTasksTRoute
+  '/$owner/$project/tasks/': typeof OwnerProjectTasksIndexRoute
   '/$owner/$project/blob/$ref/$': typeof OwnerProjectBlobRefSplatRoute
   '/$owner/$project/raw/$ref/$': typeof OwnerProjectRawRefSplatRoute
   '/$owner/$project/tree/$ref/$': typeof OwnerProjectTreeRefSplatRoute
@@ -90,6 +108,8 @@ export interface FileRouteTypes {
     | '/$owner/$project/'
     | '/$owner/$project/commit/$sha'
     | '/$owner/$project/commits/$ref'
+    | '/$owner/$project/tasks/$t'
+    | '/$owner/$project/tasks/'
     | '/$owner/$project/blob/$ref/$'
     | '/$owner/$project/raw/$ref/$'
     | '/$owner/$project/tree/$ref/$'
@@ -99,6 +119,8 @@ export interface FileRouteTypes {
     | '/$owner/$project'
     | '/$owner/$project/commit/$sha'
     | '/$owner/$project/commits/$ref'
+    | '/$owner/$project/tasks/$t'
+    | '/$owner/$project/tasks'
     | '/$owner/$project/blob/$ref/$'
     | '/$owner/$project/raw/$ref/$'
     | '/$owner/$project/tree/$ref/$'
@@ -108,6 +130,8 @@ export interface FileRouteTypes {
     | '/$owner/$project/'
     | '/$owner/$project/commit/$sha'
     | '/$owner/$project/commits/$ref'
+    | '/$owner/$project/tasks/$t'
+    | '/$owner/$project/tasks/'
     | '/$owner/$project/blob/$ref/$'
     | '/$owner/$project/raw/$ref/$'
     | '/$owner/$project/tree/$ref/$'
@@ -118,6 +142,8 @@ export interface RootRouteChildren {
   OwnerProjectIndexRoute: typeof OwnerProjectIndexRoute
   OwnerProjectCommitShaRoute: typeof OwnerProjectCommitShaRoute
   OwnerProjectCommitsRefRoute: typeof OwnerProjectCommitsRefRoute
+  OwnerProjectTasksTRoute: typeof OwnerProjectTasksTRoute
+  OwnerProjectTasksIndexRoute: typeof OwnerProjectTasksIndexRoute
   OwnerProjectBlobRefSplatRoute: typeof OwnerProjectBlobRefSplatRoute
   OwnerProjectRawRefSplatRoute: typeof OwnerProjectRawRefSplatRoute
   OwnerProjectTreeRefSplatRoute: typeof OwnerProjectTreeRefSplatRoute
@@ -153,6 +179,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof OwnerProjectCommitsRefRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/$owner/$project/tasks/': {
+      id: '/$owner/$project/tasks/'
+      path: '/$owner/$project/tasks'
+      fullPath: '/$owner/$project/tasks/'
+      preLoaderRoute: typeof OwnerProjectTasksIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/$owner/$project/tasks/$t': {
+      id: '/$owner/$project/tasks/$t'
+      path: '/$owner/$project/tasks/$t'
+      fullPath: '/$owner/$project/tasks/$t'
+      preLoaderRoute: typeof OwnerProjectTasksTRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/$owner/$project/blob/$ref/$': {
       id: '/$owner/$project/blob/$ref/$'
       path: '/$owner/$project/blob/$ref/$'
@@ -182,6 +222,8 @@ const rootRouteChildren: RootRouteChildren = {
   OwnerProjectIndexRoute: OwnerProjectIndexRoute,
   OwnerProjectCommitShaRoute: OwnerProjectCommitShaRoute,
   OwnerProjectCommitsRefRoute: OwnerProjectCommitsRefRoute,
+  OwnerProjectTasksTRoute: OwnerProjectTasksTRoute,
+  OwnerProjectTasksIndexRoute: OwnerProjectTasksIndexRoute,
   OwnerProjectBlobRefSplatRoute: OwnerProjectBlobRefSplatRoute,
   OwnerProjectRawRefSplatRoute: OwnerProjectRawRefSplatRoute,
   OwnerProjectTreeRefSplatRoute: OwnerProjectTreeRefSplatRoute,

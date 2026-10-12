@@ -42,3 +42,48 @@ export const projectQuery = (owner: string, project: string) =>
 export async function createProject(handle: string) {
   return parseResponse(client.api.projects.$post({ json: { handle } }));
 }
+
+// A project's tasks and attempts. Every key starts `["project", "owner/project"]`, then names the
+// task (`"task", "t42"`) or attempt (`"attempt", "t42a3"`) it reads, as the arena spec's **Data and
+// updates** lays out, so a mutation invalidates a task's queries by its key prefix and the WebSocket
+// upgrade can address the same keys.
+
+/** How often a task page refetches what it shows while the page is visible. */
+export const TASK_POLL_MS = 3000;
+
+/** The key prefix of everything read from one project's tasks. */
+export const projectKey = (owner: string, project: string) => ["project", `${owner}/${project}`] as const;
+
+/** The key prefix of everything read about one task: invalidate it after changing the task. */
+export const taskKey = (owner: string, project: string, task: string) =>
+  [...projectKey(owner, project), "task", task] as const;
+
+const tasksApi = client.api.projects[":owner"][":project"].tasks;
+type TaskListState = NonNullable<Parameters<typeof tasksApi.$get>[0]["query"]["state"]>;
+
+/** The project's tasks in one state, by number, each with its attempt count, best gate and merge request state. */
+export const tasksQuery = (owner: string, project: string, state: TaskListState) =>
+  apiQuery([...projectKey(owner, project), "tasks", state], (init) =>
+    tasksApi.$get({ param: { owner, project }, query: { state } }, { init }),
+  );
+
+/** Creates an open task, created by the signed-in user. Rejects with hono's `DetailedError` on failure. */
+export async function createTask(owner: string, project: string, task: { title: string; body: string }) {
+  return parseResponse(tasksApi.$post({ param: { owner, project }, json: task }));
+}
+
+/** One task by its reference (`t42`), polled while the page is visible. */
+export const taskQuery = (owner: string, project: string, task: string) => ({
+  ...apiQuery(taskKey(owner, project, task), (init) =>
+    tasksApi[":t"].$get({ param: { owner, project, t: task } }, { init }),
+  ),
+  refetchInterval: TASK_POLL_MS,
+});
+
+/** The task's attempts by number, obsolete ones left out, polled while the page is visible. */
+export const taskAttemptsQuery = (owner: string, project: string, task: string) => ({
+  ...apiQuery([...taskKey(owner, project, task), "attempts"], (init) =>
+    tasksApi[":t"].attempts.$get({ param: { owner, project, t: task }, query: {} }, { init }),
+  ),
+  refetchInterval: TASK_POLL_MS,
+});

@@ -10,11 +10,24 @@ import { buildPath, splitPath } from "@/lib/paths";
 import type { ProjectLocation } from "@/lib/paths";
 import { cn } from "@/lib/utils";
 
+/** The header tab each view sits under. */
+const SECTIONS: Record<ProjectLocation["view"], "code" | "commits" | "tasks"> = {
+  home: "code",
+  tree: "code",
+  blob: "code",
+  raw: "code",
+  commits: "commits",
+  commit: "commits",
+  tasks: "tasks",
+  task: "tasks",
+};
+
 export function ProjectView({ location, children }: { location: ProjectLocation; children: ReactNode }) {
   const project = useQuery(projectQuery(location.owner, location.project));
   const { owner } = location;
   const ref = "ref" in location ? location.ref : "main";
   const home = buildPath({ view: "home", owner, project: location.project });
+  const section = SECTIONS[location.view];
 
   return (
     <div className="flex flex-col gap-4">
@@ -25,14 +38,17 @@ export function ProjectView({ location, children }: { location: ProjectLocation;
           </Link>
         </h1>
         <nav aria-label="Project views" className="flex gap-1 text-sm">
-          <Tab to={home} active={location.view !== "commits" && location.view !== "commit"}>
+          <Tab to={home} active={section === "code"}>
             Code
           </Tab>
           <Tab
             to={buildPath({ view: "commits", owner, project: location.project, ref })}
-            active={location.view === "commits" || location.view === "commit"}
+            active={section === "commits"}
           >
             Commits
+          </Tab>
+          <Tab to={buildPath({ view: "tasks", owner, project: location.project })} active={section === "tasks"}>
+            Tasks
           </Tab>
         </nav>
       </div>
@@ -47,6 +63,8 @@ function Tab({ to, active, children }: { to: string; active: boolean; children: 
   return (
     <Link
       to={to}
+      // The section decides which tab is current; the router would also mark `Code` on every page below home.
+      activeOptions={{ exact: true, includeSearch: false }}
       aria-current={active ? "page" : undefined}
       className={cn(
         "rounded-md px-2 py-1 text-muted-foreground hover:bg-muted hover:text-foreground",

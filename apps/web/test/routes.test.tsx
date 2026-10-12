@@ -1,22 +1,10 @@
-import { QueryClient } from "@tanstack/react-query";
-import { createMemoryHistory, RouterProvider } from "@tanstack/react-router";
-import { render, screen, waitFor, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
+import { screen, waitFor, within } from "@testing-library/react";
+import type userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
 import { buildPath } from "@/lib/paths";
-import { getRouter } from "@/router";
+import { renderApp } from "./render";
 import { me, project, projects, server } from "./server";
-
-/** Renders the whole app, router and all, at `path`. */
-async function renderApp(path: string) {
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const router = getRouter({ history: createMemoryHistory({ initialEntries: [path] }), queryClient });
-  // The root's shell renders <html>; mount at the document so it isn't nested in a <div>.
-  render(<RouterProvider router={router} />, { container: document });
-  await router.load();
-  return { router, user: userEvent.setup(), path: () => router.state.location.href };
-}
 
 const header = () => screen.getByRole("banner");
 const openSwitcher = async (user: ReturnType<typeof userEvent.setup>) =>

@@ -18,6 +18,8 @@ interface InProject {
  */
 export type ProjectLocation =
   | (InProject & { view: "home" })
+  | (InProject & { view: "tasks" })
+  | (InProject & { view: "task"; task: string })
   | (InProject & { view: "tree" | "blob" | "raw"; ref: string; path: string; attempt?: string })
   | (InProject & { view: "commits"; ref: string; attempt?: string })
   | (InProject & { view: "commit"; sha: string; attempt?: string });
@@ -31,6 +33,12 @@ export function buildPath(location: ProjectLocation): string {
   switch (location.view) {
     case "home": {
       return base;
+    }
+    case "tasks": {
+      return `${base}/tasks`;
+    }
+    case "task": {
+      return `${base}/tasks/${segment(location.task)}`;
     }
     case "commit": {
       path = `${base}/commit/${segment(location.sha)}`;
@@ -67,7 +75,9 @@ export function parsePath(href: string): ProjectLocation | null {
   const attempt = url.searchParams.get("attempt");
   const hint = attempt === null ? {} : { attempt };
   if (view === undefined) return { owner, project, view: "home" };
+  if (view === "tasks" && ref === undefined) return { owner, project, view };
   if (!ref) return null;
+  if (view === "tasks" && rest.length === 0) return { owner, project, view: "task", task: ref };
   if (view === "commit" && rest.length === 0) return { owner, project, view, sha: ref, ...hint };
   if (view === "commits" && rest.length === 0) return { owner, project, view, ref, ...hint };
   if (view === "tree" || view === "blob" || view === "raw") {

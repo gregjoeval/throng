@@ -8,6 +8,8 @@ const at = { owner: "greg", project: "throng" };
 describe("buildPath and parsePath", () => {
   const cases: [ProjectLocation, string][] = [
     [{ ...at, view: "home" }, "/greg/throng"],
+    [{ ...at, view: "tasks" }, "/greg/throng/tasks"],
+    [{ ...at, view: "task", task: "t42" }, "/greg/throng/tasks/t42"],
     [{ ...at, view: "tree", ref: "main", path: "" }, "/greg/throng/tree/main"],
     [{ ...at, view: "tree", ref: "t42a3", path: "src/lib" }, "/greg/throng/tree/t42a3/src/lib"],
     [{ ...at, view: "blob", ref: "main", path: "docs/my notes.md" }, "/greg/throng/blob/main/docs/my%20notes.md"],

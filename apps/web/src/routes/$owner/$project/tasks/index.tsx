@@ -9,7 +9,7 @@ import { EmptyState, ErrorState, Loading } from "@/components/states";
 import { Button } from "@/components/ui/button";
 import { tasksQuery } from "@/lib/api";
 import { buildPath } from "@/lib/paths";
-import { GATE_LABELS, MERGE_REQUEST_LABELS } from "@/lib/tasks";
+import { GATE_LABELS, mergeRequestLabel } from "@/lib/tasks";
 import { cn } from "@/lib/utils";
 
 /** The list's tabs: open by default, then closed and obsolete through `?state=`. */
@@ -94,7 +94,7 @@ function Tasks({ owner, project, state }: { owner: string; project: string; stat
             <td className="px-2 py-2 tabular-nums">{task.attemptCount}</td>
             <td className="px-2 py-2">{task.bestGate === null ? "—" : GATE_LABELS[task.bestGate]}</td>
             <td className="px-2 py-2">
-              {task.mergeRequestState === null ? "—" : MERGE_REQUEST_LABELS[task.mergeRequestState]}
+              {task.mergeRequestState === null ? "—" : mergeRequestLabel(task.mergeRequestState)}
             </td>
           </tr>
         ))}

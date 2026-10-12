@@ -2,6 +2,7 @@ import type { InferResponseType } from "hono/client";
 import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
 import type { client } from "@/lib/api";
+import type { Attempt, ListedTask } from "@/lib/tasks";
 
 /** `GET /api/me` for a human signed in through Access, typed from the platform's routes. */
 export const me: InferResponseType<typeof client.api.me.$get, 200> = {
@@ -25,10 +26,6 @@ export const notFound = (message: string) =>
 
 /** `bob`, who owns no project in the default handlers. */
 export const bob = { id: "u2", handle: "bob" };
-
-type Tasks = (typeof client.api.projects)[":owner"][":project"]["tasks"];
-export type ListedTask = InferResponseType<Tasks["$get"], 200>["tasks"][number];
-export type Attempt = InferResponseType<Tasks[":t"]["attempts"]["$get"], 200>["attempts"][number];
 
 /** Task `t<number>`, open, created by `ada`, with no attempts, as the task list shows it. */
 export function task(number: number, fields: Partial<ListedTask> = {}): ListedTask {

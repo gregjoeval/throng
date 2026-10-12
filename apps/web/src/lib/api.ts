@@ -72,6 +72,14 @@ export async function createTask(owner: string, project: string, task: { title: 
   return parseResponse(tasksApi.$post({ param: { owner, project }, json: task }));
 }
 
+/**
+ * Closes a task, and its active attempts with it, or makes it obsolete, and its active attempts
+ * with it. Rejects with hono's `DetailedError` on failure.
+ */
+export async function endTask(owner: string, project: string, task: string, how: "close" | "obsolete") {
+  return parseResponse(tasksApi[":t"][how].$post({ param: { owner, project, t: task } }));
+}
+
 /** One task by its reference (`t42`), polled while the page is visible. */
 export const taskQuery = (owner: string, project: string, task: string) => ({
   ...apiQuery(taskKey(owner, project, task), (init) =>

@@ -105,6 +105,11 @@ export class Follows {
     );
   }
 
+  /** Queues `follow` to run again, from the same task head. */
+  requeue(follow: StoredFollow): void {
+    this.request({ ...follow, taskHead: follow.task_head });
+  }
+
   get(id: number): StoredFollow | null {
     const [row] = this.#sql.exec<FollowRow>("SELECT * FROM follows WHERE id = ?", id);
     return row === undefined ? null : toFollow(row);

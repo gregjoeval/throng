@@ -147,6 +147,9 @@ export interface ProjectContext {
   owner: string;
 }
 
+/** The part of a project's context that work done for no user (a follow, a landing) has. */
+type ProjectId = Pick<ProjectContext, "id">;
+
 /** Journal events for tasks and attempts, as the spec names them. */
 export type TaskEvent =
   | "created"
@@ -1021,23 +1024,14 @@ export class TaskStore {
    * update a follow checks whether the push merged the task branch in (or merges it now).
    */
   #authorMoved(project: ProjectContext, attempt: StoredAttempt): void {
-    const [row] = this.#sql.exec<AttemptRow>(
-      "SELECT * FROM attempts WHERE task = ? AND number = ?",
-      attempt.task,
-      attempt.number,
-    );
+    const row = this.#attemptRow(attempt);
     this.#sql.exec(
       "UPDATE attempts SET followed_head = NULL WHERE task = ? AND number = ?",
       attempt.task,
       attempt.number,
     );
     if (row?.needs_update != null && isActive(attempt.state)) {
-      this.follows.request({
-        project: project.id,
-        task: attempt.task,
-        attempt: attempt.number,
-        taskHead: row.needs_update,
-      });
+      this.#queueFollow(project, attempt, row.needs_update);
     }
   }
 
@@ -1063,12 +1057,7 @@ export class TaskStore {
       this.#journal(actor, "taskBranchPushed", input.task, null, { head: input.head });
       const active = this.#activeAttempts(input.task);
       for (const attempt of active) {
-        this.follows.request({
-          project: project.id,
-          task: attempt.task,
-          attempt: attempt.number,
-          taskHead: input.head,
-        });
+        this.#queueFollow(project, attempt, input.head);
       }
       return active.map((attempt) => attempt.fork);
     });
@@ -1091,7 +1080,7 @@ export class TaskStore {
       }
       if (this.#landingHolds(attempt)) {
         this.follows.end(follow, "stopped");
-        this.follows.request({ ...current, taskHead: current.task_head });
+        this.follows.requeue(current);
         return false;
       }
       return true;
@@ -1112,7 +1101,7 @@ export class TaskStore {
       this.follows.end(follow, "done");
       const attempt = this.#attempt(followed(current));
       if (!isActive(attempt.state)) return false;
-      const project: ProjectContext = { id: current.project, owner: "" };
+      const project = { id: current.project };
       switch (outcome.kind) {
         case "merged":
         case "current": {
@@ -1134,7 +1123,7 @@ export class TaskStore {
           break;
         }
         case "moved": {
-          this.follows.request({ ...current, taskHead: current.task_head });
+          this.follows.requeue(current);
           break;
         }
         case "stale":
@@ -1152,18 +1141,14 @@ export class TaskStore {
    * head is one a follow wrote: the author hasn't pulled the task branch merge.
    */
   pullFirstNotice(_project: ProjectContext, _actor: Actor, input: AttemptInput): string | null {
-    const [row] = this.#sql.exec<AttemptRow>(
-      "SELECT * FROM attempts WHERE task = ? AND number = ?",
-      input.task,
-      input.number,
-    );
+    const row = this.#attemptRow(input);
     if (row?.followed_head == null) return null;
     return `${taskRef(input.task)}'s task branch moved; pull first`;
   }
 
   /** A follow's new head on the attempt's fork, recorded as a push by no user. */
   #followedTo(
-    project: ProjectContext,
+    project: ProjectId,
     attempt: StoredAttempt,
     { before, after, taskHead }: { before: string; after: string; taskHead: string },
   ): void {
@@ -1190,6 +1175,11 @@ export class TaskStore {
     }
   }
 
+  /** Queues a follow of task head `taskHead` for the attempt. */
+  #queueFollow(project: ProjectId, attempt: AttemptInput, taskHead: string): void {
+    this.follows.request({ project: project.id, task: attempt.task, attempt: attempt.number, taskHead });
+  }
+
   /** Whether a landing of the merge request the attempt is the source of has claimed its push to `main`. */
   #landingHolds(attempt: AttemptInput): boolean {
     const mr = this.mergeRequests.open(attempt.task);
@@ -1197,7 +1187,7 @@ export class TaskStore {
   }
 
   /** Queues a follow of the task's task branch for an attempt that (re)starts, when the task has one. */
-  async #catchUp(project: ProjectContext, attempt: AttemptInput): Promise<void> {
+  async #catchUp(project: ProjectId, attempt: AttemptInput): Promise<void> {
     let head: { sha: string } | null;
     try {
       head = await taskBranchHead(this.#repos, project.id, attempt.task);
@@ -1206,9 +1196,7 @@ export class TaskStore {
       return;
     }
     if (head === null) return;
-    this.#sql.transaction(() =>
-      this.follows.request({ project: project.id, task: attempt.task, attempt: attempt.number, taskHead: head.sha }),
-    );
+    this.#sql.transaction(() => this.#queueFollow(project, attempt, head.sha));
   }
 
   /**
@@ -1685,7 +1673,7 @@ export class TaskStore {
         this.#journal(null, "mainAdvanced", task, attempt, { mergeRequest: taskRef(task), head, sha: landedSha });
         return landed;
       });
-      await this.#archive({ id: project, owner: "" }, [source]);
+      await this.#archive({ id: project }, [source]);
       return true;
     }
     if (outcome.kind === "landed") return false;
@@ -1928,10 +1916,15 @@ export class TaskStore {
     this.#endTask(actor, attempt.task, "closed");
   }
 
-  #attempt({ task, number }: AttemptInput): StoredAttempt {
-    const [row] = this.#sql.exec<AttemptRow>("SELECT * FROM attempts WHERE task = ? AND number = ?", task, number);
-    if (row === undefined) throw new ServiceError("notFound", `no attempt ${attemptRef(task, number)}`);
+  #attempt(attempt: AttemptInput): StoredAttempt {
+    const row = this.#attemptRow(attempt);
+    if (row === undefined) throw new ServiceError("notFound", `no attempt ${attemptRef(attempt.task, attempt.number)}`);
     return this.#toAttempt(row);
+  }
+
+  #attemptRow({ task, number }: AttemptInput): AttemptRow | undefined {
+    const [row] = this.#sql.exec<AttemptRow>("SELECT * FROM attempts WHERE task = ? AND number = ?", task, number);
+    return row;
   }
 
   #toAttempt(row: AttemptRow): StoredAttempt {
@@ -2007,7 +2000,7 @@ export class TaskStore {
   }
 
   #request(
-    project: ProjectContext,
+    project: ProjectId,
     actor: Actor | null,
     attempt: StoredAttempt,
     sha: string,
@@ -2089,7 +2082,7 @@ export class TaskStore {
    * committed. If the archive fails, the fork is kept (nothing is lost), `archived_sha` stays
    * null, and `attempt.archive_failed` is logged; reopening such an attempt reuses the kept fork.
    */
-  async #archive(project: ProjectContext, attempts: StoredAttempt[]): Promise<void> {
+  async #archive(project: ProjectId, attempts: StoredAttempt[]): Promise<void> {
     const origin = originRepo(project.id);
     await Promise.all(
       attempts.map(async (attempt) => {
@@ -2271,7 +2264,7 @@ export class TaskStore {
     );
   }
 
-  async #deleteForks(project: ProjectContext, task: number, numbers: number[]): Promise<void> {
+  async #deleteForks(project: ProjectId, task: number, numbers: number[]): Promise<void> {
     await Promise.all(
       numbers.map((n) => {
         const name = forkRepo(project.id, attemptRef(task, n));

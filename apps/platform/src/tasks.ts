@@ -13,8 +13,8 @@ import { headAttemptRef } from "./scoring.ts";
 import type { AttemptScoring, ScoringRequest, StoredRun } from "./scoring.ts";
 import { attemptRef, parseAttemptRef, parseTaskRef, taskRef } from "./task-refs.ts";
 import type {
-  AttemptMergeRequest,
   AttemptInput,
+  AttemptMergeRequest,
   AttemptScoringDetail,
   AttemptState,
   ProjectContext,

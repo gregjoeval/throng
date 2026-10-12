@@ -1,6 +1,6 @@
 import { QueryClient } from "@tanstack/react-query";
 import { DetailedError } from "hono/client";
-import { HttpResponse, http } from "msw";
+import { http, HttpResponse } from "msw";
 import { describe, expect, expectTypeOf, it } from "vitest";
 import { apiQuery, client, meQuery } from "@/lib/api";
 import { me, server } from "./server";

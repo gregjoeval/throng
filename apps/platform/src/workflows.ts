@@ -10,7 +10,7 @@ import { roleAccess } from "./network";
 import { previewName } from "./preview";
 import { forkRepo, originRepo } from "./repos";
 import { buildResult, previewPlan, scorePlan, scoreTimeoutMs, withPreview } from "./results";
-import type { RawScore, PreviewPlan, ScorePlan, ScoringResult } from "./results";
+import type { PreviewPlan, RawScore, ScorePlan, ScoringResult } from "./results";
 import type { RunResult } from "./sandbox";
 import type { ScoringOutcome, ScoringParams } from "./scoring";
 import { parseResult, PREVIEW_BUILD_TIMEOUT_MS, previewScript, scoreScript } from "./scripts";

@@ -7,7 +7,7 @@ import { Hono } from "hono";
 import { afterEach, describe, expect, it } from "vitest";
 import { gitRoutes, UPSTREAM_TOKEN_TTL_SECONDS } from "../src/git-proxy.ts";
 import { projectService } from "../src/projects.ts";
-import { originRepo, forkRepo } from "../src/repos.ts";
+import { forkRepo, originRepo } from "../src/repos.ts";
 import type { ScoringResult } from "../src/results.ts";
 import type { ScoringRunner } from "../src/scoring.ts";
 import type { ProjectContext } from "../src/task-store.ts";

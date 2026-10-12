@@ -1,4 +1,4 @@
-import { HeadContent, Outlet, ScriptOnce, Scripts, createRootRoute } from "@tanstack/react-router";
+import { createRootRoute, HeadContent, Outlet, ScriptOnce, Scripts } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 import { AppHeader } from "@/components/app-header";
 import { ErrorState, NotFound } from "@/components/states";

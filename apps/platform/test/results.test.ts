@@ -8,9 +8,9 @@ import {
   parseShortstat,
   previewPlan,
   scorePlan,
-  withPreview,
   scoreTimeoutMs,
   SETUP_TIMEOUT_MS,
+  withPreview,
 } from "../src/results.ts";
 import type { CheckResult, RawScore } from "../src/results.ts";
 

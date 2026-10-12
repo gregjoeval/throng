@@ -12,7 +12,7 @@
 // doesn't requeue on its own once the new head passes).
 //
 // The agent loop over MCP, mcp, through `/mcp` and git only (see `e2e-mcp.ts`): the e2e user's agent
-// creates a task, starts two attempts, clones one with its clone command, pushes and opens it, and
+// creates a task, starts two attempts, clones one with llms.txt's recipe, pushes and opens it, and
 // waits until it is scored; a second e2e user, the reviewer, posts a verdict on it; the first selects
 // it and waits until it merges.
 //
@@ -41,6 +41,7 @@ import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { ARCHIVE_REF_PREFIX, archiveRef } from "../src/archive.ts";
+import { CLONE_RECIPE } from "../src/mcp.ts";
 import { originRepo } from "../src/repos.ts";
 import { openBrowser } from "./e2e-browser.ts";
 import type { BrowserSession } from "./e2e-browser.ts";
@@ -870,20 +871,19 @@ async function connectMcp(token: string): Promise<Client> {
 }
 
 /**
- * Clones the attempt into `dir` by running its own clone command (the token in `THRONG_TOKEN`), edits
- * the greeting, commits and pushes to its `main`. A new fork can take a moment to serve, so the clone
- * retries.
+ * Clones the attempt's remote into `dir` with the recipe `llms.txt` gives, run through `sh` with the
+ * token in `THRONG_TOKEN`; edits the greeting, commits, and pushes to its `main` with no auth of its
+ * own, so the push proves the clone kept the header. A new fork can take a moment to serve, so the
+ * clone retries.
  */
-async function cloneAndPush(p: RealProject, attempt: LoopAttempt & { clone: string }, dir: string): Promise<string> {
-  await retrying(() =>
-    run("sh", ["-c", `${attempt.clone} "$1"`, "sh", dir], {
-      env: { ...process.env, THRONG_TOKEN: p.token, GIT_TERMINAL_PROMPT: "0" },
-    }),
-  );
+async function cloneAndPush(p: RealProject, attempt: LoopAttempt, dir: string): Promise<string> {
+  const recipe = `${CLONE_RECIPE.replace("<remote>", '"$1"')} "$2"`;
+  const env = { ...process.env, THRONG_TOKEN: p.token, GIT_TERMINAL_PROMPT: "0" };
+  await retrying(() => run("sh", ["-c", recipe, "sh", attempt.remote, dir], { env }));
   const file = join(dir, "src/greeting.js");
   await writeFile(file, (await readFile(file, "utf8")).replace('"hello"', `"hello from ${attempt.ref}"`));
   await git(dir, "commit", "-q", "-am", `${attempt.ref}: greet over MCP`);
-  await git(dir, ...auth(p.token), "push", "-q", "origin", "HEAD:refs/heads/main");
+  await git(dir, "push", "-q", "origin", "HEAD:refs/heads/main");
   return (await git(dir, "rev-parse", "HEAD")).trim();
 }
 

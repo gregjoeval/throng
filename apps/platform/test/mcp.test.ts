@@ -223,7 +223,9 @@ describe("/mcp", () => {
     const { claude, greg, project } = await withProject();
     const started = await call(claude, "start_attempts", { project, task: "t1", count: 2, note: "two tries" });
     expect(started.isError).toBeFalsy();
-    expect(started.summary).toBe("started t1a1, t1a2");
+    expect(started.summary).toBe(
+      'started t1a1, t1a2; clone each remote with git clone -c http.extraHeader="Authorization: Bearer $THRONG_TOKEN" <remote>',
+    );
     const remote = `${ORIGIN}/git/greg/throng/t1a1.git`;
     expect(started.data["attempts"][0]).toMatchObject({
       ref: "t1a1",
@@ -231,8 +233,8 @@ describe("/mcp", () => {
       alias: "claude",
       note: "two tries",
       remote,
-      clone: `git -c http.extraHeader="Authorization: Bearer $THRONG_TOKEN" clone ${remote}`,
     });
+    expect(started.data["attempts"][0]).not.toHaveProperty("clone");
 
     const opened = await call(claude, "update_attempt", { project, attempt: "t1a1", note: "ready", state: "open" });
     expect(opened.data["attempt"]).toMatchObject({ ref: "t1a1", state: "open", note: "ready" });
@@ -257,8 +259,8 @@ describe("/mcp", () => {
         reviewer: toolCaller(ada),
         project,
         // What `git push` to the attempt's remote does, through the git proxy.
-        push: async ({ ref, clone, remote }) => {
-          expect(clone).toBe(`git -c http.extraHeader="Authorization: Bearer $THRONG_TOKEN" clone ${remote}`);
+        push: async ({ ref, remote }) => {
+          expect(remote).toBe(`${ORIGIN}/git/greg/throng/${ref}.git`);
           const [, task = "", number = ""] = /^t(\d+)a(\d+)$/u.exec(ref) ?? [];
           const fork = `${projectId}-${ref}`;
           const before = repos.ref(fork, "refs/heads/main") ?? "0".repeat(40);

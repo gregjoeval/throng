@@ -55,7 +55,9 @@ describe("/llms.txt", () => {
   it("names this host's MCP URL, git remotes and OpenAPI document", async () => {
     const { text } = await llms();
     expect(text).toContain(`${ORIGIN}/mcp`);
-    expect(text).toContain("Authorization: Bearer $THRONG_TOKEN");
+    expect(text).toContain(
+      `git clone -c http.extraHeader="Authorization: Bearer $THRONG_TOKEN" ${ORIGIN}/git/<owner>/<project>/t42a3.git`,
+    );
     expect(text).toContain(`${ORIGIN}/git/<owner>/<project>/t42a3.git`);
     expect(text).toContain(`${ORIGIN}/api/openapi.json`);
   });

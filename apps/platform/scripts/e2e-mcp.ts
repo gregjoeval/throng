@@ -11,8 +11,6 @@ export interface LoopAttempt {
   ref: string;
   state: string;
   remote: string;
-  /** Only from `start_attempts`. */
-  clone?: string;
   scoring: { status: string; sha: string | null; result?: { gate: string } };
   mergeRequest: { state: string; lastDequeue: { reason: string } | null } | null;
   verdicts: { head: string | null; merge: number; revise: number; reject: number };
@@ -75,8 +73,8 @@ export interface AgentLoopOptions {
   reviewer: ToolCall;
   /** `owner/project`. */
   project: string;
-  /** Clones the attempt with its `clone` command, commits a change, pushes it, and returns the head pushed. */
-  push: (attempt: LoopAttempt & { clone: string }) => Promise<string>;
+  /** Clones the attempt's `remote` as `llms.txt` says, commits a change, pushes it, and returns the head pushed. */
+  push: (attempt: LoopAttempt) => Promise<string>;
   /** Seconds each `wait_for_attempt` holds. */
   wait: number;
   /** How long scoring, then merging, may take. */
@@ -109,13 +107,10 @@ export async function agentLoop(options: AgentLoopOptions): Promise<AgentLoopRes
   const started = (await creator("start_attempts", { project, task, count: 2 }))["attempts"] as LoopAttempt[];
   assert(started.length === 2, `started ${started.length} attempts, expected 2`);
   const [first, second] = started as [LoopAttempt, LoopAttempt];
-  assert(
-    first.clone !== undefined && first.clone.includes(first.remote),
-    `${first.ref}'s clone command doesn't clone its remote: ${first.clone}`,
-  );
+  assert(first.remote.endsWith(`/${first.ref}.git`), `${first.ref}'s remote is ${first.remote}`);
   log(`${task}: started ${first.ref}, ${second.ref}`);
 
-  const head = await push({ ...first, clone: first.clone });
+  const head = await push(first);
   log(`${first.ref}: pushed ${head}`);
   const opened = (await creator("update_attempt", { project, attempt: first.ref, state: "open" }))[
     "attempt"

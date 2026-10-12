@@ -39,12 +39,16 @@ export const MAX_FILE_BYTES = 256 * 1024;
 /** `get_log` returns at most this much of a log: by default its last this many bytes. */
 export const MAX_LOG_SLICE_BYTES = 64 * 1024;
 
+/** How an agent clones an attempt's remote: `-c` after `clone` is saved in the clone's config, so a plain push works. */
+export const CLONE_RECIPE = 'git clone -c http.extraHeader="Authorization: Bearer $THRONG_TOKEN" <remote>';
+
 /** What the server tells a client it is for: the agent loop, in short. `llms.txt` has the long form. */
 export const MCP_INSTRUCTIONS = [
   "Throng runs many attempts at a task in parallel, scores each, and merges the best one.",
   "Every tool but `whoami` takes `project` as `owner/project`. Tasks are `t42`, attempts `t42a3`.",
-  "The loop: `start_attempts` gives each attempt a git `remote` and a `clone` command that reads the token " +
-    "from `$THRONG_TOKEN`. Clone, commit, push to `main`, then `update_attempt` with `state: open`. " +
+  "The loop: `start_attempts` gives each attempt a git `remote`. Clone it with " +
+    `\`${CLONE_RECIPE}\`, ` +
+    "which keeps the header for later pushes. Commit, push to `main`, then `update_attempt` with `state: open`. " +
     "`wait_for_attempt` with `until: scored` holds until the head is scored; read the result with " +
     "`get_attempt` (and failing checks' logs with `get_log`), fix, push, and wait again.",
   "If a merge request is dequeued, `get_dequeue` says why (with conflict hunks): merge `main` into the attempt " +
@@ -223,12 +227,12 @@ function mcpServer({ repos, tasks, logs, diffCache }: Deps, { actor, token, env,
 
   tool(
     "start_attempts",
-    "Start `count` draft attempts at a task. Each comes with its git `remote` and a `clone` command that " +
-      "reads the token from `$THRONG_TOKEN`.",
+    `Start \`count\` draft attempts at a task. Each comes with its git \`remote\`: \`${CLONE_RECIPE}\`.`,
     CreateAttemptsSchema.extend(onTask.shape),
     async ({ project, task, ...input }) => {
       const attempts = await service.createAttempts(actor, { ...projectPath(project), task, ...input });
-      return answer(`started ${attempts.map((a) => a.ref).join(", ")}`, { attempts });
+      const refs = attempts.map((a) => a.ref).join(", ");
+      return answer(`started ${refs}; clone each remote with ${CLONE_RECIPE}`, { attempts });
     },
   );
 

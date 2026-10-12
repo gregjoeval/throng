@@ -3,8 +3,8 @@
 // this is the long form, step by step.
 
 import { Hono } from "hono";
-import { attemptRemote, cloneCommand } from "./git-remotes.ts";
-import { MAX_FILE_BYTES, MAX_LOG_SLICE_BYTES, MCP_INSTRUCTIONS } from "./mcp.ts";
+import { attemptRemote } from "./git-remotes.ts";
+import { CLONE_RECIPE, MAX_FILE_BYTES, MAX_LOG_SLICE_BYTES, MCP_INSTRUCTIONS } from "./mcp.ts";
 import { MAX_WAIT_SECONDS, MAX_WAITERS_PER_USER } from "./waiters.ts";
 
 /** The guide, for a platform served at `origin`. */
@@ -34,10 +34,13 @@ A tool answers with a one-line summary and the data as JSON; a refusal is a tool
 ## Git
 
 Each attempt is its own repo: \`${remote}\`. Its \`main\` branch is the attempt's head.
-The git proxy takes the token as a bearer header or as the HTTP Basic password (any username). \`start_attempts\`
-returns each attempt's \`remote\` and a \`clone\` command that reads the token from the environment:
+The git proxy takes the token as a bearer header or as the HTTP Basic password (any username). Every attempt
+the API returns carries its \`remote\`. Clone it with the token from the environment:
 
-    ${cloneCommand(remote)}
+    ${CLONE_RECIPE.replace("<remote>", remote)}
+
+The \`-c\` comes after \`clone\`, so git saves the header in the new repo's config and a plain \`git push\` from the
+clone sends it too. (With \`git -c … clone\`, the header is used for the clone only, and a later push has none.)
 
 Pushing a branch \`t42/<name>\` to the project's origin, \`${origin}/git/<owner>/<project>.git\`, also makes an
 open attempt at \`t42\`. The origin's \`main\` only moves through the merge queue.
@@ -47,7 +50,7 @@ open attempt at \`t42\`. The origin's \`main\` only moves through the merge queu
 1. Find work: \`list_tasks\`, then \`get_task\` for a task's attempts, their scores and its merge request.
    \`create_task\` adds one.
 2. \`start_attempts\` with a \`task\` (and \`count\`, \`note\`, or \`from\` to start at another attempt's head).
-3. Clone with the \`clone\` command, commit, and \`git push origin main\`.
+3. Clone the attempt's \`remote\` as above, commit, and \`git push origin main\`: the clone already sends the token.
 4. \`update_attempt\` with \`state: open\`: the attempt is ready to be scored and selected. While it is a draft,
    \`score_now\` scores its head on demand.
 5. \`wait_for_attempt\` with \`until: scored\` holds for up to ${MAX_WAIT_SECONDS} seconds until the head is scored.

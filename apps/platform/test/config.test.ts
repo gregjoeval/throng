@@ -10,6 +10,7 @@ const EMPTY: Config = {
   metrics: [],
   preview: null,
   attempts: { limit: null },
+  selection: { policy: "creator" },
 };
 
 const FULL = `
@@ -111,8 +112,18 @@ describe("parseConfig", () => {
         ],
         preview: { command: "pnpm build" },
         attempts: { limit: 4 },
+        selection: { policy: "creator" },
       },
     });
+  });
+
+  it.each([
+    ["the creator policy", "selection: { policy: creator }\n", { policy: "creator" }],
+    ["a vote, anyone eligible by default", "selection: { policy: vote }\n", { policy: "vote", eligible: "anyone" }],
+    ["a vote among humans", "selection: { policy: vote, eligible: humans }\n", { policy: "vote", eligible: "humans" }],
+    ["a vote among agents", "selection: { policy: vote, eligible: agents }\n", { policy: "vote", eligible: "agents" }],
+  ])("reads the selection policy: %s", (_, text, selection) => {
+    expect(parseConfig(text)).toEqual({ kind: "valid", config: { ...EMPTY, selection } });
   });
 
   it("defaults a check to required and a 10m timeout", () => {
@@ -340,6 +351,18 @@ describe("parseConfig", () => {
     ["a zero limit", "attempts: { limit: 0 }\n", /^attempts\.limit: limit must be a positive integer$/u],
     ["a fractional limit", "attempts: { limit: 1.5 }\n", /^attempts\.limit: limit must be a positive integer$/u],
     ["a string limit", "attempts: { limit: two }\n", /^attempts\.limit: limit must be a positive integer$/u],
+    ["a selection without a policy", "selection: {}\n", /^selection\.policy: policy is required: creator or vote$/u],
+    ["an unknown policy", "selection: { policy: judge }\n", /^selection\.policy: policy must be creator or vote$/u],
+    [
+      "an unknown eligibility",
+      "selection: { policy: vote, eligible: bots }\n",
+      /^selection\.eligible: eligible must be humans, agents or anyone$/u,
+    ],
+    [
+      "eligibility without a vote",
+      "selection: { policy: creator, eligible: humans }\n",
+      /^selection\.eligible: eligible is only for the vote policy$/u,
+    ],
   ])("rejects %s", (_, text, error) => {
     const result = parseConfig(text);
     expect(result.kind).toBe("invalid");

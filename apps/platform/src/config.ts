@@ -29,6 +29,18 @@ export type Source = (typeof SOURCES)[number];
 export type ConfigLayer = Exclude<Source, "platform">;
 export const CONFIG_LAYERS = SOURCES.filter((source): source is ConfigLayer => source !== "platform");
 
+/** Who makes a task's selection: its creator, or a vote among eligible users. */
+export const SELECTION_POLICIES = ["creator", "vote"] as const;
+/** Who may vote: users acting as themselves, users acting under an alias, or either. */
+export const VOTE_ELIGIBILITIES = ["humans", "agents", "anyone"] as const;
+export type VoteEligibility = (typeof VOTE_ELIGIBILITIES)[number];
+
+/** A selection policy: a vote says who is eligible to vote in it. */
+export type SelectionPolicy = { policy: "creator" } | { policy: "vote"; eligible: VoteEligibility };
+
+/** The policy a project has when its config sets none: the task's creator selects. */
+export const CREATOR_SELECTS: SelectionPolicy = { policy: "creator" };
+
 /** A metric, with the fields its type has. */
 export type MetricConfig = {
   name: string;
@@ -72,6 +84,8 @@ export interface Config {
   preview: { command: string | null } | null;
   /** Null to use the default cap on active attempts per task. */
   attempts: { limit: number | null };
+  /** Who makes each task's selection, unless a task overrides it. */
+  selection: SelectionPolicy;
 }
 
 export type ConfigResult =
@@ -263,6 +277,29 @@ export const CheckSchema = z.strictObject({
     .optional(),
 });
 
+/** A selection policy as a config, or a task overriding it, writes it. */
+export const SelectionSchema = z
+  .strictObject(
+    {
+      policy: z.enum(SELECTION_POLICIES, {
+        error: (issue) =>
+          issue.input === undefined
+            ? `policy is required: ${oneOf(SELECTION_POLICIES)}`
+            : `policy must be ${oneOf(SELECTION_POLICIES)}`,
+      }),
+      eligible: z.enum(VOTE_ELIGIBILITIES, { error: `eligible must be ${oneOf(VOTE_ELIGIBILITIES)}` }).optional(),
+    },
+    { error: "selection must be a mapping" },
+  )
+  .superRefine((selection, ctx) => {
+    if (selection.policy !== "vote" && selection.eligible !== undefined) {
+      ctx.addIssue({ code: "custom", path: ["eligible"], message: "eligible is only for the vote policy" });
+    }
+  })
+  .transform((selection): SelectionPolicy =>
+    selection.policy === "vote" ? { policy: "vote", eligible: selection.eligible ?? "anyone" } : CREATOR_SELECTS,
+  );
+
 const ConfigSchema = z
   .strictObject(
     {
@@ -292,6 +329,7 @@ const ConfigSchema = z
             .optional(),
         })
         .optional(),
+      selection: SelectionSchema.optional(),
     },
     { error: "the config must be a mapping" },
   )
@@ -334,8 +372,18 @@ export function parseConfig(text: string | null): ConfigResult {
       metrics: (config.metrics ?? []).map((metric) => metricConfig(metric, "project")),
       preview: config.preview === undefined ? null : { command: config.preview.command ?? null },
       attempts: { limit: config.attempts?.limit ?? null },
+      selection: config.selection ?? CREATOR_SELECTS,
     },
   };
+}
+
+/**
+ * The selection policy a task is selected under: its own override, else its project config's. A
+ * missing or invalid config leaves it to the task's creator.
+ */
+export function selectionPolicy(config: ConfigResult, override: SelectionPolicy | null): SelectionPolicy {
+  if (override !== null) return override;
+  return config.kind === "valid" ? config.config.selection : CREATOR_SELECTS;
 }
 
 /** The project's config, read from its origin's `main`. */

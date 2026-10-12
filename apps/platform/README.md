@@ -24,8 +24,10 @@ Each run:
 1. Generates a random `SPIKE_TOKEN`.
 2. Applies D1 migrations to `throng-ci`.
 3. Builds with `CLOUDFLARE_ENV=ci` and deploys `throng-ci`, setting `SPIKE_TOKEN` and `CF_PREVIEW_TOKEN` (the deploy's own API token).
-4. Runs the e2e scenarios. Every project id starts with `ci<run id>r<attempt>p`.
-5. Always deletes every repo under that prefix with `pnpm e2e cleanup`, even when the suite fails or is cancelled.
+4. Runs the e2e scenarios. Every project id starts with `e2eci<run id>r<attempt>p`. Each scenario deletes what its projects made, and the suite revokes its Throng token when it ends.
+5. Always deletes everything under that prefix with `pnpm e2e cleanup`, even when the suite fails or is cancelled: each project's D1 row, its Durable Object's storage, its logs in R2 and its repos.
+
+The suite reaches the Worker through its e2e routes, `/e2e/*`, behind the `SPIKE_TOKEN` bearer secret. They refuse any project or repo whose id doesn't start with `e2e`, so they can't reach a real project, and `E2E_PROJECT_PREFIX` must start with `e2e` too.
 
 ### Running it
 
@@ -38,14 +40,14 @@ gh workflow run e2e.yml --ref my-branch     # every scenario, against a branch
 
 ### Scenarios
 
-- `zeroconfig`, `conflict`, `needsreview`: the merge queue. These make real projects (with task rows) owned by an e2e user, `e2e@throng.invalid`, through `POST /spike/projects/:project`, then drive them only through `/api` and the git proxy with that user's Throng token (`POST /spike/token`). The fixture is the one push that goes around the proxy, since the proxy refuses pushes to the origin's `main`.
+- `zeroconfig`, `conflict`, `needsreview`: the merge queue. These make real projects (with task rows) owned by an e2e user, `e2e@throng.invalid`, through `POST /e2e/projects/:project`, then drive them only through `/api` and the git proxy with that user's Throng token (`POST /e2e/token`). The fixture is the one push that goes around the proxy, since the proxy refuses pushes to the origin's `main`.
   - `zeroconfig`: a project with no `.throng/config.yml`. Selecting `t1a1` closes `t1a2`, and the merge request lands as a merge commit whose parents are the old `main` and the approved head, with the `Throng-Task`, `Throng-Attempt`, `Throng-Merge-Request` and `Approved-by` trailers. It also checks custom refs after landing: both attempts are archived under `refs/attempts/` in the origin.
   - `conflict`: two tasks whose attempts edit the same line. `t1`'s merge request lands, and `t2`'s is dequeued with reason `conflict` and the expected three-way hunk. Its author merges `main` and pushes, which moves it to `needs_review`. Once approved, it lands.
   - `needsreview`: a slow required check keeps the landing in its retest. A push to the source while it's queued or landing dequeues it with `new_push` to `needs_review`. Once the new head passes, it still doesn't requeue on its own.
-- `metrics`, `failing`, `invalid`, `preview`, `coalesce`, `intrusion`, `deps`: scoring, through the spike's attempts (forks with no task rows); see the header of `scripts/e2e.ts`.
+- `metrics`, `failing`, `invalid`, `preview`, `coalesce`, `intrusion`, `deps`: scoring, through the e2e routes' attempts (forks with no task rows); see the header of `scripts/e2e.ts`.
 - `refs`: attempt archives. Closing an attempt pushes its fork's `main` to `refs/attempts/t42a3` in the origin (`ARCHIVE_REF_PREFIX` in `src/archive.ts`), and reopening copies it back. The scenario checks, against real Artifacts, that:
   1. a plain `git push` to a ref under that prefix succeeds and `git ls-remote` lists it;
-  2. the Worker's own git client (`src/git-client.ts`, behind `POST /spike/repos/:name/copy-ref`) copies one origin's `main` into another origin's archive ref, and an archive ref back out again;
+  2. the Worker's own git client (`src/git-client.ts`, behind `POST /e2e/repos/:name/copy-ref`) copies one origin's `main` into another origin's archive ref, and an archive ref back out again;
   3. both refs are still there after a later push to `main`;
   4. no archive push started a check.
 
@@ -59,6 +61,6 @@ gh workflow run e2e.yml --ref my-branch     # every scenario, against a branch
 4. **GitHub environment.** Under **Settings → Environments**, create an environment named `ci`. Optionally, limit its **Deployment branches** to `main`. Give it two secrets:
    - `CLOUDFLARE_API_TOKEN`: the token from step 2.
    - `CLOUDFLARE_ACCOUNT_ID`: the account id (the same as `CF_ACCOUNT_ID` in `wrangler.jsonc`).
-5. **Run it once** and check the suite passes and the run's repos are gone afterwards.
+5. **Run it once** and check the suite passes and the run's projects and repos are gone afterwards.
 
 The first run creates the `throng-ci` Worker, its Workflow (`throng-ci-scoring`) and its container. `pnpm e2e cleanup` needs `THRONG_URL`, `SPIKE_TOKEN` and an explicit `E2E_PROJECT_PREFIX`, so it can also clear up after a local run.

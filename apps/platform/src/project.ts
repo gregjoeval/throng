@@ -118,6 +118,11 @@ export class ProjectCoordinator extends DurableObject<Env> {
       .map((r) => ({ ...r, detail: JSON.parse(r.detail) as Record<string, unknown> }));
   }
 
+  /** E2e cleanup only: deletes all of this project's storage, so nothing of an e2e run is left. */
+  async destroy(): Promise<void> {
+    await this.ctx.storage.deleteAll();
+  }
+
   /** Records a hop the caller observed (repo created, fork ready) so one journal holds the whole run. */
   note(kind: string, detail: Record<string, unknown>): void {
     this.#log(kind, detail);

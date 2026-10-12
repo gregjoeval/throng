@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ServiceError } from "../src/errors.ts";
 import type { DequeueCause } from "../src/merge-requests.ts";
-import type { ScoringResult } from "../src/results.ts";
+import type { Gate, ScoringResult } from "../src/results.ts";
 import type { ScoringOutcome, ScoringParams, ScoringWorkflow } from "../src/scoring.ts";
 import { TaskStore } from "../src/task-store.ts";
 import type { AttemptInput, ProjectContext } from "../src/task-store.ts";
@@ -33,7 +33,7 @@ class FakeWorkflow implements ScoringWorkflow {
   }
 }
 
-function result(gate: "passed" | "failed" = "passed"): ScoringResult {
+function result(gate: Gate = "passed"): ScoringResult {
   return {
     base: "b".repeat(40),
     config: { kind: "none" },
@@ -45,7 +45,7 @@ function result(gate: "passed" | "failed" = "passed"): ScoringResult {
   };
 }
 
-const done = (gate: "passed" | "failed" = "passed"): ScoringOutcome => ({ status: "done", result: result(gate) });
+const done = (gate: Gate = "passed"): ScoringOutcome => ({ status: "done", result: result(gate) });
 
 /**
  * A task by cat, with attempts by ada and bob. `score` finishes the attempt's latest run, as its

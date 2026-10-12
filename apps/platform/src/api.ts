@@ -21,7 +21,7 @@ import type { LogStore } from "./logs.ts";
 import { DEQUEUE_REASONS, MERGE_REQUEST_STATES } from "./merge-requests.ts";
 import { MAX_PROJECT_HANDLE, PROJECT_HANDLE, projectService } from "./projects.ts";
 import type { Repos } from "./repos.ts";
-import { CHECK_OUTCOMES } from "./results.ts";
+import { CHECK_OUTCOMES, GATES } from "./results.ts";
 import { ATTEMPT_SCORING_STATUSES, RUN_STATUSES, SCORING_TRIGGERS } from "./scoring.ts";
 import { ATTEMPT_STATES, TASK_STATES } from "./task-store.ts";
 import { taskService } from "./tasks.ts";
@@ -196,7 +196,7 @@ const ScoringResultSchema = z
         z.object({ kind: z.literal("invalid"), error: z.string() }),
       ])
       .openapi({ description: "How the `.throng/config.yml` on `origin/main` it was scored under parsed." }),
-    gate: z.enum(["passed", "failed"]).openapi({ description: "Passed when every required check passed." }),
+    gate: z.enum(GATES).openapi({ description: "Passed when every required check passed." }),
     checks: z.array(
       z
         .object({

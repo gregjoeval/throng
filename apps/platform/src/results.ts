@@ -47,12 +47,15 @@ export type PreviewResult =
   | { status: "failed" }
   | { status: "errored"; error: string };
 
+export const GATES = ["passed", "failed"] as const;
+export type Gate = (typeof GATES)[number];
+
 export interface ScoringResult {
   /** `git merge-base <head> origin/main` at scoring time; null when they share no history. */
   base: string | null;
   config: { kind: "none" } | { kind: "valid" } | { kind: "invalid"; error: string };
   /** Passed when every required check passed, including when there are none. */
-  gate: "passed" | "failed";
+  gate: Gate;
   checks: CheckResult[];
   builtin: BuiltinMetrics;
   preview: PreviewResult;
@@ -156,7 +159,7 @@ export function parseMetrics(
 }
 
 /** Passed when every required check passed; no checks at all passes. */
-export function gateFor(checks: CheckResult[]): "passed" | "failed" {
+export function gateFor(checks: CheckResult[]): Gate {
   return checks.every((c) => !c.required || c.outcome === "passed") ? "passed" : "failed";
 }
 

@@ -70,11 +70,14 @@ export interface Commit {
   committedAt: number;
 }
 
+export const TREE_ENTRY_TYPES = ["tree", "blob", "symlink", "gitlink", "exec"] as const;
+export type TreeEntryType = (typeof TREE_ENTRY_TYPES)[number];
+
 export interface TreeEntry {
   name: string;
   mode: string;
   hash: string;
-  type: "tree" | "blob" | "symlink" | "gitlink" | "exec";
+  type: TreeEntryType;
 }
 
 /** One ref copied from one repo to another: see `Repos.copyRef`. */

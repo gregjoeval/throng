@@ -16,6 +16,7 @@ import type { BrowseService, Resolved } from "./browse.ts";
 import { DIFF_CAPS, diffCommit, unifiedPatch } from "./diff.ts";
 import type { DiffCache } from "./diff.ts";
 import { errorBody, errorResponse, ServiceError } from "./errors.ts";
+import { TREE_ENTRY_TYPES } from "./repos.ts";
 import type { Repos } from "./repos.ts";
 import { ATTEMPT_STATES } from "./task-store.ts";
 import type { TaskBackend } from "./tasks.ts";
@@ -66,7 +67,7 @@ const ResolvedSchema = {
   sha: z.string().openapi({ description: "The commit the ref resolved to." }),
 };
 
-const EntryType = z.enum(["tree", "blob", "symlink", "gitlink", "exec"]);
+const EntryType = z.enum(TREE_ENTRY_TYPES);
 
 const EntrySchema = z
   .object({

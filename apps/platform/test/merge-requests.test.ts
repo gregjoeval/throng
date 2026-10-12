@@ -279,7 +279,8 @@ describe("approve and cancel", () => {
         position: null,
         last_dequeue: inQueue ? { reason: "cancelled" } : null,
       });
-      expect(mrEvents().slice(-2)).toEqual(inQueue ? ["dequeued", "cancelled"] : [expect.any(String), "cancelled"]);
+      expect(mrEvents().at(-1)).toBe("cancelled");
+      expect(mrEvents().at(-2) === "dequeued").toBe(inQueue);
       expect(store.getTask(PROJECT, cat, { task: 1 }).state).toBe("open");
       expect(store.getAttempt(PROJECT, cat, ref1).state).toBe("open");
     });
@@ -312,7 +313,8 @@ describe("a push to the source attempt", () => {
       const inQueue = from !== "pending";
       const lastDequeue = inQueue ? { reason: "newPush" } : null;
       expect(mr()).toMatchObject({ state: "needsReview", position: null, last_dequeue: lastDequeue });
-      expect(mrEvents().slice(-2)).toEqual(inQueue ? ["dequeued", "needsReview"] : [expect.any(String), "needsReview"]);
+      expect(mrEvents().at(-1)).toBe("needsReview");
+      expect(mrEvents().at(-2) === "dequeued").toBe(inQueue);
       expect(store.getAttempt(PROJECT, cat, ref1).merge_request).toEqual({
         state: "needsReview",
         last_dequeue: lastDequeue,

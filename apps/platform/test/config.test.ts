@@ -118,22 +118,18 @@ describe("parseConfig", () => {
     ["1s", 1000],
     ["30m", 30 * 60_000],
     ["1800s", 30 * 60_000],
-    ["0h", null],
-    ["31m", null],
-    ["1h", null],
-    ["1801s", null],
-    ["10", null],
-    ["10 m", null],
-    ["10d", null],
-    ["-1m", null],
-  ])("bounds a check's timeout: %s", (timeout, ms) => {
+  ])("accepts a check's timeout within bounds: %s", (timeout, ms) => {
     const result = parseConfig(check(`timeout: "${timeout}"`));
-    if (ms === null) {
-      expect(result).toMatchObject({ kind: "invalid", error: expect.stringMatching(/^checks\[0\]\.timeout: /) });
-    } else {
-      expect(result).toMatchObject({ kind: "valid", config: { checks: [{ timeoutMs: ms }] } });
-    }
+    expect(result).toMatchObject({ kind: "valid", config: { checks: [{ timeoutMs: ms }] } });
   });
+
+  it.each(["0h", "31m", "1h", "1801s", "10", "10 m", "10d", "-1m"])(
+    "rejects a check's timeout out of bounds or malformed: %s",
+    (timeout) => {
+      const result = parseConfig(check(`timeout: "${timeout}"`));
+      expect(result).toMatchObject({ kind: "invalid", error: expect.stringMatching(/^checks\[0\]\.timeout: /) });
+    },
+  );
 
   it.each([
     // YAML

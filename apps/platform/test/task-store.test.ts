@@ -57,6 +57,17 @@ async function failure(promise: Promise<unknown> | (() => unknown)): Promise<Ser
 
 const code = async (promise: Promise<unknown> | (() => unknown)) => (await failure(promise)).code;
 
+/** The ServiceError code `fn` fails with, or null when it succeeds. */
+async function errorCode(fn: () => unknown): Promise<string | null> {
+  try {
+    await fn();
+    return null;
+  } catch (error) {
+    if (error instanceof ServiceError) return error.code;
+    throw error;
+  }
+}
+
 /** A task by ada with one attempt by ada, in `state`. */
 async function attemptIn(store: TaskStore, state: AttemptState): Promise<StoredAttempt> {
   const task = store.createTask(PROJECT, ada, { title: "Fix it" });
@@ -319,16 +330,12 @@ describe("attempts", () => {
     for (const [from, allowed] of Object.entries(valid) as [AttemptState, Partial<Record<Move, AttemptState>>][]) {
       for (const move of Object.keys(moves) as Move[]) {
         const to = allowed[move];
+        const expected = to === undefined ? { error: "invalidState", state: from } : { error: null, state: to };
         it(`${from} --${move}--> ${to ?? "invalidState"}`, async () => {
           const { store } = setup();
           await attemptIn(store, from);
-          if (to === undefined) {
-            expect(await code(async () => moves[move](store))).toBe("invalidState");
-            expect(store.getAttempt(PROJECT, ada, ref).state).toBe(from);
-          } else {
-            await moves[move](store);
-            expect(store.getAttempt(PROJECT, ada, ref).state).toBe(to);
-          }
+          const error = await errorCode(async () => moves[move](store));
+          expect({ error, state: store.getAttempt(PROJECT, ada, ref).state }).toEqual(expected);
         });
       }
     }

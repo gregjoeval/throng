@@ -56,9 +56,9 @@ async function attemptIn(store: TaskStore, state: AttemptState) {
 function code(fn: () => unknown): string {
   try {
     fn();
-  } catch (err) {
-    expect(err).toBeInstanceOf(ServiceError);
-    return (err as ServiceError).code;
+  } catch (error) {
+    if (error instanceof ServiceError) return error.code;
+    throw error;
   }
   throw new Error("expected a ServiceError");
 }

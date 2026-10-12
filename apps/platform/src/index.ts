@@ -11,6 +11,7 @@ export { ProjectCoordinator } from "./project";
 export { RunSandbox, OutboundAuth } from "./sandbox";
 export { ScoringWorkflow } from "./workflows";
 export { LandingWorkflow } from "./landing-workflow";
+export { FollowWorkflow } from "./follow-workflow";
 
 const PUSH_TOKEN_TTL_SECONDS = 60 * 60;
 

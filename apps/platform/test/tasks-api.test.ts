@@ -159,6 +159,7 @@ describe("attempt routes", () => {
         closedAt: null,
         mergedSha: null,
         archivedSha: null,
+        needsUpdate: false,
         scoring: { status: "none", sha: null },
         mergeRequest: null,
         verdicts: { head: null, merge: 0, revise: 0, reject: 0 },

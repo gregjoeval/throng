@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { reposFor } from "./artifacts";
 import { camelKeys } from "./casing";
+import type { FollowOutcome } from "./follows";
 import { LANDING_ROLES, sandboxName, SCORING_ROLES } from "./grants";
 import type { SandboxRole } from "./grants";
 import type { LandingOutcome } from "./landing";
@@ -20,7 +21,7 @@ export interface JournalEntry {
  * One per project: the source of truth for its tasks and attempts (`task-store.ts`), with their
  * rows, per-project counters and journal events for every transition, and for its scoring runs
  * (`scoring.ts`), merge requests and the landings of its merge queue. After every store call and
- * report it drains: stopping and starting Landing Workflows, then scoring runs.
+ * report it drains: stopping and starting Landing Workflows, starting Follow Workflows, then scoring runs.
  * The journal also records the hops the e2e suite reads timings back from.
  */
 export class ProjectCoordinator extends DurableObject<Env> {
@@ -44,6 +45,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
       repos: reposFor(env),
       scoring: { workflow: env.SCORING, teardown: teardown(SCORING_ROLES) },
       landing: { workflow: env.LANDING, teardown: teardown(LANDING_ROLES) },
+      follow: { workflow: env.FOLLOW },
     });
   }
 
@@ -102,6 +104,23 @@ export class ProjectCoordinator extends DurableObject<Env> {
       await this.#tasks.landingFinished(landing, outcome);
     } finally {
       await this.#drain(this.#tasks.landings.get(landing)?.project);
+    }
+  }
+
+  /**
+   * Called by a Follow Workflow right before it merges a task branch into an attempt's fork. False
+   * when it must not push: the attempt ended, or a landing of its merge request is pushing to main.
+   */
+  claimFollowPush(follow: number): boolean {
+    return this.#tasks.claimFollowPush(follow);
+  }
+
+  /** Called by a Follow Workflow when it ends: records the attempt's new head, or marks it needs update. */
+  async followFinished(follow: number, outcome: FollowOutcome): Promise<void> {
+    try {
+      await this.#tasks.followFinished(follow, outcome);
+    } finally {
+      await this.#drain(this.#tasks.follows.get(follow)?.project);
     }
   }
 

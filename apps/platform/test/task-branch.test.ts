@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Hono } from "hono";
 import { afterEach, describe, expect, it } from "vitest";
+import type { FollowParams } from "../src/follows.ts";
 import { gitRoutes } from "../src/git-proxy.ts";
 import { projectService } from "../src/projects.ts";
 import { forkRepo, originRepo } from "../src/repos.ts";
@@ -33,7 +34,9 @@ async function setup() {
   const env = gitEnv(work);
 
   const db = testDatabase();
-  const { backend, store } = testTaskBackends(host, now);
+  const followed: FollowParams[] = [];
+  const follow = { workflow: { create: async ({ params }: { params: FollowParams }) => followed.push(params) } };
+  const { backend, store } = testTaskBackends(host, now, undefined, undefined, follow);
   const app = new Hono().route("/git", gitRoutes({ repos: () => host, tasks: () => backend, now }));
   const server = await serve(app, { DB: db, ACCESS_TEAM_DOMAIN: "x", ACCESS_AUD: "x" });
   cleanups.push(server.close);
@@ -83,7 +86,26 @@ async function setup() {
   const taskHead = () => host.head(origin, "refs/tasks/t1");
   const fork = (attempt: string) => forkRepo(project.id, attempt);
 
-  return { host, env, greg, ada, bob, project, origin, mainSha, tasks, clone, commit, push, taskHead, fork };
+  const attemptRemote = (token: string, attempt: string) =>
+    `${server.origin.replace("://", `://git:${token}@`)}/git/greg/throng/${attempt}.git`;
+  return {
+    host,
+    env,
+    greg,
+    ada,
+    bob,
+    project,
+    origin,
+    mainSha,
+    tasks,
+    clone,
+    commit,
+    push,
+    taskHead,
+    fork,
+    followed,
+    attemptRemote,
+  };
 }
 
 describe("pushing a task branch", () => {
@@ -153,7 +175,7 @@ describe("starting attempts on a task with a task branch", () => {
   });
 
   it("starts a push-to-create attempt from the task head, and names the task branch in the notice", async () => {
-    const { ada, bob, env, clone, commit, push, host, fork, tasks, project } = await setup();
+    const { ada, bob, env, clone, commit, push, host, fork, tasks, project, followed } = await setup();
     const dir = await clone(ada.token);
     const tests = await commit(dir, "Add login tests");
     expect((await push(dir, "refs/tasks/t1")).ok).toBeTruthy();
@@ -170,10 +192,79 @@ describe("starting attempts on a task with a task branch", () => {
     );
     expect(await host.head(fork("t1a1"))).toBe(fix);
     expect(tasks.getAttempt(project, bob.actor, { task: 1, number: 1 })).toMatchObject({ state: "open" });
+    // Its author may not have built on the task branch: a follow checks, and merges it in if not.
+    await tasks.drain(project.id);
+    expect(followed.map((f) => [f.attempt, f.taskHead])).toEqual([[1, tests]]);
 
     // A new task made by push-to-create has no task branch to name.
     const other = await clone(bob.token);
     await commit(other, "Add search");
     expect((await push(other, "refs/heads/search")).stderr).not.toMatch(/task branch/u);
+  });
+});
+
+describe("following the task branch", () => {
+  it("queues a follow of the pushed task head for each active attempt, and names them in the push's reply", async () => {
+    const { ada, bob, clone, commit, push, tasks, project, followed } = await setup();
+    await tasks.createAttempts(project, bob.actor, { task: 1, count: 2 });
+    await tasks.closeAttempt(project, bob.actor, { task: 1, number: 2 });
+
+    const dir = await clone(ada.token);
+    const tests = await commit(dir, "Add login tests");
+    const pushed = await push(dir, "refs/tasks/t1");
+    expect(pushed.ok).toBeTruthy();
+    expect(pushed.stderr).toMatch(new RegExp(`remote: t1's task branch is at ${tests}; merging it into t1a1\\.`, "u"));
+    await tasks.drain(project.id);
+    expect(followed.map((f) => [f.attempt, f.taskHead])).toEqual([[1, tests]]);
+  });
+
+  it("says nothing more when the task has no active attempts", async () => {
+    const { ada, clone, commit, push } = await setup();
+    const dir = await clone(ada.token);
+    await commit(dir, "Add login tests");
+    const pushed = await push(dir, "refs/tasks/t1");
+    expect(pushed.ok).toBeTruthy();
+    expect(pushed.stderr).not.toMatch(/merging/u);
+  });
+
+  it("tells an author whose push the fork rejected as non-fast-forward after a follow to pull first", async () => {
+    const { ada, bob, env, host, clone, commit, push, tasks, project, fork, followed, attemptRemote } = await setup();
+    await tasks.createAttempts(project, bob.actor, { task: 1 });
+    // bob works on his attempt.
+    const mine = await clone(bob.token);
+    await git(mine, env, "remote", "add", "attempt", attemptRemote(bob.token, "t1a1"));
+    await commit(mine, "Fix login");
+    expect((await tryGit(mine, env, "push", "attempt", "HEAD:main")).ok).toBeTruthy();
+
+    // ada moves the task branch; the follow merges it into t1a1, as its Workflow would.
+    const dir = await clone(ada.token);
+    const tests = await commit(dir, "Add login tests");
+    expect((await push(dir, "refs/tasks/t1")).ok).toBeTruthy();
+    await tasks.drain(project.id);
+    const follow = followed.find((f) => f.attempt === 1);
+    if (follow === undefined) throw new Error("no follow of t1a1");
+    const before = (await host.head(fork("t1a1"))) ?? "";
+    await git(mine, env, "fetch", "-q", "origin", "refs/tasks/t1");
+    await git(mine, env, "merge", "-q", "--no-edit", "FETCH_HEAD");
+    const merged = (await git(mine, env, "rev-parse", "HEAD")).trim();
+    await git(mine, env, "push", "-q", host.path(fork("t1a1")), "HEAD:main");
+    await git(mine, env, "reset", "-q", "--hard", "HEAD~1");
+    expect(tasks.claimFollowPush(follow.follow)).toBeTruthy();
+    await tasks.followFinished(follow.follow, { kind: "merged", before, sha: merged });
+    expect(tests).not.toBe(merged);
+
+    // bob, not having pulled, forces his next commit; a host that refuses non-fast-forwards rejects it.
+    await git(host.path(fork("t1a1")), env, "config", "receive.denyNonFastForwards", "true");
+    await commit(mine, "More of the fix");
+    const forced = await tryGit(mine, env, "push", "--force", "attempt", "HEAD:main");
+    expect(forced.ok).toBeFalsy();
+    expect(forced.stderr).toMatch(/remote: t1's task branch moved; pull first/u);
+    expect(await host.head(fork("t1a1"))).toBe(merged);
+
+    // Once bob pulls, his push lands and the notice is gone.
+    await git(mine, env, "pull", "-q", "--no-rebase", "--no-edit", "attempt", "main");
+    const pulled = await tryGit(mine, env, "push", "attempt", "HEAD:main");
+    expect(pulled.ok).toBeTruthy();
+    expect(pulled.stderr).not.toMatch(/pull first/u);
   });
 });

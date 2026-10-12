@@ -241,6 +241,7 @@ describe("attempts", () => {
         merged_sha: null,
         archived_sha: null,
         forked_from: null,
+        needs_update: false,
         scoring: { status: "none", sha: null },
         merge_request: null,
         verdicts: { head: null, merge: 0, revise: 0, reject: 0 },

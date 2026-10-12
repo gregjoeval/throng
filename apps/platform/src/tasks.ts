@@ -100,6 +100,8 @@ export interface Attempt {
   archivedSha: string | null;
   /** The attempt of the same task it was copied from when it was started; absent when it wasn't. Never its base. */
   forkedFrom?: string;
+  /** Its task branch moved and merging it in conflicted; its author merges it to clear this. */
+  needsUpdate: boolean;
   scoring: AttemptScoring;
   mergeRequest: { state: AttemptMergeRequest["state"]; lastDequeue: { reason: DequeueReason } | null } | null;
   verdicts: VerdictSummary;
@@ -214,6 +216,8 @@ export interface ArenaAttempt extends ScoringStatus {
   base: Base | null;
   /** The attempt of the same task it was copied from when it was started; absent when it wasn't. Never its base. */
   forkedFrom?: string;
+  /** Its task branch moved and merging it in conflicted; its author merges it to clear this. */
+  needsUpdate: boolean;
   verdicts: VerdictSummary;
 }
 
@@ -434,13 +438,14 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
       return {
         task: taskRef(number),
         metrics: config.kind === "valid" ? config.config.checks.flatMap((check) => check.metrics) : [],
-        attempts: list.map(({ scoring, fork, state, author, verdicts, forked_from }, i) => ({
+        attempts: list.map(({ scoring, fork, state, author, verdicts, forked_from, needs_update }, i) => ({
           ref: fork,
           state,
           author: userRef(author, users),
           ...scoringStatus(scoring),
           base: bases[i] ?? null,
           ...forkedFrom(forked_from),
+          needsUpdate: needs_update,
           verdicts,
         })),
       };
@@ -629,6 +634,7 @@ function publicAttempt(a: StoredAttempt, users: Map<string, string>): Attempt {
     mergedSha: a.merged_sha,
     archivedSha: a.archived_sha,
     ...forkedFrom(a.forked_from),
+    needsUpdate: a.needs_update,
     scoring: a.scoring,
     mergeRequest: mr === null ? null : { state: mr.state, lastDequeue: mr.last_dequeue },
     verdicts: a.verdicts,

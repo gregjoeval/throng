@@ -328,9 +328,23 @@ const BaseSchema = z
     description: "Where an attempt's history meets its task branch, or `origin/main` when the task has none.",
   });
 
+const ConfigNameSchema = z.string().regex(CONFIG_NAME);
+
+const MetricSchema = z
+  .object({
+    name: ConfigNameSchema.openapi({ example: "coverage" }),
+    unit: z.string().nullable().openapi({ example: "%" }),
+    order: z.enum(METRIC_ORDERS).openapi({ description: "`asc` when lower is better, `desc` when higher is." }),
+  })
+  .openapi("Metric");
+
 const TaskArenaSchema = z
   .object({
     task: z.string().openapi({ example: "t42" }),
+    metrics: z.array(MetricSchema).openapi({
+      description:
+        "Every metric the `.throng/config.yml` on `origin/main` declares, in check order; empty without a valid config.",
+    }),
     attempts: z.array(
       ScoringStatusSchema.extend({
         ref: z.string().openapi({ example: "t42a3" }),
@@ -451,8 +465,6 @@ const RunLogPathSchema = RunPathSchema.extend({
   }),
 });
 
-const ConfigNameSchema = z.string().regex(CONFIG_NAME);
-
 const ConfigSchema = z
   .object({
     setup: z.array(z.string()).openapi({ description: "Commands run once, in order, before the checks." }),
@@ -470,15 +482,7 @@ const ConfigSchema = z
             .int()
             .max(MAX_CHECK_TIMEOUT_MS)
             .openapi({ description: "Defaults to 10 minutes.", example: 600_000 }),
-          metrics: z.array(
-            z.object({
-              name: ConfigNameSchema.openapi({ example: "coverage" }),
-              unit: z.string().nullable().openapi({ example: "%" }),
-              order: z
-                .enum(METRIC_ORDERS)
-                .openapi({ description: "`asc` when lower is better, `desc` when higher is." }),
-            }),
-          ),
+          metrics: z.array(MetricSchema),
         }),
       )
       .openapi({ description: "Run in order." }),

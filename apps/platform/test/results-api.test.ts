@@ -228,6 +228,26 @@ describe("the arena", () => {
     ]);
   });
 
+  it("declares the metrics of the config on main, with their units and which way is better", async () => {
+    const { call, ada, repos, projectId, base, drafts } = await setup();
+    await drafts(1);
+    expect((await call("GET", `${base}/tasks/t1/arena`, ada)).body["metrics"]).toEqual([]);
+    const config = [
+      "checks:",
+      "  - name: test",
+      "    command: pnpm test",
+      "    metrics: [{ name: coverage, unit: '%', order: desc }]",
+      "  - name: bundle",
+      "    command: pnpm build",
+      "    metrics: [{ name: bundle_kb, order: asc }]",
+    ].join("\n");
+    repos.commit(`${projectId}-main`, { files: { "README.md": "hi\n", ".throng/config.yml": config } });
+    expect((await call("GET", `${base}/tasks/t1/arena`, ada)).body["metrics"]).toEqual([
+      { name: "coverage", unit: "%", order: "desc" },
+      { name: "bundle_kb", unit: null, order: "asc" },
+    ]);
+  });
+
   it("gives an ended attempt no base", async () => {
     const { call, greg, ada, base, drafts, commit } = await setup();
     await drafts(1);

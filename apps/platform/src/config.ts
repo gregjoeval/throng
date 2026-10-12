@@ -111,6 +111,10 @@ const oneOf = (values: readonly string[]) =>
 const FROM_FORMAT = "from must be <check>.<file>.<path>, like test.coverage-summary.total.lines.pct";
 const command = z.string({ error: "must be a string" }).trim().min(1, "must not be empty");
 
+/**
+ * A metric as a config writes it. It stays one flat object rather than a union on `type`, so each
+ * field's error names that field; `checkMetricFields` enforces which fields each type has.
+ */
 export const MetricSchema = z.strictObject({
   name: name("metric name"),
   from: z

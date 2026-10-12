@@ -89,6 +89,15 @@ export class Landings {
     return row === undefined ? null : toLanding(row);
   }
 
+  /** The merge request's latest landing that ended `dequeued`: the one its `last_dequeue` came from, if any did. */
+  lastDequeued(mergeRequest: number): StoredLanding | null {
+    const [row] = this.#sql.exec<LandingRow>(
+      "SELECT * FROM landings WHERE merge_request = ? AND status = 'dequeued' ORDER BY id DESC LIMIT 1",
+      mergeRequest,
+    );
+    return row === undefined ? null : toLanding(row);
+  }
+
   /** Moves a landing on, recording when it ended unless it is now `pushing`. */
   move(id: number, status: LandingStatus): void {
     this.#sql.exec(

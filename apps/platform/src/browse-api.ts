@@ -456,7 +456,7 @@ export function browseRoutes({ auth, repos, tasks, diffCache }: BrowseOptions) {
 }
 
 /** Whether the client asked for the unified patch rather than JSON. */
-function wantsPatch(accept: string | undefined): boolean {
+export function wantsPatch(accept: string | undefined): boolean {
   return accept?.split(",").some((t) => t.split(";")[0]?.trim().toLowerCase() === "text/x-diff") ?? false;
 }
 

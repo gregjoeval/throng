@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parseConfig } from "../src/config.ts";
 import { buildResult, scorePlan } from "../src/results.ts";
 import type { RawScore, ScorePlan } from "../src/results.ts";
@@ -57,6 +57,8 @@ beforeEach(() => {
   git(work, "push", "-q", origin, "main");
   git(root, "clone", "-q", "--bare", origin, fork);
 });
+
+afterEach(() => rmSync(root, { recursive: true, force: true }));
 
 const plan = (overrides: Partial<ScorePlan> = {}): ScorePlan => ({ setup: [], checks: [], allow: [], ...overrides });
 const check = (name: string, command: string, timeoutMs = 60_000) => ({ name, command, timeoutMs });

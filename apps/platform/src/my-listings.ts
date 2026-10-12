@@ -8,6 +8,7 @@ import type { StoredProjectedAttempt, StoredProjectedTask } from "./projection.t
 import { projectsById } from "./projects.ts";
 import type { Project } from "./projects.ts";
 import { attemptRef, taskRef } from "./task-refs.ts";
+import { ATTEMPT_STATES, listedStates, TASK_STATES } from "./task-store.ts";
 import type { AttemptState, TaskState } from "./task-store.ts";
 import type { UserRef } from "./tasks.ts";
 import type { Actor } from "./tokens.ts";
@@ -90,18 +91,17 @@ export function myListings({ db }: { db: Database }) {
       actor: Actor,
       input: ListingPage & { state?: TaskState | undefined },
     ): Promise<{ tasks: MyTask[]; next: number | null }> {
-      const filter = stateFilter("t", input.state);
       const { results } = await db
         .prepare(
           `SELECT t.*, c.handle AS creator_handle
            FROM projected_tasks t
            JOIN projects p ON p.id = t.project_id
            JOIN users c ON c.id = t.creator_id
-           WHERE t.creator_id = ? AND ${filter.clause}
+           WHERE t.creator_id = ? AND t.state IN (SELECT value FROM json_each(?))
            ORDER BY t.created_at DESC, t.project_id, t.number DESC
            LIMIT ? OFFSET ?`,
         )
-        .bind(actor.user.id, ...filter.params, input.limit + 1, input.offset)
+        .bind(actor.user.id, listedStates(TASK_STATES, input.state), input.limit + 1, input.offset)
         .all<TaskListingRow>();
       const page = await withProjects(results, input);
       const tasks = page.rows.map(([row, project]) => ({
@@ -122,7 +122,6 @@ export function myListings({ db }: { db: Database }) {
       actor: Actor,
       input: ListingPage & { state?: AttemptState | undefined },
     ): Promise<{ attempts: MyAttempt[]; next: number | null }> {
-      const filter = stateFilter("a", input.state);
       // A task is published before its attempts, so its row is in D1 whenever theirs is.
       const { results } = await db
         .prepare(
@@ -131,11 +130,11 @@ export function myListings({ db }: { db: Database }) {
            JOIN projected_tasks t ON t.project_id = a.project_id AND t.number = a.task
            JOIN projects p ON p.id = a.project_id
            JOIN users u ON u.id = a.author_id
-           WHERE a.author_id = ? AND ${filter.clause}
+           WHERE a.author_id = ? AND a.state IN (SELECT value FROM json_each(?))
            ORDER BY a.created_at DESC, a.project_id, a.task DESC, a.number DESC
            LIMIT ? OFFSET ?`,
         )
-        .bind(actor.user.id, ...filter.params, input.limit + 1, input.offset)
+        .bind(actor.user.id, listedStates(ATTEMPT_STATES, input.state), input.limit + 1, input.offset)
         .all<AttemptListingRow>();
       const page = await withProjects(results, input);
       const attempts = page.rows.map(([row, project]) => ({
@@ -151,11 +150,4 @@ export function myListings({ db }: { db: Database }) {
       return { attempts, next: page.next };
     },
   };
-}
-
-/** Obsolete rows are left out of a listing, as from a project's own, unless its `state` asks for them. */
-function stateFilter(table: string, state: string | undefined): { clause: string; params: string[] } {
-  return state === undefined
-    ? { clause: `${table}.state != 'obsolete'`, params: [] }
-    : { clause: `${table}.state = ?`, params: [state] };
 }

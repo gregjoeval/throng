@@ -240,7 +240,7 @@ describe("approve and cancel", () => {
     expect(store.cancelMergeRequest(PROJECT, catAgent, { task: 1 }).state).toBe("cancelled");
   });
 
-  it("approves the source's current head from needs_review, and queues once it passes", async () => {
+  it("approves the source's current head from needsReview, and queues once it passes", async () => {
     const { store, ref1, open, push, score, mr, mrEvents } = await setup();
     await open(ref1);
     await store.selectAttempt(PROJECT, cat, ref1);
@@ -302,7 +302,7 @@ describe("approve and cancel", () => {
 });
 
 describe("a push to the source attempt", () => {
-  it.each(["pending", "queued", "landing"] as const)("moves %s to needs_review", async (from) => {
+  it.each(["pending", "queued", "landing"] as const)("moves %s to needsReview", async (from) => {
     const { store, ref1, open, score, push, mr, mrEvents } = await setup();
     await open(ref1);
     await store.selectAttempt(PROJECT, cat, ref1);
@@ -321,7 +321,7 @@ describe("a push to the source attempt", () => {
     });
   });
 
-  it("keeps needs_review, and never requeues on its own", async () => {
+  it("keeps needsReview, and never requeues on its own", async () => {
     const { store, ref1, open, score, push, mr, mrEvents } = await setup();
     await open(ref1);
     await score(ref1);
@@ -411,9 +411,9 @@ describe("dequeue", () => {
     { reason: "failedChecks", details: { checks: [{ name: "test", outcome: "failed", log: "test" }] } },
     { reason: "errored", details: ERRORED },
   ];
-  it.each(causes.map((cause) => [cause.reason, cause] as const))(
-    "returns to pending after %s, keeping the approval, and doesn't requeue on its own",
-    async (_reason, cause) => {
+  it.each(causes)(
+    "returns to pending after $reason, keeping the approval, and doesn't requeue on its own",
+    async (cause) => {
       const { store, ref1, open, score, mr, mrEvents, base } = await setup();
       await open(ref1);
       await score(ref1);

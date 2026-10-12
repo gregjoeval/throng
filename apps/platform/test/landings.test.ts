@@ -394,7 +394,7 @@ describe("a merge request leaving the queue while landing", () => {
     expect(journalKinds().filter((k) => k === "mainAdvanced")).toHaveLength(1);
   });
 
-  it("sends a failed landing whose source moved while pushing to needs_review", async () => {
+  it("sends a failed landing whose source moved while pushing to needsReview", async () => {
     const { store, drain, queued, mr, push } = await setup();
     const t1 = await queued("First");
     await drain();

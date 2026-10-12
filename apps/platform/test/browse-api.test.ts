@@ -177,7 +177,8 @@ describe("GET /tree", () => {
     const root = await get(`${base}/tree/main`);
     expect(root.status).toBe(200);
     expect(root.body).toMatchObject({ ref: "main", sha: head.hash, path: "" });
-    expect(defined(root.body)["entries"].map((e: Json) => [e.name, e.type])).toEqual([
+    const entries = defined(root.body)["entries"];
+    expect(entries.map((e: Json) => [e.name, e.type])).toEqual([
       ["docs", "tree"],
       ["src", "tree"],
       ["Alpha.md", "blob"],
@@ -185,7 +186,7 @@ describe("GET /tree", () => {
       ["run.sh", "exec"],
       ["zeta.md", "blob"],
     ]);
-    expect(defined(root.body)["entries"][0]).toEqual({
+    expect(entries[0]).toEqual({
       name: "docs",
       path: "docs",
       type: "tree",

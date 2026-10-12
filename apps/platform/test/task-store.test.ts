@@ -325,16 +325,24 @@ describe("attempts", () => {
       obsolete: { restore: "closed" },
     };
 
-    const cases = (Object.entries(valid) as [AttemptState, Partial<Record<Move, AttemptState>>][]).flatMap(
-      ([from, allowed]) =>
-        (Object.keys(moves) as Move[]).map((move) => [from, move, allowed[move] ?? "invalidState"] as const),
+    const pairs = (Object.entries(valid) as [AttemptState, Partial<Record<Move, AttemptState>>][]).flatMap(
+      ([from, allowed]) => (Object.keys(moves) as Move[]).map((move) => ({ from, move, to: allowed[move] })),
     );
-    it.each(cases)("%s --%s--> %s", async (from, move, to) => {
+    const allowedMoves = pairs.flatMap(({ from, move, to }) => (to === undefined ? [] : [{ from, move, to }]));
+    const refusedMoves = pairs.filter(({ to }) => to === undefined);
+
+    it.each(allowedMoves)("$from --$move--> $to", async ({ from, move, to }) => {
       const { store } = setup();
       await attemptIn(store, from);
-      const error = await errorCode(async () => moves[move](store));
-      const expected = to === "invalidState" ? { error: to, state: from } : { error: null, state: to };
-      expect({ error, state: store.getAttempt(PROJECT, ada, ref).state }).toEqual(expected);
+      expect(await errorCode(async () => moves[move](store))).toBeNull();
+      expect(store.getAttempt(PROJECT, ada, ref).state).toBe(to);
+    });
+
+    it.each(refusedMoves)("$from refuses $move", async ({ from, move }) => {
+      const { store } = setup();
+      await attemptIn(store, from);
+      expect(await errorCode(async () => moves[move](store))).toBe("invalidState");
+      expect(store.getAttempt(PROJECT, ada, ref).state).toBe(from);
     });
   });
 

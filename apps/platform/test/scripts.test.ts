@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parseConfig } from "../src/config.ts";
-import { buildResult, scorePlan } from "../src/results.ts";
-import type { RawScore, ScorePlan } from "../src/results.ts";
+import { buildResult, MAX_OUTPUT_BYTES, scorePlan } from "../src/results.ts";
+import type { PlannedMetric, RawScore, ScorePlan } from "../src/results.ts";
 import { parseResult, previewScript, scoreScript } from "../src/scripts.ts";
 import type { PreviewScriptResult } from "../src/scripts.ts";
 import { at } from "./support/defined.ts";
@@ -61,7 +61,13 @@ beforeEach(() => {
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
 const plan = (overrides: Partial<ScorePlan> = {}): ScorePlan => ({ setup: [], checks: [], allow: [], ...overrides });
-const check = (name: string, command: string, timeoutMs = 60_000) => ({ name, command, timeoutMs });
+const check = (name: string, command: string, timeoutMs = 60_000, metrics: PlannedMetric[] = []) => ({
+  name,
+  command,
+  timeoutMs,
+  metrics,
+});
+const number = (name: string, from: string): PlannedMetric => ({ name, from, type: "number" });
 
 /** Pushes an attempt to the fork on top of the origin's main (adds 2 lines, deletes 2) and returns its head. */
 function attemptHead(): string {
@@ -91,22 +97,24 @@ describe("scoreScript", () => {
     expect(raw.shortstat.trim()).toBe("1 file changed, 2 insertions(+)");
   });
 
-  it("runs every check in order, after a failure too, with an empty $THRONG_METRICS file each", () => {
+  it("runs every check in order, after a failure too, with a fresh $THRONG_OUTPUT directory each, reading a failed check's output too", () => {
     const head = attemptHead();
+    const empty = `test -z "$(ls -A "$THRONG_OUTPUT")"`;
     const checks = [
-      check(
-        "first",
-        `test ! -s "$THRONG_METRICS" && echo '{"coverage": 81.5}' > "$THRONG_METRICS" && echo first >> ../order`,
-      ),
-      check("broken", "echo broken >> ../order; exit 3"),
-      check("last", `test ! -s "$THRONG_METRICS" && echo last >> ../order && test -f b.txt`),
+      check("first", `${empty} && echo '{"n": 1}' > "$THRONG_OUTPUT/r.json" && echo first >> ../order`, 60_000, [
+        number("n", "first.r.n"),
+      ]),
+      check("broken", `echo broken >> ../order; echo '{"failed": 2}' > "$THRONG_OUTPUT/r.json"; exit 3`, 60_000, [
+        number("failed", "broken.r.failed"),
+      ]),
+      check("last", `${empty} && echo last >> ../order && test -f b.txt`),
     ];
     const sandbox = mkdtempSync(join(root, "sandbox-"));
     const raw = runScript<RawScore>(scoreScript(fork, { sha: head, base: null }, plan({ checks })), sandbox);
-    expect(raw.checks.map((c) => [c.exit, c.metrics?.trim()])).toEqual([
-      [0, '{"coverage": 81.5}'],
-      [3, ""],
-      [0, ""],
+    expect(raw.checks.map((c) => [c.exit, c.metrics])).toEqual([
+      [0, { n: { value: 1 } }],
+      [3, { failed: { value: 2 } }],
+      [0, {}],
     ]);
     expect(execFileSync("cat", [join(sandbox, "order")], { encoding: "utf8" })).toBe("first\nbroken\nlast\n");
     expect(execFileSync("cat", [join(sandbox, "logs/broken.log")], { encoding: "utf8" })).toBe("");
@@ -117,10 +125,14 @@ describe("scoreScript", () => {
     const setup = ["true", "echo nope >&2; false", "touch ../never"];
     const sandbox = mkdtempSync(join(root, "sandbox-"));
     const raw = runScript<RawScore>(
-      scoreScript(fork, { sha: head, base: null }, plan({ setup, checks: [check("test", "true")] })),
+      scoreScript(
+        fork,
+        { sha: head, base: null },
+        plan({ setup, checks: [check("test", "true", 60_000, [number("n", "test.r.n")])] }),
+      ),
       sandbox,
     );
-    expect(raw).toMatchObject({ setupFailed: 2, checks: [{ exit: null, metrics: null }] });
+    expect(raw).toMatchObject({ setupFailed: 2, checks: [{ exit: null, metrics: {} }] });
     expect(execFileSync("cat", [join(sandbox, "logs/setup.2.log")], { encoding: "utf8" })).toBe("nope\n");
     expect(() => execFileSync("test", ["-e", join(sandbox, "never")])).toThrow();
   });
@@ -153,10 +165,17 @@ describe("scoreScript", () => {
     const script = scoreScript(
       fork,
       { sha: head, base: null },
-      plan({ checks: [check("test", "echo '{\"n\": 1}' > $THRONG_METRICS")] }),
+      plan({
+        checks: [
+          check("test", `test ! -e "$THRONG_OUTPUT/r.json" && echo '{"n": 1}' > "$THRONG_OUTPUT/r.json"`, 60_000, [
+            number("n", "test.r.n"),
+          ]),
+        ],
+      }),
     );
     const first = runScript<RawScore>(script, sandbox);
     const second = runScript<RawScore>(script, sandbox);
+    expect(first.checks[0]).toMatchObject({ exit: 0, metrics: { n: { value: 1 } } });
     expect({ ...second, builtinMs: 0, checks: second.checks.map((c) => ({ ...c, durationMs: 0 })) }).toEqual({
       ...first,
       builtinMs: 0,
@@ -164,17 +183,24 @@ describe("scoreScript", () => {
     });
   });
 
-  it("turns a project's config into a scored result end to end", () => {
+  it("turns a project's config into a scored result end to end, reading two files from one check", () => {
     const head = attemptHead();
+    const report = { numTotalTests: 12, numFailedTests: 0, testResults: [{ name: "a", duration: 7 }] };
+    const coverage = { total: { lines: { pct: 87.5 } } };
     const config = parseConfig(`checks:
   - name: test
     command: >-
-      echo '{"coverage": 90, "junk": 1}' > "$THRONG_METRICS"
-    metrics:
-      - { name: coverage, unit: "%", order: desc }
+      echo '${JSON.stringify(report)}' > "$THRONG_OUTPUT/report.json" &&
+      echo '${JSON.stringify(coverage)}' > "$THRONG_OUTPUT/coverage-summary.json"
   - name: lint
-    command: exit 1
+    command: >-
+      echo '{"errors": 3}' > "$THRONG_OUTPUT/lint.json"; exit 1
     required: false
+metrics:
+  - { name: tests, from: test.report.numTotalTests, type: number }
+  - { name: coverage, from: test.coverage-summary.total.lines.pct, type: number, unit: "%" }
+  - { name: first-duration, from: test.report.testResults.0.duration, type: number, order: asc }
+  - { name: lint-errors, from: lint.lint.errors, type: number, order: asc }
 `);
     const raw = runScript<RawScore>(
       scoreScript(fork, { sha: head, base: git(origin, "rev-parse", "main") }, scorePlan(config)),
@@ -193,10 +219,49 @@ describe("scoreScript", () => {
         "_diff.filesChanged": { value: 2 },
         "_diff.additions": { value: 2 },
         "_diff.deletions": { value: 2 },
-        coverage: { source: "project", type: "number", value: 90 },
+        tests: { source: "project", type: "number", value: 12, order: "desc" },
+        coverage: { source: "project", type: "number", value: 87.5, unit: "%" },
+        "first-duration": { value: 7, order: "asc" },
+        "lint-errors": { value: 3 },
       },
     });
-    expect(at(result.checks, 1).notes).toEqual(["ignored metric junk: not declared by this check"]);
+  });
+
+  it("nulls a metric it can't read, naming the segment of from that failed and what was there", () => {
+    const head = attemptHead();
+    const json = { total: { lines: { pct: "87" } }, runs: [{ ms: 1 }], label: "x" };
+    const metrics = [
+      number("missing-file", "test.nope.total"),
+      number("missing-key", "test.out.totals.lines"),
+      number("missing-index", "test.out.runs.3.ms"),
+      number("not-an-index", "test.out.runs.first"),
+      number("into-a-string", "test.out.label.length"),
+      number("wrong-type", "test.out.total.lines.pct"),
+      number("bad-json", "test.bad.n"),
+      number("too-large", "test.big.n"),
+    ];
+    const command = [
+      `echo '${JSON.stringify(json)}' > "$THRONG_OUTPUT/out.json"`,
+      `echo '{"n": ' > "$THRONG_OUTPUT/bad.json"`,
+      `head -c ${MAX_OUTPUT_BYTES + 1} /dev/zero > "$THRONG_OUTPUT/big.json"`,
+      `touch "$THRONG_OUTPUT/notes.txt"`,
+    ].join(" && ");
+    const raw = runScript<RawScore>(
+      scoreScript(fork, { sha: head, base: null }, plan({ checks: [check("test", command, 60_000, metrics)] })),
+    );
+    expect(at(raw.checks, 0).metrics).toEqual({
+      "missing-file": { value: null, note: "test.nope: no nope.json in $THRONG_OUTPUT; files there: bad, big, out" },
+      "missing-key": { value: null, note: "test.out.totals: no key totals; keys there: total, runs, label" },
+      "missing-index": { value: null, note: "test.out.runs.3: no index 3 in an array; indexes there: 0 to 0" },
+      "not-an-index": { value: null, note: "test.out.runs.first: no index first in an array; indexes there: 0 to 0" },
+      "into-a-string": {
+        value: null,
+        note: "test.out.label.length: no key length; label is a string, not an object or array",
+      },
+      "wrong-type": { value: null, note: "test.out.total.lines.pct: expected a number, got a string" },
+      "bad-json": { value: null, note: "test.bad: bad.json is not valid JSON" },
+      "too-large": { value: null, note: "test.big: big.json is over the parse guard of 32 MB" },
+    });
   });
 });
 

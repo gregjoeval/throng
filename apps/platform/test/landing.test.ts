@@ -79,12 +79,15 @@ describe("retestConfig", () => {
     expect(retestConfig(parseConfig("checks:\n  - name: lint\n    command: x\n    required: false\n"))).toBeNull();
   });
 
-  it("keeps only the required checks, with setup", () => {
+  it("keeps only the required checks and the metrics read from them, with setup", () => {
     const config = parseConfig(
-      "setup: [npm ci]\nchecks:\n  - name: lint\n    command: a\n    required: false\n  - name: test\n    command: b\n",
+      "setup: [npm ci]\nchecks:\n  - name: lint\n    command: a\n    required: false\n  - name: test\n    command: b\n" +
+        "metrics:\n  - { name: errors, from: lint.out.errors, type: number }\n" +
+        "  - { name: tests, from: test.out.tests, type: number }\n",
     );
     const retest = retestConfig(config);
     expect(retest?.kind === "valid" && retest.config.checks.map((c) => c.name)).toEqual(["test"]);
+    expect(retest?.kind === "valid" && retest.config.metrics.map((m) => m.name)).toEqual(["tests"]);
     expect(retest?.kind === "valid" && retest.config.setup).toEqual(["npm ci"]);
   });
 
@@ -104,9 +107,9 @@ describe("failedChecks", () => {
       builtinMs: 0,
       setupFailed: null,
       checks: [
-        { exit: 0, durationMs: 1, metrics: null },
-        { exit: 2, durationMs: 1, metrics: null },
-        { exit: null, durationMs: 0, metrics: null },
+        { exit: 0, durationMs: 1, metrics: {} },
+        { exit: 2, durationMs: 1, metrics: {} },
+        { exit: null, durationMs: 0, metrics: {} },
       ],
     });
     expect(failedChecks(result, ["test", "build"])).toEqual({

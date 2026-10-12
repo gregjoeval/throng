@@ -114,14 +114,17 @@ export type LandingOutcome =
   | { kind: "errored"; details: ErroredDetails };
 
 /**
- * The config the retest runs under: the merged tree's, with only its required checks. Null skips the
- * retest: no config, or no required checks. An invalid config is kept, and fails (see `buildResult`).
+ * The config the retest runs under: the merged tree's, with only its required checks and the metrics
+ * read from them. Null skips the retest: no config, or no required checks. An invalid config is kept,
+ * and fails (see `buildResult`).
  */
 export function retestConfig(config: ConfigResult): ConfigResult | null {
   if (config.kind === "none") return null;
   if (config.kind === "invalid") return config;
   const checks = config.config.checks.filter((check) => check.required);
-  return checks.length === 0 ? null : { kind: "valid", config: { ...config.config, checks } };
+  const kept = new Set(checks.map((check) => check.name));
+  const metrics = config.config.metrics.filter((metric) => kept.has(metric.from.split(".")[0] ?? ""));
+  return checks.length === 0 ? null : { kind: "valid", config: { ...config.config, checks, metrics } };
 }
 
 /**

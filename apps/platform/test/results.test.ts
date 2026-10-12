@@ -4,7 +4,6 @@ import {
   buildResult,
   checkOutcome,
   gateFor,
-  parseMetrics,
   parseShortstat,
   previewPlan,
   scorePlan,
@@ -35,46 +34,15 @@ checks:
   - name: test
     command: npm test
     timeout: 2m
-    metrics:
-      - { name: coverage, unit: "%", order: desc }
   - name: bundle
     command: npm run size
     required: false
-    metrics:
-      - { name: bundle_kb, unit: KB, order: asc }
+metrics:
+  - { name: bundle_kb, from: bundle.size.kb, type: number, unit: KB, order: asc }
+  - { name: coverage, from: test.coverage-summary.total.lines.pct, type: number, unit: "%" }
 network:
   allow: [api.github.com]
 `);
-
-describe("parseMetrics", () => {
-  it("keeps declared metrics with finite numbers", () => {
-    expect(parseMetrics('{"coverage": 81.5, "lines": 3}', ["coverage", "lines"])).toEqual({
-      metrics: { coverage: { value: 81.5 }, lines: { value: 3 } },
-      notes: [],
-    });
-  });
-
-  it("nulls non-numbers with a note, and notes and ignores undeclared keys", () => {
-    expect(parseMetrics('{"coverage": "81", "extra": 1, "nan": null}', ["coverage", "nan"])).toEqual({
-      metrics: { coverage: { value: null, note: "not a number" }, nan: { value: null, note: "not a number" } },
-      notes: ["ignored metric extra: not declared by this check"],
-    });
-  });
-
-  it("nulls every declared metric of a file that isn't a JSON object, or that didn't report it", () => {
-    expect(parseMetrics("coverage=80", ["coverage"])).toEqual({
-      metrics: { coverage: { value: null, note: "$THRONG_METRICS was not JSON" } },
-      notes: ["ignored $THRONG_METRICS: not JSON"],
-    });
-    expect(parseMetrics("[1, 2]", []).notes).toEqual(["ignored $THRONG_METRICS: not a JSON object of name to number"]);
-    expect(parseMetrics("", ["coverage"])).toEqual({
-      metrics: { coverage: { value: null, note: "not reported" } },
-      notes: [],
-    });
-    expect(parseMetrics("{}", ["coverage"]).metrics).toEqual({ coverage: { value: null, note: "not reported" } });
-    expect(parseMetrics(null, [])).toEqual({ metrics: {}, notes: [] });
-  });
-});
 
 describe("checkOutcome", () => {
   it("passes on exit 0, fails otherwise, and skips a check that never ran", () => {
@@ -127,12 +95,22 @@ describe("parseShortstat", () => {
 });
 
 describe("scorePlan", () => {
-  it("runs the config's setup and checks with its allowed hosts, and nothing without a valid config", () => {
+  it("runs the config's setup and checks, each with the metrics it feeds, and nothing without a valid config", () => {
     expect(scorePlan(CONFIG)).toEqual({
       setup: ["npm ci"],
       checks: [
-        { name: "test", command: "npm test", timeoutMs: 120_000 },
-        { name: "bundle", command: "npm run size", timeoutMs: 600_000 },
+        {
+          name: "test",
+          command: "npm test",
+          timeoutMs: 120_000,
+          metrics: [{ name: "coverage", from: "test.coverage-summary.total.lines.pct", type: "number" }],
+        },
+        {
+          name: "bundle",
+          command: "npm run size",
+          timeoutMs: 600_000,
+          metrics: [{ name: "bundle_kb", from: "bundle.size.kb", type: "number" }],
+        },
       ],
       allow: ["api.github.com"],
     });
@@ -200,32 +178,25 @@ describe("buildResult", () => {
       CONFIG,
       raw({
         checks: [
-          { exit: 0, durationMs: 900, metrics: '{"coverage": 92, "bundle_kb": 3}' },
-          { exit: 1, durationMs: 40, metrics: '{"bundle_kb": 120}' },
+          { exit: 0, durationMs: 900, metrics: { coverage: { value: 92 } } },
+          { exit: 1, durationMs: 40, metrics: { bundle_kb: { value: 120 } } },
         ],
       }),
     );
     expect(result.gate).toBe("passed");
     expect(result.checks.slice(1, 3)).toEqual([
-      {
-        name: "test",
-        source: "project",
-        required: true,
-        outcome: "passed",
-        durationMs: 900,
-        notes: ["ignored metric bundle_kb: not declared by this check"],
-      },
+      { name: "test", source: "project", required: true, outcome: "passed", durationMs: 900, notes: [] },
       { name: "bundle", source: "project", required: false, outcome: "failed", durationMs: 40, notes: [] },
     ]);
   });
 
-  it("gives each config check an outcome metric, followed by its inline metrics as project numbers", () => {
+  it("gives each config check an outcome metric, followed by the metrics read from its output", () => {
     const result = buildResult(
       CONFIG,
       raw({
         checks: [
-          { exit: 0, durationMs: 900, metrics: '{"coverage": 92}' },
-          { exit: 1, durationMs: 40, metrics: '{"bundle_kb": 120}' },
+          { exit: 0, durationMs: 900, metrics: { coverage: { value: 92 } } },
+          { exit: 1, durationMs: 40, metrics: { bundle_kb: { value: 120 } } },
         ],
       }),
     );
@@ -249,13 +220,14 @@ describe("buildResult", () => {
     });
   });
 
-  it("gives a declared metric that wasn't reported, or isn't a number, null with a note", () => {
+  it("keeps the note of a metric the score script couldn't read", () => {
+    const note = "test.coverage-summary.total: no key total; keys there: totals";
     const result = buildResult(
       CONFIG,
       raw({
         checks: [
-          { exit: 0, durationMs: 1, metrics: '{"coverage": "92"}' },
-          { exit: 0, durationMs: 1, metrics: "" },
+          { exit: 0, durationMs: 1, metrics: { coverage: { value: null, note } } },
+          { exit: 0, durationMs: 1, metrics: { bundle_kb: { value: 3 } } },
         ],
       }),
     );
@@ -265,29 +237,48 @@ describe("buildResult", () => {
       value: null,
       order: "desc",
       unit: "%",
-      note: "not a number",
+      note,
     });
-    expect(result.metrics.bundle_kb).toMatchObject({ value: null, note: "not reported" });
   });
 
-  it("leaves out a metric's unit when it declares none", () => {
-    const config = parseConfig("checks:\n  - name: t\n    command: x\n    metrics: [{ name: n, order: asc }]\n");
-    const result = buildResult(config, raw({ checks: [{ exit: 0, durationMs: 1, metrics: '{"n": 1}' }] }));
-    expect(result.metrics.n).toEqual({ source: "project", type: "number", value: 1, order: "asc" });
-  });
-
-  it("fails the gate on a required check that timed out", () => {
+  it("checks a reported value's type again, and nulls a metric the score script didn't report", () => {
     const result = buildResult(
       CONFIG,
       raw({
         checks: [
-          { exit: 124, durationMs: 120_000, metrics: "" },
-          { exit: 0, durationMs: 1, metrics: "" },
+          { exit: 0, durationMs: 1, metrics: { coverage: { value: "92" as unknown as number } } },
+          { exit: 0, durationMs: 1, metrics: {} },
+        ],
+      }),
+    );
+    expect(result.metrics.coverage).toMatchObject({
+      value: null,
+      note: "test.coverage-summary.total.lines.pct: expected a number, got a string",
+    });
+    expect(result.metrics.bundle_kb).toMatchObject({ value: null, note: "bundle.size.kb: not reported" });
+  });
+
+  it("leaves out a metric's unit when it declares none, and defaults a number to higher is better", () => {
+    const config = parseConfig(
+      "checks:\n  - name: t\n    command: x\nmetrics:\n  - { name: n, from: t.out.n, type: number }\n",
+    );
+    const result = buildResult(config, raw({ checks: [{ exit: 0, durationMs: 1, metrics: { n: { value: 1 } } }] }));
+    expect(result.metrics.n).toEqual({ source: "project", type: "number", value: 1, order: "desc" });
+  });
+
+  it("fails the gate on a required check that timed out, and still reads its output", () => {
+    const result = buildResult(
+      CONFIG,
+      raw({
+        checks: [
+          { exit: 124, durationMs: 120_000, metrics: { coverage: { value: 40 } } },
+          { exit: 0, durationMs: 1, metrics: {} },
         ],
       }),
     );
     expect(result.checks.map((c) => c.outcome)).toEqual(["passed", "timedOut", "passed", "skipped"]);
     expect(result.metrics.test).toMatchObject({ value: "timedOut" });
+    expect(result.metrics.coverage).toMatchObject({ value: 40 });
     expect(result.gate).toBe("failed");
   });
 
@@ -297,8 +288,8 @@ describe("buildResult", () => {
       raw({
         setupFailed: 1,
         checks: [
-          { exit: null, durationMs: 0, metrics: null },
-          { exit: null, durationMs: 0, metrics: null },
+          { exit: null, durationMs: 0, metrics: {} },
+          { exit: null, durationMs: 0, metrics: {} },
         ],
       }),
     );
@@ -309,7 +300,7 @@ describe("buildResult", () => {
     ]);
     expect(result.metrics.coverage).toMatchObject({
       value: null,
-      note: "test was skipped: setup command 1 failed",
+      note: "test: test was skipped: setup command 1 failed",
     });
   });
 });
@@ -330,7 +321,7 @@ describe("previewPlan", () => {
 
   it("deploys nothing when the gate failed", () => {
     const failing = parseConfig("preview:\n  command: npm run build\nchecks:\n  - { name: test, command: npm test }\n");
-    const result = buildResult(failing, raw({ checks: [{ exit: 1, durationMs: 1, metrics: "" }] }));
+    const result = buildResult(failing, raw({ checks: [{ exit: 1, durationMs: 1, metrics: {} }] }));
     expect(result.gate).toBe("failed");
     expect(previewPlan(failing, result)).toBeNull();
     expect(result.checks.at(-1)).toMatchObject({

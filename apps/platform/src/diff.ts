@@ -356,7 +356,7 @@ async function readBlob(repos: Repos, repo: string, hash: string): Promise<Blob>
 function describe(old: FileSide | null, next: FileSide | null): Omit<FileDiff, "patch" | "flags"> {
   const either = (next ?? old)!;
   const renamed = old !== null && next !== null && old.path !== next.path;
-  const status: FileStatus = old === null ? "added" : next === null ? "deleted" : renamed ? "renamed" : "modified";
+  const status = fileStatus(old, next, renamed);
   return {
     path: either.path,
     ...(renamed ? { oldPath: old.path } : {}),
@@ -368,6 +368,12 @@ function describe(old: FileSide | null, next: FileSide | null): Omit<FileDiff, "
     additions: 0,
     deletions: 0,
   };
+}
+
+function fileStatus(old: FileSide | null, next: FileSide | null, renamed: boolean): FileStatus {
+  if (old === null) return "added";
+  if (next === null) return "deleted";
+  return renamed ? "renamed" : "modified";
 }
 
 async function computeFile(

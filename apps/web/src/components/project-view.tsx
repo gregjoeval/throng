@@ -36,7 +36,9 @@ export function ProjectView({ location, children }: { location: ProjectLocation;
           </Tab>
         </nav>
       </div>
-      {project.isPending ? <Loading /> : project.isError ? <ErrorState error={project.error} /> : children}
+      {project.isPending && <Loading />}
+      {project.isError && <ErrorState error={project.error} />}
+      {project.isSuccess && children}
     </div>
   );
 }

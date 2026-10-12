@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ServiceError } from "../src/errors.ts";
+import type { DequeueCause } from "../src/merge-requests.ts";
 import type { ScoringResult } from "../src/results.ts";
 import type { ScoringOutcome, ScoringParams, ScoringWorkflow } from "../src/scoring.ts";
 import { TaskStore } from "../src/task-store.ts";
@@ -410,19 +411,19 @@ describe("the queue", () => {
 });
 
 describe("dequeue", () => {
-  for (const reason of ["conflict", "failedChecks", "errored"] as const) {
+  const causes: Extract<DequeueCause, { details: unknown }>[] = [
+    { reason: "conflict", details: conflictDetails(["README.md"]) },
+    { reason: "failedChecks", details: { checks: [{ name: "test", outcome: "failed", log: "test" }] } },
+    { reason: "errored", details: ERRORED },
+  ];
+  for (const cause of causes) {
+    const { reason } = cause;
     it(`returns to pending after ${reason}, keeping the approval, and doesn't requeue on its own`, async () => {
       const { store, ref1, open, score, mr, mrEvents, base } = await setup();
       await open(ref1);
       await score(ref1);
       await store.selectAttempt(PROJECT, cat, ref1);
       store.startLanding(PROJECT, null);
-      const cause =
-        reason === "conflict"
-          ? { reason, details: conflictDetails(["README.md"]) }
-          : reason === "failedChecks"
-            ? { reason, details: { checks: [{ name: "test", outcome: "failed" as const, log: "test" }] } }
-            : { reason, details: ERRORED };
       store.dequeueMergeRequest(PROJECT, null, { task: 1, ...cause });
       expect(mr()).toMatchObject({
         state: "pending",

@@ -251,6 +251,14 @@ const AttemptSchema = z
   })
   .openapi("Attempt");
 
+const StartedAttemptSchema = AttemptSchema.extend({
+  clone: z.string().openapi({
+    description: "A command that clones `remote`. It names the token as `$THRONG_TOKEN` and never holds it.",
+    example:
+      'git -c http.extraHeader="Authorization: Bearer $THRONG_TOKEN" clone https://throng.example/git/greg/throng/t42a3.git',
+  }),
+}).openapi("StartedAttempt");
+
 const ScoringRunFields = z.object({
   id: z.number().int(),
   ref: z.string().openapi({ description: "The attempt it scores.", example: "t42a3" }),
@@ -1132,7 +1140,10 @@ export function apiRoutes(options: ApiOptions = {}) {
         middleware: [bearer] as const,
         request: { params: TaskPathSchema, body: { required: false, ...json(CreateAttemptsSchema) } },
         responses: {
-          201: { description: "The new attempts.", ...json(z.object({ attempts: z.array(AttemptSchema) })) },
+          201: {
+            description: "The new attempts, each with its remote and clone command.",
+            ...json(z.object({ attempts: z.array(StartedAttemptSchema) })),
+          },
           400: errorResponse("The request is invalid."),
           401: unauthorizedBearer,
           404: errorResponse("No such project or task."),

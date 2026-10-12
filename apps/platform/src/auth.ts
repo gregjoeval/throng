@@ -1,5 +1,5 @@
 // Authentication for the product API and the git proxy. Machines present a Throng token: as
-// `Authorization: Bearer` on `/api/*`, and as the HTTP Basic password (any username) on `/git/*`.
+// `Authorization: Bearer` on `/api/*`, and on `/git/*` either that or the HTTP Basic password (any username).
 // Handlers read `c.var.actor` (`{user, alias}`) and `c.var.token` (null under an Access session).
 
 import { createMiddleware } from "hono/factory";
@@ -135,10 +135,15 @@ export function rejectForwardedIdentity() {
   });
 }
 
-/** Requires a Throng token as the HTTP Basic password, which is how git sends credentials. */
+/**
+ * Requires a Throng token as the HTTP Basic password, which is how git sends credentials, or as an
+ * `Authorization: Bearer` header, which `git -c http.extraHeader=…` sends. A failure challenges for
+ * Basic, so a credential helper can answer.
+ */
 export function gitAuth({ now = () => new Date() }: AuthOptions = {}) {
   return createMiddleware<AuthEnv>(async (c, next) => {
-    const plaintext = basicPassword(c.req.header("Authorization"));
+    const header = c.req.header("Authorization");
+    const plaintext = basicPassword(header) ?? bearerToken(header);
     const found = plaintext === null ? null : await authenticateToken(c.env.DB, plaintext, now());
     if (found === null) return c.text("A Throng token is required as the password.\n", 401, BASIC_CHALLENGE);
     c.set("actor", found.actor);

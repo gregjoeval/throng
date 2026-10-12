@@ -181,14 +181,15 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
   /**
    * Deploys the head as a Worker Preview from the preview container, which holds the Preview deploy
    * grant and only a read grant on the fork, and stores its log. `deployed` is null when it gave no
-   * result or kept failing: a failed Preview is recorded on the result and never changes the gate.
+   * result, and the error when the step kept failing on infrastructure; then whatever log the
+   * container wrote is still stored. A failed Preview is recorded on the result and never changes the gate.
    */
   async #preview(
     instanceId: string,
     params: ScoringParams,
     { command, allow }: PreviewPlan,
     step: WorkflowStep,
-  ): Promise<{ deployed: PreviewScriptResult | null; logs: string[] }> {
+  ): Promise<{ deployed: PreviewScriptResult | null | { error: string }; logs: string[] }> {
     const workerName = this.env.PREVIEW_WORKER;
     const name = previewName(params, workerName);
     try {
@@ -220,8 +221,15 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
       }
       return { deployed, logs };
     } catch (cause) {
-      console.warn({ event: "scoring.preview_errored", error: String(cause).slice(0, 2000) });
-      return { deployed: null, logs: [] };
+      const error = String(cause).slice(0, 2000);
+      console.warn({ event: "scoring.preview_errored", error });
+      // A lost Sandbox can't give its log back either; that still mustn't end the run.
+      const logs = await step
+        .do("preview logs", { retries: STEP_RETRIES }, () =>
+          this.#storeLogs(instanceId, params, "preview", [PREVIEW_LOG]),
+        )
+        .catch(() => []);
+      return { deployed: { error }, logs };
     }
   }
 

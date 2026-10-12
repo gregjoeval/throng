@@ -271,4 +271,12 @@ describe("withPreview", () => {
       expect(result).toEqual({ ...passed, preview: { status: "failed" } });
     }
   });
+
+  it("records an infrastructure error as errored, apart from a failed build, without changing the gate", () => {
+    const result = withPreview(passed, { error: "Error: preview script exited 12: fetch failed" });
+    expect(result).toEqual({
+      ...passed,
+      preview: { status: "errored", error: "Error: preview script exited 12: fetch failed" },
+    });
+  });
 });

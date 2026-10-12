@@ -206,9 +206,14 @@ const ScoringResultSchema = z
           url: z.string().openapi({ description: "Where the Preview is served." }),
         }),
         z.object({ status: z.literal("failed") }),
+        z.object({
+          status: z.literal("errored"),
+          error: z.string().openapi({ description: "The infrastructure error it kept failing on." }),
+        }),
       ])
       .openapi("PreviewResult", {
-        description: "The attempt's Worker Preview: `none` without a `preview` config or a passing gate.",
+        description:
+          "The attempt's Worker Preview: `none` without a `preview` config or a passing gate, `failed` when its build or deploy failed, `errored` when the infrastructure kept failing. Neither changes the gate.",
       }),
     logs: z.array(z.string()).openapi({
       description:

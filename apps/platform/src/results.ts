@@ -36,7 +36,15 @@ export interface BuiltinMetrics {
   durationMs: number;
 }
 
-export type PreviewResult = { status: "none" } | { status: "ready"; url: string } | { status: "failed" };
+/**
+ * The Preview's outcome: `failed` when its build or deploy failed, `errored` when the infrastructure
+ * kept failing (container start, lost Sandbox, a script crash). Neither changes the gate.
+ */
+export type PreviewResult =
+  | { status: "none" }
+  | { status: "ready"; url: string }
+  | { status: "failed" }
+  | { status: "errored"; error: string };
 
 export interface ScoringResult {
   /** `git merge-base <head> origin/main` at scoring time; null when they share no history. */
@@ -168,10 +176,17 @@ export function previewPlan(config: ConfigResult, result: ScoringResult): Previe
 
 /**
  * The result with the Preview's outcome recorded: `ready` with its URL when it deployed, `failed`
- * otherwise (null when the preview script gave no result). The gate and checks never change.
+ * otherwise (null when the preview script gave no result), or `errored` with the error the step kept
+ * failing on. The gate and checks never change.
  */
-export function withPreview(result: ScoringResult, deployed: PreviewScriptResult | null): ScoringResult {
-  const preview: PreviewResult = deployed?.ok === true ? { status: "ready", url: deployed.url } : { status: "failed" };
+export function withPreview(
+  result: ScoringResult,
+  deployed: PreviewScriptResult | null | { error: string },
+): ScoringResult {
+  let preview: PreviewResult;
+  if (deployed !== null && "error" in deployed) preview = { status: "errored", error: deployed.error };
+  else if (deployed?.ok === true) preview = { status: "ready", url: deployed.url };
+  else preview = { status: "failed" };
   return { ...result, preview };
 }
 

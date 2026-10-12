@@ -88,7 +88,11 @@ interface Run {
     checks: { name: string; required: boolean; outcome: string; metrics: Record<string, number>; notes: string[] }[];
     builtin: { filesChanged: number; additions: number; deletions: number; durationMs: number };
     logs: string[];
-    preview: { status: "none" } | { status: "ready"; url: string } | { status: "failed" };
+    preview:
+      | { status: "none" }
+      | { status: "ready"; url: string }
+      | { status: "failed" }
+      | { status: "errored"; error: string };
   } | null;
   error: string | null;
 }

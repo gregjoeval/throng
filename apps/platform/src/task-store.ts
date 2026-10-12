@@ -9,15 +9,18 @@
 import { archiveRef } from "./archive.ts";
 import { CONFIG_PATH, loadConfig, type ConfigResult } from "./config.ts";
 import { ServiceError, type ErrorCode } from "./errors.ts";
+import { isLogName, logKey, missingLog } from "./logs.ts";
 import { isZeroId } from "./pkt-line.ts";
 import { forkRepo, originRepo, type Repos } from "./repos.ts";
 import {
+  headAttemptRef,
   ScoringQueue,
   type AttemptScoring,
   type ScoredAttempt,
   type ScoringRequest,
   type ScoringRunner,
   type ScoringTrigger,
+  type StoredRun,
 } from "./scoring.ts";
 import type { Actor } from "./tokens.ts";
 
@@ -75,6 +78,11 @@ export interface StoredAttempt {
   archived_sha: string | null;
   /** Its current head's scoring status, for polling. */
   scoring: AttemptScoring;
+}
+
+/** An attempt's scoring status, and the run holding its current result, if its head has one. */
+export interface AttemptScoringDetail extends AttemptScoring {
+  current: StoredRun | null;
 }
 
 /** The project a call acts in: its id and its owner's user id. */
@@ -549,6 +557,41 @@ export class TaskStore {
     return rows.map((row) => this.#toAttempt(row));
   }
 
+  /** The attempt's scoring status, with its current result: the latest `done` run for its head. */
+  getScoring(_project: ProjectContext, _actor: Actor, input: AttemptInput): AttemptScoringDetail {
+    return this.#scoringDetail(this.#attempt(input));
+  }
+
+  /** The task's arena: every attempt, obsolete ones included, by number, with its scoring and current result. */
+  taskArena(
+    _project: ProjectContext,
+    _actor: Actor,
+    input: { task: number },
+  ): (Omit<StoredAttempt, "scoring"> & { scoring: AttemptScoringDetail })[] {
+    this.#task(input.task);
+    return this.#sql
+      .exec<AttemptRow>("SELECT * FROM attempts WHERE task = ? ORDER BY number", input.task)
+      .map((row) => this.#toAttempt(row))
+      .map((a) => ({ ...a, scoring: this.#scoringDetail(a) }));
+  }
+
+  /** The attempt's scoring status, with the run holding its current result. */
+  #scoringDetail(attempt: StoredAttempt): AttemptScoringDetail {
+    return { ...attempt.scoring, current: this.scoring.currentRun(scoredAttempt(attempt)) };
+  }
+
+  /** The attempt's scoring runs, newest first, superseded and cancelled ones included. */
+  listScoringRuns(_project: ProjectContext, _actor: Actor, input: AttemptInput): StoredRun[] {
+    return this.scoring.listRuns(scoredAttempt(this.#attempt(input))).toReversed();
+  }
+
+  /** One scoring run of the project, by id. */
+  getScoringRun(_project: ProjectContext, _actor: Actor, input: { run: number }): StoredRun {
+    const run = this.scoring.getRun(input.run);
+    if (run === null) throw new ServiceError("not_found", `no run ${input.run}`);
+    return run;
+  }
+
   /** Every attempt in the project, by task and then number, leaving out obsolete ones. For the ref list. */
   listProjectAttempts(_project: ProjectContext, _actor: Actor): StoredAttempt[] {
     return this.#sql
@@ -606,6 +649,16 @@ export class TaskStore {
     }
     this.#expect(current, ["open"], "rescore");
     return this.#requireHead(await this.#scoreHead(project, actor, current, "rescore"), current);
+  }
+
+  /**
+   * Where a run's log named `name` is stored in R2. Anyone signed in may read a run's logs. An
+   * unknown run, or a name no log can have, is `not_found`; whether the log itself exists is R2's.
+   */
+  runLogKey(project: ProjectContext, actor: Actor, input: { run: number; name: string }): string {
+    const run = this.getScoringRun(project, actor, input);
+    if (!isLogName(input.name)) throw missingLog(input.run, input.name);
+    return logKey({ project: project.id, attempt: headAttemptRef(run), sha: run.sha, run: run.id }, input.name);
   }
 
   /** open → draft: takes the attempt back out of consideration. Only its author may. */
@@ -1369,6 +1422,10 @@ export const TASK_METHODS = [
   "getAttempt",
   "listAttempts",
   "listProjectAttempts",
+  "getScoring",
+  "taskArena",
+  "listScoringRuns",
+  "getScoringRun",
   "attemptForBranch",
   "editAttempt",
   "openAttempt",
@@ -1381,6 +1438,7 @@ export const TASK_METHODS = [
   "markMerged",
   "scoreNow",
   "rescore",
+  "runLogKey",
   "authorizePush",
   "recordPush",
   "routeBranchPush",

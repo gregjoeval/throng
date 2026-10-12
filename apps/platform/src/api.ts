@@ -12,8 +12,10 @@ import { browseRoutes } from "./browse-api.ts";
 import { CONFIG_NAME, MAX_CHECK_TIMEOUT_MS, MAX_CONFIG_BYTES, parseConfig } from "./config.ts";
 import { errorBody, errorResponse, ServiceError } from "./errors.ts";
 import { FORWARDED_EMAIL_HEADER } from "./forwarded.ts";
+import { LOG_CONTENT_TYPE, LOG_RETENTION_DAYS, MAX_LOG_BYTES, missingLog, type LogStore } from "./logs.ts";
 import { MAX_PROJECT_HANDLE, PROJECT_HANDLE, projectService } from "./projects.ts";
 import type { Repos } from "./repos.ts";
+import { CHECK_OUTCOMES } from "./results.ts";
 import { ATTEMPT_SCORING_STATUSES, RUN_STATUSES, SCORING_TRIGGERS } from "./scoring.ts";
 import { ATTEMPT_STATES, TASK_STATES } from "./task-store.ts";
 import { taskService, type TaskBackend } from "./tasks.ts";
@@ -139,6 +141,19 @@ const AttemptSchema = z
   })
   .openapi("Attempt");
 
+const ScoringRunFields = z.object({
+  id: z.number().int(),
+  ref: z.string().openapi({ description: "The attempt it scores.", example: "t42a3" }),
+  sha: z.string().openapi({ description: "The head it scores." }),
+  trigger: z.enum(SCORING_TRIGGERS),
+  status: z.enum(RUN_STATUSES),
+  requested_by: UserRefSchema.nullable(),
+  agent: z.string().nullable(),
+  created_at: z.string(),
+  started_at: z.string().nullable(),
+  finished_at: z.string().nullable(),
+});
+
 const ScoringSchema = z
   .object({
     queued: z.boolean().openapi({ description: "Whether this request queued a new run." }),
@@ -146,22 +161,108 @@ const ScoringSchema = z
       description: "Why nothing was queued: the head is already queued, running or scored.",
       example: "already scored",
     }),
-    run: z
-      .object({
-        id: z.number().int(),
-        ref: z.string().openapi({ description: "The attempt it scores.", example: "t42a3" }),
-        sha: z.string().openapi({ description: "The head it scores." }),
-        trigger: z.enum(SCORING_TRIGGERS),
-        status: z.enum(RUN_STATUSES),
-        requested_by: UserRefSchema.nullable(),
-        agent: z.string().nullable(),
-        created_at: z.string(),
-        started_at: z.string().nullable(),
-        finished_at: z.string().nullable(),
-      })
-      .openapi("ScoringRun", { description: "The run that was queued, or the one already covering the head." }),
+    run: ScoringRunFields.openapi("ScoringRun", {
+      description: "The run that was queued, or the one already covering the head.",
+    }),
   })
   .openapi("ScoringRequest");
+
+const MetricsSchema = z.record(z.string(), z.number()).openapi({ example: { coverage: 81.5 } });
+
+const ScoringResultSchema = z
+  .object({
+    base: z.string().nullable().openapi({
+      description: "The merge-base of the head and `origin/main` at scoring time; null with no shared history.",
+    }),
+    config: z
+      .discriminatedUnion("kind", [
+        z.object({ kind: z.literal("none") }),
+        z.object({ kind: z.literal("valid") }),
+        z.object({ kind: z.literal("invalid"), error: z.string() }),
+      ])
+      .openapi({ description: "How the `.throng/config.yml` on `origin/main` it was scored under parsed." }),
+    gate: z.enum(["passed", "failed"]).openapi({ description: "Passed when every required check passed." }),
+    checks: z.array(
+      z
+        .object({
+          name: z.string().openapi({ example: "test" }),
+          required: z.boolean(),
+          outcome: z.enum(CHECK_OUTCOMES),
+          duration_ms: z.number(),
+          metrics: MetricsSchema.openapi({ description: "The metrics it declared and reported, by name." }),
+          notes: z.array(z.string()).openapi({ description: "Ignored metrics, or why it was skipped." }),
+          error: z.string().optional().openapi({ description: "Only on the `config` entry of an invalid config." }),
+        })
+        .openapi("CheckResult"),
+    ),
+    builtin: z
+      .object({ files_changed: z.number(), additions: z.number(), deletions: z.number(), duration_ms: z.number() })
+      .openapi({ description: "Diff size against the base." }),
+    preview: z
+      .discriminatedUnion("status", [
+        z.object({ status: z.literal("none") }),
+        z.object({
+          status: z.literal("ready"),
+          url: z.string().openapi({ description: "Where the Preview is served." }),
+        }),
+        z.object({ status: z.literal("failed") }),
+        z.object({
+          status: z.literal("errored"),
+          error: z.string().openapi({ description: "The infrastructure error it kept failing on." }),
+        }),
+      ])
+      .openapi("PreviewResult", {
+        description:
+          "The attempt's Worker Preview: `none` without a `preview` config or a passing gate, `failed` when its build or deploy failed, `errored` when the infrastructure kept failing. Neither changes the gate.",
+      }),
+    logs: z.array(z.string()).openapi({
+      description:
+        "The run's stored logs by name, in run order, for `GET …/runs/{runId}/logs/{name}`. A step that never ran has none.",
+      example: ["setup.1", "test"],
+    }),
+  })
+  .openapi("ScoringResult");
+
+const CurrentResultSchema = ScoringResultSchema.extend({
+  run: z.number().int().openapi({ description: "The run it came from." }),
+  finished_at: z.string(),
+  metrics: MetricsSchema.openapi({ description: "Every check's metrics in one map; metric names are unique." }),
+}).openapi("CurrentResult", {
+  description: "The attempt's current result: the latest `done` run for its current head.",
+});
+
+const RunDetailSchema = ScoringRunFields.extend({
+  superseded: z.boolean().openapi({ description: "Whether its head is no longer the attempt's current head." }),
+  error: z.string().nullable().openapi({ description: "What ended it, once `errored`." }),
+  result: ScoringResultSchema.nullable().openapi({ description: "Its result, once `done`." }),
+}).openapi("RunDetail", { description: "A scoring run, with its result or error." });
+
+const RunPathSchema = ProjectPathSchema.extend({
+  runId: z.coerce.number().int().min(1).openapi({ description: "A scoring run's id.", example: 7 }),
+});
+
+const ScoringStatusSchema = z
+  .object({
+    status: z.enum(ATTEMPT_SCORING_STATUSES),
+    sha: z.string().nullable().openapi({ description: "The head it applies to; null before any push." }),
+    result: CurrentResultSchema.optional().openapi({
+      description: "Absent until the head has a `done` run. Results for older heads are superseded, never current.",
+    }),
+  })
+  .openapi("ScoringStatus");
+
+const TaskArenaSchema = z
+  .object({
+    task: z.string().openapi({ example: "t42" }),
+    attempts: z.array(
+      ScoringStatusSchema.extend({
+        ref: z.string().openapi({ example: "t42a3" }),
+        state: z.enum(ATTEMPT_STATES),
+        author: UserRefSchema,
+      }).openapi("ArenaAttempt"),
+    ),
+  })
+  .openapi("TaskArena");
 
 const AttemptLimitSchema = z
   .number()
@@ -210,6 +311,13 @@ const TaskPathSchema = ProjectPathSchema.extend({
 
 const AttemptPathSchema = ProjectPathSchema.extend({
   a: z.string().openapi({ description: "An attempt reference.", example: "t42a3" }),
+});
+
+const RunLogPathSchema = RunPathSchema.extend({
+  name: z.string().openapi({
+    description: "The log's name: a check's name, `setup.<n>` for the nth setup command, or `preview.deploy`.",
+    example: "test",
+  }),
 });
 
 const ConfigNameSchema = z.string().regex(CONFIG_NAME);
@@ -278,6 +386,8 @@ export interface ApiOptions extends AuthOptions {
   repos?: (env: AccessBindings) => Repos;
   /** A project's task backend: production passes its Durable Object, tests an in-process store. */
   tasks?: (env: AccessBindings) => (projectId: string) => TaskBackend;
+  /** The environment's logs bucket: production passes its R2 binding, tests one in memory. */
+  logs?: (env: AccessBindings) => LogStore;
 }
 
 function noRepos(): Repos {
@@ -288,14 +398,18 @@ function noTasks(): (projectId: string) => TaskBackend {
   throw new Error("this API was built without a task backend");
 }
 
+function noLogs(): LogStore {
+  throw new Error("this API was built without a logs bucket");
+}
+
 type Bearer = ReturnType<typeof bearerAuth>;
 
 const json = <T>(schema: T) => ({ content: { "application/json": { schema } } });
 
 /** A task transition route: `POST …/tasks/{t}/<verb>`. */
-function taskTransition(
+function taskTransition<V extends string>(
   bearer: Bearer,
-  verb: string,
+  verb: V,
   operationId: string,
   summary: string,
   forbidden: string,
@@ -336,7 +450,7 @@ interface AttemptAction<S extends z.ZodType> {
 }
 
 /** An attempt action route: `POST …/attempts/{a}/<verb>`, bearer-only. */
-function attemptAction<S extends z.ZodType>(bearer: Bearer, verb: string, action: AttemptAction<S>) {
+function attemptAction<V extends string, S extends z.ZodType>(bearer: Bearer, verb: V, action: AttemptAction<S>) {
   return createRoute({
     method: "post",
     path: `/projects/{owner}/{project}/attempts/{a}/${verb}`,
@@ -359,9 +473,9 @@ function attemptAction<S extends z.ZodType>(bearer: Bearer, verb: string, action
 }
 
 /** An attempt transition route: `POST …/attempts/{a}/<verb>`. */
-function attemptTransition(
+function attemptTransition<V extends string>(
   bearer: Bearer,
-  verb: string,
+  verb: V,
   operationId: string,
   summary: string,
   forbidden: string,
@@ -378,9 +492,9 @@ function attemptTransition(
 }
 
 /** A scoring request route: `POST …/attempts/{a}/<verb>`. */
-function scoringRoute(
+function scoringRoute<V extends string>(
   bearer: Bearer,
-  verb: string,
+  verb: V,
   operationId: string,
   summary: string,
   description: string,
@@ -415,6 +529,7 @@ export function apiRoutes(options: ApiOptions = {}) {
   const reposFor = options.repos ?? noRepos;
   const projects = (env: AccessBindings) => projectService({ db: env.DB, repos: reposFor(env) });
   const backendFor = options.tasks ?? noTasks;
+  const logsFor = options.logs ?? noLogs;
   const tasks = (env: AccessBindings) => taskService({ db: env.DB, backend: backendFor(env) });
   const taskPath = ({ t, ...rest }: z.infer<typeof TaskPathSchema>) => ({ ...rest, task: t });
   const attemptPath = ({ a, ...rest }: z.infer<typeof AttemptPathSchema>) => ({ ...rest, attempt: a });
@@ -910,6 +1025,95 @@ export function apiRoutes(options: ApiOptions = {}) {
     )
     .openapi(
       createRoute({
+        method: "get",
+        path: "/projects/{owner}/{project}/attempts/{a}/scoring",
+        operationId: "getAttemptScoring",
+        tags: ["Scoring"],
+        summary: "Poll an attempt's scoring: its current head's status and result",
+        description:
+          "`status` is the current head's latest run that wasn't cancelled, or `none`. `result` is the latest " +
+          "`done` run for the head, so it stays while a rescore of the same head runs.",
+        security: bearerOrWeb,
+        middleware: [browser] as const,
+        request: { params: AttemptPathSchema },
+        responses: {
+          200: { description: "The attempt's scoring.", ...json(ScoringStatusSchema) },
+          400: errorResponse("The attempt reference is invalid."),
+          401: unauthorizedBearer,
+          404: errorResponse("No such project or attempt."),
+        },
+      }),
+      async (c) => c.json(await tasks(c.env).getScoring(c.var.actor, attemptPath(c.req.valid("param"))), 200),
+    )
+    .openapi(
+      createRoute({
+        method: "get",
+        path: "/projects/{owner}/{project}/tasks/{t}/arena",
+        operationId: "getTaskArena",
+        tags: ["Scoring"],
+        summary: "The arena: the current result of every attempt in a task",
+        description:
+          "Every attempt, obsolete ones included, by number, with its state, its scoring status and, once its current head has a " +
+          "`done` run, that result: `base`, the gate, the checks and every metric in one `metrics` map.",
+        security: bearerOrWeb,
+        middleware: [browser] as const,
+        request: { params: TaskPathSchema },
+        responses: {
+          200: { description: "The task's attempts with their current results.", ...json(TaskArenaSchema) },
+          400: errorResponse("The task reference is invalid."),
+          401: unauthorizedBearer,
+          404: errorResponse("No such project or task."),
+        },
+      }),
+      async (c) => c.json(await tasks(c.env).taskArena(c.var.actor, taskPath(c.req.valid("param"))), 200),
+    )
+    .openapi(
+      createRoute({
+        method: "get",
+        path: "/projects/{owner}/{project}/attempts/{a}/runs",
+        operationId: "listAttemptRuns",
+        tags: ["Scoring"],
+        summary: "List an attempt's scoring runs",
+        description: "Its whole run history, newest first, including superseded and cancelled runs.",
+        security: bearerOrWeb,
+        middleware: [browser] as const,
+        request: { params: AttemptPathSchema },
+        responses: {
+          200: { description: "The runs, newest first.", ...json(z.object({ runs: z.array(RunDetailSchema) })) },
+          400: errorResponse("The attempt reference is invalid."),
+          401: unauthorizedBearer,
+          404: errorResponse("No such project or attempt."),
+        },
+      }),
+      async (c) => {
+        const runs = await tasks(c.env).listScoringRuns(c.var.actor, attemptPath(c.req.valid("param")));
+        return c.json({ runs }, 200);
+      },
+    )
+    .openapi(
+      createRoute({
+        method: "get",
+        path: "/projects/{owner}/{project}/runs/{runId}",
+        operationId: "getRun",
+        tags: ["Scoring"],
+        summary: "Get one scoring run",
+        security: bearerOrWeb,
+        middleware: [browser] as const,
+        request: { params: RunPathSchema },
+        responses: {
+          200: { description: "The run.", ...json(RunDetailSchema) },
+          400: errorResponse("The run id is invalid."),
+          401: unauthorizedBearer,
+          404: errorResponse("No such project or run."),
+        },
+      }),
+      async (c) => {
+        const { runId, ...path } = c.req.valid("param");
+        return c.json(await tasks(c.env).getScoringRun(c.var.actor, { ...path, run: runId }), 200);
+      },
+    )
+    .openapi(
+      createRoute({
         method: "post",
         path: "/projects/{owner}/{project}/attempts/{a}/handoff",
         operationId: "handOffAttempt",
@@ -934,6 +1138,36 @@ export function apiRoutes(options: ApiOptions = {}) {
       async (c) => {
         const input = { ...attemptPath(c.req.valid("param")), ...c.req.valid("json") };
         return c.json(await tasks(c.env).handOffAttempt(c.var.actor, input), 200);
+      },
+    )
+    .openapi(
+      createRoute({
+        method: "get",
+        path: "/projects/{owner}/{project}/runs/{runId}/logs/{name}",
+        operationId: "getRunLog",
+        tags: ["Scoring"],
+        summary: "Stream one log of a scoring run",
+        description:
+          "Each setup command, check and preview of a run writes a log. Logs over " +
+          `${MAX_LOG_BYTES / (1024 * 1024)} MB keep their head and tail, with a marker between them. Logs are ` +
+          `deleted ${LOG_RETENTION_DAYS} days after the run; an expired log is \`not_found\`, like a missing one.`,
+        security: bearerOrWeb,
+        middleware: [browser] as const,
+        request: { params: RunLogPathSchema },
+        responses: {
+          200: { description: "The log.", content: { "text/plain": { schema: z.string() } } },
+          400: errorResponse("The run id is invalid."),
+          401: unauthorizedBearer,
+          404: errorResponse("No such project, run or log, or the log has expired."),
+        },
+      }),
+      async (c) => {
+        const { runId, name, ...path } = c.req.valid("param");
+        const key = await tasks(c.env).runLogKey(c.var.actor, { ...path, run: runId, name });
+        const log = await logsFor(c.env).get(key);
+        if (log === null) throw missingLog(runId, name);
+        // Streamed straight from R2; the typed response only knows the documented string body.
+        return c.body(log.body, 200, { "Content-Type": LOG_CONTENT_TYPE }) as never;
       },
     )
     .openapi(

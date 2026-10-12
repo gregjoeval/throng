@@ -1,4 +1,5 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
+import type { ApiOptions } from "./api";
 import { publicApp, webApp } from "./app";
 import { reposFor } from "./artifacts";
 import { walk } from "./browse";
@@ -13,11 +14,12 @@ const FORK_READY_TIMEOUT_MS = 60_000;
 const PUSH_TOKEN_TTL_SECONDS = 60 * 60;
 
 // The API and the git proxy are typed against the bindings they read; at runtime their env is this Worker's.
-const apiOptions: GitProxyOptions = {
+const apiOptions: GitProxyOptions & Pick<ApiOptions, "logs"> = {
   repos: (env) => reposFor(env as Env),
   tasks: (env) => (projectId) => ({
     call: (method, args) => (env as Env).PROJECT.getByName(projectId).tasks(method, args),
   }),
+  logs: (env) => (env as Env).LOGS,
 };
 
 // The public hostname. It refuses forwarded identities; see `./app.ts`.

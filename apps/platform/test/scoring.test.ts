@@ -100,6 +100,7 @@ function result(overrides: Partial<ScoringResult> = {}): ScoringResult {
     checks: [],
     builtin: { filesChanged: 1, additions: 2, deletions: 0, durationMs: 5 },
     preview: { status: "none" },
+    logs: [],
     ...overrides,
   };
 }
@@ -412,6 +413,17 @@ describe("results", () => {
     expect(run!.result).toEqual(result({ config: { kind: "valid" }, checks }));
     expect(store.getAttempt(PROJECT, ada, ref!).scoring).toEqual({ status: "done", sha: run!.sha });
     expect(journal().find((e) => e.kind === "scored")).toMatchObject({ gate: "passed", summary: "1 passed, 1 failed" });
+  });
+
+  it("reads a result stored before runs kept logs as having none", async () => {
+    const { store, runs, drafts } = setup();
+    const [ref] = await drafts();
+    await store.openAttempt(PROJECT, ada, ref!);
+    await store.scoring.drain();
+    const { logs: _logs, ...older } = result();
+    store.scoring.finish(runs(ref!)[0]!.id, { status: "done", result: older as ScoringResult });
+
+    expect(runs(ref!)[0]!.result).toEqual(result({ logs: [] }));
   });
 
   it("keeps an errored run's error, with no result", async () => {

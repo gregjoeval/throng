@@ -3,32 +3,50 @@ import { reposFor } from "./artifacts";
 import { loadConfig, type ConfigResult } from "./config";
 import {
   GRANT_SOURCES,
-  grantsForRole,
   ROLE_GRANTS,
-  RUNS_REPO_CODE,
   sandboxName,
   SCORING_ROLES,
   type RoleGrants,
   type RunGrants,
   type SandboxRole,
 } from "./grants";
+import { LOG_CONTENT_TYPE, logKey, logNames, MISSING_LOG_EXIT, PREVIEW_LOG, readLogScript, withNotes } from "./logs";
+import { roleAccess } from "./network";
+import { previewName } from "./preview";
 import { forkRepo, originRepo } from "./repos";
-import { buildResult, scorePlan, scoreTimeoutMs, type RawScore, type ScorePlan, type ScoringResult } from "./results";
+import {
+  buildResult,
+  previewPlan,
+  scorePlan,
+  scoreTimeoutMs,
+  withPreview,
+  type RawScore,
+  type PreviewPlan,
+  type ScorePlan,
+  type ScoringResult,
+} from "./results";
 import type { RunResult } from "./sandbox";
 import type { ScoringOutcome, ScoringParams } from "./scoring";
 import {
   landScript,
   parseResult,
+  PREVIEW_BUILD_TIMEOUT_MS,
+  previewScript,
   retestScript,
   scoreScript,
   type FailureStage,
   type LandResult,
+  type PreviewScriptResult,
   type RetestResult,
 } from "./scripts";
 
 const TOKEN_TTL_SECONDS = 30 * 60;
+/** The preview step: fetching, installing and the build step at its timeout, then the deploy. */
+const PREVIEW_STEP_TIMEOUT_MS = PREVIEW_BUILD_TIMEOUT_MS + 10 * 60 * 1000;
 /** Each step's retries after its first try, for infrastructure errors; then the run ends `errored`. */
 const STEP_RETRIES = { limit: 2, delay: "5 seconds", backoff: "constant" } as const;
+/** What a container may reach while its logs are read: nothing. It is already running by then. */
+const NO_ACCESS = { grants: [], preview: null, npmRegistry: false, allow: [] };
 /** Re-test and land rounds before giving up on a main that keeps moving. */
 const LAND_ROUNDS = 3;
 
@@ -44,9 +62,15 @@ export type LandOutcome =
  * Durable Object. The config is read from the origin's `main`, so an attempt can't change its own
  * checks. The container that runs repo code holds read grants only (see `grants.ts`).
  *
+ * When the config has a `preview` section and the gate passed, the head is then deployed as a Worker
+ * Preview from a separate container (see `#preview`); a failed Preview never changes the gate.
+ *
  * Until the merge queue takes them over, a head whose gate passed is then rebased onto main,
  * re-tested and landed, as the spike did. Landing runs before the result is reported, so a newer
- * push still cancels it. Previews (`previewScript`) are deployed by a later stage.
+ * push still cancels it.
+ *
+ * Each setup step's, check's and Preview's log is copied to R2 (`logs.ts`) within the step that
+ * wrote it, while its container still runs, so the result names the logs that were stored.
  */
 export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
   override async run(event: Readonly<WorkflowEvent<ScoringParams>>, step: WorkflowStep): Promise<ScoringOutcome> {
@@ -60,9 +84,15 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
       );
       const plan = scorePlan(config);
       const timeoutMs = scoreTimeoutMs(plan);
-      const result = await step.do("score", { retries: STEP_RETRIES, timeout: timeoutMs }, () =>
+      const scored = await step.do("score", { retries: STEP_RETRIES, timeout: timeoutMs }, () =>
         this.#score(instanceId, params, config, plan, timeoutMs),
       );
+      const preview = previewPlan(config, scored);
+      let result = scored;
+      if (preview !== null) {
+        const { deployed, logs } = await this.#preview(instanceId, params, preview, step);
+        result = { ...withPreview(scored, deployed), logs: [...scored.logs, ...logs] };
+      }
       outcome = { status: "done", result };
     } catch (cause) {
       outcome = { status: "errored", error: String(cause).slice(0, 4000) };
@@ -92,7 +122,7 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
     return outcome;
   }
 
-  /** Runs the score script in the run's own container and builds its result. */
+  /** Runs the score script in the run's own container, stores its logs and builds its result. */
   async #score(
     instanceId: string,
     params: ScoringParams,
@@ -111,7 +141,96 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
     if (raw === null) {
       throw new Error(`score script gave no result (exit ${run.exitCode}): ${run.stderr.slice(-2000)}`);
     }
-    return buildResult(config, raw);
+    const result = buildResult(config, raw);
+    const notes = new Map(result.checks.map((check) => [check.name, check.notes]));
+    const logs = await this.#storeLogs(instanceId, params, "score", logNames(plan), notes);
+    return { ...result, logs };
+  }
+
+  /**
+   * Copies the role's container's logs to R2, truncated over `MAX_LOG_BYTES`, with each log's
+   * `notes` appended (see `withNotes`), and returns the names stored. A step that never ran wrote no
+   * log, unless it has notes; a log that fails to copy is left out rather than failing the run.
+   */
+  async #storeLogs(
+    instanceId: string,
+    params: ScoringParams,
+    role: SandboxRole,
+    names: string[],
+    notes: ReadonlyMap<string, string[]> = new Map(),
+  ): Promise<string[]> {
+    const sandbox = this.env.SANDBOX.getByName(sandboxName(instanceId, role));
+    const stored: string[] = [];
+    for (const name of names) {
+      try {
+        const read = await sandbox.run(readLogScript(name), { access: NO_ACCESS });
+        if (read.exitCode !== 0 && read.exitCode !== MISSING_LOG_EXIT) {
+          throw new Error(`exit ${read.exitCode}: ${read.stderr.slice(-500)}`);
+        }
+        const log = withNotes(read.exitCode === MISSING_LOG_EXIT ? null : read.stdout, notes.get(name) ?? []);
+        if (log === null) continue;
+        await this.env.LOGS.put(logKey(params, name), log, { httpMetadata: { contentType: LOG_CONTENT_TYPE } });
+        stored.push(name);
+      } catch (cause) {
+        console.error({ event: "scoring.log_not_stored", run: params.run, name, error: String(cause) });
+      }
+    }
+    return stored;
+  }
+
+  /**
+   * Deploys the head as a Worker Preview from the preview container, which holds the Preview deploy
+   * grant and only a read grant on the fork, and stores its log. `deployed` is null when it gave no
+   * result, and the error when the step kept failing on infrastructure; then whatever log the
+   * container wrote is still stored. A failed Preview is recorded on the result and never changes the gate.
+   */
+  async #preview(
+    instanceId: string,
+    params: ScoringParams,
+    { command, allow }: PreviewPlan,
+    step: WorkflowStep,
+  ): Promise<{ deployed: PreviewScriptResult | null | { error: string }; logs: string[] }> {
+    const workerName = this.env.PREVIEW_WORKER;
+    const name = previewName(params, workerName);
+    try {
+      const { run, logs } = await step.do(
+        "preview",
+        { retries: STEP_RETRIES, timeout: PREVIEW_STEP_TIMEOUT_MS },
+        async () => {
+          const deploy = await this.#run(
+            instanceId,
+            params,
+            "preview",
+            (g) =>
+              previewScript(g.forkRead.remote, params.sha, {
+                accountId: this.env.CF_ACCOUNT_ID,
+                workerName,
+                previewName: name,
+                command,
+              }),
+            { allow, timeoutMs: PREVIEW_STEP_TIMEOUT_MS },
+          );
+          return { run: deploy, logs: await this.#storeLogs(instanceId, params, "preview", [PREVIEW_LOG]) };
+        },
+      );
+      const deployed = parseResult<PreviewScriptResult>(run.stdout);
+      if (deployed === null) {
+        console.warn({ event: "scoring.preview_no_result", exit: run.exitCode, stderr: run.stderr.slice(-2000) });
+      } else if (!deployed.ok) {
+        console.log({ event: "scoring.preview_failed", stage: deployed.stage, output: deployed.output.slice(-2000) });
+      }
+      return { deployed, logs };
+    } catch (cause) {
+      const error = String(cause).slice(0, 2000);
+      console.warn({ event: "scoring.preview_errored", error });
+      // A lost Sandbox can't give its log back either; that still mustn't end the run.
+      const logs = await step
+        .do("preview logs", { retries: STEP_RETRIES }, () =>
+          this.#storeLogs(instanceId, params, "preview", [PREVIEW_LOG]),
+        )
+        .catch(() => []);
+      return { deployed: { error }, logs };
+    }
   }
 
   /** The spike's landing: rebase onto main, re-test, and push, retrying while main moves underneath. */
@@ -163,8 +282,12 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
     const grants = (await this.#grants(params, ROLE_GRANTS[role])) as RoleGrants<R>;
     const sandbox = this.env.SANDBOX.getByName(sandboxName(instanceId, role));
     const result = await sandbox.run(script(grants), {
-      // Installing dependencies is repo work; the trusted land container never reaches the registry.
-      access: { grants: grantsForRole(role, grants), preview: null, npmRegistry: RUNS_REPO_CODE[role], allow },
+      // Only the preview container gets the Preview deploy grant; the trusted land container never
+      // reaches the registry.
+      access: roleAccess(role, grants, {
+        preview: { accountId: this.env.CF_ACCOUNT_ID, workerName: this.env.PREVIEW_WORKER },
+        allow,
+      }),
       ...(timeoutMs === undefined ? {} : { timeoutMs }),
     });
     // Exit codes 10+ are infrastructure failures (fetch, checkout, diff); throw so the step retries.

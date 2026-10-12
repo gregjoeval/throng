@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { GitGrant } from "../src/grants.ts";
-import { interceptedHosts, outboundDecision, registryAllows, type OutboundAccess } from "../src/network.ts";
+import { SANDBOX_ROLES, type GitGrant, type RunGrants } from "../src/grants.ts";
+import { interceptedHosts, outboundDecision, registryAllows, roleAccess, type OutboundAccess } from "../src/network.ts";
 
 const registry = (path: string) => new URL(`https://registry.npmjs.org${path}`);
 
@@ -111,5 +111,45 @@ describe("network.allow", () => {
       "example.com",
       "registry.npmjs.org",
     ]);
+  });
+});
+
+const repoGrant = (repo: string, level: GitGrant["access"], token: string): GitGrant => ({
+  remote: `https://acct.artifacts.cloudflare.net/git/ns/${repo}.git`,
+  token,
+  access: level,
+});
+const pushTo = (repo: string) => new URL(`https://acct.artifacts.cloudflare.net/git/ns/${repo}.git/git-receive-pack`);
+
+describe("roleAccess", () => {
+  const grants: RunGrants = {
+    originRead: repoGrant("p1-main", "read", "origin-read"),
+    originWrite: repoGrant("p1-main", "write", "origin-write"),
+    forkRead: repoGrant("p1-t1a1", "read", "fork-read"),
+  };
+  const preview = { accountId: "acct", workerName: "fixture" };
+  const deploy = new URL("https://api.cloudflare.com/client/v4/accounts/acct/workers/scripts/fixture");
+
+  it("gives the preview container the Preview deploy grant, a fork read grant and nothing that writes a repo", () => {
+    const given = roleAccess("preview", grants, { preview, allow: [] });
+    expect(given).toEqual({ grants: [grants.forkRead], preview, npmRegistry: true, allow: [] });
+    expect(outboundDecision("PUT", deploy, given)).toEqual({ action: "preview-token" });
+    for (const repo of ["p1-main", "p1-t1a1"]) {
+      expect(outboundDecision("POST", pushTo(repo), given)).toEqual({ action: "deny" });
+    }
+  });
+
+  it("gives the Preview deploy grant to no other container", () => {
+    for (const role of SANDBOX_ROLES.filter((r) => r !== "preview")) {
+      const given = roleAccess(role, grants, { preview, allow: [] });
+      expect({ role, preview: given.preview }).toEqual({ role, preview: null });
+      expect(outboundDecision("PUT", deploy, given)).toEqual({ action: "deny" });
+    }
+  });
+
+  it("opens network.allow and the registry only to containers that run repository code", () => {
+    const allow = ["api.github.com"];
+    expect(roleAccess("score", grants, { preview, allow })).toMatchObject({ npmRegistry: true, allow });
+    expect(roleAccess("land", grants, { preview, allow })).toMatchObject({ npmRegistry: false, allow: [] });
   });
 });

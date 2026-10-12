@@ -3,6 +3,7 @@
 // gate live here so they're tested without a container.
 
 import { DEFAULT_CHECK_TIMEOUT_MS, type ConfigResult } from "./config.ts";
+import type { PreviewScriptResult } from "./scripts.ts";
 
 export const CHECK_OUTCOMES = ["passed", "failed", "timed_out", "skipped"] as const;
 export type CheckOutcome = (typeof CHECK_OUTCOMES)[number];
@@ -35,7 +36,15 @@ export interface BuiltinMetrics {
   durationMs: number;
 }
 
-export type PreviewResult = { status: "none" } | { status: "ready"; url: string } | { status: "failed" };
+/**
+ * The Preview's outcome: `failed` when its build or deploy failed, `errored` when the infrastructure
+ * kept failing (container start, lost Sandbox, a script crash). Neither changes the gate.
+ */
+export type PreviewResult =
+  | { status: "none" }
+  | { status: "ready"; url: string }
+  | { status: "failed" }
+  | { status: "errored"; error: string };
 
 export interface ScoringResult {
   /** `git merge-base <head> origin/main` at scoring time; null when they share no history. */
@@ -46,6 +55,11 @@ export interface ScoringResult {
   checks: CheckResult[];
   builtin: BuiltinMetrics;
   preview: PreviewResult;
+  /**
+   * The run's stored logs, by name (`setup.<n>`, a check's name, `preview.deploy`), in run order. A
+   * step that never ran has none; see `logs.ts` for where each is kept.
+   */
+  logs: string[];
 }
 
 /** What the score script runs, and the hosts it may reach beyond the npm registry. */
@@ -145,10 +159,44 @@ export function gateFor(checks: CheckResult[]): "passed" | "failed" {
   return checks.every((c) => !c.required || c.outcome === "passed") ? "passed" : "failed";
 }
 
-/** The run's result from the config it was scored under and the score script's raw output. */
+/** What the preview container runs, and the hosts its build may reach beyond the npm registry. */
+export interface PreviewPlan {
+  command: string | null;
+  allow: string[];
+}
+
+/**
+ * Whether to deploy a Preview, its build step and its `network.allow`: only when the config has a
+ * `preview` section and the gate passed. Null means no Preview, and the result keeps `preview: none`.
+ */
+export function previewPlan(config: ConfigResult, result: ScoringResult): PreviewPlan | null {
+  if (config.kind !== "valid" || config.config.preview === null || result.gate !== "passed") return null;
+  return { command: config.config.preview.command, allow: config.config.network.allow };
+}
+
+/**
+ * The result with the Preview's outcome recorded: `ready` with its URL when it deployed, `failed`
+ * otherwise (null when the preview script gave no result), or `errored` with the error the step kept
+ * failing on. The gate and checks never change.
+ */
+export function withPreview(
+  result: ScoringResult,
+  deployed: PreviewScriptResult | null | { error: string },
+): ScoringResult {
+  let preview: PreviewResult;
+  if (deployed !== null && "error" in deployed) preview = { status: "errored", error: deployed.error };
+  else if (deployed?.ok === true) preview = { status: "ready", url: deployed.url };
+  else preview = { status: "failed" };
+  return { ...result, preview };
+}
+
+/**
+ * The run's result from the config it was scored under and the score script's raw output. Its
+ * `logs` are empty: the run stores its logs, with each check's notes, once the result is built.
+ */
 export function buildResult(config: ConfigResult, raw: RawScore): ScoringResult {
   const builtin = { ...parseShortstat(raw.shortstat), durationMs: raw.builtinMs };
-  const common = { base: raw.base, builtin, preview: { status: "none" } as const };
+  const common = { base: raw.base, builtin, preview: { status: "none" } as const, logs: [] };
   if (config.kind === "none") return { ...common, config: { kind: "none" }, gate: "passed", checks: [] };
   if (config.kind === "invalid") {
     const entry: CheckResult = {

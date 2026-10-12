@@ -20,8 +20,25 @@ describe("previewPathAllowed", () => {
 });
 
 describe("previewName", () => {
-  it("makes a short DNS-safe label", () => {
-    expect(previewName({ project: "Spike_X", attempt: "A1" })).toBe("spike-x-a1");
-    expect(previewName({ project: "p".repeat(40), attempt: "a" })).toHaveLength(30);
+  it("names a Preview after the attempt fork and the project: <forkName>-p<projectId>", () => {
+    expect(previewName({ project: "abc123", attempt: "t42a3" }, "fixture")).toBe("t42a3-pabc123");
+  });
+
+  it("shortens a name whose host label would pass 63 characters, keeping its start and a hash of it", () => {
+    const worker = "throng-fixture-worker";
+    const long = { project: "p".repeat(40), attempt: "t42a3" };
+    const name = previewName(long, worker);
+    expect(`${name}-${worker}`).toHaveLength(63);
+    expect(name).toMatch(/^t42a3-pppp+-[a-z0-9]{8}$/);
+    expect(previewName(long, worker)).toBe(name);
+    expect(previewName({ ...long, attempt: "t42a4" }, worker)).not.toBe(name);
+    expect(previewName({ project: "p".repeat(40), attempt: "t1a1" }, worker)).not.toBe(
+      previewName({ project: `${"p".repeat(39)}q`, attempt: "t1a1" }, worker),
+    );
+  });
+
+  it("keeps a name that fits exactly", () => {
+    const worker = "w".repeat(63 - "t1a1-pabcdef".length - 1);
+    expect(previewName({ project: "abcdef", attempt: "t1a1" }, worker)).toBe("t1a1-pabcdef");
   });
 });

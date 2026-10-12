@@ -10,12 +10,12 @@ export interface GitGrant {
 
 /**
  * Each role runs in its own container. Intercepts are fixed when a container starts, so roles with
- * different grants need different containers. `preview` is kept for when Previews are deployed again.
+ * different grants need different containers.
  */
 export const SANDBOX_ROLES = ["score", "preview", "retest", "land"] as const;
 export type SandboxRole = (typeof SANDBOX_ROLES)[number];
-/** The roles a scoring run's Workflow starts containers for: scoring, then the spike's landing. */
-export const SCORING_ROLES = ["score", "retest", "land"] as const satisfies readonly SandboxRole[];
+/** The roles a scoring run's Workflow starts containers for: scoring, its Preview, then the spike's landing. */
+export const SCORING_ROLES = ["score", "preview", "retest", "land"] as const satisfies readonly SandboxRole[];
 
 /** Roles whose container runs the repository's own code (npm, its scripts, wrangler builds). */
 export const RUNS_REPO_CODE: Record<SandboxRole, boolean> = {

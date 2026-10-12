@@ -4,12 +4,14 @@
 
 import { ServiceError } from "./errors.ts";
 import { resolveProject } from "./projects.ts";
-import { headAttemptRef, type ScoringRequest, type StoredRun } from "./scoring.ts";
+import type { CheckResult, ScoringResult } from "./results.ts";
+import { headAttemptRef, type AttemptScoring, type ScoringRequest, type StoredRun } from "./scoring.ts";
 import {
   parseAttemptRef,
   parseTaskRef,
   taskRef,
   type AttemptInput,
+  type AttemptScoringDetail,
   type AttemptState,
   type ProjectContext,
   type StoredAttempt,
@@ -63,6 +65,48 @@ export interface ScoringRun {
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+}
+
+/** A scoring run with how it ended: its result once `done`, its error once `errored`. */
+export interface RunDetail extends ScoringRun {
+  /** Whether its head is no longer the attempt's current head. */
+  superseded: boolean;
+  error: string | null;
+  result: PublicResult | null;
+}
+
+/** A result as answers carry it, its field names in snake_case like the rest of the API. */
+export interface PublicResult extends Omit<ScoringResult, "checks" | "builtin"> {
+  checks: (Omit<CheckResult, "durationMs"> & { duration_ms: number })[];
+  builtin: { files_changed: number; additions: number; deletions: number; duration_ms: number };
+}
+
+/**
+ * An attempt's current result: the latest `done` run for its current head, with the run it came
+ * from and every check's metrics in one map (metric names are unique per project).
+ */
+export interface CurrentResult extends PublicResult {
+  run: number;
+  finished_at: string;
+  metrics: Record<string, number>;
+}
+
+/** An attempt's scoring status for polling, with its current result once its head has one. */
+export interface ScoringStatus extends AttemptScoring {
+  result?: CurrentResult;
+}
+
+/** One attempt in a task's arena, obsolete or not: its state lets a UI filter. */
+export interface ArenaAttempt extends ScoringStatus {
+  ref: string;
+  state: AttemptState;
+  author: UserRef;
+}
+
+/** A task's arena: the current result of every attempt in it. */
+export interface TaskArena {
+  task: string;
+  attempts: ArenaAttempt[];
 }
 
 /** What asking for scoring did: queued a run, or why not, with the run that covers the head. */
@@ -210,6 +254,54 @@ export function taskService({ db, backend }: TaskServiceDeps) {
     /** Scores an open attempt's head again. Its author, the task's creator or the project owner may. */
     rescore: scoringRequest("rescore"),
 
+    /** The R2 key of a run's log. An unknown run or log name is `not_found`. */
+    async runLogKey(actor: Actor, input: ProjectPath & { run: number; name: string }): Promise<string> {
+      return invoke("runLogKey", await project(input), actor, { run: input.run, name: input.name });
+    },
+
+    /** The attempt's scoring status and current result. Any signed-in user may read it. */
+    async getScoring(actor: Actor, input: AttemptPath): Promise<ScoringStatus> {
+      return scoringStatus(await invoke("getScoring", await project(input), actor, attemptRefOf(input.attempt)));
+    },
+
+    /**
+     * The task's arena: every attempt, obsolete ones included, by number, with its state and
+     * current result. Any signed-in user may read it.
+     */
+    async taskArena(actor: Actor, input: TaskPath): Promise<TaskArena> {
+      const number = taskNumber(input.task);
+      const list = await invoke("taskArena", await project(input), actor, { task: number });
+      const users = await handles(
+        db,
+        list.map((a) => a.author),
+      );
+      return {
+        task: taskRef(number),
+        attempts: list.map(({ scoring, fork, state, author }) => ({
+          ref: fork,
+          state,
+          author: userRef(author, users),
+          ...scoringStatus(scoring),
+        })),
+      };
+    },
+
+    /** The attempt's scoring runs, newest first. Any signed-in user may read them. */
+    async listScoringRuns(actor: Actor, input: AttemptPath): Promise<RunDetail[]> {
+      const runs = await invoke("listScoringRuns", await project(input), actor, attemptRefOf(input.attempt));
+      const users = await handles(
+        db,
+        runs.map((r) => r.user_id),
+      );
+      return runs.map((r) => runDetail(r, users));
+    },
+
+    /** One of the project's scoring runs. Any signed-in user may read it. */
+    async getScoringRun(actor: Actor, input: ProjectPath & { run: number }): Promise<RunDetail> {
+      const run = await invoke("getScoringRun", await project(input), actor, { run: input.run });
+      return runDetail(run, await handles(db, [run.user_id]));
+    },
+
     /**
      * Hands an active attempt to the user with handle `to`, who becomes its author. Only its
      * author (or their agents) may. An unknown handle is `not_found`; handing it to its own author
@@ -275,23 +367,56 @@ function publicAttempt(a: StoredAttempt, users: Map<string, string>): Attempt {
 }
 
 function publicScoring(request: ScoringRequest, users: Map<string, string>): ScoringAnswer {
-  const { run } = request;
   return {
     queued: request.queued,
     reason: request.queued ? null : request.reason,
-    run: {
-      id: run.id,
-      ref: headAttemptRef(run),
-      sha: run.sha,
-      trigger: run.trigger,
-      status: run.status,
-      requested_by: run.user_id === null ? null : userRef(run.user_id, users),
-      agent: run.agent,
-      created_at: new Date(run.created_at).toISOString(),
-      started_at: iso(run.started_at),
-      finished_at: iso(run.finished_at),
+    run: publicRun(request.run, users),
+  };
+}
+
+function publicRun(run: StoredRun, users: Map<string, string>): ScoringRun {
+  return {
+    id: run.id,
+    ref: headAttemptRef(run),
+    sha: run.sha,
+    trigger: run.trigger,
+    status: run.status,
+    requested_by: run.user_id === null ? null : userRef(run.user_id, users),
+    agent: run.agent,
+    created_at: new Date(run.created_at).toISOString(),
+    started_at: iso(run.started_at),
+    finished_at: iso(run.finished_at),
+  };
+}
+
+function runDetail(run: StoredRun, users: Map<string, string>): RunDetail {
+  const result = run.result === null ? null : publicResult(run.result);
+  return { ...publicRun(run, users), superseded: run.superseded, error: run.error, result };
+}
+
+function publicResult({ checks, builtin, ...result }: ScoringResult): PublicResult {
+  return {
+    ...result,
+    checks: checks.map(({ durationMs, ...check }) => ({ ...check, duration_ms: durationMs })),
+    builtin: {
+      files_changed: builtin.filesChanged,
+      additions: builtin.additions,
+      deletions: builtin.deletions,
+      duration_ms: builtin.durationMs,
     },
   };
+}
+
+/** An attempt's scoring status for polling, with its current result once its head has one. */
+function scoringStatus({ current, ...status }: AttemptScoringDetail): ScoringStatus {
+  return current === null ? status : { ...status, result: currentResult(current) };
+}
+
+function currentResult(run: StoredRun): CurrentResult {
+  if (run.result === null || run.finished_at === null) throw new Error(`run ${run.id} is done without a result`);
+  const metrics = Object.assign({}, ...run.result.checks.map((c) => c.metrics)) as Record<string, number>;
+  const result = publicResult(run.result);
+  return { ...result, run: run.id, finished_at: new Date(run.finished_at).toISOString(), metrics };
 }
 
 function iso(ms: number | null): string | null {

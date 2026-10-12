@@ -219,6 +219,20 @@ export class ScoringQueue {
   }
 
   /**
+   * The attempt's current result: the latest `done` run for its current head, or null. Results for
+   * older heads are superseded and never current.
+   */
+  currentRun({ task, attempt }: ScoredAttempt): StoredRun | null {
+    const [row] = this.#sql.exec<RunRow>(
+      `SELECT r.* FROM scoring_runs r JOIN scoring_heads h ON h.task = r.task AND h.attempt = r.attempt AND h.sha = r.sha
+       WHERE r.task = ? AND r.attempt = ? AND r.status = 'done' ORDER BY r.id DESC LIMIT 1`,
+      task,
+      attempt,
+    );
+    return row === undefined ? null : toRun(row);
+  }
+
+  /**
    * Asks for the attempt's head `sha` to be scored. Checks no permission: the task store has
    * already decided the request is allowed.
    */
@@ -462,9 +476,15 @@ function toRun(row: RunRow): StoredRun {
     ...run,
     trigger: row.trigger as ScoringTrigger,
     status: row.status as RunStatus,
-    result: row.result === null ? null : (JSON.parse(row.result) as ScoringResult),
+    result: row.result === null ? null : storedResult(row.result),
     superseded: row.superseded === 1,
   };
+}
+
+/** A stored result; one stored before runs kept logs has none. */
+function storedResult(json: string): ScoringResult {
+  const result = JSON.parse(json) as Omit<ScoringResult, "logs"> & { logs?: string[] };
+  return { ...result, logs: result.logs ?? [] };
 }
 
 /** A result in a few words for the journal: `no checks configured`, `2 passed, 1 failed`, `config invalid`. */

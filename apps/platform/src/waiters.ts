@@ -14,6 +14,11 @@ const WATCHED = WAIT_CONDITIONS.filter((c): c is Exclude<WaitCondition, "any"> =
 
 /** The longest a request may wait, in seconds. */
 export const MAX_WAIT_SECONDS = 30;
+/**
+ * How long to wait when the caller doesn't say: `wait_for_attempt`'s default, and the length the REST
+ * API documents for `?wait=` (which, left out, answers at once).
+ */
+export const DEFAULT_WAIT_SECONDS = MAX_WAIT_SECONDS;
 /** How many requests one user may have waiting at a time in one project; past it, a wait answers at once. */
 export const MAX_WAITERS_PER_USER = 10;
 
@@ -27,8 +32,17 @@ export interface AttemptWatch {
 }
 
 /**
+ * Whether `until` already holds when the wait arrives, so it answers at once. Only `scored` is a
+ * state rather than a change: the current head has a `done` or `errored` run.
+ */
+export function alreadyMet(until: WaitCondition, now: AttemptWatch): boolean {
+  return until === "scored" && now.scoredRun !== null;
+}
+
+/**
  * Whether `after` answers a wait for `until` that snapshotted `before`. `scored` holds once the
- * current head has a finished run it didn't have before, so a push alone doesn't answer it.
+ * current head has a finished run it didn't have before, so a push alone doesn't answer it; as part
+ * of `any`, that is how a new score counts as a change.
  */
 export function watchChanged(until: WaitCondition, before: AttemptWatch, after: AttemptWatch): boolean {
   switch (until) {

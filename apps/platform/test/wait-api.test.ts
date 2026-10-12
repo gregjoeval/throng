@@ -183,12 +183,34 @@ describe("waiting on an attempt", () => {
     await finish(1);
     expect((await answer).body).toMatchObject({ scoring: { status: "done", sha: head }, changed: true });
 
+    const next = await push(1, "two\n");
     const errored = await wait(1, "wait=30&until=scored");
-    await call("POST", `${base}/attempts/t1a1/rescore`, ada);
-    await settle();
     expect(errored.answered()).toBeFalsy();
     await finish(1, { status: "errored", error: "sandbox lost" });
-    expect((await errored.answer).body).toMatchObject({ scoring: { status: "errored" }, changed: true });
+    expect((await errored.answer).body).toMatchObject({ scoring: { status: "errored", sha: next }, changed: true });
+  });
+
+  it("answers scored at once when the current head already has a done or errored run", async () => {
+    const { call, ada, base, push, finish } = await setup();
+    await call("POST", `${base}/attempts/t1a1/open`, ada);
+    const head = await push(1, "one\n");
+    await finish(1);
+    // No timer runs: the answer comes without the clock moving.
+    const { status, body } = await call("GET", `${base}/attempts/t1a1?wait=30&until=scored`, ada);
+    expect(status).toBe(200);
+    expect(body).toMatchObject({ scoring: { status: "done", sha: head }, changed: true });
+  });
+
+  it("still waits on `any` for a change when the head is already scored", async () => {
+    const { call, ada, base, push, finish, wait } = await setup();
+    await call("POST", `${base}/attempts/t1a1/open`, ada);
+    await push(1, "one\n");
+    await finish(1);
+    const { answer, answered } = await wait(1, "wait=30");
+    await settle();
+    expect(answered()).toBeFalsy();
+    await call("POST", `${base}/attempts/t1a1/draft`, ada);
+    expect((await answer).body).toMatchObject({ state: "draft", changed: true });
   });
 
   it("answers mergeRequestChanged once the attempt is selected, and once its merge request moves", async () => {

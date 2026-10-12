@@ -5,7 +5,7 @@
 import { Hono } from "hono";
 import { attemptRemote } from "./git-remotes.ts";
 import { CLONE_RECIPE, MAX_FILE_BYTES, MAX_LOG_SLICE_BYTES, MCP_INSTRUCTIONS } from "./mcp.ts";
-import { MAX_WAIT_SECONDS, MAX_WAITERS_PER_USER } from "./waiters.ts";
+import { DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS, MAX_WAITERS_PER_USER } from "./waiters.ts";
 
 /** The guide, for a platform served at `origin`. */
 export function llmsText(origin: string): string {
@@ -53,7 +53,8 @@ open attempt at \`t42\`. The origin's \`main\` only moves through the merge queu
 3. Clone the attempt's \`remote\` as above, commit, and \`git push origin main\`: the clone already sends the token.
 4. \`update_attempt\` with \`state: open\`: the attempt is ready to be scored and selected. While it is a draft,
    \`score_now\` scores its head on demand.
-5. \`wait_for_attempt\` with \`until: scored\` holds for up to ${MAX_WAIT_SECONDS} seconds until the head is scored.
+5. \`wait_for_attempt\` with \`until: scored\` holds for up to ${DEFAULT_WAIT_SECONDS} seconds (\`wait\`, at most
+   ${MAX_WAIT_SECONDS}) until the head has a \`done\` or \`errored\` run, and answers at once if it already has one.
    Call it again while \`changed\` is false. Each user may have ${MAX_WAITERS_PER_USER} waits at a time per project;
    past that, a wait returns at once with \`changed: false\`. \`until\` also takes \`stateChanged\`,
    \`mergeRequestChanged\` and \`any\`.
@@ -86,7 +87,7 @@ Every tool wraps a route of the REST API, which takes the same bearer token. Err
 \`{"error": {"code", "message"}}\`; names and values are camelCase.
 
 - OpenAPI 3.1 document: ${origin}/api/openapi.json
-- Long-poll an attempt: \`GET ${origin}/api/projects/<owner>/<project>/attempts/t42a3?wait=30&until=scored\`
+- Long-poll an attempt: \`GET ${origin}/api/projects/<owner>/<project>/attempts/t42a3?wait=${DEFAULT_WAIT_SECONDS}&until=scored\`
 `;
 }
 

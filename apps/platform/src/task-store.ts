@@ -48,7 +48,7 @@ import { attemptRef, reservedTask, taskBranchRef, taskRef } from "./task-refs.ts
 import type { Actor } from "./tokens.ts";
 import { Verdicts } from "./verdicts.ts";
 import type { StoredVerdict, VerdictRecommendation, VerdictSummary } from "./verdicts.ts";
-import { Waiters, watchChanged } from "./waiters.ts";
+import { alreadyMet, Waiters, watchChanged } from "./waiters.ts";
 import type { AttemptWatch, WaitCondition } from "./waiters.ts";
 
 /** Active attempts a task may have when neither the project config nor the task overrides it. */
@@ -678,8 +678,9 @@ export class TaskStore {
 
   /**
    * Holds until what `until` watches on the attempt changes from now, or `wait` seconds pass, then
-   * answers with the attempt and whether it changed. Past the actor's user's cap on waiting
-   * requests, answers at once, unchanged.
+   * answers with the attempt and whether it changed. `scored` answers at once, changed, when the
+   * current head is already scored. Past the actor's user's cap on waiting requests, answers at
+   * once, unchanged.
    */
   async waitForAttempt(
     _project: ProjectContext,
@@ -687,6 +688,7 @@ export class TaskStore {
     input: AttemptInput & { wait: number; until: WaitCondition },
   ): Promise<StoredAttempt & { changed: boolean }> {
     const before = this.#watch(input);
+    if (alreadyMet(input.until, before)) return { ...this.#attempt(input), changed: true };
     const ready = () => watchChanged(input.until, before, this.#watch(input));
     const changed = await this.#waiters.wait(actor.user.id, ready, input.wait * 1000);
     return { ...this.#attempt(input), changed };

@@ -11,6 +11,7 @@ import type { LogStore } from "../src/logs.ts";
 import { MAX_FILE_BYTES, MAX_LOG_SLICE_BYTES } from "../src/mcp.ts";
 import type { ScoringResult } from "../src/results.ts";
 import { userForEmail } from "../src/users.ts";
+import { DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS } from "../src/waiters.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
 import type { Json } from "./support/json.ts";
@@ -336,6 +337,21 @@ describe("/mcp", () => {
     expect(waited.data["attempt"]).toMatchObject({ ref: "t1a1", state: "draft", changed: false });
     const invalid = await call(ada, "wait_for_attempt", { project, attempt: "t1a1", wait: 31 });
     expect(invalid.isError).toBeTruthy();
+  });
+
+  it("takes the same wait limits as `?wait=`, defaulting to the documented length", async () => {
+    const { tokenFor, connect, app, env } = await setup();
+    const client = await connect(await tokenFor("greg@example.com"));
+    const { tools } = await client.listTools();
+    const tool = tools.find((t) => t.name === "wait_for_attempt");
+    const mcpWait = tool?.inputSchema.properties?.["wait"] as Json;
+    const doc = (await (await app.request(`${ORIGIN}/api/openapi.json`, {}, env)).json()) as Json;
+    const params = doc["paths"]["/projects/{owner}/{project}/attempts/{a}"]["get"]["parameters"] as Json[];
+    const restWait = params.find((p) => p["name"] === "wait")?.["schema"] as Json;
+    expect({ min: mcpWait["minimum"], max: mcpWait["maximum"] }).toEqual({ min: 1, max: MAX_WAIT_SECONDS });
+    expect({ min: restWait["minimum"], max: restWait["maximum"] }).toEqual({ min: 1, max: MAX_WAIT_SECONDS });
+    expect(mcpWait["default"]).toBe(DEFAULT_WAIT_SECONDS);
+    expect(restWait["example"]).toBe(DEFAULT_WAIT_SECONDS);
   });
 
   it("selects an attempt, and cancels its merge request", async () => {

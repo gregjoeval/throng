@@ -50,8 +50,8 @@ export interface WaitOptions {
 }
 
 /**
- * Calls `wait_for_attempt` until `done` holds. Each answer is checked whether or not it `changed`:
- * what `until` watches may have changed before the first wait began.
+ * Calls `wait_for_attempt` until `done` holds. Each answer is checked whether or not it `changed`: a
+ * merge request may pass through several states, or change before the first wait began.
  */
 export async function waitForAttempt(call: ToolCall, options: WaitOptions): Promise<LoopAttempt> {
   const { project, attempt, until, wait, done, failed, timeoutMs } = options;
@@ -140,8 +140,9 @@ export async function agentLoop(options: AgentLoopOptions): Promise<AgentLoopRes
   ] as LoopAttempt;
   assert(opened.state === "open", `${first.ref} is ${opened.state} after opening it`);
 
-  const ended = (a: LoopAttempt) => a.scoring.sha === head && ["done", "errored"].includes(a.scoring.status);
-  await waitForAttempt(creator, { project, attempt: first.ref, until: "scored", wait, done: ended, timeoutMs });
+  // `scored` holds once the current head, `head`, has a finished run: a wait says so with `changed`.
+  const scoredHead = (a: LoopAttempt) => a.changed === true;
+  await waitForAttempt(creator, { project, attempt: first.ref, until: "scored", wait, done: scoredHead, timeoutMs });
   const scored = (await creator("get_attempt", { project, attempt: first.ref }))["attempt"] as LoopAttempt;
   assert(
     scored.scoring.status === "done" && scored.scoring.sha === head && scored.scoring.result?.gate === "passed",

@@ -14,7 +14,7 @@ import type { Repos } from "./repos.ts";
 import { taskService } from "./tasks.ts";
 import type { TaskBackend } from "./tasks.ts";
 import { MAX_VERDICT_BODY, VERDICT_RECOMMENDATIONS } from "./verdicts.ts";
-import { MAX_WAIT_SECONDS, WAIT_CONDITIONS } from "./waiters.ts";
+import { DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS, WAIT_CONDITIONS } from "./waiters.ts";
 
 export const ProjectPathSchema = z.object({
   owner: z.string().openapi({ description: "The owner's handle.", example: "greg" }),
@@ -166,18 +166,25 @@ export const HandOffSchema = z
   })
   .openapi("HandOff");
 
+/** How long a wait holds, in seconds: the one limit `?wait=` and `wait_for_attempt` share. */
+export const WaitSecondsSchema = z.coerce.number().int().min(1).max(MAX_WAIT_SECONDS);
+
+/** `GET …/attempts/{a}`'s wait; `wait_for_attempt` takes the same, with `wait` defaulting to `DEFAULT_WAIT_SECONDS`. */
 export const WaitQuerySchema = z.object({
-  wait: z.coerce.number().int().min(1).max(MAX_WAIT_SECONDS).optional().openapi({
+  wait: WaitSecondsSchema.optional().openapi({
     description:
-      "Seconds to hold the request until what `until` watches changes. Without it, the attempt is returned at once.",
-    example: 30,
+      `Seconds to hold the request until what \`until\` watches changes, 1 to ${MAX_WAIT_SECONDS}; ` +
+      `${DEFAULT_WAIT_SECONDS} unless you need less. Without it, the attempt is returned at once. A deploy drops ` +
+      "a waiting request, which then answers `changed: false`; wait again.",
+    example: DEFAULT_WAIT_SECONDS,
   }),
   until: z
     .enum(WAIT_CONDITIONS)
     .default("any")
     .openapi({
       description:
-        "What to wait for, with `wait`: `scored`, the current head gets a `done` or `errored` run it didn't have; " +
+        "What to wait for, with `wait`: `scored`, the current head has a `done` or `errored` run (at once if it " +
+        "already has one); " +
         "`stateChanged`, the attempt's state; `mergeRequestChanged`, its merge request's state or last dequeue; " +
         "`any`, any of them.",
     }),

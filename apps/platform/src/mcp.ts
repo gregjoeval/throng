@@ -19,6 +19,7 @@ import {
   PostVerdictSchema,
   SelectionSchema,
   WaitQuerySchema,
+  WaitSecondsSchema,
   workersCache,
 } from "./api-shared.ts";
 import type { ApiOptions } from "./api.ts";
@@ -32,7 +33,7 @@ import { ATTEMPT_STATES, TASK_STATES } from "./task-store.ts";
 import { taskService } from "./tasks.ts";
 import type { MergeRequest, ScoringAnswer } from "./tasks.ts";
 import type { Actor } from "./tokens.ts";
-import { MAX_WAIT_SECONDS } from "./waiters.ts";
+import { DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS } from "./waiters.ts";
 
 /** `read_file` returns at most this much of a file's text. */
 export const MAX_FILE_BYTES = 256 * 1024;
@@ -371,10 +372,12 @@ function mcpServer({ repos, tasks, logs, diffCache }: Deps, { actor, token, env,
 
   tool(
     "wait_for_attempt",
-    `Hold until what \`until\` watches on the attempt changes, or \`wait\` seconds (at most ${MAX_WAIT_SECONDS}) ` +
-      "pass, then return the attempt and whether it changed. Call again while `changed` is false.",
+    `Hold until what \`until\` watches on the attempt changes, or \`wait\` seconds (default ${DEFAULT_WAIT_SECONDS}, ` +
+      `at most ${MAX_WAIT_SECONDS}) pass, then return the attempt and whether it changed. \`until: scored\` waits ` +
+      "for the current head to have a `done` or `errored` run, and answers at once if it already has one. " +
+      "Call again while `changed` is false.",
     onAttempt.extend({
-      wait: z.number().int().min(1).max(MAX_WAIT_SECONDS).default(MAX_WAIT_SECONDS).describe("Seconds to hold."),
+      wait: WaitSecondsSchema.default(DEFAULT_WAIT_SECONDS).describe(`Seconds to hold, 1 to ${MAX_WAIT_SECONDS}.`),
       until: WaitQuerySchema.shape.until,
     }),
     async ({ project, attempt, wait, until }) => {

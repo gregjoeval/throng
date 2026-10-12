@@ -99,10 +99,26 @@ describe("the task page body", () => {
     expect(within(view).getByRole("region", { name: "Lane t1a2" })).toBeInTheDocument();
   });
 
-  it("goes back to the attempts once the merge request is cancelled", async () => {
+  it("goes back to the attempts once the merge request is cancelled, where the closed ones can be reopened", async () => {
     const source = attempt(1, 1, { state: "open", mergeRequest: { state: "cancelled", lastDequeue: null } });
-    await openTask(task(1), [source]);
-    expect(await within(body()).findByTestId("single-attempt-view")).toBeInTheDocument();
+    const reopened: string[] = [];
+    server.use(
+      http.post("*/api/projects/:owner/:project/attempts/:a/reopen", ({ params }) => {
+        reopened.push(String(params["a"]));
+        return HttpResponse.json(attempt(1, 2, { author: me.user, state: "draft" }));
+      }),
+    );
+    const { user } = await openTask(task(1), [source, attempt(1, 2, { author: me.user, state: "closed" })]);
+    const view = await within(body()).findByTestId("single-attempt-view");
+    const closed = within(view).getByRole("list", { name: "Closed attempts", hidden: true });
+    await user.click(within(view).getByText("Closed (1)"));
+    await user.click(await within(closed).findByRole("button", { name: "Reopen" }));
+    await waitFor(() => expect(reopened).toEqual(["t1a2"]));
+  });
+
+  it("lists closed attempts to reopen when no attempt is active", async () => {
+    await openTask(task(1), [attempt(1, 1, { state: "closed" })]);
+    expect(within(body()).getByRole("list", { name: "Closed attempts", hidden: true })).toHaveTextContent("t1a1");
   });
 
   it("summarises a closed task: its merge commit and archived attempts", async () => {

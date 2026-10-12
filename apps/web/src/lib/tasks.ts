@@ -44,8 +44,8 @@ export const isActive = (attempt: Pick<Attempt, "state">) => attempt.state === "
 
 /** What a task page's body shows, by the task's state (the arena spec's **Body by state**). */
 export type TaskBody =
-  | { kind: "noAttempts" }
-  | { kind: "singleAttempt"; attempt: Attempt }
+  | { kind: "noAttempts"; closed: Attempt[] }
+  | { kind: "singleAttempt"; attempt: Attempt; closed: Attempt[] }
   | { kind: "arena"; attempts: Attempt[] }
   | { kind: "mergeRequest"; source: Attempt }
   | { kind: "ended"; merged: Attempt | null; archived: Attempt[] };
@@ -58,9 +58,10 @@ export function taskBody(task: Task, attempts: Attempt[]): TaskBody {
   const source = attempts.find((a) => a.mergeRequest !== null && isOpenMergeRequest(a.mergeRequest.state));
   if (source !== undefined) return { kind: "mergeRequest", source };
   const active = attempts.filter(isActive);
+  const closed = attempts.filter((a) => a.state === "closed");
   const [only] = active;
-  if (only === undefined) return { kind: "noAttempts" };
-  if (active.length === 1) return { kind: "singleAttempt", attempt: only };
+  if (only === undefined) return { kind: "noAttempts", closed };
+  if (active.length === 1) return { kind: "singleAttempt", attempt: only, closed };
   return { kind: "arena", attempts: active };
 }
 

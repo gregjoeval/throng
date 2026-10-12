@@ -1,7 +1,8 @@
 // The single-attempt view, for a task with exactly one active attempt and no merge request: the
-// attempt's lane against its base, its scorecard, and Merge for whoever may select it.
+// attempt's lane against its base, its scorecard, Merge for whoever may select it, and the closed attempts.
 
 import { useQuery } from "@tanstack/react-query";
+import { ClosedAttempts } from "@/components/closed-attempts";
 import { Lane } from "@/components/lane";
 import { Scorecard } from "@/components/scorecard";
 import { SelectAttempt, useMaySelect } from "@/components/selection";
@@ -15,7 +16,12 @@ interface InProject {
   projectRef: ProjectRef;
 }
 
-export function SingleAttemptView({ projectRef, task, attempt }: InProject & { task: Task; attempt: Attempt }) {
+export function SingleAttemptView({
+  projectRef,
+  task,
+  attempt,
+  closed,
+}: InProject & { task: Task; attempt: Attempt; closed: Attempt[] }) {
   const arena = useQuery(taskArenaQuery(projectRef, task.ref));
   const maySelect = useMaySelect(projectRef, task);
   if (arena.isPending) return <Loading />;
@@ -30,6 +36,7 @@ export function SingleAttemptView({ projectRef, task, attempt }: InProject & { t
           <SelectAttempt projectRef={projectRef} task={task} attempt={attempt.ref} others={0} verb="Merge" />
         ) : null}
         <Scorecard attempt={scored} columns={metricColumns(arena.data.metrics)} />
+        {closed.length === 0 ? null : <ClosedAttempts projectRef={projectRef} task={task.ref} closed={closed} />}
       </aside>
     </div>
   );

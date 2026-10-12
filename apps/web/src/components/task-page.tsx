@@ -5,6 +5,7 @@ import { Link } from "@tanstack/react-router";
 import { ChevronDownIcon, ChevronRightIcon } from "lucide-react";
 import { useState } from "react";
 import { Arena } from "@/components/arena";
+import { ClosedAttempts } from "@/components/closed-attempts";
 import { Markdown } from "@/components/markdown";
 import { MergeRequestView } from "@/components/merge-request";
 import { SingleAttemptView } from "@/components/single-attempt";
@@ -96,10 +97,10 @@ function TaskBody({ projectRef, task, attempts }: TaskAt & { task: Task; attempt
   const body = taskBody(task, attempts);
   switch (body.kind) {
     case "noAttempts": {
-      return <NoAttempts projectRef={projectRef} task={task} />;
+      return <NoAttempts projectRef={projectRef} task={task} closed={body.closed} />;
     }
     case "singleAttempt": {
-      return <SingleAttemptView projectRef={projectRef} task={task} attempt={body.attempt} />;
+      return <SingleAttemptView projectRef={projectRef} task={task} attempt={body.attempt} closed={body.closed} />;
     }
     case "arena": {
       return <Arena projectRef={projectRef} task={task.ref} attempts={body.attempts} />;
@@ -113,8 +114,17 @@ function TaskBody({ projectRef, task, attempts }: TaskAt & { task: Task; attempt
   }
 }
 
-/** How to start an attempt: the MCP tool, or a push of a branch reserved for this task. */
-function NoAttempts({ projectRef, task }: TaskAt & { task: Task }) {
+/** How to start an attempt: the MCP tool, or a push of a branch reserved for this task; or reopen a closed one. */
+function NoAttempts({ projectRef, task, closed }: TaskAt & { task: Task; closed: Attempt[] }) {
+  return (
+    <div className="flex flex-col gap-3">
+      <NoActiveAttempts projectRef={projectRef} task={task} />
+      {closed.length === 0 ? null : <ClosedAttempts projectRef={projectRef} task={task.ref} closed={closed} />}
+    </div>
+  );
+}
+
+function NoActiveAttempts({ projectRef, task }: TaskAt & { task: Task }) {
   return (
     <EmptyState title="No active attempts">
       <div className="flex max-w-xl flex-col gap-3 text-left">

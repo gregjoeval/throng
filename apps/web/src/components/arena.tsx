@@ -3,23 +3,23 @@
 // toggles arrange them by attempt or by file, diff them against their bases or current main, and lay
 // the diffs out split or unified; the URL and `localStorage` remember the choice (`arena-view.ts`).
 
-import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueries, useQuery } from "@tanstack/react-query";
 import { getRouteApi } from "@tanstack/react-router";
 import { CheckIcon } from "lucide-react";
 import { useEffect, useId, useState } from "react";
 import type { ReactNode } from "react";
+import { ClosedAttempts } from "@/components/closed-attempts";
 import { FileSection } from "@/components/commit-files";
 import { GatePill, Lane, laneCompareQuery, laneReference, VerdictCounts } from "@/components/lane";
 import { useSelect } from "@/components/selection";
 import { ErrorState, Loading } from "@/components/states";
 import { Button } from "@/components/ui/button";
-import { mainHeadQuery, meQuery, reopenAttempt, taskArenaQuery, taskKey } from "@/lib/api";
+import { mainHeadQuery, taskArenaQuery } from "@/lib/api";
 import type { ProjectRef } from "@/lib/api";
 import { bestValues, formatValue, isPassing, metricColumns, sortRail, toggleLane } from "@/lib/arena";
 import type { ArenaAttempt, MetricColumn, RailSort } from "@/lib/arena";
 import { arenaView, fileRows, parseArenaSearch, readStoredView, storageKey, storeView } from "@/lib/arena-view";
 import type { ArenaSearch, ArenaView, Arrangement, Layout, Reference } from "@/lib/arena-view";
-import { apiError } from "@/lib/errors";
 import { isActive } from "@/lib/tasks";
 import type { Attempt } from "@/lib/tasks";
 
@@ -373,7 +373,7 @@ function Rail({
         ))}
       </ul>
       <p className="text-xs text-muted-foreground">Click a card to add or remove its lane.</p>
-      {closed.length === 0 ? null : <ClosedGroup projectRef={projectRef} task={task} closed={closed} />}
+      {closed.length === 0 ? null : <ClosedAttempts projectRef={projectRef} task={task} closed={closed} />}
     </aside>
   );
 }
@@ -477,48 +477,4 @@ function MetricRow({
 
 function Badge({ children }: { children: ReactNode }) {
   return <span className="rounded-md border px-1.5 text-xs text-muted-foreground">{children}</span>;
-}
-
-/** The task's closed attempts, collapsed under their count; each author may reopen theirs. */
-function ClosedGroup({ projectRef, task, closed }: InTask & { closed: ArenaAttempt[] }) {
-  const me = useQuery(meQuery);
-  return (
-    <details className="rounded-xl border px-3 py-2 text-sm">
-      <summary className="cursor-pointer text-muted-foreground">Closed ({closed.length})</summary>
-      <ul aria-label="Closed attempts" className="mt-2 flex flex-col gap-1">
-        {closed.map((attempt) => (
-          <li key={attempt.ref} className="flex flex-wrap items-center gap-2">
-            <span className="font-mono">{attempt.ref}</span>
-            <span className="text-xs text-muted-foreground">{attempt.author.handle}</span>
-            {me.data?.user.id === attempt.author.id ? (
-              <ReopenAttempt projectRef={projectRef} task={task} attempt={attempt.ref} />
-            ) : null}
-          </li>
-        ))}
-      </ul>
-    </details>
-  );
-}
-
-/** Reopens a closed attempt as a draft; only its author may. */
-function ReopenAttempt({ projectRef, task, attempt }: InTask & { attempt: string }) {
-  const queryClient = useQueryClient();
-  const reopen = useMutation({
-    mutationFn: () => reopenAttempt(projectRef, attempt),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: taskKey(projectRef, task) });
-    },
-  });
-  return (
-    <>
-      <Button variant="ghost" size="sm" className="ml-auto" disabled={reopen.isPending} onClick={() => reopen.mutate()}>
-        Reopen
-      </Button>
-      {reopen.isError ? (
-        <p role="alert" className="w-full text-xs text-destructive">
-          {apiError(reopen.error).message}
-        </p>
-      ) : null}
-    </>
-  );
 }

@@ -178,6 +178,23 @@ export const compareQuery = (owner: string, project: string, from: string, to: s
     },
   });
 
+/**
+ * `main`'s current head (null before the first push), polled while the page is visible: the arena's
+ * "current main" reference compares against it by sha, so a moved `main` is a new compare.
+ */
+export const mainHeadQuery = (owner: string, project: string) => ({
+  ...apiQuery([...projectKey(owner, project), "refs"], (init) =>
+    projectApi.refs.$get({ param: { owner, project } }, { init }),
+  ),
+  select: (refs: { main: { sha: string | null } }) => refs.main.sha,
+  refetchInterval: TASK_POLL_MS,
+});
+
+/** Queues scoring of a draft's head now. Rejects with hono's `DetailedError` on failure. */
+export async function scoreNow(owner: string, project: string, attempt: string) {
+  return parseResponse(projectApi.attempts[":a"].score.$post({ param: { owner, project, a: attempt } }));
+}
+
 /** The task's attempts by number, obsolete ones left out, polled while the page is visible. */
 export const taskAttemptsQuery = (owner: string, project: string, task: string) => ({
   ...apiQuery([...taskKey(owner, project, task), "attempts"], (init) =>

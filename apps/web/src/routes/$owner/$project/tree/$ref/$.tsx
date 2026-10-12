@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
+import { BrowseLayout } from "@/components/browse-layout";
 import { DirectoryEntries } from "@/components/directory";
 import { Breadcrumbs, ProjectView } from "@/components/project-view";
 import { ErrorState, Loading } from "@/components/states";
@@ -19,9 +20,11 @@ function Directory() {
   return (
     <ProjectView location={location}>
       <Breadcrumbs location={location} />
-      {tree.isPending && <Loading />}
-      {tree.isError && <ErrorState error={tree.error} />}
-      {tree.isSuccess && <DirectoryEntries at={location} entries={tree.data.entries} />}
+      <BrowseLayout at={location}>
+        {tree.isPending && <Loading />}
+        {tree.isError && <ErrorState error={tree.error} />}
+        {tree.isSuccess && <DirectoryEntries at={location} entries={tree.data.entries} />}
+      </BrowseLayout>
     </ProjectView>
   );
 }

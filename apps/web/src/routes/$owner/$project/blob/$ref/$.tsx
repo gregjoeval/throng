@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
+import { BrowseLayout } from "@/components/browse-layout";
 import { FileView } from "@/components/file-view";
 import { Breadcrumbs, ProjectView } from "@/components/project-view";
 import { ErrorState, Loading } from "@/components/states";
@@ -19,9 +20,11 @@ function File() {
   return (
     <ProjectView location={location}>
       <Breadcrumbs location={location} />
-      {blob.isPending && <Loading />}
-      {blob.isError && <ErrorState error={blob.error} />}
-      {blob.isSuccess && <FileView key={blob.data.path} at={location} blob={blob.data} />}
+      <BrowseLayout at={location}>
+        {blob.isPending && <Loading />}
+        {blob.isError && <ErrorState error={blob.error} />}
+        {blob.isSuccess && <FileView key={blob.data.path} at={location} blob={blob.data} />}
+      </BrowseLayout>
     </ProjectView>
   );
 }

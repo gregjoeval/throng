@@ -268,3 +268,61 @@ describe("the file view", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("no file nope.ts at main");
   });
 });
+
+const sidebar = () => screen.findByRole("treegrid", { name: "File tree" });
+/**
+ * Each row of the sidebar's tree as its name indented two spaces a level, after `+` or `-` for a
+ * folder shut or open, and with ` *` when it's selected.
+ */
+const outline = (tree: HTMLElement) =>
+  within(tree)
+    .getAllByRole("row")
+    .map((row) => {
+      const level = Number(row.getAttribute("aria-level"));
+      const expanded = row.getAttribute("aria-expanded");
+      const marks: Record<string, string> = { true: "- ", false: "+ " };
+      const mark = expanded === null ? "" : (marks[expanded] ?? "");
+      const selected = row.getAttribute("aria-selected") === "true" ? " *" : "";
+      return `${"  ".repeat(level - 1)}${mark}${row.textContent}${selected}`;
+    });
+
+describe("the file tree sidebar", () => {
+  it("opens at the current path, its folders expanded and the current one selected", async () => {
+    serveRepo({ main: FILES });
+    await renderApp("/ada/alpha/blob/main/src/lib/util.ts");
+    const tree = await sidebar();
+    await waitFor(() =>
+      expect(outline(tree)).toEqual([
+        "+ docs",
+        "- src",
+        "  - lib",
+        "    util.ts *",
+        "  index.ts",
+        "README.md",
+        "big.txt",
+        "package.json",
+      ]),
+    );
+  });
+
+  it("loads a folder's contents only when it's expanded", async () => {
+    const asked = serveRepo({ main: FILES });
+    const { user } = await renderApp("/ada/alpha/tree/main/src");
+    const tree = await sidebar();
+    await waitFor(() => expect(outline(tree)).toContain("  index.ts"));
+    expect(asked).not.toContain("tree main docs");
+    const docs = within(tree).getByRole("row", { name: /docs/u });
+    await user.click(within(docs).getByRole("button", { name: /expand/iu }));
+    await waitFor(() => expect(outline(tree)).toContain("  guide.md"));
+    expect(asked).toContain("tree main docs");
+  });
+
+  it("opens a file picked in the tree, keeping the ref and attempt hint", async () => {
+    const sha = "b".repeat(40);
+    serveRepo({ [sha]: FILES }, { main: { ref: "main", sha: null }, active: [], archived: [] });
+    const { user, path } = await renderApp(`/ada/alpha/tree/${sha}/src?attempt=t42a3`);
+    await user.click(await within(await sidebar()).findByRole("row", { name: "index.ts" }));
+    await waitFor(() => expect(path()).toBe(`/ada/alpha/blob/${sha}/src/index.ts?attempt=t42a3`));
+    await waitFor(async () => expect(outline(await sidebar())).toContain("  index.ts *"));
+  });
+});

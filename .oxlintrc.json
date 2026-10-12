@@ -32,7 +32,7 @@
       "plugins": ["react"],
       "rules": {
         "react/react-in-jsx-scope": "off",
-        "react/set-state-in-effect": "off"
+        "react/set-state-in-effect": "error"
       }
     }
   ],

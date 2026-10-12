@@ -22,24 +22,25 @@ export type CodeProps = {
 export function Code({ code, lang, path, lineNumbers, highlightLines, className }: CodeProps) {
   const start = highlightLines?.start;
   const end = highlightLines?.end;
-  const [html, setHtml] = useState<string>();
+  // Highlighting belongs to the input it was made from, so a change shows the plain text again.
+  const input = JSON.stringify([code, lang, path, lineNumbers, start, end]);
+  const [highlighted, setHighlighted] = useState<{ input: string; html: string }>();
 
   useEffect(() => {
     let current = true;
-    setHtml(undefined);
     const range = start !== undefined && end !== undefined ? { start, end } : undefined;
-    highlight(code, { lang, path, lineNumbers, highlightLines: range })
-      .then((result) => {
-        if (current) setHtml(result);
-      })
-      .catch(() => {
-        // Keep the plain-text fallback.
-      });
+    const render = async () => {
+      // On failure, keep the plain-text fallback.
+      const result = await highlight(code, { lang, path, lineNumbers, highlightLines: range }).catch(() => undefined);
+      if (current && result !== undefined) setHighlighted({ input, html: result });
+    };
+    void render();
     return () => {
       current = false;
     };
-  }, [code, lang, path, lineNumbers, start, end]);
+  }, [input, code, lang, path, lineNumbers, start, end]);
 
+  const html = highlighted?.input === input ? highlighted.html : undefined;
   if (html === undefined) {
     return (
       <div className={cn("code", className)}>

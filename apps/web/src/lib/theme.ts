@@ -15,8 +15,15 @@ export function currentTheme(): Theme {
   return document.documentElement.classList.contains("dark") ? "dark" : "light";
 }
 
-export function setTheme(theme: Theme) {
+const listeners = new Set<() => void>();
+
+function applyTheme(theme: Theme) {
   document.documentElement.classList.toggle("dark", theme === "dark");
+  for (const listener of listeners) listener();
+}
+
+export function setTheme(theme: Theme) {
+  applyTheme(theme);
   try {
     localStorage.setItem(storageKey, theme);
   } catch {
@@ -32,19 +39,26 @@ function hasSavedTheme(): boolean {
   }
 }
 
+/** Applies an OS theme change while the user hasn't picked a theme. */
+function followSystem(event: MediaQueryListEvent) {
+  if (hasSavedTheme()) return;
+  applyTheme(event.matches ? "dark" : "light");
+}
+
+function systemQuery(): MediaQueryList | null {
+  return typeof matchMedia === "function" ? matchMedia("(prefers-color-scheme: dark)") : null;
+}
+
 /**
- * Follows the OS setting while the user hasn't picked a theme, calling `onChange` with each new one.
- * Returns the unsubscribe function.
+ * Calls `onChange` whenever the theme changes, by `setTheme` or by following the OS setting, which
+ * it follows while anyone is subscribed. Returns the unsubscribe function. Shaped for
+ * `useSyncExternalStore` with `currentTheme`.
  */
-export function followSystemTheme(onChange: (theme: Theme) => void): () => void {
-  if (typeof matchMedia !== "function") return () => {};
-  const query = matchMedia("(prefers-color-scheme: dark)");
-  const listener = (event: MediaQueryListEvent) => {
-    if (hasSavedTheme()) return;
-    const theme: Theme = event.matches ? "dark" : "light";
-    document.documentElement.classList.toggle("dark", theme === "dark");
-    onChange(theme);
+export function subscribeTheme(onChange: () => void): () => void {
+  if (listeners.size === 0) systemQuery()?.addEventListener("change", followSystem);
+  listeners.add(onChange);
+  return () => {
+    listeners.delete(onChange);
+    if (listeners.size === 0) systemQuery()?.removeEventListener("change", followSystem);
   };
-  query.addEventListener("change", listener);
-  return () => query.removeEventListener("change", listener);
 }

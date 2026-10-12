@@ -13,7 +13,14 @@ import { bearerAuth, bearerOrAccess, bearerOrForwarded } from "./auth.ts";
 import type { AuthEnv, AuthOptions } from "./auth.ts";
 import { BASE_LINES } from "./base.ts";
 import { browseRoutes } from "./browse-api.ts";
-import { CONFIG_NAME, MAX_CHECK_TIMEOUT_MS, MAX_CONFIG_BYTES, METRIC_ORDERS, parseConfig } from "./config.ts";
+import {
+  CONFIG_LAYERS,
+  CONFIG_NAME,
+  MAX_CHECK_TIMEOUT_MS,
+  MAX_CONFIG_BYTES,
+  METRIC_ORDERS,
+  parseConfig,
+} from "./config.ts";
 import { dequeueRoutes } from "./dequeue-api.ts";
 import type { DiffCache } from "./diff.ts";
 import { errorBody, errorResponse, ServiceError } from "./errors.ts";
@@ -109,6 +116,59 @@ const CreateProjectSchema = z
 
 const UserRefSchema = z.object({ id: z.string(), handle: z.string().openapi({ example: "greg" }) }).openapi("UserRef");
 
+const ConfigNameSchema = z.string().regex(CONFIG_NAME);
+
+const configMetricFields = {
+  name: ConfigNameSchema.openapi({ example: "coverage" }),
+  from: z.string().openapi({
+    description:
+      "Where its value is read: the check, a JSON file it writes into `$THRONG_OUTPUT` (without `.json`), then " +
+      "object keys and array indexes.",
+    example: "test.coverage-summary.total.lines.pct",
+  }),
+  source: z.enum(CONFIG_LAYERS).openapi({ description: "Who defined it: the project's config, or the task." }),
+};
+
+const MetricSchema = z
+  .discriminatedUnion("type", [
+    z.object({
+      ...configMetricFields,
+      type: z.literal("number"),
+      unit: z.string().nullable().openapi({ example: "%" }),
+      order: z.enum(METRIC_ORDERS).openapi({ description: "`asc` when lower is better, `desc` when higher is." }),
+    }),
+    z.object({
+      ...configMetricFields,
+      type: z.literal("boolean"),
+      order: z.enum(METRIC_ORDERS).openapi({ description: "`desc` when true is better, `asc` when false is." }),
+    }),
+    z.object({
+      ...configMetricFields,
+      type: z.literal("string"),
+      format: z.enum(METRIC_FORMATS).nullable().openapi({ description: "`url`: shown as a link." }),
+    }),
+    z.object({
+      ...configMetricFields,
+      type: z.literal("enum"),
+      values: z.array(z.string()).openapi({ description: "Every value it may take, best first." }),
+    }),
+  ])
+  .openapi("Metric", {
+    description:
+      `A metric the config declares. Its \`type\` (${METRIC_TYPES.join(", ")}) decides how its values compare; a ` +
+      "string never ranks.",
+  });
+
+/** A task's metrics as a request gives them: checked like `.throng/config.yml`'s, so they're described there. */
+const TaskMetricsInputSchema = z.array(z.unknown()).openapi({
+  description:
+    "The task's own metrics, read after the project's, in the shape of `.throng/config.yml`'s `metrics`: " +
+    "`name`, `from`, `type`, and optionally `unit` and `order`. Names must not start with `_` or clash with a " +
+    "check or metric in the project's config on `main`, and each `from` must name one of its checks. Replaces " +
+    "the task's metrics.",
+  example: [{ name: "lines", from: "test.coverage-summary.total.lines.total", type: "number", order: "asc" }],
+});
+
 const TaskSchema = z
   .object({
     ref: z.string().openapi({ description: "The task's reference.", example: "t42" }),
@@ -125,6 +185,9 @@ const TaskSchema = z
       .int()
       .nullable()
       .openapi({ description: "Overrides the project's cap on active attempts; null to use the project's." }),
+    metrics: z
+      .array(MetricSchema)
+      .openapi({ description: "The task's own metrics, read after the project's; empty by default." }),
     taskBranch: z
       .object({
         sha: z.string().openapi({ description: "The task branch's head." }),
@@ -398,48 +461,6 @@ const BaseSchema = z
     description: "Where an attempt's history meets its task branch, or `origin/main` when the task has none.",
   });
 
-const ConfigNameSchema = z.string().regex(CONFIG_NAME);
-
-const configMetricFields = {
-  name: ConfigNameSchema.openapi({ example: "coverage" }),
-  from: z.string().openapi({
-    description:
-      "Where its value is read: the check, a JSON file it writes into `$THRONG_OUTPUT` (without `.json`), then " +
-      "object keys and array indexes.",
-    example: "test.coverage-summary.total.lines.pct",
-  }),
-};
-
-const MetricSchema = z
-  .discriminatedUnion("type", [
-    z.object({
-      ...configMetricFields,
-      type: z.literal("number"),
-      unit: z.string().nullable().openapi({ example: "%" }),
-      order: z.enum(METRIC_ORDERS).openapi({ description: "`asc` when lower is better, `desc` when higher is." }),
-    }),
-    z.object({
-      ...configMetricFields,
-      type: z.literal("boolean"),
-      order: z.enum(METRIC_ORDERS).openapi({ description: "`desc` when true is better, `asc` when false is." }),
-    }),
-    z.object({
-      ...configMetricFields,
-      type: z.literal("string"),
-      format: z.enum(METRIC_FORMATS).nullable().openapi({ description: "`url`: shown as a link." }),
-    }),
-    z.object({
-      ...configMetricFields,
-      type: z.literal("enum"),
-      values: z.array(z.string()).openapi({ description: "Every value it may take, best first." }),
-    }),
-  ])
-  .openapi("Metric", {
-    description:
-      `A metric the config declares. Its \`type\` (${METRIC_TYPES.join(", ")}) decides how its values compare; a ` +
-      "string never ranks.",
-  });
-
 const TaskArenaSchema = z
   .object({
     task: z.string().openapi({ example: "t42" }),
@@ -527,6 +548,7 @@ const CreateTaskSchema = z
     title: z.string().trim().min(1).max(200),
     body: z.string().max(65_536).optional().openapi({ description: "Markdown." }),
     attemptLimit: AttemptLimitSchema.optional(),
+    metrics: TaskMetricsInputSchema.optional(),
   })
   .openapi("CreateTask");
 
@@ -535,6 +557,7 @@ const EditTaskSchema = z
     title: z.string().trim().min(1).max(200).optional(),
     body: z.string().max(65_536).optional().openapi({ description: "Markdown." }),
     attemptLimit: AttemptLimitSchema.optional(),
+    metrics: TaskMetricsInputSchema.optional(),
   })
   .openapi("EditTask");
 

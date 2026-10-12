@@ -345,7 +345,7 @@ function configScored(
     metrics: Object.fromEntries(
       metricsFrom(check.name, metrics).map((metric): [string, MetricResult] => [
         metric.name,
-        metricResult(metric, "project", value(metric)),
+        metricResult(metric, metric.source, value(metric)),
       ]),
     ),
   };

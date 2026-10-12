@@ -22,12 +22,16 @@ const FROM = /^[^.]+\.[^./\\]+(\.[^.]+)+$/u;
 /** A metric's stored `order`: `asc` when lower values are better, `desc` when higher are. */
 export const METRIC_ORDERS = ["asc", "desc"] as const;
 export type MetricOrder = (typeof METRIC_ORDERS)[number];
+/** Who defined a check or metric: the project's config, or a task over it. */
+export const CONFIG_LAYERS = ["project", "task"] as const;
+export type ConfigLayer = (typeof CONFIG_LAYERS)[number];
 
 /** A metric, with the fields its type has. */
 export type MetricConfig = {
   name: string;
   /** Where its value is read: `<check>.<file>.<path>`. */
   from: string;
+  source: ConfigLayer;
 } & (
   | {
       type: "number";
@@ -103,7 +107,7 @@ const oneOf = (values: readonly string[]) =>
 const FROM_FORMAT = "from must be <check>.<file>.<path>, like test.coverage-summary.total.lines.pct";
 const command = z.string({ error: "must be a string" }).trim().min(1, "must not be empty");
 
-const MetricSchema = z.strictObject({
+export const MetricSchema = z.strictObject({
   name: name("metric name"),
   from: z
     .string({ error: (issue) => (issue.input === undefined ? "from is required: <check>.<file>.<path>" : FROM_FORMAT) })
@@ -120,7 +124,7 @@ const MetricSchema = z.strictObject({
 });
 
 /** Rejects each field a metric sets that its type doesn't have, and an enum without its values. */
-function checkMetricFields(metric: z.infer<typeof MetricSchema>, at: number, ctx: z.RefinementCtx): void {
+export function checkMetricFields(metric: z.infer<typeof MetricSchema>, at: number, ctx: z.RefinementCtx): void {
   const problem = (path: (string | number)[], message: string) =>
     ctx.addIssue({ code: "custom", path: ["metrics", at, ...path], message });
   if (metric.unit !== undefined && metric.type !== "number") problem(["unit"], "unit is only for a number metric");
@@ -145,9 +149,12 @@ function checkMetricFields(metric: z.infer<typeof MetricSchema>, at: number, ctx
   });
 }
 
-/** A parsed metric as stored, with its type's defaults: a number or boolean is `desc` (higher or true is better). */
-function metricConfig(metric: z.infer<typeof MetricSchema>): MetricConfig {
-  const fields = { name: metric.name, from: metric.from };
+/**
+ * A parsed metric as stored, as the layer `source` defined it, with its type's defaults: a number or
+ * boolean is `desc` (higher or true is better).
+ */
+export function metricConfig(metric: z.infer<typeof MetricSchema>, source: ConfigLayer): MetricConfig {
+  const fields = { name: metric.name, from: metric.from, source };
   const order = metric.order === undefined ? "desc" : ORDERS[metric.order];
   switch (metric.type) {
     case "number": {
@@ -282,7 +289,7 @@ export function parseConfig(text: string | null): ConfigResult {
         required: check.required ?? true,
         timeoutMs: check.timeout ?? DEFAULT_CHECK_TIMEOUT_MS,
       })),
-      metrics: (config.metrics ?? []).map(metricConfig),
+      metrics: (config.metrics ?? []).map((metric) => metricConfig(metric, "project")),
       preview: config.preview === undefined ? null : { command: config.preview.command ?? null },
       attempts: { limit: config.attempts?.limit ?? null },
     },
@@ -295,7 +302,7 @@ export async function loadConfig(repos: Repos, projectId: string): Promise<Confi
   return parseConfig(file === null ? null : await file.text());
 }
 
-function describeIssue(issue: z.core.$ZodIssue): string {
+export function describeIssue(issue: z.core.$ZodIssue): string {
   const path = issue.path
     .map((part, i) => (typeof part === "number" ? `[${part}]` : `${i === 0 ? "" : "."}${String(part)}`))
     .join("");

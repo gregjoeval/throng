@@ -48,8 +48,8 @@ async function openArena(
 }
 
 const METRICS: Metric[] = [
-  { name: "coverage", from: "test.coverage.pct", type: "number", unit: "%", order: "desc" },
-  { name: "bundle_kb", from: "bundle.size.kb", type: "number", unit: "KB", order: "asc" },
+  { name: "coverage", from: "test.coverage.pct", type: "number", unit: "%", order: "desc", source: "project" },
+  { name: "bundle_kb", from: "bundle.size.kb", type: "number", unit: "KB", order: "asc", source: "project" },
 ];
 
 const rail = () => screen.getByRole("list", { name: "Attempts" });
@@ -338,7 +338,7 @@ describe("the single-attempt view", () => {
       ...serveArena(
         task(1),
         [arenaAttempt(1, 1, { status: "done", result: result({ metrics }) })],
-        [{ name: "report", from: "test.out.url", type: "string", format: "url" }],
+        [{ name: "report", from: "test.out.url", type: "string", format: "url", source: "project" }],
       ),
     );
     await renderApp("/ada/alpha/tasks/t1");
@@ -359,7 +359,7 @@ describe("the single-attempt view", () => {
       ...serveArena(
         task(1),
         [arenaAttempt(1, 1, { status: "done", result: result({ metrics }) })],
-        [{ name: "report", from: "test.out.url", type: "string", format: "url" }],
+        [{ name: "report", from: "test.out.url", type: "string", format: "url", source: "project" }],
       ),
     );
     await renderApp("/ada/alpha/tasks/t1");
@@ -519,9 +519,9 @@ describe("the arena's rail", () => {
         typed(3, "failed", { green: true, grade: "a", summary: "fast" }),
       ],
       [
-        { name: "green", from: "test.out.green", type: "boolean", order: "desc" },
-        { name: "grade", from: "test.out.grade", type: "enum", values: ["a", "b", "c"] },
-        { name: "summary", from: "test.out.summary", type: "string", format: null },
+        { name: "green", from: "test.out.green", type: "boolean", order: "desc", source: "project" },
+        { name: "grade", from: "test.out.grade", type: "enum", values: ["a", "b", "c"], source: "project" },
+        { name: "summary", from: "test.out.summary", type: "string", format: null, source: "project" },
       ],
     );
     expect(cardMetrics("t1a1")).toMatchObject({ green: "No", grade: "c", summary: "slow" });

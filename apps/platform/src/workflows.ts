@@ -16,6 +16,8 @@ import type { RunResult } from "./sandbox";
 import type { ScoringOutcome, ScoringParams } from "./scoring";
 import { parseResult, PREVIEW_BUILD_TIMEOUT_MS, previewScript, scoreScript } from "./scripts";
 import type { PreviewScriptResult } from "./scripts";
+import { NO_TASK_DEFINITIONS, withTask } from "./task-definitions";
+import { parseAttemptRef } from "./task-refs";
 
 const TOKEN_TTL_SECONDS = 30 * 60;
 /** The preview step: fetching, installing and the build step at its timeout, then the deploy. */
@@ -43,7 +45,7 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
     let outcome: ScoringOutcome;
     try {
       const config = await step.do("config", { retries: STEP_RETRIES, timeout: "1 minute" }, () =>
-        loadConfig(reposFor(this.env), params.project),
+        this.#config(params),
       );
       const plan = scorePlan(config);
       const timeoutMs = scoreTimeoutMs(plan);
@@ -74,6 +76,20 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
       await project.scoringFinished(params.run, outcome);
     });
     return outcome;
+  }
+
+  /**
+   * The run's config, its layers merged once: the project's config on `main`, then what the task
+   * defines over it. A clash between them makes it invalid. The spike's attempts have no task row,
+   * so they get the project's alone.
+   */
+  async #config(params: ScoringParams): Promise<ConfigResult> {
+    const task = parseAttemptRef(params.attempt)?.task;
+    const [project, definitions] = await Promise.all([
+      loadConfig(reposFor(this.env), params.project),
+      task === undefined ? NO_TASK_DEFINITIONS : this.env.PROJECT.getByName(params.project).taskDefinitions(task),
+    ]);
+    return withTask(project, definitions);
   }
 
   /** Runs the score script in the run's own container, stores its logs and builds its result. */

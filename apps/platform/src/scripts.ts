@@ -8,6 +8,7 @@ import { THRONG_COMMITTER } from "./landing.ts";
 import { PREVIEW_LOG, setupLogName } from "./logs.ts";
 import { MAX_METRICS_BYTES, SETUP_TIMEOUT_MS } from "./results.ts";
 import type { ScorePlan } from "./results.ts";
+import { parseAttemptRef, taskBranchRef } from "./task-refs.ts";
 
 export const RESULT_PREFIX = "THRONG_RESULT ";
 
@@ -42,19 +43,30 @@ fi`;
 }
 
 /**
- * Scores the attempt's head `sha`: fetches it from the fork and `main` from the origin, records the
- * merge base and the diff size against it, then runs the plan (see `runPlan`). The result is a
- * `RawScore`; `buildResult` turns it into the run's result.
+ * Scores attempt `attempt`'s (`t42a3`) head `sha`: fetches it from the fork, and from the origin its
+ * task's task branch when there is one, else `main`. It records the attempt's base (the merge base
+ * with that line, as `attemptBase` derives it) and the diff size against it, then runs the plan (see
+ * `runPlan`). The result is a `RawScore`; `buildResult` turns it into the run's result.
  */
-export function scoreScript(forkRemote: string, originRemote: string, sha: string, plan: ScorePlan): string {
+export function scoreScript(
+  forkRemote: string,
+  originRemote: string,
+  { attempt, sha }: { attempt: string; sha: string },
+  plan: ScorePlan,
+): string {
+  const parsed = parseAttemptRef(attempt);
+  if (parsed === null) throw new Error(`not an attempt: ${attempt}`);
+  const task = taskBranchRef(parsed.task);
   return `${PRELUDE}
 rm -rf score logs out && mkdir logs out && out="$PWD/out" && git init -q score && cd score
 git fetch -q ${quote(forkRemote)} '+refs/heads/*:refs/remotes/fork/*' || exit 10
-git fetch -q ${quote(originRemote)} '+refs/heads/main:refs/remotes/origin/main' || exit 12
+task=$(git ls-remote ${quote(originRemote)} ${quote(task)}) || exit 12
+line=${quote(task)} && [ -n "$task" ] || line=refs/heads/main
+git fetch -q ${quote(originRemote)} "+$line:refs/remotes/origin/line" || exit 12
 git checkout -q --detach ${quote(sha)} || exit 11
 now() { date +%s%3N; }
 t0=$(now)
-base=$(git merge-base HEAD refs/remotes/origin/main 2>/dev/null) || base=""
+base=$(git merge-base HEAD refs/remotes/origin/line 2>/dev/null) || base=""
 shortstat=$(git diff --shortstat "\${base:-$(git hash-object -t tree /dev/null)}" HEAD) || exit 15
 builtin_ms=$(( $(now) - t0 ))
 ${runPlan(plan)}

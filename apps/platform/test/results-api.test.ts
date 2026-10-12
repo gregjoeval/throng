@@ -63,7 +63,7 @@ async function setup() {
   const ada = await tokenFor("ada@example.com");
   const bob = await tokenFor("bob@example.com");
   const projectId = (await call("POST", "/projects", greg, { handle: "throng" })).body["id"] as string;
-  repos.commit(`${projectId}-main`, { files: { "README.md": "hi\n" } });
+  const root = repos.commit(`${projectId}-main`, { files: { "README.md": "hi\n" } }).hash;
   const base = "/projects/greg/throng";
   const scoring = () => store(projectId).scoring;
 
@@ -95,7 +95,7 @@ async function setup() {
     expect(scoring().finish(id, outcome)).toBeTruthy();
   };
 
-  return { api, env, call, greg, ada, bob, base, drafts, commit, push, scoring, finish };
+  return { api, env, repos, projectId, root, call, greg, ada, bob, base, drafts, commit, push, scoring, finish };
 }
 
 describe("OpenAPI document", () => {
@@ -144,7 +144,7 @@ describe("OpenAPI document", () => {
 
 describe("the arena", () => {
   it("gives every attempt's current result in one call, whatever state its scoring is in", async () => {
-    const { call, ada, bob, base, drafts, commit, push, scoring, finish } = await setup();
+    const { call, ada, bob, root, base, drafts, commit, push, scoring, finish } = await setup();
     await drafts(4);
     const scored = commit("t1a1", "one\n");
     await call("POST", `${base}/attempts/t1a1/score`, ada);
@@ -167,6 +167,7 @@ describe("the arena", () => {
         author: { id: expect.any(String), handle: "ada" },
         status: "done",
         sha: scored,
+        base: { sha: root, on: "main" },
         verdicts: expect.anything(),
         result: {
           ...result(),
@@ -182,6 +183,7 @@ describe("the arena", () => {
         verdicts: expect.anything(),
         status: "running",
         sha: running,
+        base: { sha: root, on: "main" },
       },
       {
         ref: "t1a3",
@@ -190,6 +192,7 @@ describe("the arena", () => {
         verdicts: expect.anything(),
         status: "none",
         sha: null,
+        base: { sha: root, on: "main" },
       },
       {
         ref: "t1a4",
@@ -198,8 +201,40 @@ describe("the arena", () => {
         verdicts: expect.anything(),
         status: "none",
         sha: moved,
+        base: { sha: root, on: "main" },
       },
     ]);
+  });
+
+  it("derives each active attempt's base from its current head: the task branch when the task has one", async () => {
+    const { call, ada, repos, projectId, root, base, drafts, commit } = await setup();
+    await drafts(2);
+    commit("t1a1", "one\n");
+    const origin = `${projectId}-main`;
+    const tests = repos.commit(origin, {
+      files: { "README.md": "hi\n", "t.test": "x\n" },
+      branch: "task",
+      parents: [root],
+    });
+    repos.commit(origin, { files: { "README.md": "main moved\n" } });
+    repos.setRef(origin, "refs/tasks/t1", tests.hash);
+    repos.push(origin, `${projectId}-t1a2`, "refs/heads/main", tests.hash);
+    commit("t1a2", "two\n");
+
+    const res = await call("GET", `${base}/tasks/t1/arena`, ada);
+    expect(res.body["attempts"].map((a: Json) => [a["ref"], a["status"], a["base"]])).toEqual([
+      ["t1a1", "none", { sha: root, on: "task" }],
+      ["t1a2", "none", { sha: tests.hash, on: "task" }],
+    ]);
+  });
+
+  it("gives an ended attempt no base", async () => {
+    const { call, greg, ada, base, drafts, commit } = await setup();
+    await drafts(1);
+    commit("t1a1", "one\n");
+    await call("POST", `${base}/attempts/t1a1/obsolete`, greg);
+    const res = await call("GET", `${base}/tasks/t1/arena`, ada);
+    expect(res.body["attempts"][0]).toMatchObject({ state: "obsolete", base: null });
   });
 
   it("keeps obsolete attempts in, with their state, so a UI can filter them", async () => {

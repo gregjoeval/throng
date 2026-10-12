@@ -85,7 +85,7 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
       instanceId,
       params,
       "score",
-      (g) => scoreScript(g.forkRead.remote, g.originRead.remote, params.sha, plan),
+      (g) => scoreScript(g.forkRead.remote, g.originRead.remote, { attempt: params.attempt, sha: params.sha }, plan),
       { allow: plan.allow, timeoutMs },
     );
     const raw = parseResult<RawScore>(run.stdout);

@@ -51,7 +51,10 @@ export const GATES = ["passed", "failed"] as const;
 export type Gate = (typeof GATES)[number];
 
 export interface ScoringResult {
-  /** `git merge-base <head> origin/main` at scoring time; null when they share no history. */
+  /**
+   * The head's base at scoring time (`attemptBase`): its merge base with the task branch, or with
+   * `origin/main` when the task has none; null when they share no history.
+   */
   base: string | null;
   config: { kind: "none" } | { kind: "valid" } | { kind: "invalid"; error: string };
   /** Passed when every required check passed, including when there are none. */

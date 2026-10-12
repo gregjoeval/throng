@@ -72,7 +72,7 @@ function attemptHead(): string {
 describe("scoreScript", () => {
   it("records the merge base and the diff size from it, and runs nothing without a plan", () => {
     const head = attemptHead();
-    const raw = runScript<RawScore>(scoreScript(fork, origin, head, plan()));
+    const raw = runScript<RawScore>(scoreScript(fork, origin, { attempt: "t1a1", sha: head }, plan()));
     expect(raw).toMatchObject({ base: git(origin, "rev-parse", "main"), setupFailed: null, checks: [] });
     expect(raw.shortstat.trim()).toBe("2 files changed, 2 insertions(+), 2 deletions(-)");
     expect(raw.builtinMs).toBeGreaterThanOrEqual(0);
@@ -82,8 +82,30 @@ describe("scoreScript", () => {
     const head = attemptHead();
     commit("c.txt", "later\n", "main moves on");
     git(work, "push", "-q", origin, "HEAD:main");
-    const raw = runScript<RawScore>(scoreScript(fork, origin, head, plan()));
+    const raw = runScript<RawScore>(scoreScript(fork, origin, { attempt: "t1a1", sha: head }, plan()));
     expect(raw.base).toBe(git(origin, "rev-parse", "main~1"));
+  });
+
+  it("measures the base from the task branch when the task has one", () => {
+    const tests = commit("t.test", "test\n", "the task's tests");
+    git(work, "push", "-q", origin, "HEAD:refs/tasks/t1");
+    git(work, "reset", "-q", "--hard", "HEAD~1");
+    commit("c.txt", "later\n", "main moves on");
+    git(work, "push", "-q", origin, "HEAD:main");
+    git(work, "reset", "-q", "--hard", tests);
+    const head = attemptHead();
+    const raw = runScript<RawScore>(scoreScript(fork, origin, { attempt: "t1a1", sha: head }, plan()));
+    expect(raw.base).toBe(tests);
+    expect(raw.shortstat.trim()).toBe("2 files changed, 2 insertions(+), 2 deletions(-)");
+  });
+
+  it("ignores another task's task branch", () => {
+    const tests = commit("t.test", "test\n", "the task's tests");
+    git(work, "push", "-q", origin, "HEAD:refs/tasks/t2");
+    const head = attemptHead();
+    const raw = runScript<RawScore>(scoreScript(fork, origin, { attempt: "t1a1", sha: head }, plan()));
+    expect(raw.base).toBe(git(origin, "rev-parse", "main"));
+    expect(raw.base).not.toBe(tests);
   });
 
   it("diffs against the empty tree when the head shares no history with main", () => {
@@ -91,7 +113,7 @@ describe("scoreScript", () => {
     git(work, "rm", "-rqf", ".");
     const head = commit("only.txt", "x\ny\n", "unrelated");
     git(work, "push", "-q", fork, "lone:main", "--force");
-    const raw = runScript<RawScore>(scoreScript(fork, origin, head, plan()));
+    const raw = runScript<RawScore>(scoreScript(fork, origin, { attempt: "t1a1", sha: head }, plan()));
     expect(raw.base).toBeNull();
     expect(raw.shortstat.trim()).toBe("1 file changed, 2 insertions(+)");
   });
@@ -107,7 +129,10 @@ describe("scoreScript", () => {
       check("last", `test ! -s "$THRONG_METRICS" && echo last >> ../order && test -f b.txt`),
     ];
     const sandbox = mkdtempSync(join(root, "sandbox-"));
-    const raw = runScript<RawScore>(scoreScript(fork, origin, head, plan({ checks })), sandbox);
+    const raw = runScript<RawScore>(
+      scoreScript(fork, origin, { attempt: "t1a1", sha: head }, plan({ checks })),
+      sandbox,
+    );
     expect(raw.checks.map((c) => [c.exit, c.metrics?.trim()])).toEqual([
       [0, '{"coverage": 81.5}'],
       [3, ""],
@@ -122,7 +147,7 @@ describe("scoreScript", () => {
     const setup = ["true", "echo nope >&2; false", "touch ../never"];
     const sandbox = mkdtempSync(join(root, "sandbox-"));
     const raw = runScript<RawScore>(
-      scoreScript(fork, origin, head, plan({ setup, checks: [check("test", "true")] })),
+      scoreScript(fork, origin, { attempt: "t1a1", sha: head }, plan({ setup, checks: [check("test", "true")] })),
       sandbox,
     );
     expect(raw).toMatchObject({ setupFailed: 2, checks: [{ exit: null, metrics: null }] });
@@ -133,7 +158,7 @@ describe("scoreScript", () => {
   it("stops a check at its timeout", () => {
     const head = attemptHead();
     const raw = runScript<RawScore>(
-      scoreScript(fork, origin, head, plan({ checks: [check("slow", "sleep 20", 1000)] })),
+      scoreScript(fork, origin, { attempt: "t1a1", sha: head }, plan({ checks: [check("slow", "sleep 20", 1000)] })),
     );
     expect(raw.checks[0]).toMatchObject({ exit: 124 });
     expect(at(raw.checks, 0).durationMs).toBeGreaterThanOrEqual(1000);
@@ -146,7 +171,7 @@ describe("scoreScript", () => {
       scoreScript(
         fork,
         origin,
-        head,
+        { attempt: "t1a1", sha: head },
         plan({ checks: [check("quotes", `echo "it's" '$HOME' "$(echo ok)" > ../quoted`)] }),
       ),
     );
@@ -159,7 +184,7 @@ describe("scoreScript", () => {
     const script = scoreScript(
       fork,
       origin,
-      head,
+      { attempt: "t1a1", sha: head },
       plan({ checks: [check("test", "echo '{\"n\": 1}' > $THRONG_METRICS")] }),
     );
     const first = runScript<RawScore>(script, sandbox);
@@ -183,7 +208,7 @@ describe("scoreScript", () => {
     command: exit 1
     required: false
 `);
-    const raw = runScript<RawScore>(scoreScript(fork, origin, head, scorePlan(config)));
+    const raw = runScript<RawScore>(scoreScript(fork, origin, { attempt: "t1a1", sha: head }, scorePlan(config)));
     const result = buildResult(config, raw);
     expect(result).toMatchObject({
       config: { kind: "valid" },

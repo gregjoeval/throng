@@ -6,7 +6,8 @@
 // one path deleted and one added) are paired. Every cap is a flag on the file it hit, so callers
 // can tell a missing patch from an empty one.
 
-import { structuredPatch, type StructuredPatchHunk } from "diff";
+import { structuredPatch } from "diff";
+import type { StructuredPatchHunk } from "diff";
 import { BINARY_SNIFF_BYTES, mapLimit, MAX_TEXT_BYTES } from "./browse.ts";
 import type { Repos, TreeEntry } from "./repos.ts";
 

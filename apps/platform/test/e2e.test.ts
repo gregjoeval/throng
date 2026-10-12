@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { e2eProject, e2eRoutes, e2eToken, type LogBucket } from "../src/e2e.ts";
+import { e2eProject, e2eRoutes, e2eToken } from "../src/e2e.ts";
+import type { LogBucket } from "../src/e2e.ts";
 import { resolveProject } from "../src/projects.ts";
 import { forkRepo, originRepo } from "../src/repos.ts";
 import { authenticateToken, mintToken } from "../src/tokens.ts";
-import { userForEmail, type Database } from "../src/users.ts";
+import { userForEmail } from "../src/users.ts";
+import type { Database } from "../src/users.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
 

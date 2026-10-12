@@ -2,7 +2,8 @@
 // the platform's verifier (`apps/platform/src/access.ts`) without the user lookup, which stays on
 // the platform.
 
-import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey } from "jose";
+import { createRemoteJWKSet, jwtVerify } from "jose";
+import type { JWTVerifyGetKey } from "jose";
 
 /** The Access application throng-web trusts: the team's domain and the application's `aud` tag. */
 export interface AccessConfig {

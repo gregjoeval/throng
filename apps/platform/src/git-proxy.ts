@@ -10,8 +10,10 @@
 // `pushToCreate`). See the spec's "Git proxy" and "Push-to-create" sections and
 // `docs/research/git-proxy.md`.
 
-import { Hono, type Context } from "hono";
-import { gitAuth, type AuthEnv, type AuthOptions } from "./auth.ts";
+import { Hono } from "hono";
+import type { Context } from "hono";
+import { gitAuth } from "./auth.ts";
+import type { AuthEnv, AuthOptions } from "./auth.ts";
 import { ServiceError } from "./errors.ts";
 import {
   commandList,
@@ -25,24 +27,24 @@ import {
   updatedRefs,
   writeReport,
   zeroId,
-  type PushReport,
-  type PushRequest,
-  type RefUpdate,
 } from "./pkt-line.ts";
+import type { PushReport, PushRequest, RefUpdate } from "./pkt-line.ts";
 import { resolveProject } from "./projects.ts";
-import { forkRepo, originRepo, type Repos, type TokenScope } from "./repos.ts";
-import {
-  type AttemptInput,
-  type BranchRoute,
-  type ProjectContext,
-  type PushNotice,
-  type PushRecord,
-  type StoredAttempt,
-  type StoredTask,
-  type TaskMethod,
+import { forkRepo, originRepo } from "./repos.ts";
+import type { Repos, TokenScope } from "./repos.ts";
+import type {
+  AttemptInput,
+  BranchRoute,
+  ProjectContext,
+  PushNotice,
+  PushRecord,
+  StoredAttempt,
+  StoredTask,
+  TaskMethod,
 } from "./task-store.ts";
 import { attemptRef, parseAttemptRef, taskRef } from "./task-refs.ts";
-import { headAttemptRef, type ScoringRequest } from "./scoring.ts";
+import { headAttemptRef } from "./scoring.ts";
+import type { ScoringRequest } from "./scoring.ts";
 import type { TaskBackend } from "./tasks.ts";
 import type { AccessBindings } from "./access.ts";
 

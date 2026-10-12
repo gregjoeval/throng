@@ -10,10 +10,8 @@ import {
   migrate,
   taskFromCommit,
   TaskStore,
-  type AttemptState,
-  type ProjectContext,
-  type StoredAttempt,
 } from "../src/task-store.ts";
+import type { AttemptState, ProjectContext, StoredAttempt } from "../src/task-store.ts";
 import { parseAttemptRef, parseTaskRef, reservedTask } from "../src/task-refs.ts";
 import type { Actor } from "../src/tokens.ts";
 import { FakeRepos } from "./fake-repos.ts";

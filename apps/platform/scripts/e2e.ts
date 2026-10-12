@@ -32,7 +32,8 @@ import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { ARCHIVE_REF_PREFIX, archiveRef } from "../src/archive.ts";
 import { originRepo } from "../src/repos.ts";
-import { basicAuthHeader, type Commit, parseCommit } from "./e2e-git.ts";
+import { basicAuthHeader, parseCommit } from "./e2e-git.ts";
+import type { Commit } from "./e2e-git.ts";
 
 const run = promisify(execFile);
 const FIXTURE = new URL("../fixtures/fixture-worker/", import.meta.url).pathname;

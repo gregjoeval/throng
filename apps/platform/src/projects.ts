@@ -5,9 +5,11 @@
 // REST API and later MCP share it.
 
 import { ServiceError } from "./errors.ts";
-import { originRepo, type Repos } from "./repos.ts";
+import { originRepo } from "./repos.ts";
+import type { Repos } from "./repos.ts";
 import type { Actor } from "./tokens.ts";
-import { randomId, type Database } from "./users.ts";
+import { randomId } from "./users.ts";
+import type { Database } from "./users.ts";
 
 export const PROJECT_ID_LENGTH = 6;
 export const MAX_PROJECT_HANDLE = 40;

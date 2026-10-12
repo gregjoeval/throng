@@ -11,9 +11,8 @@ import {
   withPreview,
   scoreTimeoutMs,
   SETUP_TIMEOUT_MS,
-  type CheckResult,
-  type RawScore,
 } from "../src/results.ts";
+import type { CheckResult, RawScore } from "../src/results.ts";
 
 const BASE = "a".repeat(40);
 

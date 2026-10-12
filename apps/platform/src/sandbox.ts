@@ -1,5 +1,6 @@
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
-import { CLOUDFLARE_API_HOST, interceptedHosts, outboundDecision, type OutboundAccess } from "./network";
+import { CLOUDFLARE_API_HOST, interceptedHosts, outboundDecision } from "./network";
+import type { OutboundAccess } from "./network";
 
 const INACTIVITY_TIMEOUT_MS = 10 * 60 * 1_000;
 /** How long a script may run when its caller gives no timeout. */

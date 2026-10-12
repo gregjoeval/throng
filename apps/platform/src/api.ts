@@ -7,7 +7,8 @@
 
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import type { AccessBindings } from "./access.ts";
-import { bearerAuth, bearerOrAccess, bearerOrForwarded, type AuthEnv, type AuthOptions } from "./auth.ts";
+import { bearerAuth, bearerOrAccess, bearerOrForwarded } from "./auth.ts";
+import type { AuthEnv, AuthOptions } from "./auth.ts";
 import { ProjectPathSchema } from "./api-shared.ts";
 import { browseRoutes } from "./browse-api.ts";
 import { dequeueRoutes } from "./dequeue-api.ts";
@@ -15,22 +16,18 @@ import { CONFIG_NAME, MAX_CHECK_TIMEOUT_MS, MAX_CONFIG_BYTES, parseConfig } from
 import { errorBody, errorResponse, ServiceError } from "./errors.ts";
 import { FORWARDED_EMAIL_HEADER } from "./forwarded.ts";
 import { DEQUEUE_REASONS, MERGE_REQUEST_STATES } from "./merge-requests.ts";
-import { LOG_CONTENT_TYPE, LOG_RETENTION_DAYS, MAX_LOG_BYTES, missingLog, type LogStore } from "./logs.ts";
+import { LOG_CONTENT_TYPE, LOG_RETENTION_DAYS, MAX_LOG_BYTES, missingLog } from "./logs.ts";
+import type { LogStore } from "./logs.ts";
 import { MAX_PROJECT_HANDLE, PROJECT_HANDLE, projectService } from "./projects.ts";
 import type { DiffCache } from "./diff.ts";
 import type { Repos } from "./repos.ts";
 import { CHECK_OUTCOMES } from "./results.ts";
 import { ATTEMPT_SCORING_STATUSES, RUN_STATUSES, SCORING_TRIGGERS } from "./scoring.ts";
 import { ATTEMPT_STATES, TASK_STATES } from "./task-store.ts";
-import { taskService, type TaskBackend } from "./tasks.ts";
-import {
-  DEFAULT_TOKEN_TTL_SECONDS,
-  listTokens,
-  MAX_TOKEN_TTL_SECONDS,
-  mintToken,
-  revokeToken,
-  type Token,
-} from "./tokens.ts";
+import { taskService } from "./tasks.ts";
+import type { TaskBackend } from "./tasks.ts";
+import { DEFAULT_TOKEN_TTL_SECONDS, listTokens, MAX_TOKEN_TTL_SECONDS, mintToken, revokeToken } from "./tokens.ts";
+import type { Token } from "./tokens.ts";
 import type { User } from "./users.ts";
 
 const UserSchema = z

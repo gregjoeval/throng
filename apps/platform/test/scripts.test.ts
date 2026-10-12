@@ -4,8 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { parseConfig } from "../src/config.ts";
-import { buildResult, scorePlan, type RawScore, type ScorePlan } from "../src/results.ts";
-import { parseResult, previewScript, scoreScript, type PreviewScriptResult } from "../src/scripts.ts";
+import { buildResult, scorePlan } from "../src/results.ts";
+import type { RawScore, ScorePlan } from "../src/results.ts";
+import { parseResult, previewScript, scoreScript } from "../src/scripts.ts";
+import type { PreviewScriptResult } from "../src/scripts.ts";
 
 // Runs the Sandbox scripts against local bare repos standing in for Artifacts remotes.
 

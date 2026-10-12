@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { describe, expect, it } from "vitest";
-import { basicPassword, bearerAuth, bearerToken, gitAuth, type AuthEnv } from "../src/auth.ts";
+import { basicPassword, bearerAuth, bearerToken, gitAuth } from "../src/auth.ts";
+import type { AuthEnv } from "../src/auth.ts";
 import { mintToken, revokeToken } from "../src/tokens.ts";
 import { userForEmail } from "../src/users.ts";
 import { testDatabase } from "./support/d1.ts";

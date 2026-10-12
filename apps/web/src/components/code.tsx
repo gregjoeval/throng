@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { highlight, type LineRange } from "@/lib/highlighter";
+import { highlight } from "@/lib/highlighter";
+import type { LineRange } from "@/lib/highlighter";
 import { cn } from "@/lib/utils";
 
 export type CodeProps = {

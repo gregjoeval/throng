@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { SANDBOX_ROLES, type GitGrant, type RunGrants } from "../src/grants.ts";
-import { interceptedHosts, outboundDecision, registryAllows, roleAccess, type OutboundAccess } from "../src/network.ts";
+import { SANDBOX_ROLES } from "../src/grants.ts";
+import type { GitGrant, RunGrants } from "../src/grants.ts";
+import { interceptedHosts, outboundDecision, registryAllows, roleAccess } from "../src/network.ts";
+import type { OutboundAccess } from "../src/network.ts";
 
 const registry = (path: string) => new URL(`https://registry.npmjs.org${path}`);
 

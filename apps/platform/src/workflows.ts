@@ -1,33 +1,20 @@
-import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
+import { WorkflowEntrypoint } from "cloudflare:workers";
+import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import { reposFor } from "./artifacts";
-import { loadConfig, type ConfigResult } from "./config";
-import {
-  GRANT_SOURCES,
-  ROLE_GRANTS,
-  sandboxName,
-  SCORING_ROLES,
-  type RoleGrants,
-  type RunGrants,
-  type SandboxRole,
-} from "./grants";
+import { loadConfig } from "./config";
+import type { ConfigResult } from "./config";
+import { GRANT_SOURCES, ROLE_GRANTS, sandboxName, SCORING_ROLES } from "./grants";
+import type { RoleGrants, RunGrants, SandboxRole } from "./grants";
 import { LOG_CONTENT_TYPE, logKey, logNames, MISSING_LOG_EXIT, PREVIEW_LOG, readLogScript, withNotes } from "./logs";
 import { roleAccess } from "./network";
 import { previewName } from "./preview";
 import { forkRepo, originRepo } from "./repos";
-import {
-  buildResult,
-  previewPlan,
-  scorePlan,
-  scoreTimeoutMs,
-  withPreview,
-  type RawScore,
-  type PreviewPlan,
-  type ScorePlan,
-  type ScoringResult,
-} from "./results";
+import { buildResult, previewPlan, scorePlan, scoreTimeoutMs, withPreview } from "./results";
+import type { RawScore, PreviewPlan, ScorePlan, ScoringResult } from "./results";
 import type { RunResult } from "./sandbox";
 import type { ScoringOutcome, ScoringParams } from "./scoring";
-import { parseResult, PREVIEW_BUILD_TIMEOUT_MS, previewScript, scoreScript, type PreviewScriptResult } from "./scripts";
+import { parseResult, PREVIEW_BUILD_TIMEOUT_MS, previewScript, scoreScript } from "./scripts";
+import type { PreviewScriptResult } from "./scripts";
 
 const TOKEN_TTL_SECONDS = 30 * 60;
 /** The preview step: fetching, installing and the build step at its timeout, then the deploy. */

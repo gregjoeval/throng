@@ -7,7 +7,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { diffCommit, unifiedPatch } from "../src/diff.ts";
-import { FakeRepos, type FakeFile } from "./fake-repos.ts";
+import { FakeRepos } from "./fake-repos.ts";
+import type { FakeFile } from "./fake-repos.ts";
 
 const REPO = "p1-main";
 const dirs: string[] = [];

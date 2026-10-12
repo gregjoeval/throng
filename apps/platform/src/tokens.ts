@@ -1,7 +1,8 @@
 // Throng tokens: what machines (agents, the CLI, git) present instead of an Access session.
 // The plaintext `thr_<random>` is returned once at mint time; only its SHA-256 hash is stored.
 
-import { randomId, type Database, type User } from "./users.ts";
+import { randomId } from "./users.ts";
+import type { Database, User } from "./users.ts";
 
 export const TOKEN_PREFIX = "thr_";
 export const DEFAULT_TOKEN_TTL_SECONDS = 24 * 60 * 60;

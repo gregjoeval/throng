@@ -1,7 +1,8 @@
 // HTTP plumbing the browse and merge queue routes share: the project path, multi-segment `{path}`
 // routes, and the public shape of a file or commit diff with its `text/x-diff` answer.
 
-import { z, type OpenAPIHono, type RouteConfig } from "@hono/zod-openapi";
+import { z } from "@hono/zod-openapi";
+import type { OpenAPIHono, RouteConfig } from "@hono/zod-openapi";
 import type { Context } from "hono";
 import { DIFF_FLAGS, FILE_STATUSES } from "./diff.ts";
 

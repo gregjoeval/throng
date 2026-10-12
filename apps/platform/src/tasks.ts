@@ -9,19 +9,20 @@ import type { ConflictDetails, ConflictFile } from "./conflicts.ts";
 import type { ErroredDetails, FailedChecksDetails } from "./landing.ts";
 import type { Dequeue, DequeueReason, StoredMergeRequest } from "./merge-requests.ts";
 import { forkRepo, originRepo } from "./repos.ts";
-import { headAttemptRef, type AttemptScoring, type ScoringRequest, type StoredRun } from "./scoring.ts";
-import {
-  type AttemptMergeRequest,
-  type AttemptInput,
-  type AttemptScoringDetail,
-  type AttemptState,
-  type ProjectContext,
-  type StoredAttempt,
-  type StoredTask,
-  type TaskMethod,
-  type TaskOutcome,
-  type TaskState,
-  type TaskStore,
+import { headAttemptRef } from "./scoring.ts";
+import type { AttemptScoring, ScoringRequest, StoredRun } from "./scoring.ts";
+import type {
+  AttemptMergeRequest,
+  AttemptInput,
+  AttemptScoringDetail,
+  AttemptState,
+  ProjectContext,
+  StoredAttempt,
+  StoredTask,
+  TaskMethod,
+  TaskOutcome,
+  TaskState,
+  TaskStore,
 } from "./task-store.ts";
 import { attemptRef, parseAttemptRef, parseTaskRef, taskRef } from "./task-refs.ts";
 import type { Actor } from "./tokens.ts";

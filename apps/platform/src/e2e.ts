@@ -4,13 +4,17 @@
 // made. Every project it makes is named with `E2E_PROJECT_PREFIX`, and these routes refuse any
 // project or repo without it, so they can never reach a real project.
 
-import { Hono, type Context } from "hono";
+import { Hono } from "hono";
+import type { Context } from "hono";
 import { camelKeys } from "./casing.ts";
 import { LOG_PREFIX } from "./logs.ts";
-import { type Project, projectService } from "./projects.ts";
-import { forkRepo, originRepo, parseRepoName, type Repos } from "./repos.ts";
+import { projectService } from "./projects.ts";
+import type { Project } from "./projects.ts";
+import { forkRepo, originRepo, parseRepoName } from "./repos.ts";
+import type { Repos } from "./repos.ts";
 import { mintToken, revokeToken } from "./tokens.ts";
-import { type Database, type User, userForEmail } from "./users.ts";
+import { userForEmail } from "./users.ts";
+import type { Database, User } from "./users.ts";
 
 /** The e2e suite's user. `.invalid` never resolves, so nothing is ever sent to it. */
 export const E2E_EMAIL = "e2e@throng.invalid";

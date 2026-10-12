@@ -1,12 +1,6 @@
 import { describe, expect, it } from "vitest";
-import {
-  type Config,
-  CONFIG_PATH,
-  DEFAULT_CHECK_TIMEOUT_MS,
-  loadConfig,
-  MAX_CONFIG_BYTES,
-  parseConfig,
-} from "../src/config.ts";
+import { CONFIG_PATH, DEFAULT_CHECK_TIMEOUT_MS, loadConfig, MAX_CONFIG_BYTES, parseConfig } from "../src/config.ts";
+import type { Config } from "../src/config.ts";
 import { FakeRepos } from "./fake-repos.ts";
 
 const EMPTY: Config = {

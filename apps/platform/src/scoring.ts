@@ -17,7 +17,7 @@
 import { normaliseResult } from "./casing.ts";
 import { forkRepo } from "./repos.ts";
 import type { ScoringResult } from "./results.ts";
-import { type Sql } from "./task-store.ts";
+import type { Sql } from "./task-store.ts";
 import { attemptRef } from "./task-refs.ts";
 import type { Actor } from "./tokens.ts";
 

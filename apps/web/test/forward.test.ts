@@ -1,7 +1,9 @@
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from "jose";
 import { beforeAll, describe, expect, it } from "vitest";
-import { accessVerifier, type AccessVerifier } from "@/server/access";
-import { forwardToPlatform, isApiRequest, type Platform } from "@/server/forward";
+import { accessVerifier } from "@/server/access";
+import type { AccessVerifier } from "@/server/access";
+import { forwardToPlatform, isApiRequest } from "@/server/forward";
+import type { Platform } from "@/server/forward";
 
 const TEAM = "throng.cloudflareaccess.com";
 const AUD = "test-aud";

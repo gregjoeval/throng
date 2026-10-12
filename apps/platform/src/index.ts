@@ -3,7 +3,8 @@ import type { ApiOptions } from "./api";
 import { publicApp, webApp } from "./app";
 import { reposFor } from "./artifacts";
 import { walk } from "./browse";
-import { gitRoutes, type GitProxyOptions } from "./git-proxy";
+import { gitRoutes } from "./git-proxy";
+import type { GitProxyOptions } from "./git-proxy";
 import { e2eRoutes } from "./e2e";
 
 export { ProjectCoordinator } from "./project";

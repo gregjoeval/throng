@@ -9,8 +9,9 @@
 import { archiveRef } from "./archive.ts";
 import { ServiceError } from "./errors.ts";
 import { resolveProject } from "./projects.ts";
-import { forkRepo, originRepo, type Commit, type Repos, type TreeEntry } from "./repos.ts";
-import { type ProjectContext, type StoredAttempt, type TaskMethod } from "./task-store.ts";
+import { forkRepo, originRepo } from "./repos.ts";
+import type { Commit, Repos, TreeEntry } from "./repos.ts";
+import type { ProjectContext, StoredAttempt, TaskMethod } from "./task-store.ts";
 import { attemptRef, parseAttemptRef } from "./task-refs.ts";
 import type { TaskBackend } from "./tasks.ts";
 import type { Actor } from "./tokens.ts";

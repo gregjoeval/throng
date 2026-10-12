@@ -1,8 +1,10 @@
 // What a Sandbox container may reach. The Worker's outbound intercept asks `outboundDecision` about every
 // request and does only what it says, so the whole policy is here and testable.
 
-import { grantFor, grantsForRole, RUNS_REPO_CODE, type GitGrant, type RoleGrants, type SandboxRole } from "./grants.ts";
-import { previewPathAllowed, type PreviewGrant } from "./preview.ts";
+import { grantFor, grantsForRole, RUNS_REPO_CODE } from "./grants.ts";
+import type { GitGrant, RoleGrants, SandboxRole } from "./grants.ts";
+import { previewPathAllowed } from "./preview.ts";
+import type { PreviewGrant } from "./preview.ts";
 
 export const NPM_REGISTRY_HOST = "registry.npmjs.org";
 export const CLOUDFLARE_API_HOST = "api.cloudflare.com";

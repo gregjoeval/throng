@@ -1,13 +1,6 @@
 import { describe, expect, it } from "vitest";
-import {
-  DIFF_CAPS,
-  DIFF_VERSION,
-  diffCommit,
-  diffFile,
-  unifiedPatch,
-  type DiffCache,
-  type DiffCaps,
-} from "../src/diff.ts";
+import { DIFF_CAPS, DIFF_VERSION, diffCommit, diffFile, unifiedPatch } from "../src/diff.ts";
+import type { DiffCache, DiffCaps } from "../src/diff.ts";
 import { FakeRepos } from "./fake-repos.ts";
 
 const REPO = "p1-main";

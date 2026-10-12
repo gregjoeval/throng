@@ -5,7 +5,8 @@
 
 import { z } from "zod";
 import { parseDocument } from "yaml";
-import { originRepo, type Repos } from "./repos.ts";
+import { originRepo } from "./repos.ts";
+import type { Repos } from "./repos.ts";
 
 export const CONFIG_PATH = ".throng/config.yml";
 /** Larger configs are rejected rather than parsed. */

@@ -2,7 +2,8 @@
 // that turn the project's config and the score script's raw output into it. Metrics parsing and the
 // gate live here so they're tested without a container.
 
-import { DEFAULT_CHECK_TIMEOUT_MS, type ConfigResult } from "./config.ts";
+import { DEFAULT_CHECK_TIMEOUT_MS } from "./config.ts";
+import type { ConfigResult } from "./config.ts";
 import type { PreviewScriptResult } from "./scripts.ts";
 
 export const CHECK_OUTCOMES = ["passed", "failed", "timedOut", "skipped"] as const;

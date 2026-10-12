@@ -1,27 +1,16 @@
-import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep, type WorkflowStepConfig } from "cloudflare:workers";
+import { WorkflowEntrypoint } from "cloudflare:workers";
+import type { WorkflowEvent, WorkflowStep, WorkflowStepConfig } from "cloudflare:workers";
 import { parseConfig } from "./config";
-import { conflictFiles, parseMergeTree, type ConflictDetails } from "./conflicts";
+import { conflictFiles, parseMergeTree } from "./conflicts";
+import type { ConflictDetails } from "./conflicts";
 import { LANDING_ROLES, sandboxName } from "./grants";
-import {
-  failedChecks,
-  mergeAuthor,
-  mergeCommitMessage,
-  retestConfig,
-  type LandingOutcome,
-  type LandingParams,
-  type Signer,
-} from "./landing";
+import { failedChecks, mergeAuthor, mergeCommitMessage, retestConfig } from "./landing";
+import type { LandingOutcome, LandingParams, Signer } from "./landing";
 import { landingLogKey, logNames } from "./logs";
-import { buildResult, scorePlan, scoreTimeoutMs, type RawScore } from "./results";
-import {
-  conflictCheckScript,
-  landScript,
-  parseResult,
-  retestScript,
-  type ConflictCheckResult,
-  type LandResult,
-  type MergePlan,
-} from "./scripts";
+import { buildResult, scorePlan, scoreTimeoutMs } from "./results";
+import type { RawScore } from "./results";
+import { conflictCheckScript, landScript, parseResult, retestScript } from "./scripts";
+import type { ConflictCheckResult, LandResult, MergePlan } from "./scripts";
 import { attemptRef } from "./task-refs";
 import { runInSandbox, STEP_RETRIES, storeLogs } from "./workflows";
 

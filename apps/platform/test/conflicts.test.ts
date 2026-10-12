@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { conflictFiles, parseMergeTree, parseZdiff3, type ConflictCaps } from "../src/conflicts.ts";
+import { conflictFiles, parseMergeTree, parseZdiff3 } from "../src/conflicts.ts";
+import type { ConflictCaps } from "../src/conflicts.ts";
 
 const entry = (mode: string, oid: string, stage: number, path: string) => `${mode} ${oid} ${stage}\t${path}`;
 const B = (c: string) => c.repeat(40);

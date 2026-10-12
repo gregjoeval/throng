@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { AccessVerifier } from "../src/access.ts";
 import { hc, parseResponse } from "hono/client";
-import { apiRoutes, type ApiRoutes } from "../src/api.ts";
+import { apiRoutes } from "../src/api.ts";
+import type { ApiRoutes } from "../src/api.ts";
 import type { ScoringResult } from "../src/results.ts";
 import type { ScoringOutcome } from "../src/scoring.ts";
 import type { User } from "../src/users.ts";

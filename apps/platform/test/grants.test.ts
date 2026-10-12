@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { grantFor, grantsForRole, RUNS_REPO_CODE, SANDBOX_ROLES, type RunGrants } from "../src/grants.ts";
+import { grantFor, grantsForRole, RUNS_REPO_CODE, SANDBOX_ROLES } from "../src/grants.ts";
+import type { RunGrants } from "../src/grants.ts";
 
 const remote = (repo: string) => `https://acct.artifacts.cloudflare.net/git/ns/${repo}.git`;
 const grants: RunGrants = {

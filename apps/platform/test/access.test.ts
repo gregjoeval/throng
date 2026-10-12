@@ -1,6 +1,7 @@
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from "jose";
 import { beforeAll, describe, expect, it } from "vitest";
-import { accessVerifier, type AccessVerifier } from "../src/access.ts";
+import { accessVerifier } from "../src/access.ts";
+import type { AccessVerifier } from "../src/access.ts";
 
 const TEAM = "throng.cloudflareaccess.com";
 const AUD = "test-aud";

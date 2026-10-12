@@ -1,14 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { ServiceError } from "../src/errors.ts";
 import type { CheckResult, ScoringResult } from "../src/results.ts";
-import {
-  SCORING_CAP,
-  type ScoringOutcome,
-  type ScoringParams,
-  type ScoringRequest,
-  type ScoringWorkflow,
-} from "../src/scoring.ts";
-import { TaskStore, type AttemptInput, type ProjectContext } from "../src/task-store.ts";
+import { SCORING_CAP } from "../src/scoring.ts";
+import type { ScoringOutcome, ScoringParams, ScoringRequest, ScoringWorkflow } from "../src/scoring.ts";
+import { TaskStore } from "../src/task-store.ts";
+import type { AttemptInput, ProjectContext } from "../src/task-store.ts";
 import type { Actor } from "../src/tokens.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testSql } from "./support/task-backend.ts";

@@ -1,10 +1,12 @@
 import { DurableObject } from "cloudflare:workers";
-import { LANDING_ROLES, sandboxName, SCORING_ROLES, type SandboxRole } from "./grants";
+import { LANDING_ROLES, sandboxName, SCORING_ROLES } from "./grants";
+import type { SandboxRole } from "./grants";
 import { reposFor } from "./artifacts";
 import { camelKeys } from "./casing";
 import type { LandingOutcome } from "./landing";
 import type { ScoringOutcome, ScoringRequest, StoredRun } from "./scoring";
-import { runTaskMethod, TaskStore, type ProjectContext, type Sql, type TaskOutcome } from "./task-store";
+import { runTaskMethod, TaskStore } from "./task-store";
+import type { ProjectContext, Sql, TaskOutcome } from "./task-store";
 import { parseAttemptRef } from "./task-refs";
 
 export interface JournalEntry {

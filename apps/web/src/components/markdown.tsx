@@ -1,5 +1,6 @@
 import { useMemo } from "react";
-import { type Components, defaultUrlTransform, MarkdownHooks, type UrlTransform } from "react-markdown";
+import { defaultUrlTransform, MarkdownHooks } from "react-markdown";
+import type { Components, UrlTransform } from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import { loadShiki } from "@/lib/highlighter";

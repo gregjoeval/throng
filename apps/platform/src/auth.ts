@@ -3,10 +3,12 @@
 // Handlers read `c.var.actor` (`{user, agent}`) and `c.var.token` (null under an Access session).
 
 import { createMiddleware } from "hono/factory";
-import { verifierFromEnv, type AccessBindings, type AccessVerifier } from "./access.ts";
+import { verifierFromEnv } from "./access.ts";
+import type { AccessBindings, AccessVerifier } from "./access.ts";
 import { errorBody } from "./errors.ts";
 import { FORWARDED_EMAIL_HEADER } from "./forwarded.ts";
-import { authenticateToken, type Actor, type Token } from "./tokens.ts";
+import { authenticateToken } from "./tokens.ts";
+import type { Actor, Token } from "./tokens.ts";
 import { userForEmail } from "./users.ts";
 
 export interface AuthEnv {

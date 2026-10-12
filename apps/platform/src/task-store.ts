@@ -7,36 +7,37 @@
 // handles when it answers.
 
 import { archiveRef } from "./archive.ts";
-import { CONFIG_PATH, loadConfig, type ConfigResult } from "./config.ts";
-import { ServiceError, type ErrorCode } from "./errors.ts";
+import { CONFIG_PATH, loadConfig } from "./config.ts";
+import type { ConfigResult } from "./config.ts";
+import { ServiceError } from "./errors.ts";
+import type { ErrorCode } from "./errors.ts";
 import type { LandingOutcome, LandingParams, LandingRunner } from "./landing.ts";
-import { Landings, type StoredLanding } from "./landings.ts";
+import { Landings } from "./landings.ts";
+import type { StoredLanding } from "./landings.ts";
 import { migrateValues, normaliseLandingOutcome } from "./casing.ts";
 import { isLogName, landingLogKey, logKey, missingLog } from "./logs.ts";
-import {
-  dequeueCause,
-  MergeRequests,
-  type Dequeue,
-  type DequeueCause,
-  type DequeueReason,
-  type MergeRequestEvent,
-  type MergeRequestState,
-  type StoredMergeRequest,
+import { dequeueCause, MergeRequests } from "./merge-requests.ts";
+import type {
+  Dequeue,
+  DequeueCause,
+  DequeueReason,
+  MergeRequestEvent,
+  MergeRequestState,
+  StoredMergeRequest,
 } from "./merge-requests.ts";
 import { isZeroId } from "./pkt-line.ts";
 import { attemptRef, reservedTask, taskRef } from "./task-refs.ts";
-import { forkRepo, originRepo, type Repos } from "./repos.ts";
-import {
-  headAttemptRef,
-  SCORING_CAP,
-  ScoringQueue,
-  type AttemptScoring,
-  type ScoredAttempt,
-  type ScoringOutcome,
-  type ScoringRequest,
-  type ScoringRunner,
-  type ScoringTrigger,
-  type StoredRun,
+import { forkRepo, originRepo } from "./repos.ts";
+import type { Repos } from "./repos.ts";
+import { headAttemptRef, SCORING_CAP, ScoringQueue } from "./scoring.ts";
+import type {
+  AttemptScoring,
+  ScoredAttempt,
+  ScoringOutcome,
+  ScoringRequest,
+  ScoringRunner,
+  ScoringTrigger,
+  StoredRun,
 } from "./scoring.ts";
 import type { Actor } from "./tokens.ts";
 

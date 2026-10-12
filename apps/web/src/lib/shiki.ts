@@ -3,7 +3,8 @@ import type { HighlighterGeneric, ShikiTransformer } from "shiki/core";
 import { createBundledHighlighter } from "shiki/core";
 import { createJavaScriptRegexEngine } from "shiki/engine/javascript";
 import { bundledLanguages, bundledLanguagesInfo } from "shiki/langs";
-import { type HighlightOptions, plainText, themes } from "./highlighter";
+import { plainText, themes } from "./highlighter";
+import type { HighlightOptions } from "./highlighter";
 
 // The Shiki side of `./highlighter`, which imports this module lazily. Each
 // grammar is its own chunk, imported the first time it is used. The

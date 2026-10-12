@@ -11,15 +11,10 @@ import type { Context } from "hono";
 import type { AccessBindings } from "./access.ts";
 import { CommitDiffSchema, diffContent, diffResponse, ProjectPathSchema, TAIL, tailedRoutes } from "./api-shared.ts";
 import type { AuthEnv, bearerOrForwarded } from "./auth.ts";
-import {
-  browseService,
-  DEFAULT_COMMITS_PAGE,
-  MAX_COMMITS_PAGE,
-  MAX_TEXT_BYTES,
-  type BrowseService,
-  type Resolved,
-} from "./browse.ts";
-import { DIFF_CAPS, diffCommit, unifiedPatch, type DiffCache } from "./diff.ts";
+import { browseService, DEFAULT_COMMITS_PAGE, MAX_COMMITS_PAGE, MAX_TEXT_BYTES } from "./browse.ts";
+import type { BrowseService, Resolved } from "./browse.ts";
+import { DIFF_CAPS, diffCommit, unifiedPatch } from "./diff.ts";
+import type { DiffCache } from "./diff.ts";
 import { errorBody, errorResponse, ServiceError } from "./errors.ts";
 import type { Repos } from "./repos.ts";
 import { ATTEMPT_STATES } from "./task-store.ts";

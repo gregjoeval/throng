@@ -9,14 +9,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { MAX_CONFIG_BYTES } from "../src/config.ts";
 import { conflictFiles, parseMergeTree } from "../src/conflicts.ts";
 import type { RawScore, ScorePlan } from "../src/results.ts";
-import {
-  conflictCheckScript,
-  landScript,
-  parseResult,
-  retestScript,
-  type ConflictCheckResult,
-  type LandResult,
-} from "../src/scripts.ts";
+import { conflictCheckScript, landScript, parseResult, retestScript } from "../src/scripts.ts";
+import type { ConflictCheckResult, LandResult } from "../src/scripts.ts";
 
 const ENV = {
   ...process.env,

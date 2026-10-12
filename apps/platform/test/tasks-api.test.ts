@@ -75,6 +75,7 @@ describe("task routes", () => {
       closedAt: null,
       closedBy: null,
       attemptLimit: null,
+      checks: [],
       metrics: [],
       taskBranch: null,
     });
@@ -245,6 +246,92 @@ describe("task metrics", () => {
     const { call, ada, base } = await withConfig();
     const created = await call("POST", `${base}/tasks`, ada, { title: "a", metrics: [LINES, LINES] });
     expect(created.body["error"]["message"]).toBe("metrics[1].name: duplicate metric name lines");
+  });
+});
+
+describe("task checks", () => {
+  const PROJECT_CONFIG = [
+    "checks:",
+    "  - name: test",
+    "    command: pnpm test",
+    "metrics:",
+    "  - name: coverage",
+    "    from: test.coverage-summary.total.lines.pct",
+    "    type: number",
+    "",
+  ].join("\n");
+  const SMOKE = { name: "smoke", command: "./smoke.sh", timeout: "2m" };
+  const SMOKED = { name: "smoked", from: "smoke.report.ok", type: "boolean" };
+
+  async function withConfig() {
+    const env = await setup();
+    env.repos.writeFile(`${env.project["id"]}-main`, "main", ".throng/config.yml", PROJECT_CONFIG);
+    return env;
+  }
+
+  it("are saved with metrics over them, in the config's shape, and read back with the task", async () => {
+    const { call, ada, bob, base } = await withConfig();
+    const created = await call("POST", `${base}/tasks`, ada, { title: "a", checks: [SMOKE], metrics: [SMOKED] });
+    expect(created.status).toBe(201);
+    const smoke = { name: "smoke", command: "./smoke.sh", required: true, timeoutMs: 120_000, source: "task" };
+    expect(created.body["checks"]).toEqual([smoke]);
+    expect(created.body["metrics"]).toEqual([{ ...SMOKED, order: "desc", source: "task" }]);
+    expect((await call("GET", `${base}/tasks/t1`, bob)).body["checks"]).toEqual([smoke]);
+
+    const optional = await call("PATCH", `${base}/tasks/t1`, ada, { checks: [{ ...SMOKE, required: false }] });
+    expect(optional.status).toBe(200);
+    expect(optional.body["checks"]).toEqual([{ ...smoke, required: false }]);
+    expect(optional.body["metrics"]).toHaveLength(1);
+    expect((await call("POST", `${base}/tasks`, ada, { title: "b" })).body["checks"]).toEqual([]);
+  });
+
+  it("may be edited only by the task's creator or the project's owner", async () => {
+    const { call, ada, bob, greg, base } = await withConfig();
+    await call("POST", `${base}/tasks`, ada, { title: "a" });
+    const edit = (token: string) => call("PATCH", `${base}/tasks/t1`, token, { checks: [SMOKE] });
+    expect((await edit(bob)).status).toBe(403);
+    expect((await edit(greg)).status).toBe(200);
+    expect((await edit(ada)).status).toBe(200);
+  });
+
+  it.each([
+    ["an invalid shape", { checks: [{ ...SMOKE, timeout: "soon" }] }, /^checks\[0\]\.timeout: timeout must be/u],
+    ["a missing command", { checks: [{ name: "smoke" }] }, /^checks\[0\]\.command: /u],
+    ["a reserved name", { checks: [{ ...SMOKE, name: "_smoke" }] }, /^checks\[0\]\.name: .*reserved/u],
+    [
+      "a project check's name",
+      { checks: [{ ...SMOKE, name: "test" }] },
+      /^checks\[0\]\.name: test is also a check's name in \.throng\/config\.yml$/u,
+    ],
+    [
+      "a project metric's name",
+      { checks: [{ ...SMOKE, name: "coverage" }] },
+      /^checks\[0\]\.name: coverage is also a metric's name in \.throng\/config\.yml$/u,
+    ],
+    ["a duplicate", { checks: [SMOKE, SMOKE] }, /^checks\[1\]\.name: duplicate check name smoke$/u],
+    [
+      "a task metric named like it",
+      { checks: [SMOKE], metrics: [{ ...SMOKED, name: "smoke" }] },
+      /^metrics\[0\]\.name: smoke is also the name of one of the task's checks$/u,
+    ],
+  ])("are rejected with what is wrong: %s", async (_label, fields, message) => {
+    const { call, ada, base } = await withConfig();
+    const created = await call("POST", `${base}/tasks`, ada, { title: "a", ...fields });
+    expect(created.status).toBe(400);
+    expect(created.body["error"]).toMatchObject({ code: "invalidRequest", message: expect.stringMatching(message) });
+    await call("POST", `${base}/tasks`, ada, { title: "b" });
+    const edited = await call("PATCH", `${base}/tasks/t1`, ada, fields);
+    expect(edited.status).toBe(400);
+    expect(edited.body["error"]["message"]).toMatch(message);
+  });
+
+  it("check a task metric's from against the task's saved checks when an edit gives only one of them", async () => {
+    const { call, ada, base } = await withConfig();
+    await call("POST", `${base}/tasks`, ada, { title: "a", checks: [SMOKE] });
+    expect((await call("PATCH", `${base}/tasks/t1`, ada, { metrics: [SMOKED] })).status).toBe(200);
+    const dropped = await call("PATCH", `${base}/tasks/t1`, ada, { checks: [] });
+    expect(dropped.status).toBe(400);
+    expect(dropped.body["error"]["message"]).toBe("metrics[0].from: no check is named smoke");
   });
 });
 

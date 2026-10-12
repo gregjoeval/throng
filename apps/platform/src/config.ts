@@ -53,6 +53,7 @@ export interface CheckConfig {
   /** Whether the gate needs it to pass. */
   required: boolean;
   timeoutMs: number;
+  source: ConfigLayer;
 }
 
 export interface Config {
@@ -172,6 +173,17 @@ export function metricConfig(metric: z.infer<typeof MetricSchema>, source: Confi
   }
 }
 
+/** A parsed check as stored, as the layer `source` defined it: required, with a 10m timeout, by default. */
+export function checkConfig(check: z.infer<typeof CheckSchema>, source: ConfigLayer): CheckConfig {
+  return {
+    name: check.name,
+    command: check.command,
+    required: check.required ?? true,
+    timeoutMs: check.timeout ?? DEFAULT_CHECK_TIMEOUT_MS,
+    source,
+  };
+}
+
 const TimeoutSchema = z
   .string({ error: "timeout must be a duration like 90s, 10m or 1h" })
   .regex(DURATION, "timeout must be a duration like 90s, 10m or 1h")
@@ -182,7 +194,7 @@ const TimeoutSchema = z
   .refine((ms) => ms > 0, "timeout must be positive")
   .refine((ms) => ms <= MAX_CHECK_TIMEOUT_MS, "timeout must be at most 30m");
 
-const CheckSchema = z.strictObject({
+export const CheckSchema = z.strictObject({
   name: name("check name"),
   command,
   required: z.boolean({ error: "required must be true or false" }).optional(),
@@ -283,12 +295,7 @@ export function parseConfig(text: string | null): ConfigResult {
     config: {
       setup: config.setup ?? [],
       network: { allow: config.network?.allow ?? [] },
-      checks: (config.checks ?? []).map((check) => ({
-        name: check.name,
-        command: check.command,
-        required: check.required ?? true,
-        timeoutMs: check.timeout ?? DEFAULT_CHECK_TIMEOUT_MS,
-      })),
+      checks: (config.checks ?? []).map((check) => checkConfig(check, "project")),
       metrics: (config.metrics ?? []).map((metric) => metricConfig(metric, "project")),
       preview: config.preview === undefined ? null : { command: config.preview.command ?? null },
       attempts: { limit: config.attempts?.limit ?? null },

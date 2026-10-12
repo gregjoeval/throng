@@ -8,6 +8,7 @@ import { buildResult, MAX_OUTPUT_BYTES, scorePlan } from "../src/results.ts";
 import type { PlannedMetric, RawScore, ScorePlan } from "../src/results.ts";
 import { parseResult, previewScript, scoreScript } from "../src/scripts.ts";
 import type { PreviewScriptResult } from "../src/scripts.ts";
+import { NO_TASK_DEFINITIONS, taskDefinitionsFrom, withTask } from "../src/task-definitions.ts";
 import { at } from "./support/defined.ts";
 
 // Runs the Sandbox scripts against local bare repos standing in for Artifacts remotes.
@@ -223,6 +224,52 @@ metrics:
         coverage: { source: "project", type: "number", value: 87.5, unit: "%" },
         "first-duration": { value: 7, order: "asc" },
         "lint-errors": { value: 3 },
+      },
+    });
+  });
+
+  it("runs a task's checks after the project's, after its setup, and gates on a required one", () => {
+    const head = attemptHead();
+    const project = parseConfig(`setup:
+  - echo ready > ../setup-ran
+checks:
+  - name: test
+    command: >-
+      echo '{"lines": 40}' > "$THRONG_OUTPUT/report.json"
+`);
+    const task = taskDefinitionsFrom(
+      {
+        checks: [
+          {
+            name: "smoke",
+            command: `test -f ../setup-ran && echo '{"ok": false}' > "$THRONG_OUTPUT/smoke.json"; exit 1`,
+          },
+        ],
+        metrics: [
+          { name: "lines", from: "test.report.lines", type: "number" },
+          { name: "smoked", from: "smoke.smoke.ok", type: "boolean" },
+        ],
+      },
+      NO_TASK_DEFINITIONS,
+      project,
+    );
+    if ("error" in task) throw new Error(task.error);
+    const config = withTask(project, task.definitions);
+    const raw = runScript<RawScore>(
+      scoreScript(fork, { sha: head, base: git(origin, "rev-parse", "main") }, scorePlan(config)),
+    );
+    expect(buildResult(config, raw)).toMatchObject({
+      gate: "failed",
+      checks: [
+        { name: "_diff" },
+        { name: "test", source: "project", outcome: "passed" },
+        { name: "smoke", source: "task", required: true, outcome: "failed" },
+        { name: "_preview", outcome: "skipped" },
+      ],
+      metrics: {
+        smoke: { source: "task", value: "failed" },
+        lines: { source: "task", value: 40 },
+        smoked: { source: "task", value: false },
       },
     });
   });

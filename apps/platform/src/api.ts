@@ -159,13 +159,38 @@ const MetricSchema = z
       "string never ranks.",
   });
 
+const ConfigCheckSchema = z
+  .object({
+    name: ConfigNameSchema.openapi({ example: "test" }),
+    command: z.string().openapi({ example: "pnpm test" }),
+    required: z.boolean().openapi({ description: "Whether the gate needs it to pass." }),
+    timeoutMs: z
+      .number()
+      .int()
+      .max(MAX_CHECK_TIMEOUT_MS)
+      .openapi({ description: "Defaults to 10 minutes.", example: 600_000 }),
+    source: z.enum(CONFIG_LAYERS).openapi({ description: "Who defined it: the project's config, or the task." }),
+  })
+  .openapi("Check", { description: "A check the config declares: a command whose exit code is its outcome." });
+
+/** A task's checks as a request gives them: checked like `.throng/config.yml`'s, so they're described there. */
+const TaskChecksInputSchema = z.array(z.unknown()).openapi({
+  description:
+    "The task's own checks, run after the project's in the same container, under its `setup` and " +
+    "`network.allow`, in the shape of `.throng/config.yml`'s `checks`: `name`, `command`, and optionally " +
+    "`required` (true by default; a required task check gates the task's attempts) and `timeout`. Names must " +
+    "not start with `_` or clash with a check or metric in the project's config on `main`. Replaces the " +
+    "task's checks; its metrics may read them.",
+  example: [{ name: "smoke", command: "./smoke.sh", timeout: "2m" }],
+});
+
 /** A task's metrics as a request gives them: checked like `.throng/config.yml`'s, so they're described there. */
 const TaskMetricsInputSchema = z.array(z.unknown()).openapi({
   description:
     "The task's own metrics, read after the project's, in the shape of `.throng/config.yml`'s `metrics`: " +
     "`name`, `from`, `type`, and optionally `unit` and `order`. Names must not start with `_` or clash with a " +
-    "check or metric in the project's config on `main`, and each `from` must name one of its checks. Replaces " +
-    "the task's metrics.",
+    "check or metric in the project's config on `main`, or one of the task's checks, and each `from` must name " +
+    "one of the project's or the task's checks. Replaces the task's metrics.",
   example: [{ name: "lines", from: "test.coverage-summary.total.lines.total", type: "number", order: "asc" }],
 });
 
@@ -185,6 +210,9 @@ const TaskSchema = z
       .int()
       .nullable()
       .openapi({ description: "Overrides the project's cap on active attempts; null to use the project's." }),
+    checks: z
+      .array(ConfigCheckSchema)
+      .openapi({ description: "The task's own checks, run after the project's; empty by default." }),
     metrics: z
       .array(MetricSchema)
       .openapi({ description: "The task's own metrics, read after the project's; empty by default." }),
@@ -548,6 +576,7 @@ const CreateTaskSchema = z
     title: z.string().trim().min(1).max(200),
     body: z.string().max(65_536).optional().openapi({ description: "Markdown." }),
     attemptLimit: AttemptLimitSchema.optional(),
+    checks: TaskChecksInputSchema.optional(),
     metrics: TaskMetricsInputSchema.optional(),
   })
   .openapi("CreateTask");
@@ -557,6 +586,7 @@ const EditTaskSchema = z
     title: z.string().trim().min(1).max(200).optional(),
     body: z.string().max(65_536).optional().openapi({ description: "Markdown." }),
     attemptLimit: AttemptLimitSchema.optional(),
+    checks: TaskChecksInputSchema.optional(),
     metrics: TaskMetricsInputSchema.optional(),
   })
   .openapi("EditTask");
@@ -608,20 +638,7 @@ const ConfigSchema = z
     network: z.object({
       allow: z.array(z.string()).openapi({ description: "Extra HTTPS hosts checks may reach, lowercased." }),
     }),
-    checks: z
-      .array(
-        z.object({
-          name: ConfigNameSchema.openapi({ example: "test" }),
-          command: z.string().openapi({ example: "pnpm test" }),
-          required: z.boolean().openapi({ description: "Whether the gate needs it to pass." }),
-          timeoutMs: z
-            .number()
-            .int()
-            .max(MAX_CHECK_TIMEOUT_MS)
-            .openapi({ description: "Defaults to 10 minutes.", example: 600_000 }),
-        }),
-      )
-      .openapi({ description: "Run in order." }),
+    checks: z.array(ConfigCheckSchema).openapi({ description: "Run in order." }),
     metrics: z.array(MetricSchema).openapi({ description: "Read from the checks' output files, in order." }),
     preview: z
       .object({ command: z.string().nullable().openapi({ description: "Builds before the preview deploys." }) })

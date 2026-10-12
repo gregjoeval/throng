@@ -74,12 +74,14 @@ describe("parseConfig", () => {
             command: "pnpm test",
             required: true,
             timeoutMs: 10 * 60_000,
+            source: "project",
           },
           {
             name: "bundle",
             command: "pnpm build && node scripts/size.js",
             required: false,
             timeoutMs: 90_000,
+            source: "project",
           },
         ],
         metrics: [
@@ -119,7 +121,15 @@ describe("parseConfig", () => {
       kind: "valid",
       config: {
         ...EMPTY,
-        checks: [{ name: "lint", command: "pnpm lint", required: true, timeoutMs: DEFAULT_CHECK_TIMEOUT_MS }],
+        checks: [
+          {
+            name: "lint",
+            command: "pnpm lint",
+            required: true,
+            timeoutMs: DEFAULT_CHECK_TIMEOUT_MS,
+            source: "project",
+          },
+        ],
       },
     });
   });

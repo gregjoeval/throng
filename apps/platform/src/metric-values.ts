@@ -6,12 +6,25 @@
  * body, and declare no functions inside it.
  */
 
-/** A metric's type, which decides how its values compare. */
-export const METRIC_TYPES = ["number"] as const;
+/**
+ * A metric's type, which decides how its values compare: a number by its `order`, a boolean too
+ * (true is the higher), an enum by its `values` best first, and a string not at all.
+ */
+export const METRIC_TYPES = ["boolean", "number", "string", "enum"] as const;
 export type MetricType = (typeof METRIC_TYPES)[number];
 
+/** How a string metric's value is shown; it never changes how values compare. */
+export const METRIC_FORMATS = ["url"] as const;
+export type MetricFormat = (typeof METRIC_FORMATS)[number];
+
+/** What a value must be to fit its metric: its type, and an enum's values. */
+export type MetricRule = { type: "boolean" | "number" | "string" } | { type: "enum"; values: string[] };
+
+/** A value that fits its metric's type. */
+export type TypedValue = boolean | number | string;
+
 /** A metric's value, or null with why. */
-export type MetricValue = { value: number } | { value: null; note: string };
+export type MetricValue = { value: TypedValue } | { value: null; note: string };
 
 /** What the score script found for a metric's output file in `$THRONG_OUTPUT`. */
 export type OutputFile =
@@ -36,18 +49,31 @@ export function keyList(keys: string[]): string {
   return keys.slice(0, 20).join(", ") + (keys.length > 20 ? `, and ${keys.length - 20} more` : "");
 }
 
-/** A value checked against its metric's type: the value, or what it was instead. */
-export function typedValue(value: unknown, type: MetricType): { value: number } | { problem: string } {
-  if (type === "number" && typeof value === "number" && Number.isFinite(value)) return { value };
-  return { problem: `expected a ${type}, got ${jsonKind(value)}` };
+/**
+ * A value checked against its metric's rule: the value, or what it was instead. A number must be
+ * finite, and an enum's value one of its `values`.
+ */
+export function typedValue(value: unknown, rule: MetricRule): { value: TypedValue } | { problem: string } {
+  if (rule.type === "enum") {
+    if (typeof value !== "string")
+      return { problem: `expected one of ${keyList(rule.values)}, got ${jsonKind(value)}` };
+    if (!rule.values.includes(value)) {
+      return { problem: `${JSON.stringify(value)} is not one of its values: ${keyList(rule.values)}` };
+    }
+    return { value };
+  }
+  if (rule.type === "number" && typeof value === "number" && Number.isFinite(value)) return { value };
+  if (rule.type === "boolean" && typeof value === "boolean") return { value };
+  if (rule.type === "string" && typeof value === "string") return { value };
+  return { problem: `expected a ${rule.type}, got ${jsonKind(value)}` };
 }
 
 /**
- * The value at `from` (`<check>.<file>.<path>`) in its output file, checked against `type`. The
+ * The value at `from` (`<check>.<file>.<path>`) in its output file, checked against `rule`. The
  * path's segments are object keys, or plain numeric indexes into arrays. A null's note starts with
  * `from` up to the segment that failed, and lists the keys (or files) that were there instead.
  */
-export function metricValue(from: string, type: MetricType, file: OutputFile): MetricValue {
+export function metricValue(from: string, rule: MetricRule, file: OutputFile): MetricValue {
   const segments = from.split(".");
   const name = segments[1] ?? "";
   const fileAt = segments.slice(0, 2).join(".");
@@ -80,7 +106,7 @@ export function metricValue(from: string, type: MetricType, file: OutputFile): M
       return { value: null, note: `${path}: no key ${key}; ${parent} is ${jsonKind(at)}, not an object or array` };
     }
   }
-  const typed = typedValue(at, type);
+  const typed = typedValue(at, rule);
   return "problem" in typed ? { value: null, note: `${from}: ${typed.problem}` } : typed;
 }
 

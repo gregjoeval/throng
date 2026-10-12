@@ -103,18 +103,32 @@ describe("scorePlan", () => {
           name: "test",
           command: "npm test",
           timeoutMs: 120_000,
-          metrics: [{ name: "coverage", from: "test.coverage-summary.total.lines.pct", type: "number" }],
+          metrics: [{ name: "coverage", from: "test.coverage-summary.total.lines.pct", rule: { type: "number" } }],
         },
         {
           name: "bundle",
           command: "npm run size",
           timeoutMs: 600_000,
-          metrics: [{ name: "bundle_kb", from: "bundle.size.kb", type: "number" }],
+          metrics: [{ name: "bundle_kb", from: "bundle.size.kb", rule: { type: "number" } }],
         },
       ],
       allow: ["api.github.com"],
     });
     expect(scorePlan({ kind: "none" })).toEqual({ setup: [], checks: [], allow: [] });
+  });
+
+  it("hands the score script each metric's type rule, with an enum's values", () => {
+    const config = parseConfig(
+      "checks:\n  - { name: t, command: x }\nmetrics:\n" +
+        "  - { name: grade, from: t.out.grade, type: enum, values: [a, b] }\n" +
+        "  - { name: ok, from: t.out.ok, type: boolean, order: asc }\n" +
+        "  - { name: link, from: t.out.link, type: string, format: url }\n",
+    );
+    expect(scorePlan(config).checks[0]?.metrics).toEqual([
+      { name: "grade", from: "t.out.grade", rule: { type: "enum", values: ["a", "b"] } },
+      { name: "ok", from: "t.out.ok", rule: { type: "boolean" } },
+      { name: "link", from: "t.out.link", rule: { type: "string" } },
+    ]);
     expect(scorePlan({ kind: "invalid", error: "x" })).toEqual({ setup: [], checks: [], allow: [] });
   });
 
@@ -301,6 +315,53 @@ describe("buildResult", () => {
     expect(result.metrics.coverage).toMatchObject({
       value: null,
       note: "test: test was skipped: setup command 1 failed",
+    });
+  });
+
+  const TYPED = parseConfig(`checks:
+  - { name: t, command: x }
+metrics:
+  - { name: typed, from: t.out.typed, type: boolean }
+  - { name: untyped, from: t.out.untyped, type: boolean, order: asc }
+  - { name: grade, from: t.out.grade, type: enum, values: [a, b, c] }
+  - { name: summary, from: t.out.summary, type: string }
+  - { name: report, from: t.out.report, type: string, format: url }
+`);
+
+  it("scores booleans, enums and strings with their type's fields: order, values and format", () => {
+    const metrics = {
+      typed: { value: true },
+      untyped: { value: false },
+      grade: { value: "b" },
+      summary: { value: "all good" },
+      report: { value: "https://ci.example.test/1" },
+    };
+    const result = buildResult(TYPED, raw({ checks: [{ exit: 0, durationMs: 1, metrics }] }));
+    expect(result.metrics).toMatchObject({
+      typed: { source: "project", type: "boolean", value: true, order: "desc" },
+      untyped: { source: "project", type: "boolean", value: false, order: "asc" },
+      grade: { source: "project", type: "enum", value: "b", values: ["a", "b", "c"] },
+      summary: { source: "project", type: "string", value: "all good" },
+      report: { source: "project", type: "string", value: "https://ci.example.test/1", format: "url" },
+    });
+    expect(result.metrics.summary).toEqual({ source: "project", type: "string", value: "all good" });
+  });
+
+  it("nulls an enum value that isn't listed, and a value of the wrong type, each with a note", () => {
+    const metrics = {
+      typed: { value: "true" },
+      untyped: { value: 0 },
+      grade: { value: "d" },
+      summary: { value: 3 },
+      report: { value: null, note: "t.out: no out.json in $THRONG_OUTPUT; files there: there are none" },
+    };
+    const result = buildResult(TYPED, raw({ checks: [{ exit: 0, durationMs: 1, metrics }] }));
+    expect(result.metrics).toMatchObject({
+      typed: { type: "boolean", value: null, note: "t.out.typed: expected a boolean, got a string" },
+      untyped: { type: "boolean", value: null, note: "t.out.untyped: expected a boolean, got a number" },
+      grade: { type: "enum", value: null, note: 't.out.grade: "d" is not one of its values: a, b, c' },
+      summary: { type: "string", value: null, note: "t.out.summary: expected a string, got a number" },
+      report: { type: "string", value: null, format: "url" },
     });
   });
 });

@@ -14,7 +14,7 @@
         "allow": ["**/*.css", "@testing-library/jest-dom/vitest"]
       }
     ],
-    "promise/always-return": "off",
+    "promise/always-return": "error",
     "import/no-cycle": "error"
   },
   "overrides": [

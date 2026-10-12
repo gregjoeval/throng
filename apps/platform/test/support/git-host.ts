@@ -62,6 +62,12 @@ interface Minted {
   expiresAt: number;
 }
 
+interface HostResponse {
+  status: number;
+  headers: Record<string, string>;
+  body: Buffer;
+}
+
 export class LocalGitHost implements Repos {
   readonly root: string;
   readonly #server: Server;
@@ -83,16 +89,19 @@ export class LocalGitHost implements Repos {
     const root = await mkdtemp(join(tmpdir(), "throng-git-host-"));
     let host: LocalGitHost | undefined;
     const server = createServer((req, res) => {
-      void host!.#handle(req).then(
-        ({ status, headers, body }) => {
-          res.writeHead(status, headers);
-          res.end(body);
-        },
-        (err: unknown) => {
+      const respond = async () => {
+        let response: HostResponse;
+        try {
+          response = await host!.#handle(req);
+        } catch (err: unknown) {
           res.writeHead(500, { "Content-Type": "text/plain" });
           res.end(String(err));
-        },
-      );
+          return;
+        }
+        res.writeHead(response.status, response.headers);
+        res.end(response.body);
+      };
+      void respond();
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     host = new LocalGitHost(root, server);
@@ -255,7 +264,7 @@ export class LocalGitHost implements Repos {
   }
 
   /** Checks the bearer as Artifacts would, then runs `git http-backend` as a CGI. */
-  async #handle(req: IncomingMessage): Promise<{ status: number; headers: Record<string, string>; body: Buffer }> {
+  async #handle(req: IncomingMessage): Promise<HostResponse> {
     const url = new URL(req.url ?? "/", this.origin);
     const bearer = /^Bearer (\S+)$/.exec(req.headers.authorization ?? "")?.[1] ?? null;
     this.requests.push({ method: req.method ?? "GET", path: url.pathname + url.search, bearer });

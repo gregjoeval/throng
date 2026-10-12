@@ -665,12 +665,11 @@ export class UpstreamTokens {
   #prune(): void {
     const now = this.#now().getTime();
     for (const [key, entry] of this.#cache) {
-      void entry.then(
-        (t) => {
-          if (t.expiresAt <= now && this.#cache.get(key) === entry) this.#cache.delete(key);
-        },
-        () => {},
-      );
+      const forgetIfExpired = async () => {
+        const token = await entry.catch(() => null);
+        if (token !== null && token.expiresAt <= now && this.#cache.get(key) === entry) this.#cache.delete(key);
+      };
+      void forgetIfExpired();
     }
   }
 }

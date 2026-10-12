@@ -30,12 +30,18 @@ const rehypePlugins = [rehypeSanitize, rehypeShiki];
 
 const SCHEME = /^[A-Za-z][A-Za-z\d+.-]*:/u;
 
-/** Resolves a relative URL against `base`. Absolute URLs and fragments are left alone. */
-export function resolveUrl(url: string, base: string | undefined): string {
+/**
+ * Resolves a relative URL against `base`, adding the `search` parameters the URL doesn't set
+ * itself. Absolute URLs and fragments are left alone.
+ */
+export function resolveUrl(url: string, base: string | undefined, search?: URLSearchParams): string {
   if (!base || url === "" || SCHEME.test(url) || url.startsWith("#") || url.startsWith("//")) {
     return url;
   }
   const resolved = new URL(url, new URL(base, "https://base.invalid"));
+  for (const [key, value] of search ?? []) {
+    if (!resolved.searchParams.has(key)) resolved.searchParams.set(key, value);
+  }
   return SCHEME.test(base) ? resolved.href : resolved.pathname + resolved.search + resolved.hash;
 }
 
@@ -49,17 +55,21 @@ export interface MarkdownProps {
   baseUrl?: string;
   /** The URL relative images resolve against, e.g. the `/raw` directory. Defaults to `baseUrl`. */
   imageBaseUrl?: string;
+  /** Query parameters every resolved relative URL carries, e.g. the file browser's `attempt` hint. */
+  search?: Record<string, string>;
   className?: string;
 }
 
 /** GitHub-flavoured Markdown, sanitized, with code blocks highlighted by Shiki. */
-export function Markdown({ children, baseUrl, imageBaseUrl, className }: MarkdownProps) {
+export function Markdown({ children, baseUrl, imageBaseUrl, search, className }: MarkdownProps) {
+  const query = new URLSearchParams(search).toString();
   const urlTransform = useMemo<UrlTransform>(
     () => (url, key) => {
       const safe = defaultUrlTransform(url);
-      return resolveUrl(safe, key === "src" ? (imageBaseUrl ?? baseUrl) : baseUrl);
+      const params = new URLSearchParams(query);
+      return resolveUrl(safe, key === "src" ? (imageBaseUrl ?? baseUrl) : baseUrl, params);
     },
-    [baseUrl, imageBaseUrl],
+    [baseUrl, imageBaseUrl, query],
   );
   return (
     <div className={cn("markdown", className)}>

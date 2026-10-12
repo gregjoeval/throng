@@ -108,6 +108,24 @@ export function commitsSearch(search: Record<string, unknown>): { attempt?: stri
   return { ...attemptSearch(search), ...(Number.isSafeInteger(offset) && offset > 0 ? { offset } : {}) };
 }
 
+const MARKDOWN = /\.(?:md|markdown|mdown|mkd)$/iu;
+
+/** Whether a path names a Markdown file. */
+export function isMarkdown(path: string): boolean {
+  return MARKDOWN.test(path);
+}
+
+/**
+ * What a Markdown file's relative links and images resolve against: its directory in the file view
+ * and under `/raw` (each ending in `/`), and the `?attempt=` hint each resolved URL carries.
+ */
+export function markdownLinks(at: BrowseLocation) {
+  const dir = splitPath(at.path).slice(0, -1).join("/");
+  const { owner, project, ref } = at;
+  const base = (view: "blob" | "raw") => `${buildPath({ view, owner, project, ref, path: dir })}/`;
+  return { baseUrl: base("blob"), imageBaseUrl: base("raw"), search: attemptSearch({ attempt: at.attempt }) };
+}
+
 /** A path's segments, ignoring leading, trailing and doubled slashes. */
 export function splitPath(path: string): string[] {
   return path.split("/").filter((part) => part !== "");

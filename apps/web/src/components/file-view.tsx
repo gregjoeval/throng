@@ -6,11 +6,10 @@ import { useEffect, useState } from "react";
 import type { MouseEvent, ReactNode } from "react";
 import { Code } from "@/components/code";
 import { Markdown } from "@/components/markdown";
-import { isMarkdown, markdownBases } from "@/components/readme";
 import type { Blob } from "@/lib/api";
 import { formatBytes } from "@/lib/format";
 import { lineAnchor, parseLineAnchor, selectLine } from "@/lib/lines";
-import { buildPath } from "@/lib/paths";
+import { buildPath, isMarkdown, markdownLinks } from "@/lib/paths";
 import type { BrowseLocation } from "@/lib/paths";
 import { cn } from "@/lib/utils";
 
@@ -74,7 +73,7 @@ function FileBody({ at, blob, raw, showSource }: { at: BrowseLocation; blob: Blo
       </div>
     );
   }
-  if (!showSource) return <Markdown {...markdownBases(at)}>{blob.content}</Markdown>;
+  if (!showSource) return <Markdown {...markdownLinks(at)}>{blob.content}</Markdown>;
   return <NumberedCode path={blob.path} code={blob.content} />;
 }
 

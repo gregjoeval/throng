@@ -227,6 +227,21 @@ describe("the file view", () => {
     expect(screen.getByRole("region", { name: "guide.md" })).toHaveTextContent("Read **this**.");
   });
 
+  it("keeps the attempt hint on a Markdown file's relative links and images at a sha", async () => {
+    const sha = "b".repeat(40);
+    serveRepo({ [sha]: FILES }, { main: { ref: "main", sha: null }, active: [], archived: [] });
+    await renderApp(`/ada/alpha/blob/${sha}/README.md?attempt=t42a3`);
+    const file = await screen.findByRole("region", { name: "README.md" });
+    expect(await within(file).findByRole("link", { name: "guide" })).toHaveAttribute(
+      "href",
+      `/ada/alpha/blob/${sha}/docs/guide.md?attempt=t42a3`,
+    );
+    expect(within(file).getByRole("img", { name: "logo" })).toHaveAttribute(
+      "src",
+      `/ada/alpha/raw/${sha}/docs/logo.png?attempt=t42a3`,
+    );
+  });
+
   it("opens Markdown at its source when the URL names a line", async () => {
     serveRepo({ main: FILES });
     await renderApp("/ada/alpha/blob/main/docs/guide.md#L3");

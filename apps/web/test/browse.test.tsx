@@ -107,3 +107,109 @@ describe("the directory view", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("no directory nope at main");
   });
 });
+
+const CODE = "const a = 1;\nconst b = 2;\nconst c = 3;\nconst d = 4;\nconst e = 5;\n";
+const gutter = () => screen.findByRole("navigation", { name: "Line numbers" });
+/** The numbers of the lines marked highlighted, once Shiki has rendered them. */
+async function highlighted() {
+  await waitFor(() => expect(document.querySelector("pre span[style*='--shiki-dark']")).not.toBeNull());
+  return [...document.querySelectorAll(".line")].flatMap((line, i) =>
+    line.classList.contains("highlighted") ? [i + 1] : [],
+  );
+}
+
+describe("the file view", () => {
+  it("shows a text file highlighted, with a numbered link to each line", async () => {
+    serveRepo({ main: { "src/a.ts": CODE } });
+    await renderApp("/ada/alpha/blob/main/src/a.ts");
+    const lines = within(await gutter()).getAllByRole("link");
+    expect(lines.map((link) => [link.textContent, link.getAttribute("href")])).toEqual([
+      ["1", "#L1"],
+      ["2", "#L2"],
+      ["3", "#L3"],
+      ["4", "#L4"],
+      ["5", "#L5"],
+    ]);
+    expect(await highlighted()).toEqual([]);
+    expect(screen.getByRole("region", { name: "a.ts" })).toHaveTextContent("const c = 3;");
+  });
+
+  it("selects a line on click, then a range on shift-click", async () => {
+    serveRepo({ main: { "src/a.ts": CODE } });
+    const { user, router } = await renderApp("/ada/alpha/blob/main/src/a.ts");
+    await user.click(within(await gutter()).getByRole("link", { name: "2" }));
+    await waitFor(() => expect(router.state.location.hash).toBe("L2"));
+    await waitFor(async () => expect(await highlighted()).toEqual([2]));
+    await user.keyboard("{Shift>}");
+    await user.click(within(await gutter()).getByRole("link", { name: "4" }));
+    await user.keyboard("{/Shift}");
+    await waitFor(() => expect(router.state.location.hash).toBe("L2-L4"));
+    await waitFor(async () => expect(await highlighted()).toEqual([2, 3, 4]));
+    expect(router.state.location.pathname).toBe("/ada/alpha/blob/main/src/a.ts");
+  });
+
+  it("orders a range picked upwards, and highlights the lines a URL's anchor names", async () => {
+    serveRepo({ main: { "src/a.ts": CODE } });
+    const { user, router } = await renderApp("/ada/alpha/blob/main/src/a.ts#L4");
+    await waitFor(async () => expect(await highlighted()).toEqual([4]));
+    await user.keyboard("{Shift>}");
+    await user.click(within(await gutter()).getByRole("link", { name: "1" }));
+    await user.keyboard("{/Shift}");
+    await waitFor(() => expect(router.state.location.hash).toBe("L1-L4"));
+  });
+
+  it("renders Markdown by default, with a toggle to its source", async () => {
+    serveRepo({ main: FILES });
+    const { user } = await renderApp("/ada/alpha/blob/main/docs/guide.md");
+    expect(await screen.findByRole("heading", { name: "Guide" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Preview" })).toHaveAttribute("aria-pressed", "true");
+    await user.click(screen.getByRole("button", { name: "Source" }));
+    expect(screen.getByRole("button", { name: "Source" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByRole("heading", { name: "Guide" })).toBeNull();
+    expect(await gutter()).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "guide.md" })).toHaveTextContent("Read **this**.");
+  });
+
+  it("opens Markdown at its source when the URL names a line", async () => {
+    serveRepo({ main: FILES });
+    await renderApp("/ada/alpha/blob/main/docs/guide.md#L3");
+    expect(await gutter()).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Source" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("shows an image inline from /raw", async () => {
+    serveRepo({ [`${"b".repeat(40)}`]: FILES }, { main: { ref: "main", sha: null }, active: [], archived: [] });
+    await renderApp(`/ada/alpha/blob/${"b".repeat(40)}/docs/logo.png?attempt=t42a3`);
+    expect(await screen.findByRole("img", { name: "logo.png" })).toHaveAttribute(
+      "src",
+      `/ada/alpha/raw/${"b".repeat(40)}/docs/logo.png?attempt=t42a3`,
+    );
+  });
+
+  it("shows a binary file's size and a raw link instead of its content", async () => {
+    serveRepo({ main: { "bin/tool": new Uint8Array([0x7f, 0x45, 0x4c, 0x46, 0, 1, 2, 3]) } });
+    await renderApp("/ada/alpha/blob/main/bin/tool");
+    expect(await screen.findByText("Binary file, 8 B")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "View raw" })).toHaveAttribute("href", "/ada/alpha/raw/main/bin/tool");
+  });
+
+  it("shows a too-large file's size and a raw link instead of its content", async () => {
+    serveRepo({ main: FILES });
+    await renderApp("/ada/alpha/blob/main/big.txt");
+    expect(await screen.findByText("Too large to show, 1.0 MB")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "View raw" })).toHaveAttribute("href", "/ada/alpha/raw/main/big.txt");
+  });
+
+  it("offers every file's raw bytes", async () => {
+    serveRepo({ main: { "src/a.ts": CODE } });
+    await renderApp("/ada/alpha/blob/main/src/a.ts");
+    expect(await screen.findByRole("link", { name: "Raw" })).toHaveAttribute("href", "/ada/alpha/raw/main/src/a.ts");
+    expect(screen.getByText("5 lines · 65 B")).toBeInTheDocument();
+  });
+
+  it("shows notFound for a missing file", async () => {
+    serveRepo({ main: FILES });
+    await renderApp("/ada/alpha/blob/main/nope.ts");
+    expect(await screen.findByRole("alert")).toHaveTextContent("no file nope.ts at main");
+  });
+});

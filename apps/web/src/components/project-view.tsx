@@ -109,12 +109,3 @@ export function Breadcrumbs({ location }: { location: Extract<ProjectLocation, {
 function attemptOf(location: { attempt?: string }) {
   return location.attempt === undefined ? {} : { attempt: location.attempt };
 }
-
-/** Where a view's content goes until its slice lands. */
-export function Placeholder({ children }: { children: ReactNode }) {
-  return (
-    <div className="rounded-xl border border-dashed px-6 py-12 text-center text-sm text-muted-foreground">
-      {children}
-    </div>
-  );
-}

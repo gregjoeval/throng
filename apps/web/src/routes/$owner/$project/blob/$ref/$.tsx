@@ -1,5 +1,9 @@
+import { useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import { Breadcrumbs, Placeholder, ProjectView } from "@/components/project-view";
+import { FileView } from "@/components/file-view";
+import { Breadcrumbs, ProjectView } from "@/components/project-view";
+import { ErrorState, Loading } from "@/components/states";
+import { blobQuery } from "@/lib/api";
 import { attemptSearch } from "@/lib/paths";
 
 export const Route = createFileRoute("/$owner/$project/blob/$ref/$")({
@@ -11,10 +15,13 @@ export const Route = createFileRoute("/$owner/$project/blob/$ref/$")({
 function File() {
   const { owner, project, ref, _splat: path = "" } = Route.useParams();
   const location = { view: "blob", owner, project, ref, path, ...attemptSearch(Route.useSearch()) } as const;
+  const blob = useQuery(blobQuery({ owner, project }, location));
   return (
     <ProjectView location={location}>
       <Breadcrumbs location={location} />
-      <Placeholder>This file's contents will show here.</Placeholder>
+      {blob.isPending && <Loading />}
+      {blob.isError && <ErrorState error={blob.error} />}
+      {blob.isSuccess && <FileView key={blob.data.path} at={location} blob={blob.data} />}
     </ProjectView>
   );
 }

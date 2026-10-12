@@ -76,7 +76,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 
   /** Called by a run's Scoring Workflow when it ends. Reports from a superseded or cancelled run are discarded. */
   async scoringFinished(run: number, outcome: ScoringOutcome): Promise<void> {
-    this.#tasks.scoring.finish(run, outcome);
+    this.#tasks.scoringFinished(run, outcome);
     await this.#drain();
   }
 

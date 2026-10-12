@@ -14,7 +14,11 @@ const now = () => new Date("2026-10-10T12:00:00.000Z");
 
 async function setup() {
   const repos = new FakeRepos();
-  const { backend } = testTaskBackends(repos, now);
+  // Runs start only when a test drains a project's scoring queue.
+  const { backend, store } = testTaskBackends(repos, now, {
+    workflow: { create: async () => ({}), get: async () => ({ terminate: async () => {} }) },
+    teardown: async () => {},
+  });
   const api = apiRoutes({ verifierFor: () => verify, now, repos: () => repos, tasks: () => backend });
   const env = { DB: testDatabase(), ACCESS_TEAM_DOMAIN: "throng.cloudflareaccess.com", ACCESS_AUD: "aud" };
 
@@ -39,7 +43,7 @@ async function setup() {
   const bob = await tokenFor("bob@example.com");
   const project = (await call("POST", "/projects", greg, { handle: "throng" })).body;
   const base = "/projects/greg/throng";
-  return { call, repos, greg, ada, adaClaude, bob, project, base };
+  return { call, repos, store, greg, ada, adaClaude, bob, project, base };
 }
 
 describe("task routes", () => {
@@ -130,6 +134,7 @@ describe("attempt routes", () => {
         merged_sha: null,
         archived_sha: null,
         scoring: { status: "none", sha: null },
+        merge_request: null,
       })),
     );
     expect(await repos.list(`${project["id"]}-t`)).toEqual([`${project["id"]}-t1a1`, `${project["id"]}-t1a2`]);
@@ -250,5 +255,96 @@ describe("OpenAPI document", () => {
     expect(body["components"]["schemas"]["Task"]).toBeDefined();
     expect(body["components"]["schemas"]["Attempt"]).toBeDefined();
     expect(body["components"]["schemas"]["ScoringRequest"]).toBeDefined();
+  });
+});
+/** A task by ada with two opened attempts by bob, on an origin with one commit; returns its head. */
+async function twoAttempts(env: Awaited<ReturnType<typeof setup>>): Promise<string> {
+  const { call, repos, ada, bob, project, base } = env;
+  const head = repos.commit(`${project["id"]}-main`, { files: { "README.md": "hi\n" }, message: "init" }).hash;
+  await call("POST", `${base}/tasks`, ada, { title: "a" });
+  await call("POST", `${base}/tasks/t1/attempts`, bob, { count: 2 });
+  for (const a of ["t1a1", "t1a2"]) await call("POST", `${base}/attempts/${a}/open`, bob);
+  return head;
+}
+
+describe("merge request routes", () => {
+  it("selects an attempt, approving its head, and reads the merge request back", async () => {
+    const env = await setup();
+    const { call, ada, adaClaude, bob, base } = env;
+    const head = await twoAttempts(env);
+
+    expect((await call("POST", `${base}/tasks/t1/selection`, bob, { attempt: "t1a1" })).status).toBe(403);
+    expect((await call("POST", `${base}/tasks/t1/selection`, ada, { attempt: "t2a1" })).status).toBe(400);
+    expect((await call("POST", `${base}/tasks/t1/selection`, ada, {})).status).toBe(400);
+    expect((await call("GET", `${base}/tasks/t1/merge-request`, bob)).status).toBe(404);
+
+    const selected = await call("POST", `${base}/tasks/t1/selection`, adaClaude, { attempt: "t1a1" });
+    expect(selected.status).toBe(200);
+    const ref = { id: expect.any(String), handle: "ada", agent: "claude" };
+    expect(selected.body).toEqual({
+      task: "t1",
+      attempt: "t1a1",
+      state: "pending",
+      approved_head: head,
+      approved_by: ref,
+      approved_at: "2026-10-10T12:00:00.000Z",
+      queued_at: null,
+      position: null,
+      last_dequeue: null,
+      merge_sha: null,
+      merged_at: null,
+      created_at: "2026-10-10T12:00:00.000Z",
+      created_by: ref,
+    });
+    expect((await call("GET", `${base}/tasks/t1/merge-request`, bob)).body).toEqual(selected.body);
+    expect((await call("GET", `${base}/attempts/t1a2`, bob)).body["state"]).toBe("closed");
+    expect((await call("GET", `${base}/attempts/t1a1`, bob)).body["merge_request"]).toEqual({
+      state: "pending",
+      last_dequeue: null,
+    });
+    const again = await call("POST", `${base}/tasks/t1/selection`, ada, { attempt: "t1a1" });
+    expect(again.body["error"]["code"]).toBe("invalid_state");
+  });
+
+  it("approves and cancels with their permissions", async () => {
+    const env = await setup();
+    const { call, ada, bob, greg, base } = env;
+    await twoAttempts(env);
+    await call("POST", `${base}/tasks/t1/selection`, ada, { attempt: "t1a1" });
+
+    expect((await call("POST", `${base}/tasks/t1/merge-request/approve`, bob)).status).toBe(403);
+    expect((await call("POST", `${base}/tasks/t1/merge-request/approve`, greg)).body["state"]).toBe("pending");
+    expect((await call("POST", `${base}/tasks/t1/merge-request/cancel`, bob)).status).toBe(403);
+    expect((await call("POST", `${base}/tasks/t1/merge-request/cancel`, ada)).body["state"]).toBe("cancelled");
+    const after = await call("POST", `${base}/tasks/t1/merge-request/cancel`, ada);
+    expect([after.status, after.body["error"]["code"]]).toEqual([409, "invalid_state"]);
+  });
+
+  it("lists the project's merge queue, front first", async () => {
+    const env = await setup();
+    const { call, store, ada, bob, project, base } = env;
+    await twoAttempts(env);
+    expect((await call("GET", `${base}/merge-queue`, bob)).body).toEqual({ queue: [] });
+
+    const tasks = store(project["id"]);
+    await tasks.scoring.drain();
+    const run = tasks.scoring.listRuns({ task: 1, attempt: 2 }).at(-1)!;
+    tasks.scoringFinished(run.id, {
+      status: "done",
+      result: {
+        base: null,
+        config: { kind: "none" },
+        gate: "passed",
+        checks: [],
+        builtin: { filesChanged: 0, additions: 0, deletions: 0, durationMs: 1 },
+        preview: { status: "none" },
+        logs: [],
+      },
+    });
+    const selected = await call("POST", `${base}/tasks/t1/selection`, ada, { attempt: "t1a2" });
+    expect(selected.body).toMatchObject({ state: "queued", position: 1 });
+    expect((await call("GET", `${base}/merge-queue`, bob)).body).toEqual({
+      queue: [{ position: 1, task: "t1", attempt: "t1a2", state: "queued" }],
+    });
   });
 });

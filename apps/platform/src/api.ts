@@ -12,6 +12,7 @@ import { browseRoutes } from "./browse-api.ts";
 import { CONFIG_NAME, MAX_CHECK_TIMEOUT_MS, MAX_CONFIG_BYTES, parseConfig } from "./config.ts";
 import { errorBody, errorResponse, ServiceError } from "./errors.ts";
 import { FORWARDED_EMAIL_HEADER } from "./forwarded.ts";
+import { DEQUEUE_REASONS, MERGE_REQUEST_STATES } from "./merge-requests.ts";
 import { LOG_CONTENT_TYPE, LOG_RETENTION_DAYS, MAX_LOG_BYTES, missingLog, type LogStore } from "./logs.ts";
 import { MAX_PROJECT_HANDLE, PROJECT_HANDLE, projectService } from "./projects.ts";
 import type { DiffCache } from "./diff.ts";
@@ -139,6 +140,17 @@ const AttemptSchema = z
         description:
           "The current head's scoring status, for polling. `none` when the head has no run yet, or its run was cancelled.",
       }),
+    merge_request: z
+      .object({
+        state: z.enum(MERGE_REQUEST_STATES),
+        last_dequeue: z.object({ reason: z.enum(DEQUEUE_REASONS) }).nullable(),
+      })
+      .nullable()
+      .openapi("AttemptMergeRequest", {
+        description:
+          "The latest merge request this attempt is the source of, for polling: its state and why it last left the queue. " +
+          "Null when it was never selected.",
+      }),
   })
   .openapi("Attempt");
 
@@ -264,6 +276,54 @@ const TaskArenaSchema = z
     ),
   })
   .openapi("TaskArena");
+
+const ActorRefSchema = UserRefSchema.extend({
+  agent: z.string().nullable().openapi({ description: "The agent alias they acted under, if any." }),
+}).openapi("ActorRef");
+
+const MergeRequestSchema = z
+  .object({
+    task: z.string().openapi({ description: "The task, which also names its merge request.", example: "t42" }),
+    attempt: z.string().openapi({ description: "The source attempt.", example: "t42a3" }),
+    state: z.enum(MERGE_REQUEST_STATES),
+    approved_head: z.string().openapi({ description: "The only head that can land." }),
+    approved_by: ActorRefSchema,
+    approved_at: z.string(),
+    queued_at: z.string().nullable().openapi({ description: "When it entered the queue, while queued or landing." }),
+    position: z
+      .number()
+      .int()
+      .nullable()
+      .openapi({ description: "Its 1-based place in the merge queue while queued or landing; the landing one is 1." }),
+    last_dequeue: z
+      .object({ reason: z.enum(DEQUEUE_REASONS), at: z.string() })
+      .nullable()
+      .openapi({ description: "Why it last left the queue without landing." }),
+    merge_sha: z.string().nullable().openapi({ description: "The merge commit on `main`, once merged." }),
+    merged_at: z.string().nullable(),
+    created_at: z.string(),
+    created_by: ActorRefSchema,
+  })
+  .openapi("MergeRequest");
+
+const SelectionSchema = z
+  .object({ attempt: z.string().openapi({ description: "An open attempt of the task.", example: "t42a3" }) })
+  .openapi("Selection");
+
+const MergeQueueSchema = z
+  .object({
+    queue: z.array(
+      z
+        .object({
+          position: z.number().int().openapi({ description: "1-based; the landing merge request is first." }),
+          task: z.string().openapi({ example: "t42" }),
+          attempt: z.string().openapi({ example: "t42a3" }),
+          state: z.enum(MERGE_REQUEST_STATES),
+        })
+        .openapi("MergeQueueEntry"),
+    ),
+  })
+  .openapi("MergeQueue");
 
 const AttemptLimitSchema = z
   .number()
@@ -439,6 +499,37 @@ function taskTransition<V extends string>(
       403: errorResponse(forbidden),
       404: errorResponse("No such project or task."),
       409: errorResponse(`\`invalid_state\`: ${conflicts.join(" ")}`),
+    },
+  });
+}
+
+/** A merge request action route: `POST …/tasks/{t}/merge-request/<verb>`. */
+function mergeRequestAction<V extends string>(
+  bearer: Bearer,
+  verb: V,
+  operationId: string,
+  summary: string,
+  description: string,
+) {
+  return createRoute({
+    method: "post",
+    path: `/projects/{owner}/{project}/tasks/{t}/merge-request/${verb}`,
+    operationId,
+    tags: ["Merge queue"],
+    summary,
+    description,
+    security: bearerOnly,
+    middleware: [bearer] as const,
+    request: { params: TaskPathSchema },
+    responses: {
+      200: { description: "The merge request after the action.", ...json(MergeRequestSchema) },
+      400: errorResponse("The task reference is invalid."),
+      401: unauthorizedBearer,
+      403: errorResponse(TASK_MANAGERS),
+      404: errorResponse("No such project or task."),
+      409: errorResponse(
+        "`invalid_state`: the task has no open merge request, or it isn't in a state that allows this.",
+      ),
     },
   });
 }
@@ -1208,6 +1299,101 @@ export function apiRoutes(options: ApiOptions = {}) {
         },
       }),
       async (c) => c.json(parseConfig(await c.req.text()), 200),
+    )
+    .openapi(
+      createRoute({
+        method: "post",
+        path: "/projects/{owner}/{project}/tasks/{t}/selection",
+        operationId: "selectAttempt",
+        tags: ["Merge queue"],
+        summary: "Select an attempt as the task's merge request",
+        description:
+          "Creates the task's merge request from one of its open attempts, approving the attempt's current head, and " +
+          "closes the task's other active attempts (archiving their forks). The merge request is `pending`, and enters the " +
+          "merge queue once the approved head's latest scoring run is done with a passing gate. A single-attempt task's " +
+          "Merge button calls this too. The task's creator or the project owner (or their agents) may; the creator may " +
+          "select their own attempt. Journals `selected` and `approved`.",
+        security: bearerOnly,
+        middleware: [bearer] as const,
+        request: { params: TaskPathSchema, body: { required: true, ...json(SelectionSchema) } },
+        responses: {
+          200: { description: "The new merge request.", ...json(MergeRequestSchema) },
+          400: errorResponse("The request is invalid, or the attempt isn't one of the task's."),
+          401: unauthorizedBearer,
+          403: errorResponse(TASK_MANAGERS),
+          404: errorResponse("No such project, task or attempt."),
+          409: errorResponse(
+            "`invalid_state`: the attempt isn't open, the task isn't open, the task already has an open merge request, " +
+              "or the attempt has no commits.",
+          ),
+        },
+      }),
+      async (c) => {
+        const input = { ...taskPath(c.req.valid("param")), ...c.req.valid("json") };
+        return c.json(await tasks(c.env).selectAttempt(c.var.actor, input), 200);
+      },
+    )
+    .openapi(
+      mergeRequestAction(
+        bearer,
+        "approve",
+        "approveMergeRequest",
+        "Approve the source attempt's current head",
+        "Moves a merge request in `needs_review` back to `pending`, approving the source attempt's current head. From " +
+          "`pending` it re-approves the same head, which requeues one held after a dequeue (an `errored` one, say). Then, " +
+          "as on selection, it enters the queue once the head's gate has passed. Journals `approved`.",
+      ),
+      async (c) => c.json(await tasks(c.env).approveMergeRequest(c.var.actor, taskPath(c.req.valid("param"))), 200),
+    )
+    .openapi(
+      mergeRequestAction(
+        bearer,
+        "cancel",
+        "cancelMergeRequest",
+        "Cancel the task's open merge request",
+        "From any open state. A queued or landing one is dequeued with reason `cancelled`. The task stays open and can be " +
+          "selected again. Journals `cancelled`.",
+      ),
+      async (c) => c.json(await tasks(c.env).cancelMergeRequest(c.var.actor, taskPath(c.req.valid("param"))), 200),
+    )
+    .openapi(
+      createRoute({
+        method: "get",
+        path: "/projects/{owner}/{project}/tasks/{t}/merge-request",
+        operationId: "getMergeRequest",
+        tags: ["Merge queue"],
+        summary: "Get a task's merge request",
+        description: "Its latest merge request, open or not. `last_dequeue` leaves out the dequeue's details.",
+        security: bearerOrWeb,
+        middleware: [browser] as const,
+        request: { params: TaskPathSchema },
+        responses: {
+          200: { description: "The merge request.", ...json(MergeRequestSchema) },
+          400: errorResponse("The task reference is invalid."),
+          401: unauthorizedBearer,
+          404: errorResponse("No such project or task, or the task has no merge request."),
+        },
+      }),
+      async (c) => c.json(await tasks(c.env).getMergeRequest(c.var.actor, taskPath(c.req.valid("param"))), 200),
+    )
+    .openapi(
+      createRoute({
+        method: "get",
+        path: "/projects/{owner}/{project}/merge-queue",
+        operationId: "getMergeQueue",
+        tags: ["Merge queue"],
+        summary: "The project's merge queue",
+        description: "The landing merge request first, then the queued ones, first in first out.",
+        security: bearerOrWeb,
+        middleware: [browser] as const,
+        request: { params: ProjectPathSchema },
+        responses: {
+          200: { description: "The queue, front first.", ...json(MergeQueueSchema) },
+          401: unauthorizedBearer,
+          404: errorResponse("No such project."),
+        },
+      }),
+      async (c) => c.json({ queue: await tasks(c.env).mergeQueue(c.var.actor, c.req.valid("param")) }, 200),
     )
     .route(
       "/",

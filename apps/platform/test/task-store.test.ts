@@ -253,6 +253,7 @@ describe("attempts", () => {
         merged_sha: null,
         archived_sha: null,
         scoring: { status: "none", sha: null },
+        merge_request: null,
       })),
     );
     expect(await repos.get("abc123-t1a1")).toMatchObject({ parent: "abc123-main" });
@@ -398,7 +399,7 @@ describe("attempts", () => {
     expect(await code(store.reopenAttempt(PROJECT, ada, { task: 1, number: 1 }))).toBe("invalid_state");
   });
 
-  it("merging records the sha, closes the task and its other active attempts", async () => {
+  it("merging records the sha and closes the task, leaving siblings to the selection", async () => {
     const { store } = setup();
     store.createTask(PROJECT, ada, { title: "a" });
     await store.createAttempts(PROJECT, ada, { task: 1, count: 2 });
@@ -407,7 +408,7 @@ describe("attempts", () => {
     await store.openAttempt(PROJECT, bob, { task: 1, number: 3 });
     const merged = await store.markMerged(PROJECT, bob, { task: 1, number: 3, sha: "f00d" });
     expect(merged).toMatchObject({ state: "merged", merged_sha: "f00d", closed_at: "2026-10-10T12:00:00.000Z" });
-    expect(store.listAttempts(PROJECT, ada, { task: 1 }).map((a) => a.state)).toEqual(["closed", "closed", "merged"]);
+    expect(store.listAttempts(PROJECT, ada, { task: 1 }).map((a) => a.state)).toEqual(["open", "draft", "merged"]);
     expect(store.getTask(PROJECT, ada, { task: 1 })).toMatchObject({ state: "closed", closed_by: bob.user.id });
   });
 });
@@ -598,11 +599,12 @@ describe("archive", () => {
     await store.createAttempts(PROJECT, ada, { task: 3, count: 2 });
     await store.openAttempt(PROJECT, ada, { task: 3, number: 1 });
     await store.markMerged(PROJECT, owner, { task: 3, number: 1, sha: "landed" });
+    // The selection closes the merged attempt's siblings; merging archives only the merged one.
     expect(store.listAttempts(PROJECT, ada, { task: 3 }).map((a) => [a.state, a.archived_sha])).toEqual([
       ["merged", "base"],
-      ["closed", "base"],
+      ["draft", null],
     ]);
-    expect(await repos.list("abc123-t")).toEqual([]);
+    expect(await repos.list("abc123-t")).toEqual(["abc123-t3a2"]);
   });
 
   it("archives nothing when a closed attempt is made obsolete", async () => {

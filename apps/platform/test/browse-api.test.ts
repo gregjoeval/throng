@@ -276,8 +276,21 @@ describe("GET /blob and /raw", () => {
       size: 20,
       binary: false,
       tooLarge: false,
+      contentType: "text/plain; charset=utf-8",
       content: "export const a = 1;\n",
     });
+  });
+
+  it("gives each file the content type /raw serves it as", async () => {
+    const { repos, get, origin, base } = await setup();
+    repos.commit(origin, { files: { "a.avif": PNG, "logo.PNG": PNG, "data.bin": PNG, "page.html": "<p>hi</p>" } });
+    const typeOf = async (path: string) => defined((await get(`${base}/blob/main/${path}`)).body)["contentType"];
+    expect(await typeOf("a.avif")).toBe("image/avif");
+    expect(await typeOf("logo.PNG")).toBe("image/png");
+    expect(await typeOf("data.bin")).toBe("application/octet-stream");
+    expect(await typeOf("page.html")).toBe("text/plain; charset=utf-8");
+    const raw = await get(`${base}/raw/main/a.avif`);
+    expect(raw.headers.get("Content-Type")).toBe("image/avif");
   });
 
   it("flags binary and too-large files without content", async () => {

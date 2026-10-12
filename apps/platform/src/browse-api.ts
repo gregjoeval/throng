@@ -118,6 +118,10 @@ const BlobSchema = z
     size: z.number().int().openapi({ description: "Bytes." }),
     binary: z.boolean().openapi({ description: "A NUL byte appears in the first 8,000 bytes." }),
     tooLarge: z.boolean().openapi({ description: `Larger than ${MAX_TEXT_BYTES} bytes.` }),
+    contentType: z.string().openapi({
+      description: "The type `/raw` serves the file as: by its extension, else text or octet-stream.",
+      example: "image/png",
+    }),
     content: z.string().nullable().openapi({ description: "UTF-8 text; null when `binary` or `tooLarge`." }),
   })
   .openapi("Blob");

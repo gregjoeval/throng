@@ -87,6 +87,8 @@ export interface FileContent extends Entry {
   size: number;
   binary: boolean;
   tooLarge: boolean;
+  /** The type `/raw` serves the file as: by its extension, else text or octet-stream by its bytes. */
+  contentType: string;
   /** UTF-8 text, or null when the file is binary or too large. */
   content: string | null;
 }
@@ -234,13 +236,14 @@ export function browseService({ db, repos, backend }: BrowseDeps) {
       const binary = await isBinary(blob);
       const tooLarge = blob.size > MAX_TEXT_BYTES;
       const content = binary || tooLarge ? null : await blob.text();
-      return { ...entry, size: blob.size, binary, tooLarge, content };
+      return { ...entry, size: blob.size, binary, tooLarge, contentType: typeOf(entry.name, binary), content };
     },
 
     /** A file's bytes, and the content type its extension (or, failing that, its bytes) suggests. */
     async raw(at: Resolved, path: string): Promise<{ entry: Entry; blob: Blob; type: string }> {
       const { entry, blob } = await file(at, path);
-      return { entry, blob, type: contentType(entry.name) ?? ((await isBinary(blob)) ? BINARY_TYPE : TEXT_TYPE) };
+      // Only a file of no known type needs its bytes read to choose between text and octet-stream.
+      return { entry, blob, type: contentType(entry.name) ?? typeOf(entry.name, await isBinary(blob)) };
     },
 
     /** One page of the first-parent history from a resolved ref, newest first. */
@@ -359,6 +362,11 @@ const CONTENT_TYPES: Record<string, string> = {
   zip: "application/zip",
   gz: "application/gzip",
 };
+
+/** A file's content type: by its extension, else text or octet-stream as `binary` says. */
+function typeOf(name: string, binary: boolean): string {
+  return contentType(name) ?? (binary ? BINARY_TYPE : TEXT_TYPE);
+}
 
 function contentType(name: string): string | null {
   const dot = name.lastIndexOf(".");

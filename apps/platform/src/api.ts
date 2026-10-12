@@ -19,6 +19,8 @@ import {
   ProjectPathSchema,
   requestTaskService,
   SelectionSchema,
+  TaskChecksInputSchema,
+  TaskMetricsInputSchema,
   WaitQuerySchema,
   workersCache,
 } from "./api-shared.ts";
@@ -26,7 +28,15 @@ import { bearerAuth, bearerOrAccess, bearerOrForwarded } from "./auth.ts";
 import type { AuthEnv, AuthOptions } from "./auth.ts";
 import { BASE_LINES } from "./base.ts";
 import { browseRoutes } from "./browse-api.ts";
-import { CONFIG_NAME, MAX_CHECK_TIMEOUT_MS, MAX_CONFIG_BYTES, METRIC_ORDERS, parseConfig } from "./config.ts";
+import {
+  CONFIG_LAYERS,
+  CONFIG_NAME,
+  MAX_CHECK_TIMEOUT_MS,
+  MAX_CONFIG_BYTES,
+  METRIC_ORDERS,
+  parseConfig,
+  SOURCES,
+} from "./config.ts";
 import { dequeueRoutes } from "./dequeue-api.ts";
 import type { DiffCache } from "./diff.ts";
 import { errorBody, errorResponse, ServiceError } from "./errors.ts";
@@ -34,6 +44,7 @@ import { FORWARDED_EMAIL_HEADER } from "./forwarded.ts";
 import { LOG_CONTENT_TYPE, LOG_RETENTION_DAYS, MAX_LOG_BYTES, missingLog } from "./logs.ts";
 import type { LogStore } from "./logs.ts";
 import { DEQUEUE_REASONS, MERGE_REQUEST_STATES } from "./merge-requests.ts";
+import { METRIC_FORMATS, METRIC_TYPES } from "./metric-values.ts";
 import { MAX_PROJECT_HANDLE, PROJECT_HANDLE, projectService } from "./projects.ts";
 import type { Repos } from "./repos.ts";
 import { CHECK_OUTCOMES, GATES } from "./results.ts";
@@ -121,6 +132,77 @@ const CreateProjectSchema = z
 
 const UserRefSchema = z.object({ id: z.string(), handle: z.string().openapi({ example: "greg" }) }).openapi("UserRef");
 
+const ConfigNameSchema = z.string().regex(CONFIG_NAME);
+
+/** Who defined a declared check or metric. */
+const ConfigLayerSchema = z
+  .enum(CONFIG_LAYERS)
+  .openapi({ description: "Who defined it: the project's config, or the task." });
+
+/** The fields only some metric types have, described once for a declared metric and a metric result. */
+const METRIC_TYPE_FIELDS = {
+  numberOrder: z.enum(METRIC_ORDERS).openapi({ description: "`asc` when lower is better, `desc` when higher is." }),
+  booleanOrder: z.enum(METRIC_ORDERS).openapi({ description: "`desc` when true is better, `asc` when false is." }),
+  unit: z.string().openapi({ example: "%" }),
+  format: z.enum(METRIC_FORMATS).openapi({ description: "`url`: shown as a link." }),
+  values: z.array(z.string()).openapi({ description: "Every value it may take, best first." }),
+};
+
+const configMetricFields = {
+  name: ConfigNameSchema.openapi({ example: "coverage" }),
+  from: z.string().openapi({
+    description:
+      "Where its value is read: the check, a JSON file it writes into `$THRONG_OUTPUT` (without `.json`), then " +
+      "object keys and array indexes.",
+    example: "test.coverage-summary.total.lines.pct",
+  }),
+  source: ConfigLayerSchema,
+};
+
+const MetricSchema = z
+  .discriminatedUnion("type", [
+    z.object({
+      ...configMetricFields,
+      type: z.literal("number"),
+      unit: METRIC_TYPE_FIELDS.unit.nullable(),
+      order: METRIC_TYPE_FIELDS.numberOrder,
+    }),
+    z.object({
+      ...configMetricFields,
+      type: z.literal("boolean"),
+      order: METRIC_TYPE_FIELDS.booleanOrder,
+    }),
+    z.object({
+      ...configMetricFields,
+      type: z.literal("string"),
+      format: METRIC_TYPE_FIELDS.format.nullable(),
+    }),
+    z.object({
+      ...configMetricFields,
+      type: z.literal("enum"),
+      values: METRIC_TYPE_FIELDS.values,
+    }),
+  ])
+  .openapi("Metric", {
+    description:
+      `A metric the config declares. Its \`type\` (${METRIC_TYPES.join(", ")}) decides how its values compare; a ` +
+      "string never ranks.",
+  });
+
+const ConfigCheckSchema = z
+  .object({
+    name: ConfigNameSchema.openapi({ example: "test" }),
+    command: z.string().openapi({ example: "pnpm test" }),
+    required: z.boolean().openapi({ description: "Whether the gate needs it to pass." }),
+    timeoutMs: z
+      .number()
+      .int()
+      .max(MAX_CHECK_TIMEOUT_MS)
+      .openapi({ description: "Defaults to 10 minutes.", example: 600_000 }),
+    source: ConfigLayerSchema,
+  })
+  .openapi("Check", { description: "A check the config declares: a command whose exit code is its outcome." });
+
 const TaskSchema = z
   .object({
     ref: z.string().openapi({ description: "The task's reference.", example: "t42" }),
@@ -137,6 +219,12 @@ const TaskSchema = z
       .int()
       .nullable()
       .openapi({ description: "Overrides the project's cap on active attempts; null to use the project's." }),
+    checks: z
+      .array(ConfigCheckSchema)
+      .openapi({ description: "The task's own checks, run after the project's; empty by default." }),
+    metrics: z
+      .array(MetricSchema)
+      .openapi({ description: "The task's own metrics, read after the project's; empty by default." }),
     taskBranch: z
       .object({
         sha: z.string().openapi({ description: "The task branch's head." }),
@@ -282,7 +370,43 @@ const ScoringSchema = z
   })
   .openapi("ScoringRequest");
 
-const MetricsSchema = z.record(z.string(), z.number()).openapi({ example: { coverage: 81.5 } });
+const metricFields = {
+  source: z.enum(SOURCES).openapi({ description: "Who defined it: Throng, the project's config or the task." }),
+  note: z.string().optional().openapi({
+    description:
+      "Why its value is null; on a value, what to know about it, such as that an older result was converted.",
+  }),
+};
+
+const MetricResultSchema = z
+  .discriminatedUnion("type", [
+    z.object({
+      ...metricFields,
+      type: z.literal("number"),
+      value: z.number().nullable(),
+      order: METRIC_TYPE_FIELDS.numberOrder,
+      unit: METRIC_TYPE_FIELDS.unit.optional(),
+    }),
+    z.object({
+      ...metricFields,
+      type: z.literal("boolean"),
+      value: z.boolean().nullable(),
+      order: METRIC_TYPE_FIELDS.booleanOrder,
+    }),
+    z.object({
+      ...metricFields,
+      type: z.literal("string"),
+      value: z.string().nullable(),
+      format: METRIC_TYPE_FIELDS.format.optional(),
+    }),
+    z.object({
+      ...metricFields,
+      type: z.literal("enum"),
+      value: z.string().nullable(),
+      values: METRIC_TYPE_FIELDS.values,
+    }),
+  ])
+  .openapi("MetricResult", { description: "One typed value in a run's score; null when it couldn't be measured." });
 
 const ScoringResultSchema = z
   .object({
@@ -301,40 +425,37 @@ const ScoringResultSchema = z
         z.object({ kind: z.literal("invalid"), error: z.string() }),
       ])
       .openapi({ description: "How the `.throng/config.yml` on `origin/main` it was scored under parsed." }),
-    gate: z.enum(GATES).openapi({ description: "Passed when every required check passed." }),
-    checks: z.array(
-      z
-        .object({
-          name: z.string().openapi({ example: "test" }),
-          required: z.boolean(),
-          outcome: z.enum(CHECK_OUTCOMES),
-          durationMs: z.number(),
-          metrics: MetricsSchema.openapi({ description: "The metrics it declared and reported, by name." }),
-          notes: z.array(z.string()).openapi({ description: "Ignored metrics, or why it was skipped." }),
-          error: z.string().optional().openapi({ description: "Only on the `config` entry of an invalid config." }),
-        })
-        .openapi("CheckResult"),
-    ),
-    builtin: z
-      .object({ filesChanged: z.number(), additions: z.number(), deletions: z.number(), durationMs: z.number() })
-      .openapi({ description: "Diff size against the base." }),
-    preview: z
-      .discriminatedUnion("status", [
-        z.object({ status: z.literal("none") }),
-        z.object({
-          status: z.literal("ready"),
-          url: z.string().openapi({ description: "Where the Preview is served." }),
-        }),
-        z.object({ status: z.literal("failed") }),
-        z.object({
-          status: z.literal("errored"),
-          error: z.string().openapi({ description: "The infrastructure error it kept failing on." }),
-        }),
-      ])
-      .openapi("PreviewResult", {
+    gate: z
+      .enum(GATES)
+      .openapi({ description: "Passed when every required check passed; failed on an invalid config." }),
+    checks: z
+      .array(
+        z
+          .object({
+            name: z.string().openapi({ example: "test" }),
+            source: z.enum(SOURCES),
+            required: z.boolean(),
+            outcome: z.enum(CHECK_OUTCOMES),
+            durationMs: z.number(),
+            notes: z.array(z.string()).openapi({
+              description:
+                "What the run noticed about it, such as why it was skipped or why the Preview didn't deploy.",
+            }),
+          })
+          .openapi("CheckResult"),
+      )
+      .openapi({
         description:
-          "The attempt's Worker Preview: `none` without a `preview` config or a passing gate, `failed` when its build or deploy failed, `errored` when the infrastructure kept failing. Neither changes the gate.",
+          "Every check in run order: Throng's `_diff` (finding the base and diffing), the config's checks, then " +
+          "`_preview` (deploying the Preview). `_preview` is `skipped` without a `preview` section or a passing gate, " +
+          "`failed` when its build or deploy failed and `errored` when the infrastructure kept failing; it never " +
+          "changes the gate.",
       }),
+    metrics: z.record(z.string(), MetricResultSchema).openapi({
+      description:
+        "Every metric by name: each check's outcome metric (an enum named after the check), followed by that " +
+        "check's own metrics, such as `_diff.filesChanged` and `_preview.url`.",
+    }),
     logs: z.array(z.string()).openapi({
       description:
         "The run's stored logs by name, in run order, for `GET …/runs/{runId}/logs/{name}`. A step that never ran has none.",
@@ -346,7 +467,6 @@ const ScoringResultSchema = z
 const CurrentResultSchema = ScoringResultSchema.extend({
   run: z.number().int().openapi({ description: "The run it came from." }),
   finishedAt: z.string(),
-  metrics: MetricsSchema.openapi({ description: "Every check's metrics in one map; metric names are unique." }),
 }).openapi("CurrentResult", {
   description: "The attempt's current result: the latest `done` run for its current head.",
 });
@@ -382,22 +502,13 @@ const BaseSchema = z
     description: "Where an attempt's history meets its task branch, or `origin/main` when the task has none.",
   });
 
-const ConfigNameSchema = z.string().regex(CONFIG_NAME);
-
-const MetricSchema = z
-  .object({
-    name: ConfigNameSchema.openapi({ example: "coverage" }),
-    unit: z.string().nullable().openapi({ example: "%" }),
-    order: z.enum(METRIC_ORDERS).openapi({ description: "`asc` when lower is better, `desc` when higher is." }),
-  })
-  .openapi("Metric");
-
 const TaskArenaSchema = z
   .object({
     task: z.string().openapi({ example: "t42" }),
     metrics: z.array(MetricSchema).openapi({
       description:
-        "Every metric the `.throng/config.yml` on `origin/main` declares, in check order; empty without a valid config.",
+        "Every metric the task's attempts are scored on: those the `.throng/config.yml` on `origin/main` declares, " +
+        "then the task's own, in order, each with its `source`; empty when they don't merge into a valid config.",
     }),
     attempts: z.array(
       ScoringStatusSchema.extend({
@@ -467,6 +578,8 @@ const EditTaskSchema = z
     title: z.string().trim().min(1).max(200).optional(),
     body: z.string().max(65_536).optional().openapi({ description: "Markdown." }),
     attemptLimit: AttemptLimitSchema.optional(),
+    checks: TaskChecksInputSchema.optional(),
+    metrics: TaskMetricsInputSchema.optional(),
   })
   .openapi("EditTask");
 
@@ -502,21 +615,8 @@ const ConfigSchema = z
     network: z.object({
       allow: z.array(z.string()).openapi({ description: "Extra HTTPS hosts checks may reach, lowercased." }),
     }),
-    checks: z
-      .array(
-        z.object({
-          name: ConfigNameSchema.openapi({ example: "test" }),
-          command: z.string().openapi({ example: "pnpm test" }),
-          required: z.boolean().openapi({ description: "Whether the gate needs it to pass." }),
-          timeoutMs: z
-            .number()
-            .int()
-            .max(MAX_CHECK_TIMEOUT_MS)
-            .openapi({ description: "Defaults to 10 minutes.", example: 600_000 }),
-          metrics: z.array(MetricSchema),
-        }),
-      )
-      .openapi({ description: "Run in order." }),
+    checks: z.array(ConfigCheckSchema).openapi({ description: "Run in order." }),
+    metrics: z.array(MetricSchema).openapi({ description: "Read from the checks' output files, in order." }),
     preview: z
       .object({ command: z.string().nullable().openapi({ description: "Builds before the preview deploys." }) })
       .nullable()
@@ -535,7 +635,7 @@ const ConfigResultSchema = z
       kind: z.literal("invalid"),
       error: z.string().openapi({
         description: "One line per problem, each prefixed with its path.",
-        example: "checks[0].metrics[0].order: order is required: ascending, asc, descending or desc",
+        example: "metrics[0].from: no check is named tests",
       }),
     }),
   ])

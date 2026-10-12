@@ -5,6 +5,8 @@
 
 import { parseDocument } from "yaml";
 import { z } from "zod";
+import { METRIC_FORMATS, METRIC_TYPES, parseFrom } from "./metric-values.ts";
+import type { MetricFormat } from "./metric-values.ts";
 import { originRepo } from "./repos.ts";
 import type { Repos } from "./repos.ts";
 
@@ -13,18 +15,40 @@ export const CONFIG_PATH = ".throng/config.yml";
 export const MAX_CONFIG_BYTES = 64 * 1024;
 export const DEFAULT_CHECK_TIMEOUT_MS = 10 * 60 * 1000;
 export const MAX_CHECK_TIMEOUT_MS = 30 * 60 * 1000;
-/** Check and metric names. */
+/** Check and metric names. A leading `_` is Throng's, and a dot would split a metric's `from`. */
 export const CONFIG_NAME = /^[a-z0-9][a-z0-9_-]*$/u;
+/** A metric's `from`: `<check>.<file>.<path>`, the file being a name in `$THRONG_OUTPUT` without `.json`. */
+const FROM = /^[^.]+\.[^./\\]+(\.[^.]+)+$/u;
 /** A metric's stored `order`: `asc` when lower values are better, `desc` when higher are. */
 export const METRIC_ORDERS = ["asc", "desc"] as const;
 export type MetricOrder = (typeof METRIC_ORDERS)[number];
+/** Who defined a check or metric: Throng itself, the project's config, or a task over it. */
+export const SOURCES = ["platform", "project", "task"] as const;
+export type Source = (typeof SOURCES)[number];
+/** The layers a config merges: every source but Throng, whose own checks no config defines. */
+export type ConfigLayer = Exclude<Source, "platform">;
+export const CONFIG_LAYERS = SOURCES.filter((source): source is ConfigLayer => source !== "platform");
 
-export interface MetricConfig {
+/** A metric, with the fields its type has. */
+export type MetricConfig = {
   name: string;
-  unit: string | null;
-  /** Which way is better: `asc` when lower values are better, `desc` when higher are. */
-  order: MetricOrder;
-}
+  /** Where its value is read: `<check>.<file>.<path>`. */
+  from: string;
+  source: ConfigLayer;
+} & (
+  | {
+      type: "number";
+      unit: string | null;
+      /** Which way is better: `asc` when lower values are better, `desc` when higher are. */
+      order: MetricOrder;
+    }
+  /** `order` is `desc` when true is better, `asc` when false is. */
+  | { type: "boolean"; order: MetricOrder }
+  /** Never ranks; `format` says only how it's shown. */
+  | { type: "string"; format: MetricFormat | null }
+  /** `values` are every value it may take, best first. */
+  | { type: "enum"; values: string[] }
+);
 
 export interface CheckConfig {
   name: string;
@@ -32,7 +56,7 @@ export interface CheckConfig {
   /** Whether the gate needs it to pass. */
   required: boolean;
   timeoutMs: number;
-  metrics: MetricConfig[];
+  source: ConfigLayer;
 }
 
 export interface Config {
@@ -42,6 +66,8 @@ export interface Config {
   network: { allow: string[] };
   /** Run in order. */
   checks: CheckConfig[];
+  /** Read from the checks' output files, in order. */
+  metrics: MetricConfig[];
   /** Null when the project doesn't deploy previews; `command` is null when it needs no build. */
   preview: { command: string | null } | null;
   /** Null to use the default cap on active attempts per task. */
@@ -68,20 +94,150 @@ const UNIT_MS = { s: 1000, m: 60 * 1000, h: 60 * 60 * 1000 } as const;
 const HOST = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/u;
 
 const name = (what: string) =>
-  z.string({ error: `${what} must be a string` }).regex(CONFIG_NAME, `${what} must match ${CONFIG_NAME.source}`);
+  z.string({ error: `${what} must be a string` }).superRefine((text, ctx) => {
+    let message: string | null = null;
+    if (text.startsWith("_")) {
+      message = `${what} must not start with _, which is reserved for Throng's own checks and metrics`;
+    } else if (text.includes(".")) {
+      message = `${what} must not contain a dot; dots separate the parts of a metric's from`;
+    } else if (!CONFIG_NAME.test(text)) {
+      message = `${what} must match ${CONFIG_NAME.source}`;
+    }
+    if (message !== null) ctx.addIssue({ code: "custom", message });
+  });
+/** `a`, `a or b`, `a, b or c`. */
+const oneOf = (values: readonly string[]) =>
+  values.length === 1 ? (values[0] ?? "") : `${values.slice(0, -1).join(", ")} or ${values.at(-1) ?? ""}`;
+const FROM_FORMAT = "from must be <check>.<file>.<path>, like test.coverage-summary.total.lines.pct";
 const command = z.string({ error: "must be a string" }).trim().min(1, "must not be empty");
 
-const MetricSchema = z.strictObject({
+/**
+ * A metric as a config writes it. It stays one flat object rather than a union on `type`, so each
+ * field's error names that field; `checkMetricFields` enforces which fields each type has.
+ */
+export const MetricSchema = z.strictObject({
   name: name("metric name"),
-  unit: z.string({ error: "unit must be a string" }).optional(),
-  order: z.enum(ORDER_ALIASES, {
+  from: z
+    .string({ error: (issue) => (issue.input === undefined ? "from is required: <check>.<file>.<path>" : FROM_FORMAT) })
+    .regex(FROM, FROM_FORMAT),
+  type: z.enum(METRIC_TYPES, {
     error: (issue) =>
-      issue.input === undefined
-        ? "order is required: ascending, asc, descending or desc"
-        : "order must be ascending, asc, descending or desc",
+      issue.input === undefined ? `type is required: ${oneOf(METRIC_TYPES)}` : `type must be ${oneOf(METRIC_TYPES)}`,
   }),
+  unit: z.string({ error: "unit must be a string" }).optional(),
+  order: z.enum(ORDER_ALIASES, { error: "order must be ascending, asc, descending or desc" }).optional(),
+  values: z.array(z.string({ error: "must be a string" }), { error: "values must be a list" }).optional(),
+  format: z.enum(METRIC_FORMATS, { error: `format must be ${oneOf(METRIC_FORMATS)}` }).optional(),
   target: z.never({ error: "target is reserved and not supported yet; remove it" }).optional(),
 });
+
+/** Rejects each field a metric sets that its type doesn't have, and an enum without its values. */
+export function checkMetricFields(metric: z.infer<typeof MetricSchema>, at: number, ctx: z.RefinementCtx): void {
+  const problem = (path: (string | number)[], message: string) =>
+    ctx.addIssue({ code: "custom", path: ["metrics", at, ...path], message });
+  if (metric.unit !== undefined && metric.type !== "number") problem(["unit"], "unit is only for a number metric");
+  if (metric.format !== undefined && metric.type !== "string")
+    problem(["format"], "format is only for a string metric");
+  if (metric.order !== undefined && metric.type === "string") problem(["order"], "a string metric has no order");
+  if (metric.order !== undefined && metric.type === "enum") {
+    problem(["order"], "an enum metric's order is its values, best first");
+  }
+  if (metric.type !== "enum") {
+    if (metric.values !== undefined) problem(["values"], "values are only for an enum metric");
+    return;
+  }
+  if (metric.values === undefined || metric.values.length === 0) {
+    problem(["values"], "an enum metric needs its values, best first");
+    return;
+  }
+  const seen = new Set<string>();
+  metric.values.forEach((value, i) => {
+    if (seen.has(value)) problem(["values", i], `duplicate value ${value}`);
+    seen.add(value);
+  });
+}
+
+/** A layer's checks and metrics, as far as the name rules read them. */
+export interface NamedLayer {
+  checks: readonly { name: string }[];
+  metrics: readonly { name: string; from: string }[];
+}
+
+/** A broken name rule, at its path in the layer: `["metrics", 0, "from"]`. */
+export interface NameProblem {
+  path: (string | number)[];
+  message: string;
+}
+
+/**
+ * Each name rule a layer's checks and metrics break, in order. A check's outcome is a metric named
+ * after it, so checks and metrics share one namespace: a name may be used once, and a metric may read
+ * only a check that exists. `project` is the config a task's layer goes over: its names are taken,
+ * and its checks may be read. It is null for the project's config itself.
+ */
+export function nameProblems(layer: NamedLayer, project: NamedLayer | null): NameProblem[] {
+  const projectChecks = new Set(project?.checks.map((check) => check.name));
+  const projectMetrics = new Set(project?.metrics.map((metric) => metric.name));
+  const taken = (used: string): string | null => {
+    if (projectChecks.has(used)) return `${used} is also a check's name in ${CONFIG_PATH}`;
+    if (projectMetrics.has(used)) return `${used} is also a metric's name in ${CONFIG_PATH}`;
+    return null;
+  };
+  const problems: NameProblem[] = [];
+  const checks = new Set<string>();
+  layer.checks.forEach((check, i) => {
+    const message = taken(check.name) ?? (checks.has(check.name) ? `duplicate check name ${check.name}` : null);
+    if (message !== null) problems.push({ path: ["checks", i, "name"], message });
+    checks.add(check.name);
+  });
+  const metrics = new Set<string>();
+  layer.metrics.forEach((metric, i) => {
+    let message = taken(metric.name);
+    if (message === null && checks.has(metric.name)) message = `metric name ${metric.name} is also a check's name`;
+    else if (message === null && metrics.has(metric.name)) message = `duplicate metric name ${metric.name}`;
+    if (message !== null) problems.push({ path: ["metrics", i, "name"], message });
+    metrics.add(metric.name);
+    const { check } = parseFrom(metric.from);
+    if (!checks.has(check) && !projectChecks.has(check)) {
+      problems.push({ path: ["metrics", i, "from"], message: `no check is named ${check}` });
+    }
+  });
+  return problems;
+}
+
+/**
+ * A parsed metric as stored, as the layer `source` defined it, with its type's defaults: a number or
+ * boolean is `desc` (higher or true is better).
+ */
+export function metricConfig(metric: z.infer<typeof MetricSchema>, source: ConfigLayer): MetricConfig {
+  const fields = { name: metric.name, from: metric.from, source };
+  const order = metric.order === undefined ? "desc" : ORDERS[metric.order];
+  switch (metric.type) {
+    case "number": {
+      return { ...fields, type: "number", unit: metric.unit ?? null, order };
+    }
+    case "boolean": {
+      return { ...fields, type: "boolean", order };
+    }
+    case "string": {
+      return { ...fields, type: "string", format: metric.format ?? null };
+    }
+    case "enum": {
+      return { ...fields, type: "enum", values: metric.values ?? [] };
+    }
+  }
+}
+
+/** A parsed check as stored, as the layer `source` defined it: required, with a 10m timeout, by default. */
+export function checkConfig(check: z.infer<typeof CheckSchema>, source: ConfigLayer): CheckConfig {
+  return {
+    name: check.name,
+    command: check.command,
+    required: check.required ?? true,
+    timeoutMs: check.timeout ?? DEFAULT_CHECK_TIMEOUT_MS,
+    source,
+  };
+}
 
 const TimeoutSchema = z
   .string({ error: "timeout must be a duration like 90s, 10m or 1h" })
@@ -93,12 +249,18 @@ const TimeoutSchema = z
   .refine((ms) => ms > 0, "timeout must be positive")
   .refine((ms) => ms <= MAX_CHECK_TIMEOUT_MS, "timeout must be at most 30m");
 
-const CheckSchema = z.strictObject({
+export const CheckSchema = z.strictObject({
   name: name("check name"),
   command,
   required: z.boolean({ error: "required must be true or false" }).optional(),
   timeout: TimeoutSchema.optional(),
-  metrics: z.array(MetricSchema, { error: "metrics must be a list" }).optional(),
+  metrics: z
+    .never({
+      error:
+        "a check no longer declares metrics; move each to the top-level metrics list, with " +
+        "from: <check>.<file>.<path> naming a JSON file the check writes into $THRONG_OUTPUT, and a type",
+    })
+    .optional(),
 });
 
 const ConfigSchema = z
@@ -119,6 +281,7 @@ const ConfigSchema = z
         })
         .optional(),
       checks: z.array(CheckSchema, { error: "checks must be a list" }).optional(),
+      metrics: z.array(MetricSchema, { error: "metrics must be a list" }).optional(),
       preview: z.strictObject({ command: command.optional() }, { error: "preview must be a mapping" }).optional(),
       attempts: z
         .strictObject({
@@ -133,21 +296,9 @@ const ConfigSchema = z
     { error: "the config must be a mapping" },
   )
   .superRefine((config, ctx) => {
-    const checks = new Set<string>();
-    const metrics = new Set<string>();
-    config.checks?.forEach((check, i) => {
-      if (checks.has(check.name)) {
-        ctx.addIssue({ code: "custom", path: ["checks", i, "name"], message: `duplicate check name ${check.name}` });
-      }
-      checks.add(check.name);
-      check.metrics?.forEach((metric, j) => {
-        if (metrics.has(metric.name)) {
-          const path = ["checks", i, "metrics", j, "name"];
-          ctx.addIssue({ code: "custom", path, message: `duplicate metric name ${metric.name}` });
-        }
-        metrics.add(metric.name);
-      });
-    });
+    const layer = { checks: config.checks ?? [], metrics: config.metrics ?? [] };
+    for (const problem of nameProblems(layer, null)) ctx.addIssue({ code: "custom", ...problem });
+    layer.metrics.forEach((metric, i) => checkMetricFields(metric, i, ctx));
   });
 
 /**
@@ -179,17 +330,8 @@ export function parseConfig(text: string | null): ConfigResult {
     config: {
       setup: config.setup ?? [],
       network: { allow: config.network?.allow ?? [] },
-      checks: (config.checks ?? []).map((check) => ({
-        name: check.name,
-        command: check.command,
-        required: check.required ?? true,
-        timeoutMs: check.timeout ?? DEFAULT_CHECK_TIMEOUT_MS,
-        metrics: (check.metrics ?? []).map((metric) => ({
-          name: metric.name,
-          unit: metric.unit ?? null,
-          order: ORDERS[metric.order],
-        })),
-      })),
+      checks: (config.checks ?? []).map((check) => checkConfig(check, "project")),
+      metrics: (config.metrics ?? []).map((metric) => metricConfig(metric, "project")),
       preview: config.preview === undefined ? null : { command: config.preview.command ?? null },
       attempts: { limit: config.attempts?.limit ?? null },
     },
@@ -202,14 +344,19 @@ export async function loadConfig(repos: Repos, projectId: string): Promise<Confi
   return parseConfig(file === null ? null : await file.text());
 }
 
-function describeIssue(issue: z.core.$ZodIssue): string {
-  const path = issue.path
-    .map((part, i) => (typeof part === "number" ? `[${part}]` : `${i === 0 ? "" : "."}${String(part)}`))
-    .join("");
+export function describeIssue(issue: z.core.$ZodIssue): string {
+  const path = describePath(issue.path);
   // An unknown key's path is its parent's, so name the key itself.
   if (issue.code === "unrecognized_keys") {
     const keys = issue.keys.map((key) => (path === "" ? key : `${path}.${key}`));
     return `${keys.join(", ")}: unknown key${keys.length === 1 ? "" : "s"}`;
   }
   return path === "" ? issue.message : `${path}: ${issue.message}`;
+}
+
+/** A path into a config as its YAML reads: `checks[0].name`. */
+export function describePath(path: readonly PropertyKey[]): string {
+  return path
+    .map((part, i) => (typeof part === "number" ? `[${part}]` : `${i === 0 ? "" : "."}${String(part)}`))
+    .join("");
 }

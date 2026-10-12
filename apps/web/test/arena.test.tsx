@@ -9,9 +9,12 @@ import {
   arenaAttempt,
   BASE,
   bob,
+  check,
   MAIN,
   me,
+  platformCheck,
   result,
+  scoredMetrics,
   serveArena,
   serveCompare,
   server,
@@ -45,8 +48,8 @@ async function openArena(
 }
 
 const METRICS: Metric[] = [
-  { name: "coverage", unit: "%", order: "desc" },
-  { name: "bundle_kb", unit: "KB", order: "asc" },
+  { name: "coverage", from: "test.coverage.pct", type: "number", unit: "%", order: "desc", source: "project" },
+  { name: "bundle_kb", from: "bundle.size.kb", type: "number", unit: "KB", order: "asc", source: "project" },
 ];
 
 const rail = () => screen.getByRole("list", { name: "Attempts" });
@@ -110,7 +113,7 @@ describe("the arena's lanes", () => {
   it("heads each lane with its gate, verdict counts, the author's note and a menu", async () => {
     const t1a1 = passing(1, {
       verdicts: { head: "x", merge: 2, revise: 1, reject: 0 },
-      result: result({ preview: { status: "ready", url: "https://t1a1.preview.test" } }),
+      result: result({ metrics: scoredMetrics({ preview: "https://t1a1.preview.test" }) }),
     });
     const asked: string[] = [];
     server.use(
@@ -287,11 +290,8 @@ const only = () =>
   arenaAttempt(1, 1, {
     status: "done",
     result: result({
-      metrics: { coverage: 81.5 },
-      checks: [
-        { name: "test", required: true, outcome: "passed", durationMs: 1200, metrics: { coverage: 81.5 }, notes: [] },
-        { name: "lint", required: false, outcome: "failed", durationMs: 300, metrics: {}, notes: [] },
-      ],
+      metrics: scoredMetrics({ values: { coverage: 81.5 } }),
+      checks: [check("test", true, "passed", 1200), check("lint", false, "failed", 300)],
     }),
   });
 
@@ -328,6 +328,46 @@ describe("the single-attempt view", () => {
     expect(screen.queryByRole("button", { name: "Merge" })).toBeNull();
   });
 
+  it("links a string metric with format: url from its scorecard", async () => {
+    const metrics = {
+      ...scoredMetrics(),
+      report: { source: "project", type: "string", format: "url", value: "https://ci.example.test/1" },
+    } as const;
+    server.use(
+      serveCompare(filesByHead),
+      ...serveArena(
+        task(1),
+        [arenaAttempt(1, 1, { status: "done", result: result({ metrics }) })],
+        [{ name: "report", from: "test.out.url", type: "string", format: "url", source: "project" }],
+      ),
+    );
+    await renderApp("/ada/alpha/tasks/t1");
+    const scorecard = await screen.findByRole("region", { name: "Scorecard" });
+    expect(within(scorecard).getByRole("link", { name: "https://ci.example.test/1" })).toHaveAttribute(
+      "href",
+      "https://ci.example.test/1",
+    );
+  });
+
+  it("shows a url metric that isn't http or https as text, since an attempt's checks write it", async () => {
+    const metrics = {
+      ...scoredMetrics(),
+      report: { source: "project", type: "string", format: "url", value: "javascript:alert(1)" },
+    } as const;
+    server.use(
+      serveCompare(filesByHead),
+      ...serveArena(
+        task(1),
+        [arenaAttempt(1, 1, { status: "done", result: result({ metrics }) })],
+        [{ name: "report", from: "test.out.url", type: "string", format: "url", source: "project" }],
+      ),
+    );
+    await renderApp("/ada/alpha/tasks/t1");
+    const scorecard = await screen.findByRole("region", { name: "Scorecard" });
+    expect(scorecard).toHaveTextContent("reportjavascript:alert(1)");
+    expect(within(scorecard).queryByRole("link")).toBeNull();
+  });
+
   it("says when the attempt hasn't been scored yet", async () => {
     server.use(serveCompare(filesByHead), ...serveArena(task(1), [arenaAttempt(1, 1, { status: "queued" })]));
     await renderApp("/ada/alpha/tasks/t1");
@@ -342,8 +382,7 @@ const scored = (n: number, gate: "passed" | "failed", coverage: number, bundle: 
     status: "done",
     result: result({
       gate,
-      metrics: { coverage, bundle_kb: bundle },
-      builtin: { filesChanged: files, additions: files * 10, deletions: 0, durationMs: 1 },
+      metrics: scoredMetrics({ files, additions: files * 10, values: { coverage, bundle_kb: bundle } }),
     }),
   });
 
@@ -358,6 +397,21 @@ function cardMetrics(ref: string): Record<string, string> {
       }),
   );
 }
+
+/** A passing or failing attempt reporting a boolean `green`, an enum `grade` and a string `summary`. */
+const typed = (n: number, gate: "passed" | "failed", fields: { green: boolean; grade: string; summary: string }) =>
+  arenaAttempt(1, n, {
+    status: "done",
+    result: result({
+      gate,
+      metrics: {
+        ...scoredMetrics(),
+        green: { source: "project", type: "boolean", value: fields.green, order: "desc" },
+        grade: { source: "project", type: "enum", value: fields.grade, values: ["a", "b", "c"] },
+        summary: { source: "project", type: "string", value: fields.summary },
+      },
+    }),
+  });
 
 describe("the arena's rail", () => {
   it("shows every declared metric, files changed and lines added, marking the best among passing attempts", async () => {
@@ -416,8 +470,10 @@ describe("the arena's rail", () => {
   });
 
   it("tells a gate with no checks configured from one that passed, and shows scoring in progress", async () => {
+    // A config with no checks still runs Throng's own `_diff` and `_preview`.
+    const unchecked = result({ checks: [platformCheck("_diff", "passed"), platformCheck("_preview", "skipped")] });
     await openArena([
-      arenaAttempt(1, 1, { status: "done", result: result({ config: { kind: "none" }, checks: [] }) }),
+      arenaAttempt(1, 1, { status: "done", result: unchecked }),
       passing(2),
       arenaAttempt(1, 3, { status: "running" }),
       arenaAttempt(1, 4, { needsUpdate: true, forkedFrom: "t1a1" }),
@@ -453,6 +509,30 @@ describe("the arena's rail", () => {
     expect(railOrder()).toEqual(["t1a1", "t1a4", "t1a2", "t1a3"]);
     await user.selectOptions(sortBy, "Number");
     expect(railOrder()).toEqual(["t1a1", "t1a2", "t1a3", "t1a4"]);
+  });
+
+  it("shows booleans, enums and strings, marking and sorting by the ranked ones but never by a string", async () => {
+    const { user } = await openArena(
+      [
+        typed(1, "passed", { green: false, grade: "c", summary: "slow" }),
+        typed(2, "passed", { green: true, grade: "b", summary: "ok" }),
+        typed(3, "failed", { green: true, grade: "a", summary: "fast" }),
+      ],
+      [
+        { name: "green", from: "test.out.green", type: "boolean", order: "desc", source: "project" },
+        { name: "grade", from: "test.out.grade", type: "enum", values: ["a", "b", "c"], source: "project" },
+        { name: "summary", from: "test.out.summary", type: "string", format: null, source: "project" },
+      ],
+    );
+    expect(cardMetrics("t1a1")).toMatchObject({ green: "No", grade: "c", summary: "slow" });
+    expect(cardMetrics("t1a2")).toMatchObject({ green: "Yes*", grade: "b*", summary: "ok" });
+    expect(cardMetrics("t1a3")).toMatchObject({ green: "Yes", grade: "a", summary: "fast" });
+    const sortBy = screen.getByRole("combobox", { name: "Sort by" });
+    expect(within(sortBy).queryByRole("option", { name: "summary" })).toBeNull();
+    await user.selectOptions(sortBy, "grade");
+    expect(railOrder()).toEqual(["t1a3", "t1a2", "t1a1"]);
+    await user.selectOptions(sortBy, "green");
+    expect(railOrder()).toEqual(["t1a2", "t1a3", "t1a1"]);
   });
 
   it("polls the scores, but never asks for a lane's compare again", async () => {

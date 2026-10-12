@@ -1,7 +1,7 @@
 // An attempt's current result: the single-attempt view's scorecard, and the checks table and metric
 // values it's made of, which the attempt details sheet shows too.
 
-import { formatValue } from "@/lib/arena";
+import { formatValue, linkTarget } from "@/lib/arena";
 import type { ArenaAttempt, MetricColumn } from "@/lib/arena";
 
 type CheckOutcome = NonNullable<ArenaAttempt["result"]>["checks"][number]["outcome"];
@@ -10,6 +10,7 @@ const OUTCOME_LABELS: Record<CheckOutcome, string> = {
   passed: "Passed",
   failed: "Failed",
   timedOut: "Timed out",
+  errored: "Errored",
   skipped: "Skipped",
 };
 
@@ -60,16 +61,28 @@ export function ChecksTable({ checks }: { checks: NonNullable<ArenaAttempt["resu
   );
 }
 
-/** The attempt's value in each column, with its unit. */
+/** The attempt's value in each column, with its unit; a `url` string as a link. */
 export function MetricValues({ attempt, columns }: { attempt: ArenaAttempt; columns: MetricColumn[] }) {
   return (
     <dl className="grid grid-cols-[1fr_auto] gap-x-3 gap-y-0.5 text-xs">
-      {columns.map((column) => (
-        <div key={column.key} className="contents">
-          <dt className="text-muted-foreground">{column.label}</dt>
-          <dd className="text-right font-mono tabular-nums">{formatValue(column.value(attempt), column.unit)}</dd>
-        </div>
-      ))}
+      {columns.map((column) => {
+        const value = column.value(attempt);
+        const href = column.format === "url" ? linkTarget(value) : null;
+        return (
+          <div key={column.key} className="contents">
+            <dt className="text-muted-foreground">{column.label}</dt>
+            <dd className="min-w-0 truncate text-right font-mono tabular-nums">
+              {href === null ? (
+                formatValue(value, column.unit)
+              ) : (
+                <a href={href} target="_blank" rel="noreferrer" className="underline underline-offset-3">
+                  {href}
+                </a>
+              )}
+            </dd>
+          </div>
+        );
+      })}
     </dl>
   );
 }

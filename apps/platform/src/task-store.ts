@@ -11,7 +11,7 @@ import { taskBranchHead } from "./base.ts";
 import { migrateValues, normaliseLandingOutcome } from "./casing.ts";
 import { addColumns, renameColumns } from "./columns.ts";
 import { CONFIG_PATH, loadConfig } from "./config.ts";
-import type { ConfigResult } from "./config.ts";
+import type { CheckConfig, ConfigResult, MetricConfig } from "./config.ts";
 import { ServiceError } from "./errors.ts";
 import type { ErrorCode } from "./errors.ts";
 import { Follows } from "./follows.ts";
@@ -44,6 +44,8 @@ import type {
   ScoringTrigger,
   StoredRun,
 } from "./scoring.ts";
+import { NO_TASK_DEFINITIONS, taskDefinitionsFrom } from "./task-definitions.ts";
+import type { TaskDefinitions, TaskDefinitionsInput } from "./task-definitions.ts";
 import { attemptRef, reservedTask, taskBranchRef, taskRef } from "./task-refs.ts";
 import type { Actor } from "./tokens.ts";
 import { Verdicts } from "./verdicts.ts";
@@ -89,6 +91,8 @@ export interface StoredTask {
   /** The user id that closed (or made obsolete) the task. */
   closed_by: string | null;
   attempt_limit: number | null;
+  /** What the task defines over the project's config. */
+  definitions: TaskDefinitions;
 }
 
 export interface StoredAttempt {
@@ -211,9 +215,14 @@ export interface CreateTaskInput {
   title: string;
   body?: string | undefined;
   attemptLimit?: number | null | undefined;
+  /** Already checked against the project's config (`taskDefinitionsFrom`). */
+  checks?: CheckConfig[] | undefined;
+  /** Already checked against the project's config (`taskDefinitionsFrom`). */
+  metrics?: MetricConfig[] | undefined;
 }
 
-export interface EditTaskInput {
+/** The checks and metrics it gives replace the task's, once checked against the project's config. */
+export interface EditTaskInput extends TaskDefinitionsInput {
   task: number;
   title?: string | undefined;
   body?: string | undefined;
@@ -280,6 +289,8 @@ interface TaskRow {
   closed_at: string | null;
   closed_by: string | null;
   attempt_limit: number | null;
+  /** `TaskDefinitions` as JSON; null for none. */
+  definitions: string | null;
 }
 
 /** A push-to-create between forking and creating its attempt. */
@@ -325,7 +336,8 @@ const SCHEMA = [
     created_at TEXT NOT NULL,
     closed_at TEXT,
     closed_by TEXT,
-    attempt_limit INTEGER
+    attempt_limit INTEGER,
+    definitions TEXT
   )`,
   `CREATE TABLE IF NOT EXISTS attempts (
     task INTEGER NOT NULL REFERENCES tasks (number),
@@ -378,6 +390,9 @@ const JOURNAL_RENAMES = [["agent", "alias"]] as const;
  */
 const ATTEMPT_COLUMNS = ["forked_from INTEGER", "needs_update TEXT", "followed_head TEXT", "alias TEXT"];
 
+/** Columns added to tasks after their table was made: what a task defines over the project's config. */
+const TASK_COLUMNS = ["definitions TEXT"];
+
 /**
  * Creates the store's tables, adds the journal's and attempts' newer columns to tables that predate
  * them, and drops the spike's tables.
@@ -387,6 +402,7 @@ export function migrate(sql: Sql): void {
   for (const table of DROPPED_TABLES) sql.exec(`DROP TABLE IF EXISTS ${table}`);
   renameColumns(sql, "journal", JOURNAL_RENAMES);
   addColumns(sql, "journal", JOURNAL_COLUMNS);
+  addColumns(sql, "tasks", TASK_COLUMNS);
   const added = addColumns(sql, "attempts", ATTEMPT_COLUMNS);
   if (added.includes("alias")) {
     // Attempts made before `alias` take it from their `created` entry (renamed above), unless handed off since.
@@ -470,14 +486,15 @@ export class TaskStore {
     return this.#sql.transaction(() => {
       const number = this.#next("tasks");
       this.#sql.exec(
-        `INSERT INTO tasks (number, title, body, creator, state, created_at, attempt_limit)
-         VALUES (?, ?, ?, ?, 'open', ?, ?)`,
+        `INSERT INTO tasks (number, title, body, creator, state, created_at, attempt_limit, definitions)
+         VALUES (?, ?, ?, ?, 'open', ?, ?, ?)`,
         number,
         input.title,
         input.body ?? "",
         actor.user.id,
         this.#stamp(),
         input.attemptLimit ?? null,
+        storedDefinitions({ checks: input.checks ?? [], metrics: input.metrics ?? [] }),
       );
       this.#journal(actor, "created", number, null);
       return this.#task(number);
@@ -486,6 +503,15 @@ export class TaskStore {
 
   getTask(_project: ProjectContext, _actor: Actor, input: { task: number }): StoredTask {
     return this.#task(input.task);
+  }
+
+  /**
+   * What a task defines over the project's config, for a scoring run to merge. None for a task with
+   * no row, like the spike's attempts.
+   */
+  definitionsOf(task: number): TaskDefinitions {
+    const [row] = this.#sql.exec<TaskRow>("SELECT * FROM tasks WHERE number = ?", task);
+    return row === undefined ? NO_TASK_DEFINITIONS : toTask(row).definitions;
   }
 
   /** The project's tasks by number. Obsolete tasks are left out unless `state` asks for them. */
@@ -512,19 +538,41 @@ export class TaskStore {
     };
   }
 
-  /** Edits a task's title, body or attempt limit. The project owner or the task's creator may. */
-  editTask(project: ProjectContext, actor: Actor, input: EditTaskInput): StoredTask {
+  /**
+   * Edits a task's title, body, attempt limit, checks or metrics. The project owner or the task's
+   * creator may; who may is checked before the checks and metrics are. Changed definitions rescore
+   * each open attempt's head, so every attempt is measured the same way; drafts are left alone.
+   */
+  async editTask(project: ProjectContext, actor: Actor, input: EditTaskInput): Promise<StoredTask> {
+    this.#mayEditTask(project, actor, this.#task(input.task));
+    const defining = input.checks !== undefined || input.metrics !== undefined;
+    const config = defining ? await loadConfig(this.#repos, project.id) : null;
+
+    // From here to the update nothing awaits; the task is read again, as the check above awaited,
+    // and the checks and metrics it leaves out are taken from what's stored now.
     const current = this.#task(input.task);
-    this.#mayManageTask(project, actor, current);
-    if (current.state === "obsolete") throw invalidState(`${taskRef(current.number)} is obsolete`);
+    this.#mayEditTask(project, actor, current);
+    const definitions = storedDefinitions(
+      config === null ? current.definitions : editedDefinitions(input, current.definitions, config),
+    );
     this.#sql.exec(
-      "UPDATE tasks SET title = ?, body = ?, attempt_limit = ? WHERE number = ?",
+      "UPDATE tasks SET title = ?, body = ?, attempt_limit = ?, definitions = ? WHERE number = ?",
       input.title ?? current.title,
       input.body ?? current.body,
       input.attemptLimit === undefined ? current.attempt_limit : input.attemptLimit,
+      definitions,
       current.number,
     );
+    if (definitions !== storedDefinitions(current.definitions)) {
+      const open = this.#activeAttempts(current.number).filter((a) => a.state === "open");
+      await Promise.all(open.map((attempt) => this.#scoreHead(project, actor, attempt, "rescore")));
+    }
     return this.#task(current.number);
+  }
+
+  #mayEditTask(project: ProjectContext, actor: Actor, current: StoredTask): void {
+    this.#mayManageTask(project, actor, current);
+    if (current.state === "obsolete") throw invalidState(`${taskRef(current.number)} is obsolete`);
   }
 
   /**
@@ -725,17 +773,24 @@ export class TaskStore {
     return this.#scoringDetail(this.#attempt(input));
   }
 
-  /** The task's arena: every attempt, obsolete ones included, by number, with its scoring and current result. */
+  /**
+   * The task's arena: what the task defines over the project's config, and every attempt, obsolete
+   * ones included, by number, with its scoring and current result.
+   */
   taskArena(
     _project: ProjectContext,
     _actor: Actor,
     input: { task: number },
-  ): (Omit<StoredAttempt, "scoring"> & { scoring: AttemptScoringDetail })[] {
-    this.#task(input.task);
-    return this.#sql
+  ): {
+    definitions: TaskDefinitions;
+    attempts: (Omit<StoredAttempt, "scoring"> & { scoring: AttemptScoringDetail })[];
+  } {
+    const { definitions } = this.#task(input.task);
+    const attempts = this.#sql
       .exec<AttemptRow>("SELECT * FROM attempts WHERE task = ? ORDER BY number", input.task)
       .map((row) => this.#toAttempt(row))
       .map((a) => ({ ...a, scoring: this.#scoringDetail(a) }));
+    return { definitions, attempts };
   }
 
   /** The attempt's scoring status, with the run holding its current result. */
@@ -2557,7 +2612,31 @@ function toTask(row: TaskRow): StoredTask {
     closed_at: row.closed_at,
     closed_by: row.closed_by,
     attempt_limit: row.attempt_limit,
+    definitions:
+      row.definitions === null
+        ? NO_TASK_DEFINITIONS
+        : { ...NO_TASK_DEFINITIONS, ...(JSON.parse(row.definitions) as Partial<TaskDefinitions>) },
   };
+}
+
+/** A task's definitions as stored: null for none. */
+function storedDefinitions(definitions: TaskDefinitions): string | null {
+  const none = Object.values(definitions).every((list: unknown[]) => list.length === 0);
+  return none ? null : JSON.stringify(definitions);
+}
+
+/**
+ * A task's definitions after an edit: the checks and metrics it gave, with `current`'s for those it
+ * left out, checked against the project's config on `main`.
+ */
+function editedDefinitions(
+  input: TaskDefinitionsInput,
+  current: TaskDefinitions,
+  config: ConfigResult,
+): TaskDefinitions {
+  const checked = taskDefinitionsFrom(input, current, config);
+  if ("error" in checked) throw new ServiceError("invalidRequest", checked.error);
+  return checked.definitions;
 }
 
 function toAttempt(row: AttemptRow): Omit<StoredAttempt, "scoring" | "merge_request" | "verdicts"> {

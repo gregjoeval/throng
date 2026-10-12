@@ -39,7 +39,8 @@ describe("POST /api/config/validate", () => {
           config: {
             setup: [],
             network: { allow: [] },
-            checks: [{ name: "test", command: "pnpm test", required: true, timeoutMs: 600_000, metrics: [] }],
+            checks: [{ name: "test", command: "pnpm test", required: true, timeoutMs: 600_000, source: "project" }],
+            metrics: [],
             preview: null,
             attempts: { limit: null },
           },
@@ -52,12 +53,15 @@ describe("POST /api/config/validate", () => {
     const { mint, validate } = setup();
     const headers = { Authorization: `Bearer ${await mint()}`, "Content-Type": "text/plain" };
     expect(
-      await validate("checks: [{ name: t, command: x, metrics: [{ name: m, order: asc, target: 1 }] }]", headers),
+      await validate(
+        "checks: [{ name: t, command: x }]\nmetrics: [{ name: m, from: t.r.m, type: number, target: 1 }]",
+        headers,
+      ),
     ).toEqual({
       status: 200,
       body: {
         kind: "invalid",
-        error: "checks[0].metrics[0].target: target is reserved and not supported yet; remove it",
+        error: "metrics[0].target: target is reserved and not supported yet; remove it",
       },
     });
     expect((await validate("", headers)).body).toMatchObject({ kind: "valid" });

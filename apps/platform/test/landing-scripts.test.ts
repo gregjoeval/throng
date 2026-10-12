@@ -209,7 +209,14 @@ describe("retestScript", () => {
         fork,
         merge,
         plan(
-          [{ name: "both", command: "test -f b.txt && test -f c.txt && test -f built", timeoutMs: 60_000 }],
+          [
+            {
+              name: "both",
+              command: "test -f b.txt && test -f c.txt && test -f built",
+              timeoutMs: 60_000,
+              metrics: [],
+            },
+          ],
           ["touch built"],
         ),
       ),
@@ -224,7 +231,7 @@ describe("retestScript", () => {
         origin,
         fork,
         checked(head),
-        plan([{ name: "no-c", command: "test ! -f c.txt", timeoutMs: 60_000 }]),
+        plan([{ name: "no-c", command: "test ! -f c.txt", timeoutMs: 60_000, metrics: [] }]),
       ),
     );
     expect(raw.checks).toMatchObject([{ exit: 1 }]);

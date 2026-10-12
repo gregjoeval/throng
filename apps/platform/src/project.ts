@@ -6,6 +6,7 @@ import { LANDING_ROLES, sandboxName, SCORING_ROLES } from "./grants";
 import type { SandboxRole } from "./grants";
 import type { LandingOutcome } from "./landing";
 import type { ScoringOutcome, ScoringRequest, StoredRun } from "./scoring";
+import type { TaskDefinitions } from "./task-definitions";
 import { parseAttemptRef } from "./task-refs";
 import { runTaskMethod, TaskStore } from "./task-store";
 import type { ProjectContext, Sql, TaskOutcome } from "./task-store";
@@ -78,6 +79,11 @@ export class ProjectCoordinator extends DurableObject<Env> {
   /** Spike-only: one scoring run, with its result, for the e2e suite. */
   spikeRun(id: number): StoredRun | null {
     return this.#tasks.scoring.getRun(id);
+  }
+
+  /** Called by a run's Scoring Workflow when it starts: what the task defines over the project's config. */
+  definitionsOf(task: number): TaskDefinitions {
+    return this.#tasks.definitionsOf(task);
   }
 
   /** Called by a run's Scoring Workflow when it ends. Reports from a superseded or cancelled run are discarded. */

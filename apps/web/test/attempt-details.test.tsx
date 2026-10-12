@@ -4,7 +4,18 @@ import { describe, expect, it } from "vitest";
 import type { RunDetail, Verdict } from "@/lib/api";
 import type { ArenaAttempt, Metric } from "@/lib/arena";
 import { renderApp } from "./app";
-import { addedFile, arenaAttempt, me, result, serveArena, serveCompare, server, task } from "./server";
+import {
+  addedFile,
+  arenaAttempt,
+  check,
+  me,
+  result,
+  scoredMetrics,
+  serveArena,
+  serveCompare,
+  server,
+  task,
+} from "./server";
 
 /** t1a1, passing, scored by run 7 with a required `test` and an optional `lint`, both logged. */
 const scored = (fields: Partial<ArenaAttempt> = {}) =>
@@ -12,10 +23,7 @@ const scored = (fields: Partial<ArenaAttempt> = {}) =>
     status: "done",
     result: result({
       run: 7,
-      checks: [
-        { name: "test", required: true, outcome: "passed", durationMs: 1200, metrics: {}, notes: [] },
-        { name: "lint", required: false, outcome: "failed", durationMs: 300, metrics: {}, notes: [] },
-      ],
+      checks: [check("test", true, "passed", 1200), check("lint", false, "failed", 300)],
       logs: ["setup.1", "test", "lint"],
     }),
     ...fields,
@@ -114,19 +122,21 @@ describe("an attempt's details", () => {
 
   it("shows its metrics with their units, its preview, and its run history with superseded runs dimmed", async () => {
     const head = scored({
-      result: result({ preview: { status: "ready", url: "https://t1a1.preview.test" }, metrics: { coverage: 81.5 } }),
+      result: result({ metrics: scoredMetrics({ values: { coverage: 81.5 }, preview: "https://t1a1.preview.test" }) }),
     });
     const { sheet } = await openDetails([head, arenaAttempt(1, 2)], {
-      metrics: [{ name: "coverage", unit: "%", order: "desc" }],
+      metrics: [
+        { name: "coverage", from: "test.coverage.pct", type: "number", unit: "%", order: "desc", source: "project" },
+      ],
       runs: [
         run(9, String(head.sha), { trigger: "rescore", status: "running", finishedAt: null, result: null }),
         run(8, String(head.sha)),
         run(5, "0ld".padEnd(40, "0"), { superseded: true, result: result({ gate: "failed" }) }),
       ],
     });
-    const metrics = within(sheet).getByRole("region", { name: "Metrics" });
-    expect(metrics).toHaveTextContent("coverage81.5%");
-    expect(metrics).toHaveTextContent("Files changed1");
+    const section = within(sheet).getByRole("region", { name: "Metrics" });
+    expect(section).toHaveTextContent("coverage81.5%");
+    expect(section).toHaveTextContent("Files changed1");
     expect(within(sheet).getByRole("link", { name: "Open preview" })).toHaveAttribute(
       "href",
       "https://t1a1.preview.test",

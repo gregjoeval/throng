@@ -4,10 +4,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import type { ReactNode } from "react";
+import { RefSwitcher } from "@/components/ref-switcher";
 import { ErrorState, Loading } from "@/components/states";
 import { projectQuery } from "@/lib/api";
 import { buildPath, splitPath } from "@/lib/paths";
-import type { ProjectLocation } from "@/lib/paths";
+import type { BrowseLocation, ProjectLocation } from "@/lib/paths";
 import { cn } from "@/lib/utils";
 
 /** The header tab each view sits under. */
@@ -76,33 +77,33 @@ function Tab({ to, active, children }: { to: string; active: boolean; children: 
   );
 }
 
-/** `project / dir / file` at a ref, each part linking to its directory. */
-export function Breadcrumbs({ location }: { location: Extract<ProjectLocation, { path: string }> }) {
+/** The ref switcher, then `project / dir / file` at that ref, each part linking to its directory. */
+export function Breadcrumbs({ location }: { location: BrowseLocation }) {
   const parts = splitPath(location.path);
   const { owner, project, ref } = location;
   const at = (count: number) =>
     buildPath({ view: "tree", owner, project, ref, path: parts.slice(0, count).join("/"), ...attemptOf(location) });
   return (
-    <nav aria-label="Breadcrumbs" className="flex flex-wrap items-center gap-1 font-mono text-sm">
-      <span className="rounded-md border px-1.5 py-0.5 text-xs text-muted-foreground" title="ref">
-        {ref}
-      </span>
-      <Link to={at(0)} className="font-semibold hover:underline">
-        {project}
-      </Link>
-      {parts.map((part, index) => (
-        <span key={index} className="flex items-center gap-1">
-          <span className="text-muted-foreground">/</span>
-          {index === parts.length - 1 ? (
-            <span aria-current="page">{part}</span>
-          ) : (
-            <Link to={at(index + 1)} className="hover:underline">
-              {part}
-            </Link>
-          )}
-        </span>
-      ))}
-    </nav>
+    <div className="flex flex-wrap items-center gap-3">
+      <RefSwitcher at={location} />
+      <nav aria-label="Breadcrumbs" className="flex flex-wrap items-center gap-1 font-mono text-sm">
+        <Link to={at(0)} className="font-semibold hover:underline">
+          {project}
+        </Link>
+        {parts.map((part, index) => (
+          <span key={index} className="flex items-center gap-1">
+            <span className="text-muted-foreground">/</span>
+            {index === parts.length - 1 ? (
+              <span aria-current="page">{part}</span>
+            ) : (
+              <Link to={at(index + 1)} className="hover:underline">
+                {part}
+              </Link>
+            )}
+          </span>
+        ))}
+      </nav>
+    </div>
   );
 }
 

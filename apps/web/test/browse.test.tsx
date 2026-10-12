@@ -108,6 +108,61 @@ describe("the directory view", () => {
   });
 });
 
+const switcher = () => screen.findByRole("button", { name: /^Ref: /u });
+/** The items of the switcher's menu group named `name`. */
+const items = async (name: string) =>
+  within(await screen.findByRole("group", { name }))
+    .getAllByRole("menuitem")
+    .map((item) => item.textContent);
+
+describe("the ref switcher", () => {
+  it("lists main, then the active attempts and the archived ones, grouped", async () => {
+    serveRepo({ main: FILES });
+    const { user } = await renderApp("/ada/alpha/tree/main/src");
+    await user.click(await switcher());
+    expect(await items("Main")).toEqual(["main"]);
+    expect(await items("Active attempts")).toEqual(["t42a3"]);
+    expect(await items("Archived attempts")).toEqual(["t41a1"]);
+  });
+
+  it("keeps the path when it exists at the ref switched to", async () => {
+    const asked = serveRepo({ main: FILES, t42a3: FILES });
+    const { user, path } = await renderApp("/ada/alpha/blob/main/src/index.ts");
+    await user.click(await switcher());
+    await user.click(await screen.findByRole("menuitem", { name: "t42a3" }));
+    await waitFor(() => expect(path()).toBe("/ada/alpha/blob/t42a3/src/index.ts"));
+    expect(await switcher()).toHaveAccessibleName("Ref: t42a3");
+    expect(asked).toContain("blob t42a3 src/index.ts");
+  });
+
+  it("opens the root of the ref switched to when the path isn't there", async () => {
+    serveRepo({ main: FILES, t41a1: { "other.md": "o\n" } });
+    const { user, path } = await renderApp("/ada/alpha/tree/main/src/lib");
+    await user.click(await switcher());
+    await user.click(await screen.findByRole("menuitem", { name: "t41a1" }));
+    await waitFor(() => expect(path()).toBe("/ada/alpha/tree/t41a1"));
+    expect(await screen.findByRole("link", { name: "other.md" })).toBeInTheDocument();
+  });
+
+  it("drops the attempt hint, which only a sha needs", async () => {
+    const sha = "b".repeat(40);
+    serveRepo({ [sha]: FILES, main: FILES });
+    const { user, path } = await renderApp(`/ada/alpha/tree/${sha}/src?attempt=t42a3`);
+    expect(await switcher()).toHaveAccessibleName(`Ref: ${sha.slice(0, 7)}`);
+    await user.click(await switcher());
+    await user.click(await screen.findByRole("menuitem", { name: "main" }));
+    await waitFor(() => expect(path()).toBe("/ada/alpha/tree/main/src"));
+  });
+
+  it("switches project home to the root of another ref", async () => {
+    serveRepo({ main: FILES, t42a3: FILES });
+    const { user, path } = await renderApp("/ada/alpha");
+    await user.click(await switcher());
+    await user.click(await screen.findByRole("menuitem", { name: "t42a3" }));
+    await waitFor(() => expect(path()).toBe("/ada/alpha/tree/t42a3"));
+  });
+});
+
 const CODE = "const a = 1;\nconst b = 2;\nconst c = 3;\nconst d = 4;\nconst e = 5;\n";
 const gutter = () => screen.findByRole("navigation", { name: "Line numbers" });
 /** The numbers of the lines marked highlighted, once Shiki has rendered them. */

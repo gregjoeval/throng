@@ -22,25 +22,23 @@ type Loose = Record<string, unknown>;
  * A stored dequeue (or landing outcome's details) with its enum values in camelCase: the reason, each
  * conflicting file's type and each failed check's outcome.
  */
-export function normaliseDequeue<T extends { reason: string }>(dequeue: T): T {
-  const details = (dequeue as unknown as { details?: Loose | null }).details;
+export function normaliseDequeue<T extends { reason: string; details?: object | null }>(dequeue: T): T {
+  const { details } = dequeue;
   return { ...dequeue, reason: camelCase(dequeue.reason), ...(details ? { details: normaliseDetails(details) } : {}) };
 }
 
 /** A landing outcome a Workflow reported, with its kind and details in camelCase. */
-export function normaliseLandingOutcome<T extends { kind: string }>(outcome: T): T {
-  const details = (outcome as unknown as { details?: Loose }).details;
+export function normaliseLandingOutcome<T extends { kind: string; details?: object }>(outcome: T): T {
+  const { details } = outcome;
   return { ...outcome, kind: camelCase(outcome.kind), ...(details ? { details: normaliseDetails(details) } : {}) };
 }
 
-function normaliseDetails(details: Loose): Loose {
+function normaliseDetails(details: object): Loose {
   const out: Loose = { ...details };
-  if (Array.isArray(details.files)) {
-    out.files = (details.files as Loose[]).map((f) =>
-      typeof f.type === "string" ? { ...f, type: camelCase(f.type) } : f,
-    );
+  if (Array.isArray(out.files)) {
+    out.files = (out.files as Loose[]).map((f) => (typeof f.type === "string" ? { ...f, type: camelCase(f.type) } : f));
   }
-  if (Array.isArray(details.checks)) out.checks = (details.checks as Loose[]).map(normaliseOutcome);
+  if (Array.isArray(out.checks)) out.checks = (out.checks as Loose[]).map(normaliseOutcome);
   return out;
 }
 

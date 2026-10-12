@@ -29,6 +29,11 @@ export function taskRef(task: number): string {
   return `t${task}`;
 }
 
+/** The hidden origin ref holding task `task`'s task branch, when it has one: `refs/tasks/t42`. */
+export function taskBranchRef(task: number): string {
+  return `refs/tasks/${taskRef(task)}`;
+}
+
 export function attemptRef(task: number, number: number): string {
   return `t${task}a${number}`;
 }

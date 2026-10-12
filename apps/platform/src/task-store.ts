@@ -919,6 +919,20 @@ export class TaskStore {
   }
 
   /**
+   * Checks the actor may push task `task`'s task branch (`refs/tasks/t42` in the origin), so the git
+   * proxy may forward the push: the task exists and the actor's human is its creator or the project
+   * owner. The task branch may be pushed in any state.
+   */
+  authorizeTaskBranchPush(project: ProjectContext, actor: Actor, input: { task: number }): StoredTask {
+    const current = this.#task(input.task);
+    if (actor.user.id === project.owner || actor.user.id === current.creator) return current;
+    throw new ServiceError(
+      "forbidden",
+      `only ${taskRef(current.number)}'s creator or the project owner may push its task branch`,
+    );
+  }
+
+  /**
    * Journals a `pushed` event for each ref a push through the git proxy updated on an attempt's
    * fork, with the old and new ids so force-pushes show up afterwards, and queues scoring when the
    * attempt is open and its head moved; the scoring queue skips a head it already covers. The
@@ -2031,6 +2045,7 @@ export const TASK_METHODS = [
   "rescore",
   "runLogKey",
   "authorizePush",
+  "authorizeTaskBranchPush",
   "recordPush",
   "routeBranchPush",
   "completeBranchPush",

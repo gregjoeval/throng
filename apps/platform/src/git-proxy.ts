@@ -35,7 +35,7 @@ import { forkRepo, originRepo } from "./repos.ts";
 import type { Repos, TokenScope } from "./repos.ts";
 import { headAttemptRef } from "./scoring.ts";
 import type { ScoringRequest } from "./scoring.ts";
-import { attemptRef, parseAttemptRef, taskRef } from "./task-refs.ts";
+import { attemptRef, parseAttemptRef, parseTaskRef, taskBranchRef, taskRef } from "./task-refs.ts";
 import type {
   AttemptInput,
   BranchRoute,
@@ -64,6 +64,7 @@ const FORWARDED_RESPONSE_HEADERS = ["Cache-Control", "Content-Type", "Expires", 
 
 const MAIN = "refs/heads/main";
 const BRANCH_PREFIX = "refs/heads/";
+const TASK_BRANCH_PREFIX = "refs/tasks/";
 /** How long push-to-create waits for a new fork to be readable before giving up on the push. */
 const FORK_READY_TIMEOUT_MS = 60_000;
 const FORK_READY_POLL_MS = 250;
@@ -119,7 +120,11 @@ export function gitRoutes(options: GitProxyOptions) {
         pushed = read;
         const refusal = claim?.message ?? (target.attempt === null ? originRefusal(pushed) : null);
         if (refusal !== null) return reject(c, target, pushed, refusal);
-        if (target.attempt === null && pushed.updates.length > 0) {
+        const task = target.attempt === null ? taskBranchPush(pushed) : null;
+        if (task !== null) {
+          const outcome = await backend.call("authorizeTaskBranchPush", [target.project, c.var.actor, { task }]);
+          if (!outcome.ok) return reject(c, target, pushed, outcome.message);
+        } else if (target.attempt === null && pushed.updates.length > 0) {
           return pushToCreate(c, target, pushed, backend, { repos, tokens, fetch: upstreamFetch });
         }
       }
@@ -195,16 +200,24 @@ async function resolveTarget(c: GitContext): Promise<Target | Response> {
 
 /**
  * Why a push to the origin is refused, or null to let it through. `main` only advances through the
- * merge queue, and the origin keeps no other refs. A push of one branch goes to push-to-create,
- * which sends it to an attempt's fork; one pack can only land in one fork, so a push of several
- * refs is refused whole. A probe, with no updates, goes through.
+ * merge queue, and the origin keeps no other refs but task branches. A push of one task branch
+ * (`refs/tasks/t42`) goes to the origin once its task allows the pusher (`taskBranchPush`). A push
+ * of one branch goes to push-to-create, which sends it to an attempt's fork; one pack can only land
+ * in one repo, so a push of several refs is refused whole. A probe, with no updates, goes through.
  */
 function originRefusal(push: PushRequest): Refusal | null {
   const { updates } = push;
   const reasons = updates.map((update): string | null => {
     if (update.ref === MAIN) return "main only advances through the merge queue; push to an attempt's fork instead";
+    if (update.ref.startsWith(TASK_BRANCH_PREFIX)) {
+      const task = parseTaskRef(update.ref.slice(TASK_BRANCH_PREFIX.length));
+      if (task === null || taskBranchRef(task) !== update.ref) return "task branches look like refs/tasks/t42";
+      if (isDelete(update)) return "a task branch can't be deleted";
+      if (updates.length > 1) return "push a task branch on its own";
+      return null;
+    }
     if (!update.ref.startsWith(BRANCH_PREFIX))
-      return "the origin keeps no refs but main; push a branch to make an attempt";
+      return "the origin keeps no refs but main and task branches; push a branch to make an attempt";
     if (isDelete(update)) return "the origin keeps no branches but main";
     if (updates.length > 1) return "push one branch at a time to the origin; each becomes its own attempt";
     if (!push.capabilities.has("report-status") && !push.capabilities.has("report-status-v2")) {
@@ -214,6 +227,12 @@ function originRefusal(push: PushRequest): Refusal | null {
   });
   if (reasons.every((r) => r === null)) return null;
   return (update) => reasons[updates.indexOf(update)] ?? "rejected";
+}
+
+/** The task whose task branch a push to the origin updates, or null when it updates none. */
+function taskBranchPush({ updates: [update, ...rest] }: PushRequest): number | null {
+  if (update === undefined || rest.length > 0 || !update.ref.startsWith(TASK_BRANCH_PREFIX)) return null;
+  return parseTaskRef(update.ref.slice(TASK_BRANCH_PREFIX.length));
 }
 
 /**

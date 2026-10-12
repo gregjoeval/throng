@@ -11,6 +11,8 @@ import { FORWARDED_EMAIL_HEADER } from "../src/forwarded.ts";
 import type { LogStore } from "../src/logs.ts";
 import { MAX_FILE_BYTES, MAX_LOG_SLICE_BYTES } from "../src/mcp.ts";
 import type { ScoringResult } from "../src/results.ts";
+import type { TaskBackend } from "../src/tasks.ts";
+import type { Actor } from "../src/tokens.ts";
 import { userForEmail } from "../src/users.ts";
 import { DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS } from "../src/waiters.ts";
 import { FakeRepos } from "./fake-repos.ts";
@@ -87,7 +89,21 @@ async function setup() {
   const repos = new FakeRepos();
   const logs = new MemoryLogs();
   const { backend, store, sql } = testTaskBackends(repos, now, runner, runner);
-  const app = publicApp({ verifierFor: () => verify, now, repos: () => repos, tasks: () => backend, logs: () => logs });
+  // Every store call a tool makes, with the actor it passed: a store method takes `(project, actor, …)`.
+  const storeCalls: { method: string; actor: Actor }[] = [];
+  const recording = (projectId: string): TaskBackend => ({
+    call: async (method, args) => {
+      storeCalls.push({ method, actor: args[1] as Actor });
+      return backend(projectId).call(method, args);
+    },
+  });
+  const app = publicApp({
+    verifierFor: () => verify,
+    now,
+    repos: () => repos,
+    tasks: () => recording,
+    logs: () => logs,
+  });
   const env = { DB: testDatabase(), ACCESS_TEAM_DOMAIN: "throng.cloudflareaccess.com", ACCESS_AUD: "aud" };
   const fetchApp = (input: string | URL | Request, init?: RequestInit) =>
     Promise.resolve(app.request(input instanceof Request ? input : new Request(input, init), undefined, env));
@@ -137,7 +153,7 @@ async function setup() {
     };
   };
 
-  return { repos, logs, store, env, app, fetchApp, tokenFor, connect, runPlatform };
+  return { repos, logs, store, storeCalls, env, app, fetchApp, tokenFor, connect, runPlatform };
 }
 
 /** greg's project with one commit on `main` and a task t1, and clients for greg, ada, and ada as `claude`. */
@@ -219,6 +235,36 @@ describe("/mcp", () => {
       alias: "claude",
       token: { expiresAt: expect.any(String) },
     });
+  });
+
+  it("calls each tool family's services as the token's user and alias", async () => {
+    const { claude, greg, project, pushTo, storeCalls } = await withProject();
+    await call(greg, "start_attempts", { project, task: "t1" });
+    await pushTo(1, "greg@example.com");
+    /** The store methods `name` reached and who each was called as. */
+    const actingAs = async (name: string, args: Record<string, unknown>) => {
+      storeCalls.length = 0;
+      const result = await call(claude, name, { project, ...args });
+      expect(result.isError, `${name}: ${result.summary}`).toBeFalsy();
+      return storeCalls.map(({ method, actor }) => `${method}: ${actor.user.handle} (${actor.alias})`);
+    };
+    // Tasks.
+    expect(await actingAs("create_task", { title: "Mine" })).toEqual(["createTask: ada (claude)"]);
+    expect(await actingAs("list_tasks", {})).toEqual(["listTasks: ada (claude)"]);
+    // Attempts.
+    expect(await actingAs("start_attempts", { task: "t2" })).toEqual(["createAttempts: ada (claude)"]);
+    expect(await actingAs("update_attempt", { attempt: "t2a1", state: "open" })).toEqual(["openAttempt: ada (claude)"]);
+    expect(await actingAs("rescore", { attempt: "t2a1" })).toEqual(["rescore: ada (claude)"]);
+    // Verdicts, on greg's attempt.
+    expect(await actingAs("post_verdict", { attempt: "t1a1", recommendation: "merge", body: "ok" })).toEqual([
+      "postVerdict: ada (claude)",
+    ]);
+    expect(await actingAs("list_verdicts", { attempt: "t1a1" })).toEqual(["listVerdicts: ada (claude)"]);
+    // Merge requests, on the task ada created as claude.
+    expect(await actingAs("select_attempt", { task: "t2", attempt: "t2a1" })).toEqual(["selectAttempt: ada (claude)"]);
+    expect(await actingAs("cancel_merge_request", { task: "t2" })).toEqual(["cancelMergeRequest: ada (claude)"]);
+    // Browsing an attempt's fork resolves the attempt as the caller.
+    expect(await actingAs("list_files", { ref: "t1a1" })).toEqual(["getAttempt: ada (claude)"]);
   });
 
   it("drives the agent loop through the services: start, open, read", async () => {

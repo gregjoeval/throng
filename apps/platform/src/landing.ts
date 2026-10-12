@@ -4,7 +4,7 @@
 import type { ConfigResult } from "./config.ts";
 import type { ConflictDetails } from "./conflicts.ts";
 import type { ScoringResult } from "./results.ts";
-import { attemptRef, taskRef } from "./task-store.ts";
+import { attemptRef, taskRef } from "./task-refs.ts";
 
 /** Commits name people by a no-reply address, never their real email. */
 export const NOREPLY_DOMAIN = "users.noreply.throng";

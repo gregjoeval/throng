@@ -22,7 +22,7 @@ import {
   type LandResult,
   type MergePlan,
 } from "./scripts";
-import { attemptRef } from "./task-store";
+import { attemptRef } from "./task-refs";
 import { runInSandbox, STEP_RETRIES, storeLogs } from "./workflows";
 
 /** A step that kept failing on infrastructure; the landing ends `errored` naming it. */

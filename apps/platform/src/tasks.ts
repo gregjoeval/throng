@@ -11,11 +11,7 @@ import type { Dequeue, DequeueReason, StoredMergeRequest } from "./merge-request
 import { forkRepo, originRepo } from "./repos.ts";
 import { headAttemptRef, type AttemptScoring, type ScoringRequest, type StoredRun } from "./scoring.ts";
 import {
-  attemptRef,
   type AttemptMergeRequest,
-  parseAttemptRef,
-  parseTaskRef,
-  taskRef,
   type AttemptInput,
   type AttemptScoringDetail,
   type AttemptState,
@@ -27,6 +23,7 @@ import {
   type TaskState,
   type TaskStore,
 } from "./task-store.ts";
+import { attemptRef, parseAttemptRef, parseTaskRef, taskRef } from "./task-refs.ts";
 import type { Actor } from "./tokens.ts";
 import type { Database } from "./users.ts";
 

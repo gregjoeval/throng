@@ -32,9 +32,6 @@ import {
 import { resolveProject } from "./projects.ts";
 import { forkRepo, originRepo, type Repos, type TokenScope } from "./repos.ts";
 import {
-  attemptRef,
-  parseAttemptRef,
-  taskRef,
   type AttemptInput,
   type BranchRoute,
   type ProjectContext,
@@ -44,6 +41,7 @@ import {
   type StoredTask,
   type TaskMethod,
 } from "./task-store.ts";
+import { attemptRef, parseAttemptRef, taskRef } from "./task-refs.ts";
 import { headAttemptRef, type ScoringRequest } from "./scoring.ts";
 import type { TaskBackend } from "./tasks.ts";
 import type { AccessBindings } from "./access.ts";

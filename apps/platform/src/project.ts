@@ -4,14 +4,8 @@ import { reposFor } from "./artifacts";
 import { camelKeys } from "./casing";
 import type { LandingOutcome } from "./landing";
 import type { ScoringOutcome, ScoringRequest, StoredRun } from "./scoring";
-import {
-  parseAttemptRef,
-  runTaskMethod,
-  TaskStore,
-  type ProjectContext,
-  type Sql,
-  type TaskOutcome,
-} from "./task-store";
+import { runTaskMethod, TaskStore, type ProjectContext, type Sql, type TaskOutcome } from "./task-store";
+import { parseAttemptRef } from "./task-refs";
 
 export interface JournalEntry {
   id: number;

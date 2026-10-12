@@ -131,6 +131,11 @@ export function sortRail(attempts: ArenaAttempt[], sort: RailSort, columns: Metr
   });
 }
 
+/** The `t42` of `t42a3`. */
+export function taskOf(attempt: { ref: string }): string {
+  return attempt.ref.slice(0, attempt.ref.lastIndexOf("a"));
+}
+
 /** The `3` of `t42a3`. */
 export function attemptNumber(attempt: { ref: string }): number {
   return Number(attempt.ref.slice(attempt.ref.lastIndexOf("a") + 1));

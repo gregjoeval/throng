@@ -231,9 +231,14 @@ const MetricsSchema = z.record(z.string(), z.number()).openapi({ example: { cove
 
 const ScoringResultSchema = z
   .object({
-    base: z.string().nullable().openapi({
-      description: "The merge-base of the head and `origin/main` at scoring time; null with no shared history.",
-    }),
+    base: z
+      .string()
+      .nullable()
+      .openapi({
+        description:
+          "The head's base at scoring time: its merge-base with the task branch, or with `origin/main` when the task has " +
+          "none; null with no shared history.",
+      }),
     config: z
       .discriminatedUnion("kind", [
         z.object({ kind: z.literal("none") }),

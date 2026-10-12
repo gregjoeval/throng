@@ -77,6 +77,11 @@ test("links are rel=noopener noreferrer", async () => {
   expect(screen.getByText("site")).toHaveAttribute("rel", "noopener noreferrer");
 });
 
+test("images send no referrer, so a third-party host doesn't learn the page", async () => {
+  await renderMarkdown("![badge](https://example.com/badge.svg)");
+  expect(screen.getByRole("img", { name: "badge" })).toHaveAttribute("referrerpolicy", "no-referrer");
+});
+
 test("resolveUrl keeps absolute bases absolute", () => {
   expect(resolveUrl("a.md", "https://host.example/x/")).toBe("https://host.example/x/a.md");
   expect(resolveUrl("a.md", undefined)).toBe("a.md");

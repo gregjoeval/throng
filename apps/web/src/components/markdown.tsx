@@ -47,6 +47,8 @@ export function resolveUrl(url: string, base: string | undefined, search?: URLSe
 
 const components: Components = {
   a: ({ node: _node, ...props }) => <a {...props} rel="noopener noreferrer" />,
+  // An absolute image URL loads from a third party: it learns the viewer's IP, but not the page.
+  img: ({ node: _node, ...props }) => <img {...props} referrerPolicy="no-referrer" />,
 };
 
 export interface MarkdownProps {

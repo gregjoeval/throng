@@ -2,9 +2,8 @@
 // and which body a task page shows for a task's state.
 
 import type { InferResponseType } from "hono/client";
-import type { client } from "@/lib/api";
+import type { TasksApi as Tasks } from "@/lib/api";
 
-type Tasks = (typeof client.api.projects)[":owner"][":project"]["tasks"];
 export type Task = InferResponseType<Tasks[":t"]["$get"], 200>;
 export type ListedTask = InferResponseType<Tasks["$get"], 200>["tasks"][number];
 export type Attempt = InferResponseType<Tasks[":t"]["attempts"]["$get"], 200>["attempts"][number];

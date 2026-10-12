@@ -1,11 +1,11 @@
 // What the arena shows about a task's attempts: their gates and metrics, which value of each metric
 // is best among passing attempts, how the rail sorts, and which attempts are shown as lanes.
 
+import { parseAttemptRef, taskRef } from "@throng/platform/task-refs";
 import type { InferResponseType } from "hono/client";
-import type { client } from "@/lib/api";
+import type { TasksApi as Tasks } from "@/lib/api";
 import { isActive } from "@/lib/tasks";
 
-type Tasks = (typeof client.api.projects)[":owner"][":project"]["tasks"];
 export type TaskArena = InferResponseType<Tasks[":t"]["arena"]["$get"], 200>;
 export type Metric = TaskArena["metrics"][number];
 
@@ -126,14 +126,20 @@ export function sortRail(attempts: ArenaAttempt[], sort: RailSort, columns: Metr
   });
 }
 
+function parsedRef(attempt: { ref: string }): { task: number; number: number } {
+  const parsed = parseAttemptRef(attempt.ref);
+  if (parsed === null) throw new Error(`not an attempt: ${attempt.ref}`);
+  return parsed;
+}
+
 /** The `t42` of `t42a3`. */
 export function taskOf(attempt: { ref: string }): string {
-  return attempt.ref.slice(0, attempt.ref.lastIndexOf("a"));
+  return taskRef(parsedRef(attempt).task);
 }
 
 /** The `3` of `t42a3`. */
 export function attemptNumber(attempt: { ref: string }): number {
-  return Number(attempt.ref.slice(attempt.ref.lastIndexOf("a") + 1));
+  return parsedRef(attempt).number;
 }
 
 /**

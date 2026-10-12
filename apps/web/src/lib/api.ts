@@ -112,7 +112,9 @@ export const projectKey = (owner: string, project: string) => ["project", `${own
 export const taskKey = (owner: string, project: string, task: string) =>
   [...projectKey(owner, project), "task", task] as const;
 
-const tasksApi = client.api.projects[":owner"][":project"].tasks;
+const tasksApi = projectApi.tasks;
+/** The tasks API's client, for inferring its response types. */
+export type TasksApi = typeof tasksApi;
 type TaskListState = NonNullable<Parameters<typeof tasksApi.$get>[0]["query"]["state"]>;
 
 /** The project's tasks in one state, by number, each with its attempt count, best gate and merge request state. */

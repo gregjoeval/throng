@@ -6,7 +6,8 @@
   "type": "module",
   "exports": {
     "./app": "./src/app.ts",
-    "./forwarded": "./src/forwarded.ts"
+    "./forwarded": "./src/forwarded.ts",
+    "./task-refs": "./src/task-refs.ts"
   },
   "scripts": {
     "dev": "vite dev",

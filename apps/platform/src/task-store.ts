@@ -44,7 +44,7 @@ import type {
   ScoringTrigger,
   StoredRun,
 } from "./scoring.ts";
-import { NO_TASK_DEFINITIONS } from "./task-definitions.ts";
+import { NO_TASK_DEFINITIONS, taskDefinitionsFrom } from "./task-definitions.ts";
 import type { TaskDefinitions } from "./task-definitions.ts";
 import { attemptRef, reservedTask, taskBranchRef, taskRef } from "./task-refs.ts";
 import type { Actor } from "./tokens.ts";
@@ -222,8 +222,8 @@ export interface EditTaskInput {
   title?: string | undefined;
   body?: string | undefined;
   attemptLimit?: number | null | undefined;
-  /** Replaces the task's metrics; already checked against the project's config (`taskDefinitionsFrom`). */
-  metrics?: MetricConfig[] | undefined;
+  /** Replaces the task's metrics, as a request gave them; checked against the project's config. */
+  metrics?: unknown;
 }
 
 export interface CreateAttemptsInput {
@@ -533,20 +533,44 @@ export class TaskStore {
     };
   }
 
-  /** Edits a task's title, body, attempt limit or metrics. The project owner or the task's creator may. */
-  editTask(project: ProjectContext, actor: Actor, input: EditTaskInput): StoredTask {
+  /**
+   * Edits a task's title, body, attempt limit or metrics. The project owner or the task's creator
+   * may; who may is checked before the metrics are. Changed definitions rescore each open
+   * attempt's head, so every attempt is measured the same way; drafts are left alone.
+   */
+  async editTask(project: ProjectContext, actor: Actor, input: EditTaskInput): Promise<StoredTask> {
+    this.#mayEditTask(project, actor, this.#task(input.task));
+    const metrics = input.metrics === undefined ? undefined : await this.#taskMetrics(project, input.metrics);
+
+    // From here to the update nothing awaits; the task is read again, as the check above awaited.
     const current = this.#task(input.task);
-    this.#mayManageTask(project, actor, current);
-    if (current.state === "obsolete") throw invalidState(`${taskRef(current.number)} is obsolete`);
+    this.#mayEditTask(project, actor, current);
+    const definitions = storedDefinitions({ ...current.definitions, metrics: metrics ?? current.definitions.metrics });
     this.#sql.exec(
       "UPDATE tasks SET title = ?, body = ?, attempt_limit = ?, definitions = ? WHERE number = ?",
       input.title ?? current.title,
       input.body ?? current.body,
       input.attemptLimit === undefined ? current.attempt_limit : input.attemptLimit,
-      storedDefinitions({ ...current.definitions, metrics: input.metrics ?? current.definitions.metrics }),
+      definitions,
       current.number,
     );
+    if (definitions !== storedDefinitions(current.definitions)) {
+      const open = this.#activeAttempts(current.number).filter((a) => a.state === "open");
+      await Promise.all(open.map((attempt) => this.#scoreHead(project, actor, attempt, "rescore")));
+    }
     return this.#task(current.number);
+  }
+
+  #mayEditTask(project: ProjectContext, actor: Actor, current: StoredTask): void {
+    this.#mayManageTask(project, actor, current);
+    if (current.state === "obsolete") throw invalidState(`${taskRef(current.number)} is obsolete`);
+  }
+
+  /** A task's metrics as a request gave them, checked against the project's config on `main`. */
+  async #taskMetrics(project: ProjectContext, metrics: unknown): Promise<MetricConfig[]> {
+    const checked = taskDefinitionsFrom({ metrics }, await loadConfig(this.#repos, project.id));
+    if ("error" in checked) throw new ServiceError("invalidRequest", checked.error);
+    return checked.definitions.metrics;
   }
 
   /**
@@ -2527,7 +2551,8 @@ function toTask(row: TaskRow): StoredTask {
 
 /** A task's definitions as stored: null for none. */
 function storedDefinitions(definitions: TaskDefinitions): string | null {
-  return definitions.metrics.length === 0 ? null : JSON.stringify(definitions);
+  const none = Object.values(definitions).every((list: unknown[]) => list.length === 0);
+  return none ? null : JSON.stringify(definitions);
 }
 
 function toAttempt(row: AttemptRow): Omit<StoredAttempt, "scoring" | "merge_request" | "verdicts"> {

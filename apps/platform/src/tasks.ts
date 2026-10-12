@@ -265,8 +265,9 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
   }
 
   /**
-   * A task's metrics as a request gave them, checked against the project's config on `main`;
-   * undefined when it gave none. Saving them is still up to the store's permission check.
+   * A new task's metrics as a request gave them, checked against the project's config on `main`;
+   * undefined when it gave none. Anyone may create a task; an edit's metrics are checked by the
+   * store, after who may edit.
    */
   async function taskMetrics(ctx: ProjectContext, metrics: unknown): Promise<MetricConfig[] | undefined> {
     if (metrics === undefined) return undefined;
@@ -374,8 +375,8 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
     ): Promise<Task> {
       const { title, body, attemptLimit } = input;
       const ctx = await project(input);
-      const metrics = await taskMetrics(ctx, input.metrics);
-      const edit = { task: taskNumber(input.task), title, body, attemptLimit, metrics };
+      // The store checks the metrics itself, once it has checked who may edit the task.
+      const edit = { task: taskNumber(input.task), title, body, attemptLimit, metrics: input.metrics };
       return one(await invoke("editTask", ctx, actor, edit), tasks(ctx));
     },
 

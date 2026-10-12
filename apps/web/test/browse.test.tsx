@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { cleanup, screen, waitFor, within } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
 import { renderApp } from "./app";
@@ -352,6 +352,26 @@ describe("the file view", () => {
     await renderApp("/ada/alpha/blob/main/src/a.ts");
     expect(await screen.findByRole("link", { name: "Raw" })).toHaveAttribute("href", "/ada/alpha/raw/main/src/a.ts");
     expect(screen.getByText("5 lines · 65 B")).toBeInTheDocument();
+  });
+
+  it("opens a folder in the directory view when a relative link names it as a file", async () => {
+    serveRepo({ main: { ...FILES, "docs/guide.md": "See [the source](../src).\n" } });
+    await renderApp("/ada/alpha/blob/main/docs/guide.md");
+    const link = await screen.findByRole("link", { name: "the source" });
+    expect(link).toHaveAttribute("href", "/ada/alpha/blob/main/src");
+    // A Markdown link is a plain one, so following it loads its URL afresh.
+    cleanup();
+    const { path } = await renderApp(link.getAttribute("href") ?? "");
+    await waitFor(() => expect(path()).toBe("/ada/alpha/tree/main/src"));
+    expect(rowNames(await entriesList()).map(([name]) => name)).toEqual(["lib", "index.ts"]);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("keeps the attempt hint when it opens a folder named as a file", async () => {
+    const sha = "b".repeat(40);
+    serveRepo({ [sha]: FILES }, { main: { ref: "main", sha: null }, active: [], archived: [] });
+    const { path } = await renderApp(`/ada/alpha/blob/${sha}/src/lib?attempt=t42a3`);
+    await waitFor(() => expect(path()).toBe(`/ada/alpha/tree/${sha}/src/lib?attempt=t42a3`));
   });
 
   it("shows notFound for a missing file", async () => {

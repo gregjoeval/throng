@@ -149,8 +149,8 @@ A task or attempt taken out of use because it was deleted or migrated; it is kep
 _Avoid_: Deleted, removed, hidden, defunct
 
 **Superseded**:
-Scoring results for a head that is no longer the attempt's current head.
-_Avoid_: Outdated, stale (when meaning results)
+Scoring results or a verdict for a head that is no longer the attempt's current head.
+_Avoid_: Outdated, stale (when meaning results or verdicts)
 
 **Dequeue**:
 A merge request leaving the merge queue without landing, for a reason (conflict, failed checks, a new push, or cancelled); it can be fixed and requeued.

@@ -40,6 +40,8 @@ import type {
 } from "./scoring.ts";
 import { attemptRef, reservedTask, taskRef } from "./task-refs.ts";
 import type { Actor } from "./tokens.ts";
+import { Verdicts } from "./verdicts.ts";
+import type { StoredVerdict, VerdictRecommendation, VerdictSummary } from "./verdicts.ts";
 
 /** Active attempts a task may have when neither the project config nor the task overrides it. */
 export const DEFAULT_ATTEMPT_LIMIT = 10;
@@ -97,6 +99,8 @@ export interface StoredAttempt {
   scoring: AttemptScoring;
   /** The latest merge request it is the source of, if any, for polling: its state and last dequeue reason. */
   merge_request: AttemptMergeRequest | null;
+  /** Its verdicts on its current head, counted by recommendation. */
+  verdicts: VerdictSummary;
 }
 
 /** A merge request as its source attempt shows it. */
@@ -127,7 +131,8 @@ export type TaskEvent =
   | "merged"
   | "madeObsolete"
   | "restored"
-  | "pushed";
+  | "pushed"
+  | "verdictPosted";
 
 /** The slice of SQLite the store needs: Durable Object storage in production, `node:sqlite` in tests. */
 export interface Sql {
@@ -189,6 +194,16 @@ export interface CreateAttemptsInput {
 export interface AttemptInput {
   task: number;
   number: number;
+}
+
+export interface PostVerdictInput extends AttemptInput {
+  recommendation: VerdictRecommendation;
+  body: string;
+}
+
+/** A verdict, and whether its head is no longer the attempt's current head. */
+export interface VerdictDetail extends StoredVerdict {
+  superseded: boolean;
 }
 
 /**
@@ -343,6 +358,8 @@ export class TaskStore {
   readonly mergeRequests: MergeRequests;
   /** The merge queue's landings, one Landing Workflow each. */
   readonly landings: Landings;
+  /** The project's verdicts. */
+  readonly verdicts: Verdicts;
   readonly #landing: LandingRunner | null;
 
   constructor({ sql, repos, now = () => new Date(), scoring = null, landing = null }: TaskStoreDeps) {
@@ -352,6 +369,7 @@ export class TaskStore {
     this.#landing = landing;
     migrate(sql);
     this.landings = new Landings({ sql, now });
+    this.verdicts = new Verdicts({ sql });
     this.scoring = new ScoringQueue({ sql, runner: scoring, now, reserved: () => this.#landingSlots() });
     this.mergeRequests = new MergeRequests({
       sql,
@@ -607,6 +625,47 @@ export class TaskStore {
     const run = this.scoring.getRun(input.run);
     if (run === null) throw new ServiceError("notFound", `no run ${input.run}`);
     return run;
+  }
+
+  /**
+   * Posts the actor's verdict on the attempt's current head, replacing their earlier one on that
+   * head, and journals `verdictPosted`. Anyone but the attempt's author (and their agents) may, on
+   * an active attempt with a head, or a merged one for the record.
+   */
+  postVerdict(_project: ProjectContext, actor: Actor, input: PostVerdictInput): VerdictDetail {
+    const current = this.#attempt(input);
+    if (actor.user.id === current.author) {
+      throw new ServiceError("forbidden", `the author of ${current.fork} can't post a verdict on it`);
+    }
+    this.#expect(current, [...ACTIVE, "merged"], "post a verdict on");
+    const head = current.scoring.sha;
+    if (head === null) throw invalidState(`${current.fork} has no head to review; nothing has been pushed to it`);
+    const verdict: StoredVerdict = {
+      task: current.task,
+      attempt: current.number,
+      head,
+      reviewer: actor.user.id,
+      agent: actor.agent,
+      recommendation: input.recommendation,
+      body: input.body,
+      at: this.#stamp(),
+    };
+    this.#sql.transaction(() => {
+      this.verdicts.put(verdict);
+      this.#journal(actor, "verdictPosted", current.task, current.number, {
+        head,
+        recommendation: input.recommendation,
+      });
+    });
+    return { ...verdict, superseded: false };
+  }
+
+  /** The attempt's verdicts on every head, oldest first, each marked superseded once its head isn't current. */
+  listVerdicts(_project: ProjectContext, _actor: Actor, input: AttemptInput): VerdictDetail[] {
+    const current = this.#attempt(input);
+    return this.verdicts
+      .list(scoredAttempt(current))
+      .map((v) => ({ ...v, superseded: v.head !== current.scoring.sha }));
   }
 
   /** Every attempt in the project, by task and then number, leaving out obsolete ones. For the ref list. */
@@ -1530,9 +1589,11 @@ export class TaskStore {
 
   #toAttempt(row: AttemptRow): StoredAttempt {
     const mr = this.mergeRequests.forAttempt(row.task, row.number);
+    const scoring = this.scoring.statusFor(scoredAttempt(row));
     return {
       ...toAttempt(row),
-      scoring: this.scoring.statusFor(scoredAttempt(row)),
+      scoring,
+      verdicts: this.verdicts.summary(scoredAttempt(row), scoring.sha),
       merge_request:
         mr === null
           ? null
@@ -1930,6 +1991,8 @@ export const TASK_METHODS = [
   "obsoleteAttempt",
   "restoreAttempt",
   "handOffAttempt",
+  "postVerdict",
+  "listVerdicts",
   "markMerged",
   "selectAttempt",
   "approveMergeRequest",
@@ -2014,7 +2077,7 @@ function toTask(row: TaskRow): StoredTask {
   };
 }
 
-function toAttempt(row: AttemptRow): Omit<StoredAttempt, "scoring" | "merge_request"> {
+function toAttempt(row: AttemptRow): Omit<StoredAttempt, "scoring" | "merge_request" | "verdicts"> {
   return {
     task: row.task,
     number: row.number,

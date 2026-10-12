@@ -167,6 +167,7 @@ describe("the arena", () => {
         author: { id: expect.any(String), handle: "ada" },
         status: "done",
         sha: scored,
+        verdicts: expect.anything(),
         result: {
           ...result(),
           run: 1,
@@ -174,9 +175,30 @@ describe("the arena", () => {
           metrics: { coverage: 81.5, bundle_kb: 120 },
         },
       },
-      { ref: "t1a2", state: "draft", author: expect.anything(), status: "running", sha: running },
-      { ref: "t1a3", state: "draft", author: expect.anything(), status: "none", sha: null },
-      { ref: "t1a4", state: "draft", author: expect.anything(), status: "none", sha: moved },
+      {
+        ref: "t1a2",
+        state: "draft",
+        author: expect.anything(),
+        verdicts: expect.anything(),
+        status: "running",
+        sha: running,
+      },
+      {
+        ref: "t1a3",
+        state: "draft",
+        author: expect.anything(),
+        verdicts: expect.anything(),
+        status: "none",
+        sha: null,
+      },
+      {
+        ref: "t1a4",
+        state: "draft",
+        author: expect.anything(),
+        verdicts: expect.anything(),
+        status: "none",
+        sha: moved,
+      },
     ]);
   });
 

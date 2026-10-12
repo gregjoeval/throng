@@ -24,9 +24,11 @@ import type {
   TaskOutcome,
   TaskState,
   TaskStore,
+  VerdictDetail,
 } from "./task-store.ts";
 import type { Actor } from "./tokens.ts";
 import type { Database } from "./users.ts";
+import type { VerdictRecommendation, VerdictSummary } from "./verdicts.ts";
 
 /** A project's Durable Object, as the services call it: one store method per call. */
 export interface TaskBackend {
@@ -74,6 +76,20 @@ export interface Attempt {
   archivedSha: string | null;
   scoring: AttemptScoring;
   mergeRequest: { state: AttemptMergeRequest["state"]; lastDequeue: { reason: DequeueReason } | null } | null;
+  verdicts: VerdictSummary;
+}
+
+/** A reviewer's verdict on one head of an attempt, as the API shows it. */
+export interface Verdict {
+  reviewer: UserRef;
+  /** The agent alias the reviewer posted under, if any. */
+  agent: string | null;
+  head: string;
+  recommendation: VerdictRecommendation;
+  body: string;
+  at: string;
+  /** Whether its head is no longer the attempt's current head. */
+  superseded: boolean;
 }
 
 /** Who approved or created a merge request: a user, and the agent they acted under. */
@@ -168,6 +184,7 @@ export interface ArenaAttempt extends ScoringStatus {
   ref: string;
   state: AttemptState;
   author: UserRef;
+  verdicts: VerdictSummary;
 }
 
 /** A task's arena: the current result of every attempt in it. */
@@ -353,11 +370,12 @@ export function taskService({ db, backend }: TaskServiceDeps) {
       );
       return {
         task: taskRef(number),
-        attempts: list.map(({ scoring, fork, state, author }) => ({
+        attempts: list.map(({ scoring, fork, state, author, verdicts }) => ({
           ref: fork,
           state,
           author: userRef(author, users),
           ...scoringStatus(scoring),
+          verdicts,
         })),
       };
     },
@@ -389,6 +407,29 @@ export function taskService({ db, backend }: TaskServiceDeps) {
       const to = await db.prepare("SELECT id FROM users WHERE handle = ?").bind(input.to).first<{ id: string }>();
       if (to === null) throw new ServiceError("notFound", `no user ${input.to}`);
       return one(await invoke("handOffAttempt", ctx, actor, { ...ref, to: to.id }), attempts);
+    },
+
+    /**
+     * Posts the actor's verdict on the attempt's current head, replacing their earlier one on it.
+     * Anyone but the attempt's author (or their agents) may, while it is active or merged.
+     */
+    async postVerdict(
+      actor: Actor,
+      input: AttemptPath & { recommendation: VerdictRecommendation; body: string },
+    ): Promise<Verdict> {
+      const post = { ...attemptRefOf(input.attempt), recommendation: input.recommendation, body: input.body };
+      const verdict = await invoke("postVerdict", await project(input), actor, post);
+      return publicVerdict(verdict, await handles(db, [verdict.reviewer]));
+    },
+
+    /** The attempt's verdicts on every head, oldest first. Any signed-in user may read them. */
+    async listVerdicts(actor: Actor, input: AttemptPath): Promise<Verdict[]> {
+      const list = await invoke("listVerdicts", await project(input), actor, attemptRefOf(input.attempt));
+      const users = await handles(
+        db,
+        list.map((v) => v.reviewer),
+      );
+      return list.map((v) => publicVerdict(v, users));
     },
 
     /**
@@ -517,6 +558,19 @@ function publicAttempt(a: StoredAttempt, users: Map<string, string>): Attempt {
     archivedSha: a.archived_sha,
     scoring: a.scoring,
     mergeRequest: mr === null ? null : { state: mr.state, lastDequeue: mr.last_dequeue },
+    verdicts: a.verdicts,
+  };
+}
+
+function publicVerdict(v: VerdictDetail, users: Map<string, string>): Verdict {
+  return {
+    reviewer: userRef(v.reviewer, users),
+    agent: v.agent,
+    head: v.head,
+    recommendation: v.recommendation,
+    body: v.body,
+    at: v.at,
+    superseded: v.superseded,
   };
 }
 

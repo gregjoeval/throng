@@ -1,6 +1,7 @@
 // Bash run inside a run's Sandbox. Each script is idempotent, so a retried Workflow step can rerun it
 // on a fresh container. The last stdout line is the result: `THRONG_RESULT <json>`.
 
+import { CONFLICT_CAPS, MERGE_LABELS, type ConflictCaps, type Remerge } from "./conflicts.ts";
 import { THRONG_COMMITTER } from "./landing.ts";
 import { PREVIEW_LOG, setupLogName } from "./logs.ts";
 import { MAX_METRICS_BYTES, SETUP_TIMEOUT_MS, type ScorePlan } from "./results.ts";
@@ -156,11 +157,17 @@ result "{\\"ok\\":false,\\"stage\\":\\"deploy\\",\\"output\\":$(json < ../previe
 `;
 }
 
-/** The conflict check's result: `main`'s sha, and the raw `merge-tree` output for `parseMergeTree`. */
+/**
+ * The conflict check's result: `main`'s sha, the merge base (null with no shared history), the raw
+ * `merge-tree` output for `parseMergeTree`, and each content conflict's zdiff3 re-merge for
+ * `conflictFiles`.
+ */
 export interface ConflictCheckResult {
   main: string;
   clean: boolean;
+  base: string | null;
   output: string;
+  remerges: Remerge[];
 }
 
 /** The merge the Landing Workflow lands: the approved head onto `main`, giving `tree`. */
@@ -172,22 +179,85 @@ export interface MergePlan {
 
 /**
  * Landing step 1, untrusted (read grants only): fetches the origin's `main` and the approved head
- * from the fork, then runs `git merge-tree --write-tree --name-only --messages -z` on them. It writes
- * nothing; `parseMergeTree` reads the merged tree, or the conflicting paths, from `output`.
+ * from the fork, then runs `git merge-tree --write-tree --messages -z` on them. It writes nothing;
+ * `parseMergeTree` reads the merged tree, or the conflicting paths, from `output`.
+ *
+ * On a conflict, each path with all three sides is re-merged with `git merge-file -p --zdiff3`, its
+ * lines outside the conflicts blanked so the output stays small but keeps its line numbers. A
+ * re-merge whose conflicting lines are over twice the per-file cap, or that would take all of them
+ * over twice the total cap, is `too_large`; `conflictFiles` applies the exact caps.
  */
-export function conflictCheckScript(originRemote: string, forkRemote: string, head: string): string {
+export function conflictCheckScript(
+  originRemote: string,
+  forkRemote: string,
+  head: string,
+  caps: ConflictCaps = CONFLICT_CAPS,
+): string {
+  const [main, base, attempt] = MERGE_LABELS;
   return `${PRELUDE}
-rm -rf merge merge-tree.out && git init -q merge && cd merge
+rm -rf merge merge-tree.out remerge remerge.list && git init -q merge && cd merge
 git fetch -q ${quote(forkRemote)} '+refs/heads/*:refs/remotes/fork/*' || exit 10
 git fetch -q ${quote(originRemote)} '+refs/heads/main:refs/remotes/origin/main' || exit 12
 git cat-file -e ${quote(`${head}^{commit}`)} || exit 11
 main=$(git rev-parse refs/remotes/origin/main) || exit 12
-git merge-tree --write-tree --name-only --messages -z "$main" ${quote(head)} > ../merge-tree.out
+git merge-tree --write-tree --messages -z "$main" ${quote(head)} > ../merge-tree.out
 code=$?
 [ "$code" -le 1 ] || exit 13
 clean=$([ "$code" = 0 ] && echo true || echo false)
+base=$(git merge-base "$main" ${quote(head)}) && base="\\"$base\\"" || base=null
+mkdir ../remerge && : > ../remerge.list
+if [ "$code" = 1 ]; then
+  # Each path with all three sides: its path, then its base, main and attempt blobs, NUL-separated.
+  node -e '
+const fields = require("fs").readFileSync(0, "utf8").split("\\0");
+const sides = new Map();
+for (let i = 1; i < fields.length && fields[i] !== ""; i++) {
+  const tab = fields[i].indexOf("\\t");
+  const [, oid, stage] = fields[i].slice(0, tab).split(" ");
+  const path = fields[i].slice(tab + 1);
+  if (!sides.has(path)) sides.set(path, {});
+  sides.get(path)[stage] = oid;
+}
+for (const [path, s] of sides) if (s[1] && s[2] && s[3]) process.stdout.write([path, s[1], s[2], s[3], ""].join("\\0"));
+' < ../merge-tree.out > ../remerge/three || exit 16
+  n=0
+  total=0
+  while IFS= read -r -d '' path && IFS= read -r -d '' b && IFS= read -r -d '' m && IFS= read -r -d '' a; do
+    n=$((n + 1))
+    git merge-file -p --zdiff3 -L ${main} -L ${base} -L ${attempt} --object-id "$m" "$b" "$a" > ../remerge/raw 2> /dev/null
+    if [ $? -gt 127 ]; then
+      printf 'failed\\0%s\\0' "$path" >> ../remerge.list
+      continue
+    fi
+    awk -v max=${2 * caps.fileBytes} '
+      { l = $0; sub(/\\r$/, "", l) }
+      !c && l == "<<<<<<< ${main}" { c = 1 }
+      c { n += length($0) + 1; if (n > max) exit 3; print; if (l == ">>>>>>> ${attempt}") c = 0; next }
+      { print "" }
+    ' < ../remerge/raw > "../remerge/$n"
+    status=$?
+    size=$(wc -c < "../remerge/$n")
+    if [ "$status" = 3 ] || [ $((total + size)) -gt ${2 * caps.totalBytes} ]; then
+      printf 'too_large\\0%s\\0' "$path" >> ../remerge.list
+      continue
+    fi
+    total=$((total + size))
+    printf 'merged\\0%s\\0' "$path" >> ../remerge.list
+  done < ../remerge/three
+fi
 output=$(node -e 'process.stdout.write(JSON.stringify(require("fs").readFileSync(0, "utf8")))' < ../merge-tree.out) || exit 16
-result "{\\"main\\":\\"$main\\",\\"clean\\":$clean,\\"output\\":$output}"
+remerges=$(node -e '
+const fs = require("fs");
+const list = fs.readFileSync("../remerge.list", "utf8").split("\\0");
+const out = [];
+for (let i = 0; i + 1 < list.length; i += 2) {
+  const entry = { path: list[i + 1], status: list[i] };
+  if (entry.status === "merged") entry.output = fs.readFileSync("../remerge/" + (i / 2 + 1), "utf8");
+  out.push(entry);
+}
+process.stdout.write(JSON.stringify(out));
+') || exit 16
+result "{\\"main\\":\\"$main\\",\\"clean\\":$clean,\\"base\\":$base,\\"output\\":$output,\\"remerges\\":$remerges}"
 `;
 }
 

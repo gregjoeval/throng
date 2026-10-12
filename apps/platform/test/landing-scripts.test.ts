@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { parseMergeTree } from "../src/conflicts.ts";
+import { conflictFiles, parseMergeTree } from "../src/conflicts.ts";
 import type { RawScore, ScorePlan } from "../src/results.ts";
 import {
   conflictCheckScript,
@@ -86,6 +86,10 @@ const landing = (merge: { head: string; main: string; tree: string }) => ({
   committedAt: 1_700_000_000,
 });
 
+/** The fixture worker's `src/greeting.js` (the spike's conflict), its greeting set to `word`. */
+const greeting = (word: string) =>
+  `export const GREETING = "${word}";\n\nexport function greet(name) {\n  return \`\${GREETING}, \${name}\`;\n}\n`;
+
 describe("conflictCheckScript", () => {
   it("reports main's sha and the merged tree of a clean merge", () => {
     const { head, main } = diverged();
@@ -101,7 +105,78 @@ describe("conflictCheckScript", () => {
     const { head, main } = diverged("a.txt", "one\nmine\nthree\n", "a.txt", "one\ntheirs\nthree\n");
     const result = run<ConflictCheckResult>(conflictCheckScript(origin, fork, head));
     expect(result).toMatchObject({ main, clean: false });
-    expect(parseMergeTree(result.output).files).toEqual([{ path: "a.txt", type: "content" }]);
+    expect(parseMergeTree(result.output).files).toMatchObject([{ path: "a.txt", type: "content" }]);
+  });
+
+  it("gives the spike's GREETING conflict with its blobs and the exact hunk", () => {
+    const base = commit("greeting.js", greeting("hello"), "greeting");
+    git(work, "push", "-q", origin, "main");
+    git(work, "push", "-q", fork, "main");
+    const { head, main } = diverged("greeting.js", greeting("hello from a2"), "greeting.js", greeting("hello from a1"));
+    const result = run<ConflictCheckResult>(conflictCheckScript(origin, fork, head));
+    expect(result).toMatchObject({ main, clean: false, base });
+
+    const blob = (rev: string) => git(work, "rev-parse", `${rev}:greeting.js`);
+    expect(conflictFiles(parseMergeTree(result.output).files, result.remerges)).toEqual([
+      {
+        path: "greeting.js",
+        type: "content",
+        blobs: { base: blob(base), main: blob(main), attempt: blob(head) },
+        modes: { base: "100644", main: "100644", attempt: "100644" },
+        truncated: false,
+        hunks: [
+          {
+            startLine: 1,
+            base: ['export const GREETING = "hello";'],
+            main: ['export const GREETING = "hello from a1";'],
+            attempt: ['export const GREETING = "hello from a2";'],
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("re-merges only content conflicts, blanking the lines outside their hunks", () => {
+    const lines = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`);
+    const long = (at20: string) => lines.map((l, i) => (i === 19 ? at20 : l)).join("\n") + "\n";
+    writeFileSync(join(work, "gone.txt"), "kept?\n");
+    const base = commit("long.txt", long("line 20"), "base");
+    git(work, "push", "-q", origin, "main");
+    writeFileSync(join(work, "gone.txt"), "changed\n");
+    const head = commit("long.txt", long("attempt"), "attempt");
+    git(work, "push", "-q", fork, "main");
+    git(work, "reset", "-q", "--hard", base);
+    git(work, "rm", "-q", "gone.txt");
+    commit("long.txt", long("main"), "main");
+    git(work, "push", "-q", origin, "main");
+
+    const result = run<ConflictCheckResult>(conflictCheckScript(origin, fork, head));
+    expect(parseMergeTree(result.output).files.map((f) => f.type)).toEqual(["modify_delete", "content"]);
+    expect(result.remerges).toEqual([
+      {
+        path: "long.txt",
+        status: "merged",
+        output: `${"\n".repeat(19)}<<<<<<< main\nmain\n||||||| base\nline 20\n=======\nattempt\n>>>>>>> attempt\n${"\n".repeat(10)}`,
+      },
+    ]);
+  });
+
+  it("reports a re-merge over twice a cap as too large", () => {
+    const { head } = diverged("a.txt", "one\nmine\nthree\n", "a.txt", "one\ntheirs\nthree\n");
+    const tiny = (fileBytes: number, totalBytes: number) =>
+      run<ConflictCheckResult>(conflictCheckScript(origin, fork, head, { fileBytes, totalBytes })).remerges;
+    expect(tiny(10, 1000)).toEqual([{ path: "a.txt", status: "too_large" }]);
+    expect(tiny(1000, 10)).toEqual([{ path: "a.txt", status: "too_large" }]);
+    expect(tiny(1000, 1000)).toMatchObject([{ path: "a.txt", status: "merged" }]);
+  });
+
+  it("reports a binary content conflict as failed", () => {
+    commit("bin.dat", "\0one", "bin");
+    git(work, "push", "-q", origin, "main");
+    git(work, "push", "-q", fork, "main");
+    const { head } = diverged("bin.dat", "\0two", "bin.dat", "\0three");
+    const result = run<ConflictCheckResult>(conflictCheckScript(origin, fork, head));
+    expect(result.remerges).toEqual([{ path: "bin.dat", status: "failed" }]);
   });
 });
 

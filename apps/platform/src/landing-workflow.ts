@@ -1,7 +1,7 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep, type WorkflowStepConfig } from "cloudflare:workers";
 import { reposFor } from "./artifacts";
 import { loadConfig } from "./config";
-import { parseMergeTree, type ConflictDetails } from "./conflicts";
+import { conflictFiles, parseMergeTree, type ConflictDetails } from "./conflicts";
 import { LANDING_ROLES, sandboxName } from "./grants";
 import {
   failedChecks,
@@ -107,7 +107,13 @@ export class LandingWorkflow extends WorkflowEntrypoint<Env, LandingParams> {
     });
     const merged = parseMergeTree(checked.output);
     if (!checked.clean) {
-      const details: ConflictDetails = { attempt: ref, head: params.head, main: checked.main, files: merged.files };
+      const details: ConflictDetails = {
+        attempt: ref,
+        head: params.head,
+        main: checked.main,
+        base: checked.base,
+        files: conflictFiles(merged.files, checked.remerges),
+      };
       return { kind: "conflict", details };
     }
     const merge: MergePlan = { head: params.head, main: checked.main, tree: merged.tree };

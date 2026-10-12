@@ -282,7 +282,8 @@ function checkedValue(metric: MetricConfig, reported: MetricValue | undefined): 
  * A metric's entry in the result: its type's fields, and its value, already checked against its
  * type, or null with the note.
  */
-function metricResult(metric: MetricConfig, source: Source, checked: MetricValue): MetricResult {
+function metricResult(metric: MetricConfig, checked: MetricValue): MetricResult {
+  const { source } = metric;
   const note = checked.value === null ? { note: checked.note } : {};
   const { value } = checked;
   switch (metric.type) {
@@ -341,7 +342,7 @@ function configScored(
     metrics: Object.fromEntries(
       metricsFrom(check.name, metrics).map((metric): [string, MetricResult] => [
         metric.name,
-        metricResult(metric, metric.source, value(metric)),
+        metricResult(metric, value(metric)),
       ]),
     ),
   };

@@ -11,7 +11,6 @@
  * (true is the higher), an enum by its `values` best first, and a string not at all.
  */
 export const METRIC_TYPES = ["boolean", "number", "string", "enum"] as const;
-export type MetricType = (typeof METRIC_TYPES)[number];
 
 /** How a string metric's value is shown; it never changes how values compare. */
 export const METRIC_FORMATS = ["url"] as const;

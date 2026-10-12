@@ -63,7 +63,7 @@ export function taskDefinitionsFrom(
 }
 
 /** Whether a task defines any checks or metrics. */
-export function defines(task: TaskDefinitions): boolean {
+function defines(task: TaskDefinitions): boolean {
   return task.checks.length > 0 || task.metrics.length > 0;
 }
 

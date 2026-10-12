@@ -98,6 +98,7 @@ async function setup() {
   };
   return {
     store,
+    repos,
     base,
     drain,
     attempt,
@@ -220,6 +221,26 @@ describe("after each outcome", () => {
     expect(mr(t1.task)).toMatchObject({ state: "pending", last_dequeue: { reason: "conflict", details } });
     expect(mr(t2.task).state).toBe("landing");
     expect(landingWorkflow.created).toHaveLength(2);
+  });
+
+  it("counts the conflicting files in the notice on the next push to the source", async () => {
+    const { store, drain, queued, repos, base } = await setup();
+    const t1 = await queued("First");
+    await drain();
+    const files = [
+      { path: "a", type: "content" as const },
+      { path: "b", type: "add_add" as const },
+    ];
+    await store.landingFinished(1, {
+      kind: "conflict",
+      details: { attempt: "t1a1", head: base.hash, main: base.hash, files },
+    });
+    const after = repos.commit("abc123-t1a1", { files: { "README.md": "fixed\n" } }).hash;
+    const pushed = store.recordPush(PROJECT, ada, {
+      ...t1,
+      updates: [{ ref: "refs/heads/main", before: base.hash, after }],
+    });
+    expect(pushed.merge_request?.dequeue).toEqual({ reason: "conflict", files: 2 });
   });
 
   for (const outcome of [

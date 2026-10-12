@@ -38,6 +38,8 @@ import {
   type AttemptInput,
   type BranchRoute,
   type ProjectContext,
+  type PushNotice,
+  type PushRecord,
   type StoredAttempt,
   type StoredTask,
   type TaskMethod,
@@ -45,9 +47,6 @@ import {
 import { headAttemptRef, type ScoringRequest } from "./scoring.ts";
 import type { TaskBackend } from "./tasks.ts";
 import type { AccessBindings } from "./access.ts";
-
-/** What `recordPush` answers. */
-type PushRecord = { scoring: ScoringRequest | null };
 
 /** How long a minted Artifacts token lives. */
 export const UPSTREAM_TOKEN_TTL_SECONDS = 60 * 60;
@@ -330,7 +329,7 @@ async function pushToCreate(
       messages = [
         `Updated ${name} on ${taskRef(attempt.task)} from branch ${branch}.`,
         ...links(c, attempt.task, name),
-        ...(recorded.ok ? scoringLines(recorded.value as PushRecord) : []),
+        ...(recorded.ok ? recordLines(c, recorded.value as PushRecord) : []),
       ];
     }
 
@@ -378,6 +377,26 @@ function scoringLines({ scoring }: { scoring: ScoringRequest | null }): string[]
   return [`scoring queued for ${headAttemptRef(run)} (${run.sha})`];
 }
 
+/** The `remote:` lines for a push recorded on an attempt's fork: scoring, then its merge request's news. */
+function recordLines(c: GitContext, record: PushRecord): string[] {
+  return [...scoringLines(record), ...mergeRequestLines(c, record.merge_request)];
+}
+
+/** The `remote:` lines telling the pusher their merge request was dequeued, or now needs review. */
+function mergeRequestLines(c: GitContext, notice: PushNotice | null): string[] {
+  if (notice === null) return [];
+  const mr = `merge request ${taskRef(notice.task)}`;
+  const lines: string[] = [];
+  if (notice.dequeue !== null) {
+    const { reason, files } = notice.dequeue;
+    const count = files === null ? "" : `: ${files} ${files === 1 ? "file" : "files"}`;
+    lines.push(
+      `${mr} dequeued (${reason})${count} — ${projectApi(c)}/tasks/${taskRef(notice.task)}/merge-request/dequeue`,
+    );
+  }
+  if (notice.needs_review !== null) lines.push(`${mr} needs review: new head ${notice.needs_review}`);
+  return lines;
+}
 /** The `remote:` lines for a push that made an attempt. */
 function createdLines(
   c: GitContext,
@@ -401,9 +420,16 @@ function links(c: GitContext, task: number, attempt: string): string[] {
   const { origin, pathname } = new URL(c.req.url);
   const [, owner = "", project = ""] = REMOTE_PATH.exec(pathname) ?? [];
   return [
-    `  Task:    ${origin}/api/projects/${owner}/${project}/tasks/${taskRef(task)}`,
+    `  Task:    ${projectApi(c)}/tasks/${taskRef(task)}`,
     `  Attempt: ${origin}/git/${owner}/${project}/${attempt}.git`,
   ];
+}
+
+/** The project's API URL, from the request's own origin and path. */
+function projectApi(c: GitContext): string {
+  const { origin, pathname } = new URL(c.req.url);
+  const [, owner = "", project = ""] = REMOTE_PATH.exec(pathname) ?? [];
+  return `${origin}/api/projects/${owner}/${project}`;
 }
 
 /** Why a push is refused: one reason for every ref, or a reason per ref. */
@@ -567,7 +593,7 @@ async function recordForkPush(
     console.error({ event: "git.record_push_failed", repo: target.repo, error: recorded.message });
     return bytes;
   }
-  const messages = scoringLines(recorded.value as PushRecord);
+  const messages = recordLines(c, recorded.value as PushRecord);
   return messages.length === 0 ? bytes : writeReport(report, messages, sideband);
 }
 

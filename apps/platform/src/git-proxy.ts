@@ -469,7 +469,7 @@ function links(c: GitContext, task: number, attempt: string): string[] {
   const [, owner = "", project = ""] = REMOTE_PATH.exec(pathname) ?? [];
   return [
     `  Task:    ${projectApi(c)}/tasks/${taskRef(task)}`,
-    `  Attempt: ${attemptRemote(origin, owner, project, attempt)}`,
+    `  Attempt: ${attemptRemote(origin, { owner, project }, attempt)}`,
   ];
 }
 

@@ -9,6 +9,7 @@ import type { MetricConfig } from "./config.ts";
 import type { ConflictDetails, ConflictFile } from "./conflicts.ts";
 import { ServiceError } from "./errors.ts";
 import { attemptRemote, cloneCommand } from "./git-remotes.ts";
+import type { ProjectPath } from "./git-remotes.ts";
 import type { ErroredDetails, FailedChecksDetails } from "./landing.ts";
 import type { Dequeue, DequeueReason, StoredMergeRequest } from "./merge-requests.ts";
 import { resolveProject } from "./projects.ts";
@@ -256,11 +257,6 @@ export interface ScoringAnswer {
   run: ScoringRun;
 }
 
-interface ProjectPath {
-  owner: string;
-  project: string;
-}
-
 type TaskPath = ProjectPath & { task: string };
 type AttemptPath = ProjectPath & { attempt: string };
 
@@ -299,7 +295,7 @@ export function taskService({ db, repos, backend, origin }: TaskServiceDeps) {
       db,
       list.map((a) => a.author),
     );
-    return list.map((a) => publicAttempt(a, users, attemptRemote(origin, path.owner, path.project, a.fork)));
+    return list.map((a) => publicAttempt(a, users, attemptRemote(origin, path, a.fork)));
   };
 
   /** A task transition: resolves the project and task reference, then runs `method`. */

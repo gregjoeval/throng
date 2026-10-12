@@ -9,7 +9,7 @@ import { MAX_WAIT_SECONDS, MAX_WAITERS_PER_USER } from "./waiters.ts";
 
 /** The guide, for a platform served at `origin`. */
 export function llmsText(origin: string): string {
-  const remote = attemptRemote(origin, "<owner>", "<project>", "t42a3");
+  const remote = attemptRemote(origin, { owner: "<owner>", project: "<project>" }, "t42a3");
   return `# Throng
 
 > Throng runs many attempts at a task in parallel, scores each one with the project's checks, and merges the

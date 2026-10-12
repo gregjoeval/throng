@@ -28,7 +28,7 @@ import { browseService } from "./browse.ts";
 import { DIFF_CAPS, diffCommit, unifiedPatch } from "./diff.ts";
 import { ServiceError } from "./errors.ts";
 import { missingLog } from "./logs.ts";
-import { TASK_STATES } from "./task-store.ts";
+import { ATTEMPT_STATES, TASK_STATES } from "./task-store.ts";
 import { taskService } from "./tasks.ts";
 import type { Actor } from "./tokens.ts";
 import { MAX_WAIT_SECONDS } from "./waiters.ts";
@@ -95,6 +95,9 @@ const ProjectRefSchema = z
 const TaskRefSchema = z.string().describe("A task reference: `t42` or `42`.");
 const AttemptRefSchema = z.string().describe("An attempt reference, e.g. `t42a3`.");
 const RefSchema = z.string().describe("`main`, an attempt reference (`t42a3`), or a full 40-character commit sha.");
+
+/** The states `update_attempt` moves an attempt to; `merged` and `obsolete` aren't its author's to choose. */
+const UPDATE_STATES = z.enum(ATTEMPT_STATES).exclude(["merged", "obsolete"]);
 
 const onProject = z.object({ project: ProjectRefSchema });
 const onTask = onProject.extend({ task: TaskRefSchema });
@@ -219,17 +222,16 @@ function mcpServer({ repos, tasks, logs, diffCache }: Deps, { actor, token, env,
       "`closed`. Only its author may.",
     onAttempt.extend({
       note: EditAttemptSchema.shape.note.optional(),
-      state: z.enum(["open", "draft", "closed"]).optional(),
+      state: UPDATE_STATES.optional(),
     }),
     async ({ project, attempt, note, state }) => {
       const path = { ...projectPath(project), attempt };
       if (note === undefined && state === undefined) {
         throw new ServiceError("invalidRequest", "give a `note`, a `state`, or both");
       }
+      const moves = { open: service.openAttempt, draft: service.draftAttempt, closed: service.closeAttempt };
       let updated = note === undefined ? null : await service.editAttempt(actor, { ...path, note });
-      if (state === "open") updated = await service.openAttempt(actor, path);
-      if (state === "draft") updated = await service.draftAttempt(actor, path);
-      if (state === "closed") updated = await service.closeAttempt(actor, path);
+      if (state !== undefined) updated = await moves[state](actor, path);
       if (updated === null) throw new Error("unreachable: an update with nothing to do");
       return answer(`${updated.ref} is ${updated.state}`, { attempt: updated });
     },

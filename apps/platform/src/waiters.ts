@@ -3,9 +3,14 @@
 // wait runs out. The store wakes its waiters after every call that may change an attempt's state,
 // its scoring runs or its merge request.
 
+import type { MergeRequestState } from "./merge-requests.ts";
+import type { AttemptState } from "./task-store.ts";
+
 /** What a wait watches: its current head getting scored, its state, its merge request, or any of them. */
 export const WAIT_CONDITIONS = ["scored", "stateChanged", "mergeRequestChanged", "any"] as const;
 export type WaitCondition = (typeof WAIT_CONDITIONS)[number];
+/** The conditions `any` is made of: every other one. */
+const WATCHED = WAIT_CONDITIONS.filter((c): c is Exclude<WaitCondition, "any"> => c !== "any");
 
 /** The longest a request may wait, in seconds. */
 export const MAX_WAIT_SECONDS = 30;
@@ -14,11 +19,11 @@ export const MAX_WAITERS_PER_USER = 10;
 
 /** The fields of an attempt a wait compares against its snapshot from request time. */
 export interface AttemptWatch {
-  state: string;
+  state: AttemptState;
   /** The newest `done` or `errored` run of its current head, or null when that head has none. */
   scoredRun: number | null;
   /** Its latest merge request: which one, its state and when it last left the queue; null when it has none. */
-  mergeRequest: { id: number; state: string; dequeuedAt: string | null } | null;
+  mergeRequest: { id: number; state: MergeRequestState; dequeuedAt: string | null } | null;
 }
 
 /**
@@ -37,7 +42,7 @@ export function watchChanged(until: WaitCondition, before: AttemptWatch, after: 
       return JSON.stringify(after.mergeRequest) !== JSON.stringify(before.mergeRequest);
     }
     case "any": {
-      return (["scored", "stateChanged", "mergeRequestChanged"] as const).some((c) => watchChanged(c, before, after));
+      return WATCHED.some((c) => watchChanged(c, before, after));
     }
   }
 }

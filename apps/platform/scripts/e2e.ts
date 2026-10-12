@@ -251,10 +251,8 @@ async function zeroconfig(): Promise<void> {
   const sibling = await throng<Attempt>(p, "GET", `/attempts/${a2}`);
   assert(sibling.state === "closed", `selecting ${a1} left ${a2} ${sibling.state}`);
 
-  const merged = await mergeRequestUntil(p, t1, (mr) => mr.state === "merged");
+  const mainSha = await mergedSha(p, t1);
   timeline.mark("t1 merged");
-  const mainSha = merged.mergeSha;
-  assert(mainSha !== null, "a merged merge request has no mergeSha");
   const onMain = await api<{ sha: string }>("GET", `/e2e/repos/${originRepo(p.project)}/head`);
   assert(onMain.sha === mainSha, `main is ${onMain.sha}, expected the merge commit ${mainSha}`);
 
@@ -309,10 +307,8 @@ async function conflict(): Promise<void> {
   timeline.mark("both pushed and opened");
 
   await throng(p, "POST", `/tasks/${t1}/selection`, { attempt: a1 });
-  const landed = await mergeRequestUntil(p, t1, (mr) => mr.state === "merged");
+  const mainSha = await mergedSha(p, t1);
   timeline.mark("t1 merged");
-  const mainSha = landed.mergeSha;
-  assert(mainSha !== null, "a merged merge request has no mergeSha");
 
   await throng(p, "POST", `/tasks/${t2}/selection`, { attempt: a2 });
   timeline.mark("t2a1 selected");
@@ -376,15 +372,14 @@ async function conflict(): Promise<void> {
   const approved = await throng<MergeRequest>(p, "POST", `/tasks/${t2}/merge-request/approve`);
   assert(approved.approvedHead === resolved, `approved ${approved.approvedHead}, expected ${resolved}`);
   timeline.mark("t2 approved");
-  const merged = await mergeRequestUntil(p, t2, (mr) => mr.state === "merged");
+  const t2Merge = await mergedSha(p, t2);
   timeline.mark("t2 merged");
-  assert(merged.mergeSha !== null, "a merged merge request has no mergeSha");
-  const commit = await readCommit(p, merged.mergeSha);
+  const commit = await readCommit(p, t2Merge);
   assert(
     JSON.stringify(commit.parents) === JSON.stringify([mainSha, resolved]),
     `expected parents [t1's merge, t2a1's head], got ${JSON.stringify(commit.parents)}`,
   );
-  const greeting = await git(p.work, "show", `${merged.mergeSha}:src/greeting.js`);
+  const greeting = await git(p.work, "show", `${t2Merge}:src/greeting.js`);
   assert(greeting.includes("hello from a1 and a2"), "main does not contain the resolution");
 
   const journal = await settle(p.project);
@@ -965,6 +960,13 @@ async function mergeRequestUntil(
     assert(mr.state !== "merged" && mr.state !== "cancelled", `${task}'s merge request ended ${seen}`);
     return null;
   });
+}
+
+/** Waits for the task's merge request to merge, and returns its merge commit. */
+async function mergedSha(p: RealProject, task: string): Promise<string> {
+  const merged = await mergeRequestUntil(p, task, (mr) => mr.state === "merged");
+  assert(merged.mergeSha !== null, "a merged merge request has no mergeSha");
+  return merged.mergeSha;
 }
 
 /**

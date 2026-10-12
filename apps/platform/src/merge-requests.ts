@@ -79,6 +79,8 @@ interface MergeRequestRow {
   /** 1 after a dequeue back to pending, until an approval or a push: it doesn't requeue on its own. */
   held: number;
   last_dequeue: string | null;
+  /** 0 until a push to the source attempt has told its pusher of `last_dequeue`. */
+  dequeue_seen: number;
   merge_sha: string | null;
   merged_at: string | null;
   created_at: string;
@@ -99,6 +101,7 @@ const SCHEMA = [
     queued_at TEXT,
     held INTEGER NOT NULL DEFAULT 0,
     last_dequeue TEXT,
+    dequeue_seen INTEGER NOT NULL DEFAULT 1,
     merge_sha TEXT,
     merged_at TEXT,
     created_at TEXT NOT NULL,
@@ -171,6 +174,16 @@ export class MergeRequests {
   held(mr: StoredMergeRequest): boolean {
     const [row] = this.#sql.exec<{ held: number }>("SELECT held FROM merge_requests WHERE id = ?", mr.id);
     return row?.held === 1;
+  }
+
+  /** Its last dequeue if no push has reported it yet, marking it reported; otherwise null. */
+  takeUnseenDequeue(mr: StoredMergeRequest): Dequeue | null {
+    const [row] = this.#sql.exec<{ last_dequeue: string }>(
+      `UPDATE merge_requests SET dequeue_seen = 1 WHERE id = ? AND dequeue_seen = 0 AND last_dequeue IS NOT NULL
+       RETURNING last_dequeue`,
+      mr.id,
+    );
+    return row === undefined ? null : (JSON.parse(row.last_dequeue) as Dequeue);
   }
 
   /** The merge queue: landing first, then queued, first in first out. */
@@ -247,7 +260,7 @@ export class MergeRequests {
   ): StoredMergeRequest {
     const dequeue: Dequeue = { reason, at: this.#stamp(), ...(details === undefined ? {} : { details }) };
     this.#sql.exec(
-      "UPDATE merge_requests SET state = ?, queued_at = NULL, last_dequeue = ?, held = ? WHERE id = ?",
+      "UPDATE merge_requests SET state = ?, queued_at = NULL, last_dequeue = ?, dequeue_seen = 0, held = ? WHERE id = ?",
       to,
       JSON.stringify(dequeue),
       to === "pending" ? 1 : 0,

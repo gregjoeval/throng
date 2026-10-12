@@ -5,9 +5,9 @@ const grant = { accountId: "acct", workerName: "fixture" };
 
 describe("previewPathAllowed", () => {
   it("allows the previewed Worker and the subdomain lookup", () => {
-    expect(previewPathAllowed("/client/v4/accounts/acct/workers/scripts/fixture", grant)).toBe(true);
-    expect(previewPathAllowed("/client/v4/accounts/acct/workers/workers/fixture/previews", grant)).toBe(true);
-    expect(previewPathAllowed("/client/v4/accounts/acct/workers/subdomain", grant)).toBe(true);
+    expect(previewPathAllowed("/client/v4/accounts/acct/workers/scripts/fixture", grant)).toBeTruthy();
+    expect(previewPathAllowed("/client/v4/accounts/acct/workers/workers/fixture/previews", grant)).toBeTruthy();
+    expect(previewPathAllowed("/client/v4/accounts/acct/workers/subdomain", grant)).toBeTruthy();
   });
 
   it("refuses other Workers, other accounts, and everything else", () => {

@@ -46,7 +46,8 @@
       "rules": {
         "vitest/valid-expect": "off",
         "vitest/require-to-throw-message": "off",
-        "vitest/no-conditional-expect": "error"
+        "vitest/no-conditional-expect": "error",
+        "vitest/prefer-to-be-truthy": "error"
       }
     },
     {

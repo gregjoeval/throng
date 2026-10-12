@@ -211,7 +211,7 @@ describe("hand-off through the API and the git proxy", () => {
     const { host, env, adaClaude, ada, bob, handOff, clone, commit, fork } = await e2eSetup();
     const adaDir = await clone(ada.token);
     await commit(adaDir, "first");
-    expect((await tryGit(adaDir, env, "push", "origin", "HEAD:main")).ok).toBe(true);
+    expect((await tryGit(adaDir, env, "push", "origin", "HEAD:main")).ok).toBeTruthy();
 
     const handed = await handOff(adaClaude.token, "bob");
     expect(handed.status).toBe(200);
@@ -227,7 +227,7 @@ describe("hand-off through the API and the git proxy", () => {
 
     const bobDir = await clone(bob.token);
     const sha = await commit(bobDir, "bob");
-    expect((await tryGit(bobDir, env, "push", "origin", "HEAD:main")).ok).toBe(true);
+    expect((await tryGit(bobDir, env, "push", "origin", "HEAD:main")).ok).toBeTruthy();
     expect(await host.head(fork)).toBe(sha);
   });
 

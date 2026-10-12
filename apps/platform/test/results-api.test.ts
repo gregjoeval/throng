@@ -92,7 +92,7 @@ async function setup() {
   /** Starts queued runs, then reports how run `id` ended. */
   const finish = async (id: number, outcome: ScoringOutcome) => {
     await scoring().drain();
-    expect(scoring().finish(id, outcome)).toBe(true);
+    expect(scoring().finish(id, outcome)).toBeTruthy();
   };
 
   return { api, env, call, greg, ada, bob, base, drafts, commit, push, scoring, finish };

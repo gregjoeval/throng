@@ -200,7 +200,7 @@ describe("selection permissions and requirements", () => {
     await open(ref2);
     await store.selectAttempt(PROJECT, cat, ref1);
     expect(await code(store.selectAttempt(PROJECT, cat, ref1))).toBe("invalidState");
-    expect(store.hasOpenMergeRequest(PROJECT, cat, { task: 1 })).toBe(true);
+    expect(store.hasOpenMergeRequest(PROJECT, cat, { task: 1 })).toBeTruthy();
     expect(await code(store.createAttempts(PROJECT, bob, { task: 1 }))).toBe("invalidState");
     expect(await code(store.reopenAttempt(PROJECT, bob, ref2))).toBe("invalidState");
   });

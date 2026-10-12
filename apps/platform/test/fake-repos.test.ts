@@ -30,7 +30,7 @@ describe("FakeRepos", () => {
   it("deletes a repo once", async () => {
     const repos = new FakeRepos();
     await repos.create("k3x9q2-main");
-    expect(await repos.delete("k3x9q2-main")).toBe(true);
+    expect(await repos.delete("k3x9q2-main")).toBeTruthy();
     expect(await repos.delete("k3x9q2-main")).toBe(false);
     await expect(repos.get("k3x9q2-main")).rejects.toMatchObject({ code: "NOT_FOUND" });
   });

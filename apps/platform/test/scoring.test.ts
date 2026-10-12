@@ -108,7 +108,7 @@ const done = (overrides: Partial<ScoringResult> = {}): ScoringOutcome => ({
 const errored = (): ScoringOutcome => ({ status: "errored", error: "sandbox lost" });
 
 function queued(request: ScoringRequest | null): ScoringRequest & { queued: true } {
-  expect(request?.queued).toBe(true);
+  expect(request?.queued).toBeTruthy();
   return request as ScoringRequest & { queued: true };
 }
 
@@ -286,7 +286,7 @@ describe("the scoring queue", () => {
     expect(workflow.created.map((c) => c.params.attempt)).toEqual(["t1a1", "t1a2", "t1a3"]);
     expect(refs.map((r) => runs(r)[0]!.status)).toEqual(["running", "running", "running", "queued", "queued"]);
 
-    expect(store.scoring.finish(runs(refs[1]!)[0]!.id, done())).toBe(true);
+    expect(store.scoring.finish(runs(refs[1]!)[0]!.id, done())).toBeTruthy();
     await store.scoring.drain();
     expect(workflow.created.map((c) => c.params.attempt)).toEqual(["t1a1", "t1a2", "t1a3", "t1a4"]);
     expect(journal().find((e) => e.kind === "scored")).toMatchObject({
@@ -402,7 +402,7 @@ describe("results", () => {
       { name: "test", required: true, outcome: "passed", durationMs: 9, metrics: { coverage: 80 }, notes: [] },
       { name: "lint", required: false, outcome: "failed", durationMs: 1, metrics: {}, notes: [] },
     ];
-    expect(store.scoring.finish(runs(ref!)[0]!.id, done({ config: { kind: "valid" }, checks }))).toBe(true);
+    expect(store.scoring.finish(runs(ref!)[0]!.id, done({ config: { kind: "valid" }, checks }))).toBeTruthy();
 
     const [run] = runs(ref!);
     expect(run).toMatchObject({ status: "done", superseded: false, error: null });

@@ -121,7 +121,7 @@ describe("push-to-create", () => {
 
     const pushed = await push(dir, "search");
     expect(pushed.stderr).not.toMatch(/rejected|error/);
-    expect(pushed.ok).toBe(true);
+    expect(pushed.ok).toBeTruthy();
     expect(pushed.stderr).toMatch(/\* \[new branch\]\s+HEAD -> search/);
     expect(pushed.stderr).toMatch(/remote: Created t2 "Add search" with attempt t2a1, opened, from branch search\./);
     expect(pushed.stderr).toMatch(
@@ -167,11 +167,11 @@ describe("push-to-create", () => {
     const { ada, clone, commit, push, fork, host, tasks, project, journal, env } = await setup();
     const dir = await clone(ada.token);
     const first = await commit(dir, "Add search");
-    expect((await push(dir, "search")).ok).toBe(true);
+    expect((await push(dir, "search")).ok).toBeTruthy();
 
     const second = await commit(dir, "Search bodies too");
     const again = await push(dir, "search");
-    expect(again.ok).toBe(true);
+    expect(again.ok).toBeTruthy();
     expect(again.stderr).toMatch(/remote: Updated t2a1 on t2 from branch search\./);
     expect(await host.head(fork("t2a1"))).toBe(second);
     expect(tasks.listTasks(project, ada.actor, {}).map((t) => t.number)).toEqual([1, 2]);
@@ -184,7 +184,7 @@ describe("push-to-create", () => {
 
     await git(dir, env, "reset", "-q", "--hard", "HEAD~2");
     const rewritten = await commit(dir, "Search, take two");
-    expect((await push(dir, "search")).ok).toBe(true);
+    expect((await push(dir, "search")).ok).toBeTruthy();
     expect(await host.head(fork("t2a1"))).toBe(rewritten);
   });
 
@@ -192,7 +192,7 @@ describe("push-to-create", () => {
     const { ada, bob, clone, commit, push, fork, host, tasks, project } = await setup();
     const mine = await clone(ada.token);
     const sha = await commit(mine, "Add search");
-    expect((await push(mine, "search")).ok).toBe(true);
+    expect((await push(mine, "search")).ok).toBeTruthy();
 
     const theirs = await clone(bob.token);
     await commit(theirs, "Search, my way");
@@ -210,7 +210,7 @@ describe("push-to-create", () => {
     const dir = await clone(ada.token);
     await commit(dir, "x");
     await git(dir, gitEnv(dir), "commit", "-q", "--amend", "--allow-empty-message", "-m", "");
-    expect((await push(dir, "quiet-change")).ok).toBe(true);
+    expect((await push(dir, "quiet-change")).ok).toBeTruthy();
     expect(tasks.getTask(project, ada.actor, { task: 2 })).toMatchObject({ title: "quiet-change", body: "" });
   });
 
@@ -258,7 +258,7 @@ describe("push-to-create", () => {
 
     // The branch is free again; the failed push's number is never reused.
     const retried = await push(dir, "search");
-    expect(retried.ok).toBe(true);
+    expect(retried.ok).toBeTruthy();
     expect(retried.stderr).toMatch(/Created t3 "Add search" with attempt t3a1/);
   });
 
@@ -305,7 +305,7 @@ describe("joining a task with a t<n>/ branch", () => {
     const first = await commit(dir, "Fix login differently");
 
     const joined = await push(dir, "t1/bob");
-    expect(joined.ok).toBe(true);
+    expect(joined.ok).toBeTruthy();
     expect(joined.stderr).toMatch(/remote: Added attempt t1a2, opened, to t1 "Fix login" from branch t1\/bob\./);
     expect(joined.stderr).toMatch(/remote:\s+Attempt:\s+\S+\/git\/greg\/throng\/t1a2\.git/);
     expect(tasks.getAttempt(project, bob.actor, { task: 1, number: 2 })).toMatchObject({
@@ -317,7 +317,7 @@ describe("joining a task with a t<n>/ branch", () => {
     expect(await host.head(fork("t1a2"))).toBe(first);
 
     const second = await commit(dir, "And the tests");
-    expect((await push(dir, "t1/bob")).ok).toBe(true);
+    expect((await push(dir, "t1/bob")).ok).toBeTruthy();
     expect(await host.head(fork("t1a2"))).toBe(second);
     expect(tasks.listAttempts(project, bob.actor, { task: 1 })).toHaveLength(2);
     expect(

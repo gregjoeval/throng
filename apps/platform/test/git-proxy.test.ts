@@ -135,7 +135,7 @@ describe("git proxy", () => {
     const sha = await commit(dir, "fix");
     const pushed = await tryGit(dir, env, "push", "origin", "HEAD:main");
     expect(pushed.stderr).not.toMatch(/rejected/);
-    expect(pushed.ok).toBe(true);
+    expect(pushed.ok).toBeTruthy();
     expect(await host.head(forkRepo(project.id, "t1a1"))).toBe(sha);
 
     expect(journal()).toHaveLength(1);
@@ -152,7 +152,7 @@ describe("git proxy", () => {
     const dir = await clone("throng/t1a1.git", ada.token);
     const sha = await commit(dir, "fix");
     const pushed = await tryGit(dir, env, "push", "origin", "HEAD:main");
-    expect(pushed.ok).toBe(true);
+    expect(pushed.ok).toBeTruthy();
     expect(pushed.stderr).toMatch(new RegExp(`remote: scoring queued for t1a1 \\(${sha}\\)`));
     expect(pushed.stderr).toMatch(/HEAD -> main/);
     expect(
@@ -166,7 +166,7 @@ describe("git proxy", () => {
 
     // Pushing the same head to another ref of the fork queues nothing more.
     const again = await tryGit(dir, env, "push", "origin", "HEAD:refs/heads/copy");
-    expect(again.ok).toBe(true);
+    expect(again.ok).toBeTruthy();
     expect(again.stderr).not.toMatch(/scoring/);
   });
 
@@ -352,7 +352,7 @@ describe("merge request notices on a push to the source attempt", () => {
     const dir = await clone("throng/t1a1.git", ada.token);
     await commit(dir, "fix");
     const pushed = await tryGit(dir, env, "push", "origin", "HEAD:main");
-    expect(pushed.ok).toBe(true);
+    expect(pushed.ok).toBeTruthy();
     expect(pushed.stderr).not.toMatch(/merge request/);
   });
 
@@ -363,13 +363,13 @@ describe("merge request notices on a push to the source attempt", () => {
 
     const sha = await commit(dir, "fix");
     const pushed = await tryGit(dir, env, "push", "origin", "HEAD:main");
-    expect(pushed.ok).toBe(true);
+    expect(pushed.ok).toBeTruthy();
     expect(pushed.stderr).toContain(`remote: merge request t1 dequeued (conflict): 3 files — ${dequeueUrl}`);
     expect(pushed.stderr).toContain(`remote: merge request t1 needs review: new head ${sha}`);
 
     await commit(dir, "more");
     const again = await tryGit(dir, env, "push", "origin", "HEAD:main");
-    expect(again.ok).toBe(true);
+    expect(again.ok).toBeTruthy();
     expect(again.stderr).not.toMatch(/merge request/);
   });
 
@@ -378,12 +378,12 @@ describe("merge request notices on a push to the source attempt", () => {
     store(project.id).dequeueMergeRequest(project, null, { task: 1, reason: "errored", details: ERRORED });
 
     const pushed = await tryGit(dir, env, "push", "origin", "HEAD:refs/heads/copy");
-    expect(pushed.ok).toBe(true);
+    expect(pushed.ok).toBeTruthy();
     expect(pushed.stderr).toContain(`remote: merge request t1 dequeued (errored) — ${dequeueUrl}`);
     expect(pushed.stderr).not.toMatch(/needs review/);
 
     const again = await tryGit(dir, env, "push", "origin", "HEAD:refs/heads/copy2");
-    expect(again.ok).toBe(true);
+    expect(again.ok).toBeTruthy();
     expect(again.stderr).not.toMatch(/merge request/);
   });
 
@@ -391,13 +391,13 @@ describe("merge request notices on a push to the source attempt", () => {
     const { commit, dir, env } = await queued();
     const sha = await commit(dir, "fix");
     const pushed = await tryGit(dir, env, "push", "origin", "HEAD:main");
-    expect(pushed.ok).toBe(true);
+    expect(pushed.ok).toBeTruthy();
     expect(pushed.stderr).toContain(`remote: merge request t1 needs review: new head ${sha}`);
     expect(pushed.stderr).not.toMatch(/dequeued/);
 
     await commit(dir, "more");
     const again = await tryGit(dir, env, "push", "origin", "HEAD:main");
-    expect(again.ok).toBe(true);
+    expect(again.ok).toBeTruthy();
     expect(again.stderr).not.toMatch(/merge request/);
   });
 });

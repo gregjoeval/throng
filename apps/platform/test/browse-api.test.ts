@@ -388,7 +388,7 @@ describe("GET /commit/{sha}/diff", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("Content-Type")).toBe("text/x-diff; charset=utf-8");
     const text = await res.res.text();
-    expect(text.startsWith("diff --git a/a.txt b/a.txt\n")).toBe(true);
+    expect(text.startsWith("diff --git a/a.txt b/a.txt\n")).toBeTruthy();
     expect(text).toContain("diff --git a/c.txt b/c.txt\nnew file mode 100644\n");
   });
 

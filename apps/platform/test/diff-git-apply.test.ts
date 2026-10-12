@@ -70,7 +70,7 @@ describe("unified patches against git apply", () => {
     repos.commit(REPO, { files: before });
     const child = repos.commit(REPO, { files: after });
     const diff = (await diffCommit(repos, REPO, child.hash))!;
-    expect(diff.files.every((f) => f.flags.length === 0)).toBe(true);
+    expect(diff.files.every((f) => f.flags.length === 0)).toBeTruthy();
 
     const dir = checkout(before);
     const patchFile = join(dir, "..", `${dir.split("/").pop()}.patch`);

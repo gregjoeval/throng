@@ -74,7 +74,7 @@ describe("copyRef", () => {
     expect(sha).toBe(head);
     expect(await host.head(ORIGIN, "refs/attempts/t1a1")).toBe(head);
     expect(await host.head(ORIGIN)).toBe(base);
-    expect(await complete(ORIGIN, head)).toBe(true);
+    expect(await complete(ORIGIN, head)).toBeTruthy();
   });
 
   it("force-updates a ref to a commit that doesn't descend from it", async () => {
@@ -91,7 +91,7 @@ describe("copyRef", () => {
     });
     expect(sha).toBe(rewound);
     expect(await host.head(ORIGIN, "refs/attempts/t1a1")).toBe(rewound);
-    expect(await complete(ORIGIN, rewound)).toBe(true);
+    expect(await complete(ORIGIN, rewound)).toBeTruthy();
   });
 
   it("returns null for a missing ref, and pushes nothing when the target is already there", async () => {
@@ -175,7 +175,7 @@ describe("archive through real git", () => {
 
     expect((await store.reopenAttempt(PROJECT, ada, ref)).state).toBe("draft");
     expect(await host.head(FORK)).toBe(head);
-    expect(await complete(FORK, head)).toBe(true);
+    expect(await complete(FORK, head)).toBeTruthy();
     expect(await host.head(ORIGIN)).toBe(advanced);
   });
 });

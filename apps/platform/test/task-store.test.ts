@@ -866,7 +866,7 @@ describe("push-to-create", () => {
     );
     // Only the pusher may complete or abandon it.
     await store.abandonBranchPush(PROJECT, bob, { task: 1, number: 1 });
-    expect(await exists("abc123-t1a1")).toBe(true);
+    expect(await exists("abc123-t1a1")).toBeTruthy();
     expect(await code(store.completeBranchPush(PROJECT, bob, { task: 1, number: 1, head: "x", updates: [] }))).toBe(
       "invalidState",
     );
@@ -940,7 +940,7 @@ describe("push-to-create", () => {
     advance(BRANCH_PUSH_TTL_MS + 1);
     expect(await store.routeBranchPush(PROJECT, bob, { branch: "search" })).toMatchObject({ task: 2 });
     expect(await exists("abc123-t1a1")).toBe(false);
-    expect(await exists("abc123-t2a1")).toBe(true);
+    expect(await exists("abc123-t2a1")).toBeTruthy();
   });
 
   it("keeps a closed attempt from reopening onto a branch a push is creating", async () => {

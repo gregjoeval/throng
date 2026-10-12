@@ -216,7 +216,7 @@ describe("diffCommit caps", () => {
   it("stops listing at maxFiles and marks the diff truncated", async () => {
     const diff = await diffWith(numbered(5, "a\n"), numbered(5, "b\n"), caps({ maxFiles: 3 }));
     expect(diff.files.map((f) => f.path)).toEqual(["f00.txt", "f01.txt", "f02.txt"]);
-    expect(diff.truncated).toBe(true);
+    expect(diff.truncated).toBeTruthy();
     expect(diff.totals.files).toBe(3);
   });
 

@@ -112,7 +112,7 @@ async function setup() {
 
   /** Ends the landing (the first one) the way its Workflow would report it. */
   const finish = async (outcome: LandingOutcome) => {
-    expect(await tasks.landingFinished(1, outcome)).toBe(true);
+    expect(await tasks.landingFinished(1, outcome)).toBeTruthy();
   };
   return { call, request, logs, finish, greg, ada, bob, id, base, head, main, p };
 }

@@ -35,6 +35,7 @@ import { isActive } from "./task-store.ts";
 import type { Actor } from "./tokens.ts";
 import type { Database } from "./users.ts";
 import type { VerdictRecommendation, VerdictSummary } from "./verdicts.ts";
+import type { WaitCondition } from "./waiters.ts";
 
 /** A project's Durable Object, as the services call it: one store method per call. */
 export interface TaskBackend {
@@ -113,6 +114,11 @@ export interface Attempt extends AttemptStanding {
   archivedSha: string | null;
   scoring: AttemptScoring;
   mergeRequest: { state: AttemptMergeRequest["state"]; lastDequeue: { reason: DequeueReason } | null } | null;
+}
+
+/** An attempt a wait answered with, and whether what it watched changed. */
+export interface WaitedAttempt extends Attempt {
+  changed: boolean;
 }
 
 /** A reviewer's verdict on one head of an attempt, as the API shows it. */
@@ -382,6 +388,19 @@ export function taskService({ db, repos, backend }: TaskServiceDeps) {
 
     async getAttempt(actor: Actor, input: AttemptPath): Promise<Attempt> {
       return one(await invoke("getAttempt", await project(input), actor, attemptRefOf(input.attempt)), attempts);
+    },
+
+    /**
+     * Holds until what `until` watches on the attempt changes, or `wait` seconds pass (see
+     * `TaskStore.waitForAttempt`), then answers with the attempt and whether it changed.
+     */
+    async waitForAttempt(
+      actor: Actor,
+      input: AttemptPath & { wait: number; until: WaitCondition },
+    ): Promise<WaitedAttempt> {
+      const waited = { ...attemptRefOf(input.attempt), wait: input.wait, until: input.until };
+      const { changed, ...attempt } = await invoke("waitForAttempt", await project(input), actor, waited);
+      return { ...(await one(attempt, attempts)), changed };
     },
 
     /** A task's attempts; obsolete ones only when `state` is `obsolete`. */

@@ -32,6 +32,7 @@ import { DEFAULT_TOKEN_TTL_SECONDS, MAX_TOKEN_TTL_SECONDS, tokenService } from "
 import type { Token } from "./tokens.ts";
 import type { User } from "./users.ts";
 import { MAX_VERDICT_BODY, VERDICT_RECOMMENDATIONS } from "./verdicts.ts";
+import { MAX_WAIT_SECONDS, MAX_WAITERS_PER_USER, WAIT_CONDITIONS } from "./waiters.ts";
 
 const UserSchema = z
   .object({ id: z.string(), handle: z.string(), email: z.string(), createdAt: z.string() })
@@ -512,6 +513,34 @@ const TaskPathSchema = ProjectPathSchema.extend({
 const AttemptPathSchema = ProjectPathSchema.extend({
   a: z.string().openapi({ description: "An attempt reference.", example: "t42a3" }),
 });
+
+const WaitQuerySchema = z.object({
+  wait: z.coerce.number().int().min(1).max(MAX_WAIT_SECONDS).optional().openapi({
+    description:
+      "Seconds to hold the request until what `until` watches changes. Without it, the attempt is returned at once.",
+    example: 30,
+  }),
+  until: z
+    .enum(WAIT_CONDITIONS)
+    .default("any")
+    .openapi({
+      description:
+        "What to wait for, with `wait`: `scored`, the current head gets a `done` or `errored` run it didn't have; " +
+        "`stateChanged`, the attempt's state; `mergeRequestChanged`, its merge request's state or last dequeue; " +
+        "`any`, any of them.",
+    }),
+});
+
+const WaitedAttemptSchema = AttemptSchema.extend({
+  changed: z
+    .boolean()
+    .optional()
+    .openapi({
+      description:
+        "With `wait` only: whether what `until` watches changed before the wait ran out. False at once when the " +
+        `caller's user already has ${MAX_WAITERS_PER_USER} requests waiting in the project.`,
+    }),
+}).openapi("WaitedAttempt");
 
 const RunLogPathSchema = RunPathSchema.extend({
   name: z.string().openapi({
@@ -1137,18 +1166,30 @@ export function apiRoutes(options: ApiOptions = {}) {
         path: "/projects/{owner}/{project}/attempts/{a}",
         operationId: "getAttempt",
         tags: ["Attempts"],
-        summary: "Get an attempt by its reference",
+        summary: "Get an attempt by its reference, or wait for it to change",
+        description:
+          "With `wait`, the request is held until what `until` watches changes from when it arrived, or `wait` " +
+          "seconds pass, and the attempt comes back with `changed`. Use it instead of polling.",
         security: bearerOnly,
         middleware: [bearer] as const,
-        request: { params: AttemptPathSchema },
+        request: { params: AttemptPathSchema, query: WaitQuerySchema },
         responses: {
-          200: { description: "The attempt.", ...json(AttemptSchema) },
-          400: errorResponse("The attempt reference is invalid."),
+          200: { description: "The attempt.", ...json(WaitedAttemptSchema) },
+          400: errorResponse("The request is invalid."),
           401: unauthorizedBearer,
           404: errorResponse("No such project or attempt."),
         },
       }),
-      async (c) => c.json(await tasks(c.env).getAttempt(c.var.actor, attemptPath(c.req.valid("param"))), 200),
+      async (c) => {
+        const { wait, until } = c.req.valid("query");
+        const path = attemptPath(c.req.valid("param"));
+        const service = tasks(c.env);
+        const answer =
+          wait === undefined
+            ? await service.getAttempt(c.var.actor, path)
+            : await service.waitForAttempt(c.var.actor, { ...path, wait, until });
+        return c.json(answer, 200);
+      },
     )
     .openapi(
       createRoute({

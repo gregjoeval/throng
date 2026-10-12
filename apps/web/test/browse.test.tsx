@@ -24,6 +24,55 @@ const rowNames = (table: HTMLElement) =>
         .map((cell) => cell.textContent),
     );
 
+describe("project home", () => {
+  it("lists the root directory at main, with the README rendered below", async () => {
+    const asked = serveRepo({ main: FILES });
+    await renderApp("/ada/alpha");
+    const table = await entriesList();
+    expect(rowNames(table).map(([name]) => name)).toEqual(["docs", "src", "README.md", "big.txt", "package.json"]);
+    expect(within(table).getByRole("link", { name: "docs" })).toHaveAttribute("href", "/ada/alpha/tree/main/docs");
+    const readme = await screen.findByRole("region", { name: "README.md" });
+    expect(await within(readme).findByRole("heading", { name: "Alpha" })).toBeInTheDocument();
+    expect(asked).toContain("tree main ");
+    expect(asked).toContain("blob main README.md");
+  });
+
+  it("resolves the README's relative links and images against the repo", async () => {
+    serveRepo({ main: FILES });
+    await renderApp("/ada/alpha");
+    const readme = await screen.findByRole("region", { name: "README.md" });
+    expect(await within(readme).findByRole("link", { name: "guide" })).toHaveAttribute(
+      "href",
+      "/ada/alpha/blob/main/docs/guide.md",
+    );
+    expect(within(readme).getByRole("img", { name: "logo" })).toHaveAttribute(
+      "src",
+      "/ada/alpha/raw/main/docs/logo.png",
+    );
+  });
+
+  it("finds a README by any case, with or without .md", async () => {
+    serveRepo({ main: { "src/a.ts": "a\n", readme: "Plain words.\n" } });
+    await renderApp("/ada/alpha");
+    const readme = await screen.findByRole("region", { name: "readme" });
+    expect(await within(readme).findByText("Plain words.")).toBeInTheDocument();
+  });
+
+  it("shows no README when there's none", async () => {
+    const asked = serveRepo({ main: { "src/a.ts": "a\n" } });
+    await renderApp("/ada/alpha");
+    await entriesList();
+    expect(screen.queryByRole("region")).toBeNull();
+    expect(asked.filter((url) => url.startsWith("blob"))).toEqual([]);
+  });
+
+  it("says so when main has no commits yet", async () => {
+    serveRepo({}, { main: { ref: "main", sha: null }, active: [], archived: [] });
+    await renderApp("/ada/alpha");
+    expect(await screen.findByText("Nothing pushed yet")).toBeInTheDocument();
+  });
+});
+
 describe("the directory view", () => {
   it("lists a directory's entries, folders first, with each file's size", async () => {
     serveRepo({ main: FILES });

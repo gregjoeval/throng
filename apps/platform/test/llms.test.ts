@@ -62,6 +62,14 @@ describe("/llms.txt", () => {
     expect(text).toContain(`${ORIGIN}/api/openapi.json`);
   });
 
+  it("says what a check may reach, and that a registry stays read-only even when network.allow lists it", async () => {
+    const { text } = await llms();
+    expect(text).toContain("## Network access");
+    expect(text).toContain("`registry.npmjs.org`");
+    expect(text).toContain("`.npmrc` on the origin's `main`");
+    expect(text).toContain("`GET` and `HEAD` only, even when `network.allow` lists it too");
+  });
+
   it("mentions every tool the MCP server lists", async () => {
     const [{ text }, tools] = await Promise.all([llms(), mcpTools()]);
     expect(tools).toContain("start_attempts");

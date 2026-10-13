@@ -1,10 +1,12 @@
 // Vote selection in the project's Durable Object: opening a vote on the passing attempts, casting and
-// replacing ballots, who may vote, withdrawing a pushed candidate, adding one that passes later, and
-// closing the vote, which selects its winner.
+// replacing ballots, who may vote, withdrawing a pushed candidate (but not one a follow of the task
+// branch moved), adding one that passes later, closing the vote, which selects its winner, who may set
+// a task's selection policy, and what a task with an open vote can't change.
 
 import { describe, expect, it } from "vitest";
 import { CONFIG_PATH } from "../src/config.ts";
 import { ServiceError } from "../src/errors.ts";
+import type { FollowParams } from "../src/follows.ts";
 import type { Gate, ScoringResult } from "../src/results.ts";
 import type { ScoringOutcome, ScoringParams, ScoringWorkflow } from "../src/scoring.ts";
 import { TaskStore } from "../src/task-store.ts";
@@ -39,6 +41,15 @@ class FakeWorkflow implements ScoringWorkflow {
   }
 }
 
+/** A Follow Workflow binding that records what it was asked to start. */
+class FakeFollows {
+  created: FollowParams[] = [];
+  async create({ params }: { id: string; params: FollowParams }): Promise<unknown> {
+    this.created.push(params);
+    return {};
+  }
+}
+
 function result(gate: Gate): ScoringResult {
   return { base: "b".repeat(40), config: { kind: "none" }, gate, checks: [], metrics: {}, logs: [] };
 }
@@ -48,7 +59,8 @@ const done = (gate: Gate = "passed"): ScoringOutcome => ({ status: "done", resul
 /**
  * A project whose config selects by `selection` (a vote among anyone, by default), and a task by
  * cat with three open attempts: t1a1 by ada, t1a2 by bob, t1a3 by dan. `score` finishes an attempt's
- * latest run; `push` lands a new commit on its fork through the proxy.
+ * latest run; `push` lands a new commit on its fork through the proxy; `moveTaskBranch` pushes the
+ * task branch, and `follow` runs an attempt's follow of it to a clean merge.
  */
 async function setup(selection = "selection: { policy: vote }\n") {
   const repos = new FakeRepos();
@@ -61,11 +73,13 @@ async function setup(selection = "selection: { policy: vote }\n") {
   const advance = (ms: number) => {
     clock += ms;
   };
+  const follows = new FakeFollows();
   const store = new TaskStore({
     sql,
     repos,
     now: () => new Date((clock += 1000)),
     scoring: { workflow: new FakeWorkflow(), teardown: async () => {} },
+    follow: { workflow: follows },
   });
   const journal = () =>
     (
@@ -99,6 +113,27 @@ async function setup(selection = "selection: { policy: vote }\n") {
     store.recordPush(PROJECT, author(ref), { ...ref, updates: [{ ref: "refs/heads/main", before, after }] });
     return after;
   };
+  /** cat pushes a new task head, as the git proxy records it, and its follows start. */
+  const moveTaskBranch = async () => {
+    const taskHead = repos.commit(ORIGIN, { files: { "test.txt": `test ${++n}\n` }, branch: "tasks-t1" }).hash;
+    repos.setRef(ORIGIN, "refs/tasks/t1", taskHead);
+    store.recordTaskBranchPush(PROJECT, cat, { task: 1, head: taskHead });
+    await store.drain(PROJECT.id);
+    return taskHead;
+  };
+  /** Runs the attempt's latest follow to a clean merge of the task head into its fork; returns its new head. */
+  const follow = async (ref: AttemptInput) => {
+    const params = defined(
+      follows.created.findLast((p) => p.attempt === ref.number),
+      "a follow",
+    );
+    expect(store.claimFollowPush(params.follow)).toBeTruthy();
+    const fork = `abc123-t${ref.task}a${ref.number}`;
+    const before = defined(repos.ref(fork, "refs/heads/main"), "the fork's head");
+    const after = repos.commit(fork, { files: { "README.md": `merged ${++n}\n` }, parents: [before, params.taskHead] });
+    await store.followFinished(params.follow, { kind: "merged", before, head: after.hash });
+    return after.hash;
+  };
   /** Opens every attempt and scores it with `gates[i]`, passed by default. */
   const scoreAll = async (...gates: Gate[]) => {
     for (const [i, ref] of refs.entries()) {
@@ -109,7 +144,25 @@ async function setup(selection = "selection: { policy: vote }\n") {
   const head = (ref: AttemptInput) => store.getAttempt(PROJECT, owner, ref).scoring.sha;
   const vote = (as: Actor = owner) => store.getVote(PROJECT, as, { task: task.number });
   const tally = (as: Actor = owner) => vote(as).candidates.map((c) => [c.attempt, c.votes, c.withdrawn]);
-  return { repos, store, journal, now, advance, task, t1a1, t1a2, t1a3, score, push, scoreAll, head, vote, tally };
+  return {
+    repos,
+    store,
+    journal,
+    now,
+    advance,
+    task,
+    t1a1,
+    t1a2,
+    t1a3,
+    score,
+    push,
+    moveTaskBranch,
+    follow,
+    scoreAll,
+    head,
+    vote,
+    tally,
+  };
 }
 
 /** The setup's task with every attempt passing and a vote among `eligible` open. */
@@ -163,7 +216,7 @@ describe("opening a vote", () => {
     expect((await humans.store.openVote(PROJECT, cat, { task: 1 })).eligible).toBe("humans");
 
     const overridden = await setup("selection: { policy: creator }\n");
-    await overridden.store.editTask(PROJECT, cat, { task: 1, selection: { policy: "vote", eligible: "aliases" } });
+    await overridden.store.editTask(PROJECT, owner, { task: 1, selection: { policy: "vote", eligible: "aliases" } });
     await overridden.scoreAll();
     expect((await overridden.store.openVote(PROJECT, cat, { task: 1 })).eligible).toBe("aliases");
   });
@@ -329,6 +382,54 @@ describe("candidates", () => {
     expect((await store.closeVote(PROJECT, cat, { task: 1 })).vote.winner).toBe(2);
   });
 
+  it("stay standing when a follow of the task branch moves their head, and keep their ballots", async () => {
+    const { store, t1a1, t1a2, t1a3, scoreAll, score, moveTaskBranch, follow, tally, vote, head } = await setup();
+    await scoreAll();
+    await store.openVote(PROJECT, cat, { task: 1 });
+    store.castVote(PROJECT, eve, t1a1);
+    store.castVote(PROJECT, fay, t1a1);
+    store.castVote(PROJECT, dan, t1a2);
+
+    await moveTaskBranch();
+    for (const ref of [t1a1, t1a2, t1a3]) {
+      await follow(ref);
+      await score(ref);
+    }
+    expect(tally()).toEqual([
+      [1, 2, false],
+      [2, 1, false],
+      [3, 0, false],
+    ]);
+    expect(vote().candidates.map((c) => c.head)).toEqual([head(t1a1), head(t1a2), head(t1a3)]);
+    expect(vote(eve).ballot).toMatchObject({ attempt: 1, head: head(t1a1) });
+
+    const closed = await store.closeVote(PROJECT, cat, { task: 1 });
+    expect(closed.vote.winner).toBe(1);
+    expect(closed.selected).toMatchObject({ attempt: 1, approved_head: head(t1a1) });
+  });
+
+  it("are still withdrawn by their author's push after a follow, and a follow doesn't bring them back", async () => {
+    const { store, t1a1, t1a2, scoreAll, score, push, moveTaskBranch, follow, tally } = await setup();
+    await scoreAll();
+    await store.openVote(PROJECT, cat, { task: 1 });
+    store.castVote(PROJECT, eve, t1a1);
+    store.castVote(PROJECT, eve, t1a2);
+
+    await moveTaskBranch();
+    await follow(t1a1);
+    await score(t1a1);
+    push(t1a1);
+    await score(t1a1);
+    expect(tally()[0]).toEqual([1, 0, true]);
+
+    push(t1a2);
+    await score(t1a2);
+    await moveTaskBranch();
+    await follow(t1a2);
+    await score(t1a2);
+    expect(tally()[1]).toEqual([2, 0, true]);
+  });
+
   it("can be added again after a push withdrew them, without the old head's ballots", async () => {
     const { store, t1a1, scoreAll, score, push, tally } = await setup();
     await scoreAll();
@@ -403,12 +504,13 @@ describe("closing a vote", () => {
     expect(store.getMergeRequest(PROJECT, owner, { task: 1 }).attempt).toBe(1);
   });
 
-  it("happens with the task when the task is closed", async () => {
-    const { store, scoreAll, vote } = await setup();
+  it("happens with the task when the task is closed, closed by nobody", async () => {
+    const { store, scoreAll, vote, journal } = await setup();
     await scoreAll();
     await store.openVote(PROJECT, cat, { task: 1 });
     await store.closeTask(PROJECT, cat, { task: 1 });
-    expect(vote()).toMatchObject({ state: "closed", winner: null });
+    expect(vote()).toMatchObject({ state: "closed", winner: null, closed_by: null });
+    expect(journal().find((e) => e.kind === "voteClosed")).toMatchObject({ user: null, alias: null, winner: null });
   });
 });
 
@@ -427,5 +529,76 @@ describe("reading a vote", () => {
     await scoreAll();
     await store.openVote(PROJECT, cat, { task: 1 });
     expect(store.taskArena(PROJECT, eve, { task: 1 }).vote?.state).toBe("open");
+  });
+});
+
+describe("a task's selection policy", () => {
+  it("is the project owner's to set or change, so a creator can't loosen a vote to their own selection", async () => {
+    const { store, t1a1, scoreAll } = await setup();
+    await scoreAll();
+    const loose = { policy: "creator" } as const;
+    expect(await code(() => store.createTask(PROJECT, cat, { title: "Mine", selection: loose }))).toBe("forbidden");
+    expect(await code(store.editTask(PROJECT, cat, { task: 1, selection: loose }))).toBe("forbidden");
+    expect(
+      await code(store.editTask(PROJECT, cat, { task: 1, selection: { policy: "vote", eligible: "humans" } })),
+    ).toBe("forbidden");
+    expect(await code(store.selectAttempt(PROJECT, cat, t1a1))).toBe("invalidState");
+
+    // Sending the selection it already has changes nothing, so the creator may.
+    expect((await store.editTask(PROJECT, cat, { task: 1, title: "Fix it now", selection: null })).title).toBe(
+      "Fix it now",
+    );
+    expect(store.createTask(PROJECT, cat, { title: "Theirs", selection: null }).selection).toBeNull();
+
+    expect((await store.editTask(PROJECT, owner, { task: 1, selection: loose })).selection).toEqual(loose);
+    expect(await code(store.editTask(PROJECT, cat, { task: 1, selection: null }))).toBe("forbidden");
+    expect(store.createTask(PROJECT, owner, { title: "Owner's", selection: loose }).selection).toEqual(loose);
+    expect((await store.selectAttempt(PROJECT, cat, t1a1)).attempt).toBe(1);
+  });
+});
+
+describe("a task with an open vote", () => {
+  const check = { name: "lint", command: "pnpm lint" };
+  const lines = { name: "lines", from: "lint.report.lines", type: "number" };
+
+  it("can't change its checks, metrics or selection policy until the vote closes", async () => {
+    const { store, scoreAll, tally } = await setup();
+    await scoreAll();
+    await store.openVote(PROJECT, cat, { task: 1 });
+    const edits = [
+      { checks: [check] },
+      { checks: [check], metrics: [lines] },
+      { selection: { policy: "creator" } as const },
+    ];
+    for (const edit of edits) {
+      const refused = await store.editTask(PROJECT, owner, { task: 1, ...edit }).then(
+        () => null,
+        (error: unknown) => error,
+      );
+      expect(refused).toBeInstanceOf(ServiceError);
+      expect(refused).toMatchObject({ code: "invalidState", message: "t1 has an open vote; close it first" });
+    }
+    expect(tally().every(([, , withdrawn]) => withdrawn === false)).toBeTruthy();
+
+    const edited = await store.editTask(PROJECT, cat, {
+      task: 1,
+      title: "Fix it well",
+      body: "Carefully.",
+      checks: [],
+      metrics: [],
+      selection: null,
+    });
+    expect(edited).toMatchObject({ title: "Fix it well", body: "Carefully." });
+    expect(tally().every(([, , withdrawn]) => withdrawn === false)).toBeTruthy();
+  });
+
+  it("can change them again once the vote closed without a selection", async () => {
+    const { store, t1a1, t1a2, t1a3, scoreAll, push } = await setup();
+    await scoreAll();
+    await store.openVote(PROJECT, cat, { task: 1 });
+    for (const ref of [t1a1, t1a2, t1a3]) push(ref);
+    await store.closeVote(PROJECT, cat, { task: 1 });
+    const edited = await store.editTask(PROJECT, cat, { task: 1, checks: [check] });
+    expect(edited.definitions.checks).toMatchObject([check]);
   });
 });

@@ -228,7 +228,7 @@ function mcpServer({ repos, tasks, logs, diffCache }: Deps, { actor, token, env,
 
   tool(
     "create_task",
-    "Create an open task; the caller is its creator.",
+    "Create an open task; the caller is its creator. Only the project owner may set its `selection` policy.",
     CreateTaskSchema.extend(onProject.shape),
     async ({ project, ...input }) => {
       const created = await service.createTask(actor, { ...projectPath(project), ...input });

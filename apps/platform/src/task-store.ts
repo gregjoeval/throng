@@ -538,8 +538,12 @@ export class TaskStore {
 
   // --- tasks -----------------------------------------------------------------------------------
 
-  /** Creates an open task. Any signed-in user may, in any project. */
-  createTask(_project: ProjectContext, actor: Actor, input: CreateTaskInput): StoredTask {
+  /**
+   * Creates an open task. Any signed-in user may, in any project; only the project owner may give it
+   * a selection policy of its own.
+   */
+  createTask(project: ProjectContext, actor: Actor, input: CreateTaskInput): StoredTask {
+    if ((input.selection ?? null) !== null) this.#maySetSelection(project, actor);
     return this.#sql.transaction(() => {
       const number = this.#next("tasks");
       this.#sql.exec(
@@ -601,9 +605,11 @@ export class TaskStore {
   }
 
   /**
-   * Edits a task's title, body, attempt limit, selection policy, checks or metrics. The project owner or the task's
-   * creator may; who may is checked before the checks and metrics are. Changed definitions rescore
-   * each open attempt's head, so every attempt is measured the same way; drafts are left alone.
+   * Edits a task's title, body, attempt limit, selection policy, checks or metrics. The project owner
+   * or the task's creator may, but only the owner may change its selection policy; who may is
+   * checked before the checks and metrics are. While the task has an open vote its checks, metrics
+   * and selection policy stay as they are. Changed definitions rescore each open attempt's head, so
+   * every attempt is measured the same way; drafts are left alone.
    */
   async editTask(project: ProjectContext, actor: Actor, input: EditTaskInput): Promise<StoredTask> {
     this.#mayEditTask(project, actor, this.#task(input.task));
@@ -614,23 +620,41 @@ export class TaskStore {
     // and the checks and metrics it leaves out are taken from what's stored now.
     const current = this.#task(input.task);
     this.#mayEditTask(project, actor, current);
+    const selection = storedSelection(input.selection === undefined ? current.selection : input.selection);
+    const reselecting = selection !== storedSelection(current.selection);
+    if (reselecting) this.#maySetSelection(project, actor);
     const definitions = storedDefinitions(
       config === null ? current.definitions : editedDefinitions(input, current.definitions, config),
     );
+    const redefining = definitions !== storedDefinitions(current.definitions);
+    // A rescore could withdraw a candidate, and a new policy could end the vote's say.
+    if ((reselecting || redefining) && this.votes.open(current.number) !== null) {
+      throw invalidState(`${taskRef(current.number)} has an open vote; close it first`);
+    }
     this.#sql.exec(
       "UPDATE tasks SET title = ?, body = ?, attempt_limit = ?, definitions = ?, selection = ? WHERE number = ?",
       input.title ?? current.title,
       input.body ?? current.body,
       input.attemptLimit === undefined ? current.attempt_limit : input.attemptLimit,
       definitions,
-      storedSelection(input.selection === undefined ? current.selection : input.selection),
+      selection,
       current.number,
     );
-    if (definitions !== storedDefinitions(current.definitions)) {
+    if (redefining) {
       const open = this.#activeAttempts(current.number).filter((a) => a.state === "open");
       await Promise.all(open.map((attempt) => this.#scoreHead(project, actor, attempt, "rescore")));
     }
     return this.#task(current.number);
+  }
+
+  /**
+   * Only the project owner sets a task's selection policy: a creator choosing their own could take a
+   * selection the project gives to a vote.
+   */
+  #maySetSelection(project: ProjectContext, actor: Actor): void {
+    if (actor.user.id !== project.owner) {
+      throw new ServiceError("forbidden", "only the project owner may set a task's selection policy");
+    }
   }
 
   #mayEditTask(project: ProjectContext, actor: Actor, current: StoredTask): void {
@@ -1322,7 +1346,11 @@ export class TaskStore {
     return `${taskRef(input.task)}'s task branch moved; pull first`;
   }
 
-  /** A follow's new head on the attempt's fork, recorded as a push by no user. */
+  /**
+   * A follow's new head on the attempt's fork, recorded as a push by no user. A candidate in the
+   * task's open vote pinned to the head the follow moved on from is pinned to the new one, with its
+   * ballots: a follow isn't its author's push, so it doesn't withdraw it.
+   */
   #followedTo(
     project: ProjectId,
     attempt: StoredAttempt,
@@ -1334,6 +1362,9 @@ export class TaskStore {
       after,
       taskBranch: taskHead,
     });
+    const vote = this.votes.open(attempt.task);
+    const recorded = this.scoring.statusFor(scoredAttempt(attempt)).sha;
+    if (vote !== null && recorded !== null) this.votes.repin(vote.id, attempt.number, { from: recorded, to: after });
     this.#setFollow(attempt, { followed_head: after });
     this.#pushedToSource(null, attempt, after);
     if (attempt.state === "open") this.#request(project, null, attempt, after, "push");
@@ -1780,10 +1811,12 @@ export class TaskStore {
   //
   // Under the `vote` selection policy, a task's creator can make its selection by vote. Opening one
   // makes the task's passing attempts its candidates, each pinned to its head. A candidate whose
-  // attempt stops being open, or whose head moves from the one it was pinned to (a push, or a follow
-  // of the task branch), is withdrawn, and ballots for it stop counting; once it passes again the
-  // creator can add it back at its new head. Each user has one ballot, which their aliases share;
-  // the latest replaces the earlier. Closing the vote selects the candidate with the most ballots.
+  // attempt stops being open, or whose author pushes it from the head it was pinned to, is withdrawn,
+  // and ballots for it stop counting; once it passes again the creator can add it back at its new
+  // head. A follow of the task branch isn't its author's push: it moves the candidate's pin, and its
+  // ballots, to the merge it made, which counts once it passes. Each user has one ballot, which their
+  // aliases share; the latest replaces the earlier. While a vote is open the task's checks, metrics
+  // and selection policy can't change. Closing the vote selects the candidate with the most ballots.
 
   /**
    * Opens a vote on the task among the attempts passing now, pinned to their heads, under the
@@ -1965,10 +1998,11 @@ export class TaskStore {
   }
 
   /**
-   * Whether a candidate of a vote on `task` is withdrawn: it stopped passing at its pinned head. Its
-   * attempt isn't open, its head moved (a push, or a follow of the task branch), or a rescore of that
-   * head (after the task's checks changed, say) failed its gate. Worked out when read, so a candidate
-   * force-pushed back to its pinned head and passing there stands again, with its ballots.
+   * Whether a candidate of a vote on `task` is withdrawn: it isn't passing at its pinned head. Its
+   * attempt isn't open, its author pushed its head away from the pin (a follow moves the pin with
+   * it: `#followedTo`), or that head's latest scoring isn't a passed gate: a rescore failed it, or a
+   * follow's merge is still being scored. Worked out when read, so a candidate force-pushed back to
+   * its pinned head and passing there stands again, with its ballots.
    */
   #withdrawn(task: number): (candidate: StoredCandidate) => boolean {
     return ({ attempt, head }) => {
@@ -2530,7 +2564,7 @@ export class TaskStore {
 
   /**
    * Moves a task to closed or obsolete, keeping the first close time and who closed it, and closes its
-   * open vote without a selection.
+   * open vote without a selection, by nobody: the vote closed with its task.
    */
   #endTask(actor: Actor | null, number: number, to: "closed" | "obsolete"): void {
     this.#sql.exec(
@@ -2543,7 +2577,7 @@ export class TaskStore {
     );
     this.#journal(actor, to === "closed" ? "closed" : "madeObsolete", number, null);
     const vote = this.votes.open(number);
-    if (vote !== null) this.#endVote(actor, vote, null);
+    if (vote !== null) this.#endVote(null, vote, null);
   }
 
   /**

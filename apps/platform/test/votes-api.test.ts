@@ -94,7 +94,7 @@ describe("a task's selection policy", () => {
   it("is null until the task overrides the project's, and is set on create or edit", async () => {
     const { call, base, ada, greg } = await setup();
     expect((await call("GET", `${base}/tasks/t1`, ada)).body["selection"]).toBeNull();
-    const created = await call("POST", `${base}/tasks`, ada, {
+    const created = await call("POST", `${base}/tasks`, greg, {
       title: "Pick one",
       selection: { policy: "vote", eligible: "humans" },
     });
@@ -109,12 +109,32 @@ describe("a task's selection policy", () => {
   });
 
   it("shows in the arena as the policy in effect", async () => {
-    const { call, base, ada } = await setup("selection: { policy: vote, eligible: aliases }\n");
+    const { call, base, ada, greg } = await setup("selection: { policy: vote, eligible: aliases }\n");
     const arena = (await call("GET", `${base}/tasks/t1/arena`, ada)).body;
     expect(arena["selection"]).toEqual({ policy: "vote", eligible: "aliases" });
     expect(arena["vote"]).toBeNull();
-    await call("PATCH", `${base}/tasks/t1`, ada, { selection: { policy: "creator" } });
+    await call("PATCH", `${base}/tasks/t1`, greg, { selection: { policy: "creator" } });
     expect((await call("GET", `${base}/tasks/t1/arena`, ada)).body["selection"]).toEqual({ policy: "creator" });
+  });
+
+  it("is only the project owner's to set: a task's creator gets 403", async () => {
+    const { call, base, ada } = await setup();
+    const loose = { policy: "creator" };
+    const created = await call("POST", `${base}/tasks`, ada, { title: "Mine", selection: loose });
+    expect(created).toMatchObject({ status: 403, body: { error: { code: "forbidden" } } });
+    expect((await call("PATCH", `${base}/tasks/t1`, ada, { selection: loose })).status).toBe(403);
+    expect((await call("PATCH", `${base}/tasks/t1`, ada, { title: "Same policy", selection: null })).status).toBe(200);
+  });
+
+  it("can't change while the task has an open vote; its title still can", async () => {
+    const { call, base, ada, greg } = await setup();
+    await call("POST", `${base}/tasks/t1/vote/open`, ada, {});
+    const refused = await call("PATCH", `${base}/tasks/t1`, greg, { selection: { policy: "creator" } });
+    expect(refused).toMatchObject({
+      status: 409,
+      body: { error: { code: "invalidState", message: "t1 has an open vote; close it first" } },
+    });
+    expect((await call("PATCH", `${base}/tasks/t1`, ada, { title: "Renamed" })).body["title"]).toBe("Renamed");
   });
 });
 
@@ -174,6 +194,14 @@ describe("a vote", () => {
     expect((await call("POST", `${base}/tasks/t1/vote/close`, ada, {})).status).toBe(400);
     const closed = await call("POST", `${base}/tasks/t1/vote/close`, ada, { attempt: "t1a1" });
     expect(closed.body["vote"]).toMatchObject({ winner: "t1a1" });
+  });
+
+  it("closes by nobody when its task closes", async () => {
+    const { call, base, ada } = await setup();
+    await call("POST", `${base}/tasks/t1/vote/open`, ada, {});
+    await call("POST", `${base}/tasks/t1/close`, ada);
+    const vote = (await call("GET", `${base}/tasks/t1/vote`, ada)).body;
+    expect(vote).toMatchObject({ state: "closed", closedBy: null, winner: null });
   });
 
   it("is 404 before the task has one, and 409 to open under the creator's policy", async () => {

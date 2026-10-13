@@ -192,6 +192,22 @@ export class Votes {
     );
   }
 
+  /**
+   * Moves a candidate pinned to head `from` to head `to`, with the ballots cast for it there; a
+   * candidate pinned elsewhere, or none, stays as it is.
+   */
+  repin(vote: number, attempt: number, { from, to }: { from: string; to: string }): void {
+    const moved = this.#sql.exec(
+      "UPDATE vote_candidates SET head = ? WHERE vote = ? AND attempt = ? AND head = ? RETURNING attempt",
+      to,
+      vote,
+      attempt,
+      from,
+    );
+    if (moved.length === 0) return;
+    this.#sql.exec("UPDATE ballots SET head = ? WHERE vote = ? AND attempt = ? AND head = ?", to, vote, attempt, from);
+  }
+
   /** The vote's candidates, in the order they were first added. */
   candidates(vote: number): StoredCandidate[] {
     return this.#sql.exec<StoredCandidate>(

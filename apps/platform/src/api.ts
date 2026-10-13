@@ -321,7 +321,9 @@ const VoteSchema = z
             votes: z.number().int().openapi({ description: "The ballots for it at `head`; none while withdrawn." }),
             withdrawn: z.boolean().openapi({
               description:
-                "Its head moved from `head`, or it stopped being open. The task's creator can add it again once it passes.",
+                "Its author pushed it away from `head`, it stopped being open, or `head` isn't passing (a follow of the " +
+                "task branch moves `head` to its merge, which counts once it passes). The task's creator can add it " +
+                "again once it passes.",
             }),
           })
           .openapi("VoteCandidateTally"),
@@ -1215,7 +1217,9 @@ export function apiRoutes(options: ApiOptions = {}) {
         operationId: "createTask",
         tags: ["Tasks"],
         summary: "Create a task in a project",
-        description: "Any signed-in user may. The caller is its creator. The task starts open.",
+        description:
+          "Any signed-in user may. The caller is its creator. The task starts open. Only the project owner may give " +
+          "it a `selection` policy of its own.",
         security: bearerOrWeb,
         middleware: [browser] as const,
         request: { params: ProjectPathSchema, body: { required: true, ...json(CreateTaskSchema) } },
@@ -1223,6 +1227,7 @@ export function apiRoutes(options: ApiOptions = {}) {
           201: { description: "The new task.", ...json(TaskSchema) },
           400: errorResponse("The request is invalid."),
           401: unauthorizedBearer,
+          403: errorResponse("`selection` is set and the caller isn't the project owner."),
           404: errorResponse("No such project."),
         },
       }),
@@ -1280,7 +1285,10 @@ export function apiRoutes(options: ApiOptions = {}) {
         operationId: "editTask",
         tags: ["Tasks"],
         summary: "Edit a task's title, body, attempt limit, selection policy, checks or metrics",
-        description: "The project owner or the task's creator may. Obsolete tasks can't be edited.",
+        description:
+          "The project owner or the task's creator may, but only the project owner may change `selection`. Obsolete " +
+          "tasks can't be edited. While the task has an open vote, its `checks`, `metrics` and `selection` can't " +
+          "change (sending what they are already is fine): a rescore could withdraw a candidate. Close the vote first.",
         security: bearerOnly,
         middleware: [bearer] as const,
         request: { params: TaskPathSchema, body: { required: true, ...json(EditTaskSchema) } },
@@ -1288,9 +1296,12 @@ export function apiRoutes(options: ApiOptions = {}) {
           200: { description: "The edited task.", ...json(TaskSchema) },
           400: errorResponse("The request is invalid."),
           401: unauthorizedBearer,
-          403: errorResponse(TASK_MANAGERS),
+          403: errorResponse(`${TASK_MANAGERS} Only the project owner may change \`selection\`.`),
           404: errorResponse("No such project or task."),
-          409: errorResponse("`invalidState`: the task is obsolete."),
+          409: errorResponse(
+            "`invalidState`: the task is obsolete, or it has an open vote and the edit changes its checks, metrics or " +
+              "selection policy.",
+          ),
         },
       }),
       async (c) => {
@@ -1816,9 +1827,11 @@ export function apiRoutes(options: ApiOptions = {}) {
         summary: "Open a vote to select the task's attempt",
         description:
           "Under the `vote` selection policy, opens a vote among the attempts passing now, each a candidate at its " +
-          "current head, open to the users the policy's `eligible` lets vote. A push to a candidate during the vote " +
-          "withdraws it, as does a rescore of its head that fails the gate, and its ballots stop counting; one back at " +
-          "its pinned head and passing there stands again. " +
+          "current head, open to the users the policy's `eligible` lets vote. Its author's push to a candidate during " +
+          "the vote withdraws it, as does a rescore of its head that fails the gate, and its ballots stop counting; one " +
+          "back at its pinned head and passing there stands again. A follow of the task branch isn't its author's " +
+          "push: it moves the candidate, with its ballots, to the follow's merge, which counts once it passes. While " +
+          "the vote is open the task's checks, metrics and selection policy can't change. " +
           "Journals `voteOpened`.",
         security: bearerOrWeb,
         middleware: [browser] as const,

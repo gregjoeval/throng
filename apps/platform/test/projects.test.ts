@@ -5,15 +5,17 @@ import type { Actor } from "../src/tokens.ts";
 import { userForEmail } from "../src/users.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
+import { FakePreviewWorkers } from "./support/preview-workers.ts";
 
 async function setup(newId?: () => string) {
   const db = testDatabase();
   const repos = new FakeRepos();
+  const previewWorkers = new FakePreviewWorkers();
   const greg: Actor = { user: await userForEmail(db, "greg@example.com"), alias: null };
   const ada: Actor = { user: await userForEmail(db, "ada@example.com"), alias: "claude" };
-  const service = projectService(newId === undefined ? { db, repos } : { db, repos, newId });
+  const service = projectService({ db, repos, previewWorkers, ...(newId === undefined ? {} : { newId }) });
   const count = async () => (await db.prepare("SELECT COUNT(*) AS n FROM projects").first<{ n: number }>())?.n;
-  return { db, repos, greg, ada, service, count };
+  return { db, repos, previewWorkers, greg, ada, service, count };
 }
 
 /** Ids from a fixed list, in order. */
@@ -46,6 +48,22 @@ describe("projectService.create", () => {
     });
     expect(repos.calls).toEqual([{ method: "create", args: [`${project.id}-main`, { defaultBranch: "main" }] }]);
     expect(await repos.get(`${project.id}-main`)).toMatchObject({ defaultBranch: "main", parent: null });
+  });
+
+  it("creates the project's own preview Worker", async () => {
+    const { previewWorkers, greg, service } = await setup();
+    const project = await service.create(greg, { handle: "throng" });
+    expect([...previewWorkers.projects]).toEqual([project.id]);
+  });
+
+  it("leaves no project row or origin repo when creating its preview Worker fails", async () => {
+    const { repos, previewWorkers, greg, service, count } = await setup(ids("aaaaaa"));
+    previewWorkers.ensure = async () => {
+      throw new Error("cloudflare unavailable");
+    };
+    await expect(service.create(greg, { handle: "throng" })).rejects.toThrow("cloudflare unavailable");
+    expect(await count()).toBe(0);
+    expect(await repos.list("aaaaaa")).toEqual([]);
   });
 
   it("rejects a handle the owner already uses, without creating a repo", async () => {
@@ -87,8 +105,8 @@ describe("projectService.create", () => {
     expect(await count()).toBe(0);
   });
 
-  it("deletes the new repo when the row can't be inserted", async () => {
-    const { db, repos, greg, service } = await setup(ids("aaaaaa"));
+  it("deletes the new repo and preview Worker when the row can't be inserted", async () => {
+    const { db, repos, previewWorkers, greg, service } = await setup(ids("aaaaaa"));
     // Another request takes the handle after the duplicate check, as in a race.
     const create = repos.create.bind(repos);
     repos.create = async (name, opts) => {
@@ -101,6 +119,24 @@ describe("projectService.create", () => {
     };
     expect((await failure(service.create(greg, { handle: "throng" }))).code).toBe("conflict");
     expect(await repos.list("aaaaaa")).toEqual([]);
+    expect([...previewWorkers.projects]).toEqual([]);
+  });
+
+  it("keeps a preview Worker it found already there when the row can't be inserted", async () => {
+    // Another environment in the account may have drawn the same id and made its Worker first.
+    const { db, repos, previewWorkers, greg, service } = await setup(ids("aaaaaa"));
+    previewWorkers.projects.add("aaaaaa");
+    const create = repos.create.bind(repos);
+    repos.create = async (name, opts) => {
+      const repo = await create(name, opts);
+      await db
+        .prepare("INSERT INTO projects (id, owner_id, handle) VALUES (?, ?, ?)")
+        .bind("zzzzzz", greg.user.id, "throng")
+        .first();
+      return repo;
+    };
+    expect((await failure(service.create(greg, { handle: "throng" }))).code).toBe("conflict");
+    expect([...previewWorkers.projects]).toEqual(["aaaaaa"]);
   });
 });
 

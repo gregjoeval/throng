@@ -3,8 +3,10 @@ import { SANDBOX_ROLES } from "../src/grants.ts";
 import type { GitGrant, RunGrants } from "../src/grants.ts";
 import { interceptedHosts, outboundDecision, registryAllows, roleAccess } from "../src/network.ts";
 import type { OutboundAccess } from "../src/network.ts";
+import { previewGrant } from "../src/preview.ts";
 
 const registry = (path: string) => new URL(`https://registry.npmjs.org${path}`);
+const api = (path: string) => new URL(`https://api.cloudflare.com/client/v4/accounts/acct/workers/${path}`);
 
 describe("registryAllows", () => {
   it("lets installs read package metadata and tarballs", () => {
@@ -64,6 +66,19 @@ describe("outboundDecision", () => {
     expect(outboundDecision("PUT", script, access())).toEqual({ action: "deny" });
   });
 
+  it("refuses every DELETE to the Cloudflare API, even on the previewed Worker", () => {
+    const preview = { accountId: "acct", workerName: "pabc123" };
+    for (const path of ["scripts/pabc123", "workers/pabc123/previews", "workers/pabc123", "subdomain"]) {
+      expect({ path, decision: outboundDecision("DELETE", api(path), access({ preview })) }).toEqual({
+        path,
+        decision: { action: "deny" },
+      });
+      for (const method of ["GET", "PUT", "POST"]) {
+        expect(outboundDecision(method, api(path), access({ preview }))).toEqual({ action: "preview-token" });
+      }
+    }
+  });
+
   it("refuses plain HTTP and unknown hosts", () => {
     expect(outboundDecision("GET", new URL("http://registry.npmjs.org/x"), access({ npmRegistry: true }))).toEqual({
       action: "deny",
@@ -100,8 +115,7 @@ describe("network.allow", () => {
     const listed = ["registry.npmjs.org", "api.cloudflare.com", "acct.artifacts.cloudflare.net"];
     const open = access({ allow: listed, npmRegistry: true });
     expect(outboundDecision("PUT", registry("/is-number"), open)).toEqual({ action: "deny" });
-    const api = new URL("https://api.cloudflare.com/client/v4/accounts/acct/workers/scripts/fixture");
-    expect(outboundDecision("GET", api, open)).toEqual({ action: "deny" });
+    expect(outboundDecision("GET", api("scripts/fixture"), open)).toEqual({ action: "deny" });
     const other = new URL("https://acct.artifacts.cloudflare.net/git/ns/other.git/info/refs?service=git-upload-pack");
     expect(outboundDecision("GET", other, open)).toEqual({ action: "deny" });
   });
@@ -139,6 +153,24 @@ describe("roleAccess", () => {
     expect(outboundDecision("PUT", deploy, given)).toEqual({ action: "preview-token" });
     for (const repo of ["p1-main", "p1-t1a1"]) {
       expect(outboundDecision("POST", pushTo(repo), given)).toEqual({ action: "deny" });
+    }
+  });
+
+  it("lets a project's preview container deploy under its own Worker only, never another project's", () => {
+    const given = roleAccess("preview", grants, { preview: previewGrant("acct", "abc123"), allow: [] });
+    expect(outboundDecision("POST", api("workers/pabc123/previews"), given)).toEqual({ action: "preview-token" });
+    for (const path of [
+      "workers/pxyz789/previews",
+      "scripts/pxyz789",
+      "workers/pabc1234/previews",
+      "scripts/throng",
+      // Creating a Worker is the platform Worker's job, never a container's.
+      "workers",
+    ]) {
+      expect({ path, decision: outboundDecision("POST", api(path), given) }).toEqual({
+        path,
+        decision: { action: "deny" },
+      });
     }
   });
 

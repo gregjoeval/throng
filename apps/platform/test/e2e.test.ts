@@ -9,6 +9,7 @@ import type { Database } from "../src/users.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
 import type { Json } from "./support/json.ts";
+import { FakePreviewWorkers } from "./support/preview-workers.ts";
 
 const NOW = new Date("2026-10-10T12:00:00.000Z");
 const SECRET = "s3cret";
@@ -29,15 +30,17 @@ describe("e2eProject", () => {
   it("makes a real project owned by the e2e user, whose id and handle are both the name asked for", async () => {
     const db = testDatabase();
     const repos = new FakeRepos();
+    const previewWorkers = new FakePreviewWorkers();
     const { user } = await e2eToken(db, NOW);
 
-    const made = await e2eProject(db, repos, "e2eabc123");
+    const made = await e2eProject(db, repos, previewWorkers, "e2eabc123");
 
     expect(made.project).toMatchObject({ id: "e2eabc123", handle: "e2eabc123", owner: { id: user.id } });
     expect(await resolveProject(db, user.handle, "e2eabc123")).toMatchObject({ id: "e2eabc123" });
     // The origin exists and the write token lets the suite seed its main directly.
     expect((await repos.get(originRepo("e2eabc123"))).remote).toBe(made.remote);
     expect(made.token).toEqual(expect.any(String));
+    expect([...previewWorkers.projects]).toEqual(["e2eabc123"]);
   });
 });
 
@@ -60,10 +63,12 @@ function setup() {
   const db = testDatabase();
   const repos = new FakeRepos();
   const logs = new FakeLogs();
+  const previewWorkers = new FakePreviewWorkers();
   const destroyed: string[] = [];
   const app = e2eRoutes<{ SPIKE_TOKEN: string }>({
     db: () => db,
     repos: () => repos,
+    previewWorkers: () => previewWorkers,
     logs: () => logs,
     project: (_env, id) => ({
       note: async () => {},
@@ -83,7 +88,7 @@ function setup() {
     const type = res.headers.get("Content-Type") ?? "";
     return { status: res.status, body: type.startsWith("application/json") ? ((await res.json()) as Json) : null };
   };
-  return { db, repos, logs, destroyed, call };
+  return { db, repos, logs, previewWorkers, destroyed, call };
 }
 
 async function projectIds(db: Database): Promise<string[]> {
@@ -120,8 +125,8 @@ describe("the e2e routes", () => {
     expect(await repos.list("abc123")).toEqual(["abc123-main"]);
   });
 
-  it("delete everything a project made: its row, its Durable Object's storage, its logs and its repos", async () => {
-    const { db, repos, logs, destroyed, call } = setup();
+  it("delete everything a project made: its row, its Durable Object's storage, its logs, its repos and its preview Worker", async () => {
+    const { db, repos, logs, previewWorkers, destroyed, call } = setup();
     await call("POST", "/e2e/projects/e2erun1a");
     await call("POST", "/e2e/projects/e2erun1ab");
     await repos.fork(originRepo("e2erun1a"), forkRepo("e2erun1a", "t1a1"));
@@ -136,10 +141,11 @@ describe("the e2e routes", () => {
     expect(destroyed).toEqual(["e2erun1a"]);
     expect([...logs.keys]).toEqual(["logs/e2erun1ab/t1a1/s/1/test.log"]);
     expect(await repos.list("e2erun1a")).toEqual(["e2erun1ab-main"]);
+    expect([...previewWorkers.projects]).toEqual(["e2erun1ab"]);
   });
 
   it("sweep every project under a run's prefix, including one whose repos are already gone", async () => {
-    const { db, repos, destroyed, call } = setup();
+    const { db, repos, previewWorkers, destroyed, call } = setup();
     await call("POST", "/e2e/projects/e2erun1a");
     await call("POST", "/e2e/projects/e2erun1b");
     await call("POST", "/e2e/projects/e2erun2a");
@@ -151,6 +157,7 @@ describe("the e2e routes", () => {
     expect(await projectIds(db)).toEqual(["e2erun2a"]);
     expect(destroyed.toSorted()).toEqual(["e2erun1a", "e2erun1b"]);
     expect(await repos.list("e2erun")).toEqual(["e2erun2a-main"]);
+    expect([...previewWorkers.projects]).toEqual(["e2erun2a"]);
   });
 
   it("mint a token for a second e2e user, the reviewer, and revoke it", async () => {

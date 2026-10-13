@@ -53,6 +53,17 @@ Each scoring run copies the log of every `setup` command, check and preview to t
 
 There's one bucket per environment: `throng-logs`, and `throng-ci-logs` for `ci`. Logs are deleted after 30 days by an R2 lifecycle rule. Wrangler's config can't declare lifecycle rules, so they live in `r2-lifecycle.json`, which CI applies before each deploy (see the setup below).
 
+## Previews
+
+Each project has its own Worker, `p<projectId>`, and every Preview of its attempts deploys under it (`src/preview-workers.ts`, `src/preview.ts`). A Preview is named after its fork, so its URL is `https://<forkName>-p<projectId>.<subdomain>.workers.dev`; a label that would pass 63 characters keeps the fork name's start plus a hash. Projects never share a Worker's Previews (about 500 per Worker, least recently deployed evicted first), its limits or its settings.
+
+- **Creating a project** creates its Worker, with workers.dev and Preview URLs on, before the project's row. If that fails, the project isn't created.
+- **Projects made before this** get their Worker on their first Preview: the scoring run creates it if it's missing.
+- **Deleting a project** deletes its Worker and its Previews. Only the e2e routes delete projects today. A missing Worker counts as deleted, so a retry is safe.
+- **Grant scope.** The `preview` container deploys through the outbound proxy, which adds `CF_PREVIEW_TOKEN` only to Cloudflare API paths under the account's `workers/scripts/p<projectId>` and `workers/workers/p<projectId>` (and the account's workers.dev subdomain lookup), and never to a `DELETE`: the proxy refuses every one, so an attempt's build can't delete its project's Worker, or any part of it, and with it the other attempts' Previews. It can't reach another project's Worker, or create one. No other container gets the grant.
+
+`CF_PREVIEW_TOKEN` stays in the platform Worker's env: containers never see it. It creates and deletes projects' Workers and deploys their Previews, so it needs **Account › Workers Scripts › Edit** on the account in `CF_ACCOUNT_ID`, and nothing else. Every project uses one of the account's Worker scripts, so the account's script limit caps the number of projects.
+
 ## E2E job
 
 The **E2E** workflow (`.github/workflows/e2e.yml`) runs `pnpm e2e` against real Artifacts. It deploys the `ci` environment in `wrangler.jsonc`: the `throng-ci` Worker, Artifacts namespace `throng-ci` and D1 database `throng-ci`. It also deploys throng-web's `ci` environment, `throng-web-ci`, bound to `throng-ci`, for the `arena` scenario. It never runs on pull requests or forks, only when started by hand on `gregjoeval/throng`. Runs queue rather than overlap.
@@ -64,7 +75,7 @@ Each run:
 3. Builds with `CLOUDFLARE_ENV=ci` and deploys `throng-ci`, setting `SPIKE_TOKEN` and `CF_PREVIEW_TOKEN` (the deploy's own API token).
 4. Builds and deploys `throng-web-ci` the same way, installs Playwright's Chromium, and waits for `throng-web-ci` to answer.
 5. Runs the e2e scenarios. Every project id starts with `e2eci<run id>r<attempt>p`. Each scenario deletes what its projects made, and the suite revokes its Throng tokens when it ends.
-6. Always deletes everything under that prefix with `pnpm e2e cleanup`, even when the suite fails or is cancelled: each project's D1 row, its Durable Object's storage, its logs in R2 and its repos.
+6. Always deletes everything under that prefix with `pnpm e2e cleanup`, even when the suite fails or is cancelled: each project's D1 row, its Durable Object's storage, its logs in R2, its repos and its preview Worker.
 
 The suite reaches the Worker through its e2e routes, `/e2e/*`, behind the `SPIKE_TOKEN` bearer secret. They refuse any project or repo whose id doesn't start with `e2e`, so they can't reach a real project, and `E2E_PROJECT_PREFIX` must start with `e2e` too.
 
@@ -105,7 +116,7 @@ gh workflow run e2e.yml --ref my-branch     # every scenario, against a branch
 ### Setup (once per account)
 
 1. **D1 database.** `throng-ci` exists and its id is in `env.ci.d1_databases` in `wrangler.jsonc`. For a new account, run `pnpm --filter @throng/platform exec wrangler d1 create throng-ci` and replace the id.
-2. **API token.** In the Cloudflare dashboard, under **My Profile → API Tokens**, create a token named `Throng CI` for the account in `CF_ACCOUNT_ID` with these permissions: Workers Scripts, Containers, D1, Workers R2 Storage and Workers Observability at Edit, plus Account Settings at Read. Both the `ci` and `production` GitHub environments use it, and so does the Worker to upload Worker Previews of `throng-fixture-worker`. That Worker is shared with production and must already exist; if it doesn't, run `npx wrangler deploy` once in `fixtures/fixture-worker`.
+2. **API token.** In the Cloudflare dashboard, under **My Profile → API Tokens**, create a token named `Throng CI` for the account in `CF_ACCOUNT_ID` with these permissions: Workers Scripts, Containers, D1, Workers R2 Storage and Workers Observability at Edit, plus Account Settings at Read. Both the `ci` and `production` GitHub environments use it. The `ci` deploy also hands it to `throng-ci` as `CF_PREVIEW_TOKEN`, which needs only its Workers Scripts Edit to create, delete and deploy Previews under each project's own Worker (see [Previews](#previews)). No preview Worker has to exist beforehand.
 3. **Logs buckets.** Nothing to do by hand. Before each deploy, the deploy and E2E workflows create the environment's bucket (`throng-logs`, `throng-ci-logs`) if it's missing and set its lifecycle rules from `r2-lifecycle.json`: logs under `logs/` expire after 30 days, and R2's default rule aborts incomplete multipart uploads after 7. `lifecycle set` replaces the bucket's whole rule set, so edit the file rather than the dashboard. Check with `pnpm exec wrangler r2 bucket lifecycle list <bucket>`.
 4. **GitHub environment.** Under **Settings → Environments**, create an environment named `ci`. Optionally, limit its **Deployment branches** to `main`. Give it two secrets:
    - `CLOUDFLARE_API_TOKEN`: the token from step 2.

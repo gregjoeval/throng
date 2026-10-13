@@ -22,6 +22,7 @@ import type { Actor } from "../src/tokens.ts";
 import { userForEmail } from "../src/users.ts";
 import { testDatabase } from "./support/d1.ts";
 import { git, gitEnv, LocalGitHost, serve, tryGit } from "./support/git-host.ts";
+import { FakePreviewWorkers } from "./support/preview-workers.ts";
 import { testTaskBackends } from "./support/task-backend.ts";
 
 const cleanups: (() => Promise<void>)[] = [];
@@ -56,7 +57,10 @@ async function setup() {
   const ada = await person("ada@example.com");
   const bob = await person("bob@example.com");
 
-  const created = await projectService({ db, repos: host }).create(greg.actor, { handle: "throng" });
+  const created = await projectService({ db, repos: host, previewWorkers: new FakePreviewWorkers() }).create(
+    greg.actor,
+    { handle: "throng" },
+  );
   const project: ProjectContext = { id: created.id, owner: greg.user.id };
   const origin = originRepo(project.id);
 

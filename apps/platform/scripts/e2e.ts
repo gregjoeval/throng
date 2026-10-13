@@ -23,7 +23,8 @@
 //
 // Scoring scenarios, through the e2e routes (`/e2e/*`): metrics (a check writes two JSON files into $THRONG_OUTPUT and fails; metrics are read from both), taskmetrics (a task adds a metric over a project check, scored with source task; a clash main later adds makes the next run invalid; through `/api`), taskchecks (a task adds a metric over a project check and a required check of its own; the gate follows the task check; making the check optional rescores the open attempts; through `/api`), failing (a required check fails the gate),
 // invalid (an invalid config fails the gate with a config entry), preview (a passing gate deploys a
-// Worker Preview built with `preview.command`, and its URL serves it), coalesce (two quick pushes; the first
+// Worker Preview built with `preview.command` under the project's own Worker, and its URL serves it; the
+// build's DELETE on its own Worker is refused), coalesce (two quick pushes; the first
 // run is cancelled and only the newest sha is scored), intrusion (an attempt's checks try to push to
 // the origin and call the Cloudflare API; both fail), deps (setup installs an npm dependency from the
 // registry), refs (attempt archive refs: pushable, listed, kept across pushes to main, and copied by
@@ -36,7 +37,7 @@
 //
 // Every project id starts with E2E_PROJECT_PREFIX (default `e2e`; lowercase alphanumeric, starting
 // with `e2e`, which the Worker's e2e routes insist on). Each scenario deletes what its projects made
-// (D1 rows, Durable Object storage, logs and repos), and the run revokes its tokens when it ends.
+// (D1 rows, Durable Object storage, logs, repos and preview Workers), and the run revokes its tokens when it ends.
 // `pnpm e2e cleanup` deletes every project under an explicitly set E2E_PROJECT_PREFIX, including those
 // a failed or cancelled run left behind.
 
@@ -48,6 +49,7 @@ import { isDeepStrictEqual, promisify } from "node:util";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { ARCHIVE_REF_PREFIX, archiveRef } from "../src/archive.ts";
 import { CLONE_RECIPE } from "../src/mcp.ts";
+import { previewName, previewWorkerName } from "../src/preview.ts";
 import { originRepo } from "../src/repos.ts";
 import { openBrowser } from "./e2e-browser.ts";
 import type { BrowserSession } from "./e2e-browser.ts";
@@ -1050,16 +1052,31 @@ async function invalid(): Promise<void> {
 
 /**
  * A project with `preview` configured: once the gate passes, the head is built with
- * `preview.command` and deployed as a Worker Preview named `<forkName>-p<projectId>`, whose URL serves
- * the built attempt.
+ * `preview.command` and deployed as a Worker Preview under the project's own Worker, `p<projectId>`,
+ * so its host label is `<forkName>-p<projectId>`, and its URL serves the built attempt. The build's
+ * DELETE on its own Worker is refused, so an attempt can't delete the other attempts' Previews.
  */
 async function preview(): Promise<void> {
   const timeline = new Timeline();
   const { project, work } = await setUpProject(timeline, {
     ".throng/config.yml": `${TEST_CHECK}preview:
-  command: sed -i 's/hello from a1/hello from a1, built/' src/greeting.js
+  command: node no-delete.mjs && sed -i 's/hello from a1/hello from a1, built/' src/greeting.js
 `,
   });
+  const accountId = await cfAccountId();
+  // The build first tries a DELETE under its own Worker, which the proxy must refuse with its own 403
+  // or the build (and so the Preview) fails. It names a secret that doesn't exist, so even a DELETE
+  // that got through would delete nothing.
+  const missing = `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/${previewWorkerName(project)}/secrets/throng-e2e-missing`;
+  const noDelete = `const response = await fetch(${JSON.stringify(missing)}, { method: "DELETE" });
+const body = await response.text();
+if (response.status !== 403 || !body.startsWith("no grant for")) {
+  console.error(\`the DELETE was not refused: \${response.status} \${body}\`);
+  process.exit(1);
+}
+`;
+  await writeFile(join(work, "no-delete.mjs"), noDelete);
+  await git(work, "add", "no-delete.mjs");
   const fork = await createAttempt(project, "t1a1", timeline);
   const sha = await commitAndPush(work, fork, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
   timeline.mark("attempt pushed");
@@ -1078,9 +1095,10 @@ async function preview(): Promise<void> {
     `expected _preview.url, got ${JSON.stringify(deployed)}`,
   );
   const previewUrl = deployed.value;
+  const label = `${previewName({ project, attempt: "t1a1" })}-${previewWorkerName(project)}`;
   assert(
-    new URL(previewUrl).hostname.startsWith(`t1a1-p${project}-`),
-    `the Preview is not named after the fork and project: ${previewUrl}`,
+    new URL(previewUrl).hostname.split(".")[0] === label,
+    `the Preview is not ${label}, under the project's own Worker: ${previewUrl}`,
   );
   assert(result.logs.includes("preview.deploy"), `expected the Preview's log stored: ${JSON.stringify(result.logs)}`);
 
@@ -1145,8 +1163,7 @@ async function intrusion(): Promise<void> {
   const timeline = new Timeline();
   const { project, work } = await setUpProject(timeline, { ".throng/config.yml": TEST_CHECK });
   const origin = (await git(work, "remote", "get-url", "origin")).trim();
-  const accountId = /"CF_ACCOUNT_ID":\s*"(\w+)"/u.exec(await readFile(WRANGLER_CONFIG, "utf8"))?.[1];
-  assert(accountId !== undefined, "CF_ACCOUNT_ID not found in wrangler.jsonc");
+  const accountId = await cfAccountId();
   const fork = await createAttempt(project, "t1a1", timeline);
 
   const probe = `import assert from "node:assert/strict";
@@ -1162,7 +1179,7 @@ test("cannot push to the origin", () => {
 });
 
 test("cannot reach the Cloudflare API", async () => {
-  const url = "https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/throng-fixture-worker";
+  const url = "https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/${previewWorkerName(project)}";
   const status = await fetch(url, { signal: AbortSignal.timeout(5_000) }).then((r) => r.status, () => "blocked");
   assert.notEqual(status, 200);
 });
@@ -1362,6 +1379,13 @@ async function lsRemote(work: string, remote: Grant, ref: string): Promise<strin
   const listed = await git(work, ...auth(remote.token), "ls-remote", remote.remote, ref);
   const line = listed.split("\n").find((l) => l.endsWith(`\t${ref}`));
   return line?.split("\t")[0] ?? null;
+}
+
+/** The Cloudflare account the deployed platform Worker uses, from `wrangler.jsonc`. */
+async function cfAccountId(): Promise<string> {
+  const accountId = /"CF_ACCOUNT_ID":\s*"(\w+)"/u.exec(await readFile(WRANGLER_CONFIG, "utf8"))?.[1];
+  assert(accountId !== undefined, "CF_ACCOUNT_ID not found in wrangler.jsonc");
+  return accountId;
 }
 
 /** A new project whose origin's `main` is the fixture plus `files` (a config, helper scripts). */
@@ -1676,7 +1700,7 @@ async function waitFor(project: string, match: (e: JournalEntry) => boolean): Pr
   throw new Error(`timed out waiting on ${project}'s journal`);
 }
 
-/** Deletes everything the project made: its rows, its Durable Object's storage, its logs and its repos. */
+/** Deletes everything the project made: its rows, its Durable Object's storage, its logs, its repos and its preview Worker. */
 async function cleanUp(project: string, work: string): Promise<void> {
   if (process.env.E2E_KEEP === "1") return;
   await api("DELETE", `/e2e/projects/${project}`).catch((error) => console.warn(`could not delete ${project}`, error));

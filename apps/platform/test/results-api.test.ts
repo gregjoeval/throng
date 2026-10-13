@@ -12,6 +12,7 @@ import type { User } from "../src/users.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
 import type { Json } from "./support/json.ts";
+import { FakePreviewWorkers } from "./support/preview-workers.ts";
 import { testTaskBackends } from "./support/task-backend.ts";
 
 /** Access sessions are `as:<email>`. */
@@ -59,7 +60,13 @@ async function setup() {
   const followed: FollowParams[] = [];
   const follow = { workflow: { create: async ({ params }: { params: FollowParams }) => followed.push(params) } };
   const { backend, store } = testTaskBackends(repos, now, runner, undefined, follow);
-  const api = apiRoutes({ verifierFor: () => verify, now, repos: () => repos, tasks: () => backend });
+  const api = apiRoutes({
+    verifierFor: () => verify,
+    now,
+    repos: () => repos,
+    previewWorkers: () => new FakePreviewWorkers(),
+    tasks: () => backend,
+  });
   const env = { DB: testDatabase(), ACCESS_TEAM_DOMAIN: "throng.cloudflareaccess.com", ACCESS_AUD: "aud" };
 
   const call = async (method: string, path: string, bearer?: string, body?: unknown) => {

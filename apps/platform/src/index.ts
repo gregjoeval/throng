@@ -6,6 +6,7 @@ import { walk } from "./browse";
 import { e2eRoutes } from "./e2e";
 import { gitRoutes } from "./git-proxy";
 import type { GitProxyOptions } from "./git-proxy";
+import { previewWorkersFor } from "./preview-workers";
 
 export { ProjectCoordinator } from "./project";
 export { RunSandbox, OutboundAuth } from "./sandbox";
@@ -16,8 +17,9 @@ export { FollowWorkflow } from "./follow-workflow";
 const PUSH_TOKEN_TTL_SECONDS = 60 * 60;
 
 // The API and the git proxy are typed against the bindings they read; at runtime their env is this Worker's.
-const apiOptions: GitProxyOptions & Pick<ApiOptions, "logs"> = {
+const apiOptions: GitProxyOptions & Pick<ApiOptions, "logs" | "previewWorkers"> = {
   repos: (env) => reposFor(env as Env),
+  previewWorkers: (env) => previewWorkersFor(env as Env),
   tasks: (env) => (projectId) => ({
     call: (method, args) => (env as Env).PROJECT.getByName(projectId).tasks(method, args),
   }),
@@ -48,6 +50,7 @@ app.route(
   e2eRoutes<Env>({
     db: (env) => env.DB,
     repos: (env) => reposFor(env),
+    previewWorkers: (env) => previewWorkersFor(env),
     logs: (env) => ({
       list: (options) => env.LOGS.list(options),
       delete: (keys) => env.LOGS.delete(keys),

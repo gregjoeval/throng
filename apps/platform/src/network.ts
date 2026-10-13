@@ -3,7 +3,7 @@
 
 import { grantFor, grantsForRole, RUNS_REPO_CODE } from "./grants.ts";
 import type { GitGrant, RoleGrants, SandboxRole } from "./grants.ts";
-import { previewPathAllowed } from "./preview.ts";
+import { previewAllows } from "./preview.ts";
 import type { PreviewGrant } from "./preview.ts";
 
 export const NPM_REGISTRY_HOST = "registry.npmjs.org";
@@ -12,7 +12,7 @@ export const CLOUDFLARE_API_HOST = "api.cloudflare.com";
 /** Everything one container may reach. Fixed when the container starts. */
 export interface OutboundAccess {
   grants: GitGrant[];
-  /** Lets the container deploy Previews of one Worker; the token itself stays in the Worker's env. */
+  /** Lets the container deploy Previews of one Worker, never delete; the token itself stays in the Worker's env. */
   preview: PreviewGrant | null;
   /** Read-only access to the npm registry, for installs. */
   npmRegistry: boolean;
@@ -39,7 +39,7 @@ export function outboundDecision(method: string, url: URL, access: OutboundAcces
     return access.npmRegistry && registryAllows(method, url) ? { action: "pass" } : { action: "deny" };
   }
   if (url.host === CLOUDFLARE_API_HOST) {
-    const allowed = access.preview !== null && previewPathAllowed(url.pathname, access.preview);
+    const allowed = access.preview !== null && previewAllows(method, url.pathname, access.preview);
     return allowed ? { action: "preview-token" } : { action: "deny" };
   }
   const grant = grantFor(access.grants, url);

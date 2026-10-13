@@ -11,6 +11,7 @@ import {
   checkMetricFields,
   CheckSchema,
   CONFIG_PATH,
+  CREATOR_SELECTS,
   describeIssue,
   describePath,
   metricConfig,
@@ -89,6 +90,7 @@ export function withTask(project: ConfigResult, task: TaskDefinitions): ConfigRe
     metrics: [],
     preview: null,
     attempts: { limit: null },
+    selection: CREATOR_SELECTS,
   };
   return {
     kind: "valid",

@@ -8,6 +8,7 @@ import type { OpenAPIHono, RouteConfig } from "@hono/zod-openapi";
 import type { Context } from "hono";
 import type { AccessBindings } from "./access.ts";
 import { DEFAULT_COMMITS_PAGE, MAX_COMMITS_PAGE } from "./browse.ts";
+import { SelectionPolicySchema } from "./config.ts";
 import { DIFF_FLAGS, FILE_STATUSES } from "./diff.ts";
 import type { DiffCache } from "./diff.ts";
 import type { Repos } from "./repos.ts";
@@ -124,6 +125,42 @@ export const SelectionSchema = z
   .object({ attempt: z.string().openapi({ description: "An open attempt of the task.", example: "t42a3" }) })
   .openapi("Selection");
 
+/** A task's selection policy as a request gives it, checked like `.throng/config.yml`'s `selection`. */
+export const SelectionPolicyInputSchema = SelectionPolicySchema.nullable().openapi({
+  description:
+    "Overrides the project's selection policy (`.throng/config.yml`'s `selection`); null to use the project's. " +
+    "`policy` is `creator` (the task's creator selects) or `vote` (a vote among `eligible` users: `humans` acting " +
+    "as themselves, `aliases` acting under an alias, or `anyone`, the default). Only the project owner may set or " +
+    "change it, and not while the task has an open vote.",
+  example: { policy: "vote", eligible: "humans" },
+});
+
+export const OpenVoteSchema = z
+  .object({
+    deadline: z.iso
+      .datetime({ offset: true })
+      .optional()
+      .openapi({ description: "When ballots stop being taken, in the future; none by default." }),
+  })
+  .openapi("OpenVote");
+
+export const BallotSchema = z
+  .object({ attempt: z.string().openapi({ description: "A candidate in the task's open vote.", example: "t42a3" }) })
+  .openapi("Ballot");
+
+export const VoteCandidateSchema = z
+  .object({ attempt: z.string().openapi({ description: "An attempt of the task passing now.", example: "t42a3" }) })
+  .openapi("VoteCandidate");
+
+export const CloseVoteSchema = z
+  .object({
+    attempt: z.string().optional().openapi({
+      description: "Breaks a tie: one of the tied candidates. If given otherwise, it must be the winner.",
+      example: "t42a3",
+    }),
+  })
+  .openapi("CloseVote");
+
 export const AttemptLimitSchema = z
   .number()
   .int()
@@ -158,6 +195,7 @@ export const CreateTaskSchema = z
     title: z.string().trim().min(1).max(200),
     body: z.string().max(65_536).optional().openapi({ description: "Markdown." }),
     attemptLimit: AttemptLimitSchema.optional(),
+    selection: SelectionPolicyInputSchema.optional(),
     checks: TaskChecksInputSchema.optional(),
     metrics: TaskMetricsInputSchema.optional(),
   })

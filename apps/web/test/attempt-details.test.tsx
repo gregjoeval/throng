@@ -9,6 +9,7 @@ import {
   arenaAttempt,
   check,
   me,
+  NO_VOTE,
   result,
   scoredMetrics,
   serveArena,
@@ -200,6 +201,7 @@ describe("an attempt's details", () => {
       http.get("*/api/projects/:owner/:project/tasks/:t/arena", () => {
         const counts = { head: head.sha, merge: 0, revise: posted === null ? 0 : 1, reject: 0 };
         return HttpResponse.json({
+          ...NO_VOTE,
           task: "t1",
           metrics: [],
           attempts: [{ ...head, verdicts: counts }, arenaAttempt(1, 2)],

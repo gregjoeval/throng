@@ -4,8 +4,8 @@
 
 import { currentBase, readTaskBranch } from "./base.ts";
 import type { Base } from "./base.ts";
-import { loadConfig } from "./config.ts";
-import type { CheckConfig, MetricConfig } from "./config.ts";
+import { loadConfig, selectionPolicy } from "./config.ts";
+import type { CheckConfig, MetricConfig, SelectionPolicy, VoteEligibility } from "./config.ts";
 import type { ConflictDetails, ConflictFile } from "./conflicts.ts";
 import { ServiceError } from "./errors.ts";
 import { attemptRemote } from "./git-remotes.ts";
@@ -39,6 +39,7 @@ import { isActive } from "./task-store.ts";
 import type { Actor } from "./tokens.ts";
 import type { Database } from "./users.ts";
 import type { VerdictRecommendation, VerdictSummary } from "./verdicts.ts";
+import type { VoteDetail, VoteState } from "./votes.ts";
 import type { WaitCondition } from "./waiters.ts";
 
 /** A project's Durable Object, as the services call it: one store method per call. */
@@ -79,6 +80,8 @@ export interface Task {
   metrics: MetricConfig[];
   /** The head of its task branch (`refs/tasks/t42` in the origin), or null when it has none. */
   taskBranch: TaskBranch | null;
+  /** Overrides the project's selection policy; null to use the project's. */
+  selection: SelectionPolicy | null;
 }
 
 export interface TaskBranch {
@@ -170,6 +173,35 @@ export interface MergeRequest {
   createdBy: ActorRef;
 }
 
+/** A task's vote as the API shows it, with each candidate's tally and the caller's own ballot. */
+export interface Vote {
+  task: string;
+  state: VoteState;
+  eligible: VoteEligibility;
+  deadline: string | null;
+  openedBy: ActorRef;
+  openedAt: string;
+  closedBy: ActorRef | null;
+  closedAt: string | null;
+  /** The attempt it selected, `t42a3`, once closed with a selection. */
+  winner: string | null;
+  candidates: {
+    attempt: string;
+    head: string;
+    addedAt: string;
+    votes: number;
+    withdrawn: boolean;
+    beingScored: boolean;
+  }[];
+  myBallot: { attempt: string; head: string; alias: string | null; at: string } | null;
+}
+
+/** A closed vote, and the merge request it selected, if it selected one. */
+export interface ClosedVote {
+  vote: Vote;
+  mergeRequest: MergeRequest | null;
+}
+
 /** A merge request's latest dequeue with its details: null for a new push or a cancel. */
 export interface MergeRequestDequeue {
   reason: DequeueReason;
@@ -246,6 +278,10 @@ export interface TaskArena {
    * task's, each with its `source`; none when they don't merge into a valid config.
    */
   metrics: MetricConfig[];
+  /** The selection policy in effect: the task's override, else the config on `origin/main`'s. */
+  selection: SelectionPolicy;
+  /** The task's open vote, or null when it has none. */
+  vote: Vote | null;
   attempts: ArenaAttempt[];
 }
 
@@ -336,6 +372,15 @@ export function taskService({ db, repos, backend, origin }: TaskServiceDeps) {
   const mergeRequest = async (mr: StoredMergeRequest): Promise<MergeRequest> =>
     publicMergeRequest(mr, await handles(db, [mr.approved_by.user, mr.created_by.user]));
 
+  const vote = async (v: VoteDetail): Promise<Vote> =>
+    publicVote(v, await handles(db, [v.opened_by.user, v.closed_by?.user ?? null]));
+
+  /** A vote action naming one of the task's attempts: resolves the project and references, then runs `method`. */
+  const voteFor =
+    (method: "castVote" | "addVoteCandidate") =>
+    async (actor: Actor, input: TaskPath & { attempt: string }): Promise<Vote> =>
+      vote(await invoke(method, await project(input), actor, attemptOfTask(input)));
+
   /** A merge request action on a task: resolves the project and task reference, then runs `method`. */
   const mergeRequestMove =
     (method: "approveMergeRequest" | "cancelMergeRequest" | "getMergeRequest") =>
@@ -351,12 +396,14 @@ export function taskService({ db, repos, backend, origin }: TaskServiceDeps) {
           title: string;
           body?: string | undefined;
           attemptLimit?: number | null | undefined;
+          selection?: SelectionPolicy | null | undefined;
         },
     ): Promise<Task> {
-      const { title, body, attemptLimit } = input;
+      const { title, body, attemptLimit, selection } = input;
       const ctx = await project(input);
       const definitions = await newTaskDefinitions(ctx, input);
-      return one(await invoke("createTask", ctx, actor, { title, body, attemptLimit, ...definitions }), tasks(ctx));
+      const create = { title, body, attemptLimit, selection, ...definitions };
+      return one(await invoke("createTask", ctx, actor, create), tasks(ctx));
     },
 
     async getTask(actor: Actor, input: TaskPath): Promise<Task> {
@@ -385,13 +432,14 @@ export function taskService({ db, repos, backend, origin }: TaskServiceDeps) {
           title?: string | undefined;
           body?: string | undefined;
           attemptLimit?: number | null | undefined;
+          selection?: SelectionPolicy | null | undefined;
         },
     ): Promise<Task> {
-      const { title, body, attemptLimit } = input;
+      const { title, body, attemptLimit, selection } = input;
       const ctx = await project(input);
       // The store checks the checks and metrics itself, once it has checked who may edit the task.
       const { checks, metrics } = input;
-      const edit = { task: taskNumber(input.task), title, body, attemptLimit, checks, metrics };
+      const edit = { task: taskNumber(input.task), title, body, attemptLimit, selection, checks, metrics };
       return one(await invoke("editTask", ctx, actor, edit), tasks(ctx));
     },
 
@@ -484,7 +532,8 @@ export function taskService({ db, repos, backend, origin }: TaskServiceDeps) {
     async taskArena(actor: Actor, input: TaskPath): Promise<TaskArena> {
       const number = taskNumber(input.task);
       const ctx = await project(input);
-      const { definitions, attempts: list } = await invoke("taskArena", ctx, actor, { task: number });
+      const arena = await invoke("taskArena", ctx, actor, { task: number });
+      const { definitions, attempts: list } = arena;
       const [users, bases, config] = await Promise.all([
         handles(
           db,
@@ -497,6 +546,8 @@ export function taskService({ db, repos, backend, origin }: TaskServiceDeps) {
       return {
         task: taskRef(number),
         metrics: merged.kind === "valid" ? merged.config.metrics : [],
+        selection: selectionPolicy(config, arena.selection),
+        vote: arena.vote === null ? null : await vote(arena.vote),
         attempts: list.map(({ scoring, fork, state, author, alias, verdicts, forked_from, needs_update }, i) => ({
           ref: fork,
           state,
@@ -568,12 +619,7 @@ export function taskService({ db, repos, backend, origin }: TaskServiceDeps) {
      * closing the task's other active attempts. The task's creator or the project owner may.
      */
     async selectAttempt(actor: Actor, input: TaskPath & { attempt: string }): Promise<MergeRequest> {
-      const task = taskNumber(input.task);
-      const ref = attemptRefOf(input.attempt);
-      if (ref.task !== task) {
-        throw new ServiceError("invalidRequest", `${input.attempt} is not an attempt of ${taskRef(task)}`);
-      }
-      return mergeRequest(await invoke("selectAttempt", await project(input), actor, ref));
+      return mergeRequest(await invoke("selectAttempt", await project(input), actor, attemptOfTask(input)));
     },
 
     /** Approves the source attempt's current head. The task's creator or the project owner may. */
@@ -608,6 +654,38 @@ export function taskService({ db, repos, backend, origin }: TaskServiceDeps) {
       return invoke("dequeueLogKey", await project(input), actor, { task: taskNumber(input.task), name: input.name });
     },
 
+    /**
+     * Opens a vote on the task among its passing attempts, under the `vote` selection policy, with an
+     * optional deadline for ballots. The task's creator or the project owner may.
+     */
+    async openVote(actor: Actor, input: TaskPath & { deadline?: string | undefined }): Promise<Vote> {
+      const open = { task: taskNumber(input.task), deadline: input.deadline };
+      return vote(await invoke("openVote", await project(input), actor, open));
+    },
+
+    /** Casts the actor's ballot for a candidate, replacing their earlier one. Not for their own attempt. */
+    castVote: voteFor("castVote"),
+    /** Adds an attempt passing now to the open vote. The task's creator or the project owner may. */
+    addVoteCandidate: voteFor("addVoteCandidate"),
+
+    /**
+     * Closes the task's open vote, selecting the candidate with the most ballots; `attempt` breaks a
+     * tie. The task's creator or the project owner may.
+     */
+    async closeVote(actor: Actor, input: TaskPath & { attempt?: string | undefined }): Promise<ClosedVote> {
+      const task = taskNumber(input.task);
+      const tieBreak =
+        input.attempt === undefined ? undefined : attemptOfTask({ task: input.task, attempt: input.attempt });
+      const closed = await invoke("closeVote", await project(input), actor, { task, attempt: tieBreak?.number });
+      const mr = closed.selected;
+      return { vote: await vote(closed.vote), mergeRequest: mr === null ? null : await mergeRequest(mr) };
+    },
+
+    /** The task's latest vote, open or closed. Any signed-in user may read it. */
+    async getVote(actor: Actor, input: TaskPath): Promise<Vote> {
+      return vote(await invoke("getVote", await project(input), actor, { task: taskNumber(input.task) }));
+    },
+
     /** The project's merge queue, front first. Any signed-in user may read it. */
     async mergeQueue(actor: Actor, input: ProjectPath): Promise<MergeQueueEntry[]> {
       const queue = await invoke("mergeQueue", await project(input), actor);
@@ -633,6 +711,16 @@ function taskNumber(ref: string): number {
   const number = parseTaskRef(ref);
   if (number === null) throw new ServiceError("invalidRequest", `not a task reference: ${ref}`);
   return number;
+}
+
+/** An attempt reference (`t42a3`) that must name an attempt of the task `task` (`t42`). */
+function attemptOfTask(input: { task: string; attempt: string }): AttemptInput {
+  const task = taskNumber(input.task);
+  const ref = attemptRefOf(input.attempt);
+  if (ref.task !== task) {
+    throw new ServiceError("invalidRequest", `${input.attempt} is not an attempt of ${taskRef(task)}`);
+  }
+  return ref;
 }
 
 /** An attempt reference (`t42a3`) as its task and attempt numbers. */
@@ -672,6 +760,7 @@ function publicTask(t: StoredTask, users: Map<string, string>, taskBranch: TaskB
     checks: t.definitions.checks,
     metrics: t.definitions.metrics,
     taskBranch,
+    selection: t.selection,
   };
 }
 
@@ -746,6 +835,32 @@ function publicMergeRequest(mr: StoredMergeRequest, users: Map<string, string>):
     mergedAt: mr.merged_at,
     createdAt: mr.created_at,
     createdBy: actorRef(mr.created_by, users),
+  };
+}
+
+function publicVote(v: VoteDetail, users: Map<string, string>): Vote {
+  const ref = (attempt: number) => attemptRef(v.task, attempt);
+  const ballot = v.ballot;
+  return {
+    task: taskRef(v.task),
+    state: v.state,
+    eligible: v.eligible,
+    deadline: v.deadline,
+    openedBy: actorRef(v.opened_by, users),
+    openedAt: v.opened_at,
+    closedBy: v.closed_by === null ? null : actorRef(v.closed_by, users),
+    closedAt: v.closed_at,
+    winner: v.winner === null ? null : ref(v.winner),
+    candidates: v.candidates.map((c) => ({
+      attempt: ref(c.attempt),
+      head: c.head,
+      addedAt: c.added_at,
+      votes: c.votes,
+      withdrawn: c.withdrawn,
+      beingScored: c.being_scored,
+    })),
+    myBallot:
+      ballot === null ? null : { attempt: ref(ballot.attempt), head: ballot.head, alias: ballot.alias, at: ballot.at },
   };
 }
 

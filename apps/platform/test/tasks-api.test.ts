@@ -85,6 +85,7 @@ describe("task routes", () => {
       checks: [],
       metrics: [],
       taskBranch: null,
+      selection: null,
     });
     await call("POST", `${base}/tasks`, bob, { title: "Second", attemptLimit: 3 });
 

@@ -10,8 +10,8 @@ import { archiveRef } from "./archive.ts";
 import { containsCommit, taskBranchHead } from "./base.ts";
 import { migrateValues, normaliseLandingOutcome } from "./casing.ts";
 import { addColumns, renameColumns } from "./columns.ts";
-import { CONFIG_PATH, loadConfig } from "./config.ts";
-import type { CheckConfig, ConfigResult, MetricConfig } from "./config.ts";
+import { CONFIG_PATH, loadConfig, selectionPolicy } from "./config.ts";
+import type { CheckConfig, ConfigResult, MetricConfig, SelectionPolicy } from "./config.ts";
 import { ServiceError } from "./errors.ts";
 import type { ErrorCode } from "./errors.ts";
 import { Follows } from "./follows.ts";
@@ -51,6 +51,8 @@ import { attemptRef, reservedTask, taskBranchRef, taskRef } from "./task-refs.ts
 import type { Actor } from "./tokens.ts";
 import { Verdicts } from "./verdicts.ts";
 import type { StoredVerdict, VerdictRecommendation, VerdictSummary } from "./verdicts.ts";
+import { ELIGIBLE_VOTERS, mayVote, voteLeaders, Votes } from "./votes.ts";
+import type { CandidateStanding, CandidateTally, StoredCandidate, StoredVote, VoteDetail } from "./votes.ts";
 import { alreadyMet, Waiters, watchChanged } from "./waiters.ts";
 import type { AttemptWatch, WaitCondition } from "./waiters.ts";
 
@@ -102,6 +104,8 @@ export interface StoredTask {
   attempt_limit: number | null;
   /** What the task defines over the project's config. */
   definitions: TaskDefinitions;
+  /** Overrides the project's selection policy; null to use the project's. */
+  selection: SelectionPolicy | null;
 }
 
 export interface StoredAttempt {
@@ -182,7 +186,11 @@ export type TaskEvent =
   | "pushed"
   | "verdictPosted"
   | "taskBranchPushed"
-  | "needsUpdate";
+  | "needsUpdate"
+  | "voteOpened"
+  | "voteCast"
+  | "candidateAdded"
+  | "voteClosed";
 
 /** The slice of SQLite the store needs: Durable Object storage in production, `node:sqlite` in tests. */
 export interface Sql {
@@ -229,6 +237,7 @@ export interface CreateTaskInput {
   title: string;
   body?: string | undefined;
   attemptLimit?: number | null | undefined;
+  selection?: SelectionPolicy | null | undefined;
   /** Already checked against the project's config (`taskDefinitionsFrom`). */
   checks?: CheckConfig[] | undefined;
   /** Already checked against the project's config (`taskDefinitionsFrom`). */
@@ -241,6 +250,7 @@ export interface EditTaskInput extends TaskDefinitionsInput {
   title?: string | undefined;
   body?: string | undefined;
   attemptLimit?: number | null | undefined;
+  selection?: SelectionPolicy | null | undefined;
 }
 
 export interface CreateAttemptsInput {
@@ -305,6 +315,8 @@ interface TaskRow {
   attempt_limit: number | null;
   /** `TaskDefinitions` as JSON; null for none. */
   definitions: string | null;
+  /** `SelectionPolicy` as JSON; null to use the project's. */
+  selection: string | null;
   /** The head its task branch's last recorded push left, or null when it has none. */
   task_head: string | null;
 }
@@ -356,6 +368,7 @@ const SCHEMA = [
     closed_by TEXT,
     attempt_limit INTEGER,
     definitions TEXT,
+    selection TEXT,
     task_head TEXT
   )`,
   `CREATE TABLE IF NOT EXISTS attempts (
@@ -418,9 +431,9 @@ const ATTEMPT_COLUMNS = [
 
 /**
  * Columns added to tasks after their table was made: what a task defines over the project's config,
- * and the head of its task branch.
+ * its selection policy and the head of its task branch.
  */
-const TASK_COLUMNS = ["definitions TEXT", "task_head TEXT"];
+const TASK_COLUMNS = ["definitions TEXT", "selection TEXT", "task_head TEXT"];
 
 /**
  * Creates the store's tables, adds the journal's and attempts' newer columns to tables that predate
@@ -484,6 +497,8 @@ export class TaskStore {
   readonly landings: Landings;
   /** The project's verdicts. */
   readonly verdicts: Verdicts;
+  /** The project's votes. */
+  readonly votes: Votes;
   /** What of its tasks and attempts is still to be published to the D1 projection. */
   readonly projection: Projection;
   readonly #landing: LandingRunner | null;
@@ -505,6 +520,7 @@ export class TaskStore {
     this.landings = new Landings({ sql, now });
     this.follows = new Follows({ sql, now, taskHead: (task) => this.#taskHead(task) });
     this.verdicts = new Verdicts({ sql });
+    this.votes = new Votes({ sql });
     this.scoring = new ScoringQueue({
       sql,
       runner: scoring,
@@ -522,13 +538,17 @@ export class TaskStore {
 
   // --- tasks -----------------------------------------------------------------------------------
 
-  /** Creates an open task. Any signed-in user may, in any project. */
-  createTask(_project: ProjectContext, actor: Actor, input: CreateTaskInput): StoredTask {
+  /**
+   * Creates an open task. Any signed-in user may, in any project; only the project owner may give it
+   * a selection policy of its own.
+   */
+  createTask(project: ProjectContext, actor: Actor, input: CreateTaskInput): StoredTask {
+    if ((input.selection ?? null) !== null) this.#maySetSelection(project, actor);
     return this.#sql.transaction(() => {
       const number = this.#next("tasks");
       this.#sql.exec(
-        `INSERT INTO tasks (number, title, body, creator, state, created_at, attempt_limit, definitions)
-         VALUES (?, ?, ?, ?, 'open', ?, ?, ?)`,
+        `INSERT INTO tasks (number, title, body, creator, state, created_at, attempt_limit, definitions, selection)
+         VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?)`,
         number,
         input.title,
         input.body ?? "",
@@ -536,6 +556,7 @@ export class TaskStore {
         this.#stamp(),
         input.attemptLimit ?? null,
         storedDefinitions({ checks: input.checks ?? [], metrics: input.metrics ?? [] }),
+        storedSelection(input.selection ?? null),
       );
       this.#journal(actor, "created", number, null);
       return this.#task(number);
@@ -584,9 +605,11 @@ export class TaskStore {
   }
 
   /**
-   * Edits a task's title, body, attempt limit, checks or metrics. The project owner or the task's
-   * creator may; who may is checked before the checks and metrics are. Changed definitions rescore
-   * each open attempt's head, so every attempt is measured the same way; drafts are left alone.
+   * Edits a task's title, body, attempt limit, selection policy, checks or metrics. The project owner
+   * or the task's creator may, but only the owner may change its selection policy; who may is
+   * checked before the checks and metrics are. While the task has an open vote its checks, metrics
+   * and selection policy stay as they are. Changed definitions rescore each open attempt's head, so
+   * every attempt is measured the same way; drafts are left alone.
    */
   async editTask(project: ProjectContext, actor: Actor, input: EditTaskInput): Promise<StoredTask> {
     this.#mayEditTask(project, actor, this.#task(input.task));
@@ -597,22 +620,41 @@ export class TaskStore {
     // and the checks and metrics it leaves out are taken from what's stored now.
     const current = this.#task(input.task);
     this.#mayEditTask(project, actor, current);
+    const selection = storedSelection(input.selection === undefined ? current.selection : input.selection);
+    const reselecting = selection !== storedSelection(current.selection);
+    if (reselecting) this.#maySetSelection(project, actor);
     const definitions = storedDefinitions(
       config === null ? current.definitions : editedDefinitions(input, current.definitions, config),
     );
+    const redefining = definitions !== storedDefinitions(current.definitions);
+    // A rescore could withdraw a candidate, and a new policy could end the vote's say.
+    if ((reselecting || redefining) && this.votes.open(current.number) !== null) {
+      throw invalidState(`${taskRef(current.number)} has an open vote; close it first`);
+    }
     this.#sql.exec(
-      "UPDATE tasks SET title = ?, body = ?, attempt_limit = ?, definitions = ? WHERE number = ?",
+      "UPDATE tasks SET title = ?, body = ?, attempt_limit = ?, definitions = ?, selection = ? WHERE number = ?",
       input.title ?? current.title,
       input.body ?? current.body,
       input.attemptLimit === undefined ? current.attempt_limit : input.attemptLimit,
       definitions,
+      selection,
       current.number,
     );
-    if (definitions !== storedDefinitions(current.definitions)) {
+    if (redefining) {
       const open = this.#activeAttempts(current.number).filter((a) => a.state === "open");
       await Promise.all(open.map((attempt) => this.#scoreHead(project, actor, attempt, "rescore")));
     }
     return this.#task(current.number);
+  }
+
+  /**
+   * Only the project owner sets a task's selection policy: a creator choosing their own could take a
+   * selection the project gives to a vote.
+   */
+  #maySetSelection(project: ProjectContext, actor: Actor): void {
+    if (actor.user.id !== project.owner) {
+      throw new ServiceError("forbidden", "only the project owner may set a task's selection policy");
+    }
   }
 
   #mayEditTask(project: ProjectContext, actor: Actor, current: StoredTask): void {
@@ -813,23 +855,27 @@ export class TaskStore {
   }
 
   /**
-   * The task's arena: what the task defines over the project's config, and every attempt, obsolete
-   * ones included, by number, with its scoring and current result.
+   * The task's arena: what the task defines over the project's config, its selection policy override
+   * and open vote (with the actor's ballot), and every attempt, obsolete ones included, by number,
+   * with its scoring and current result.
    */
   taskArena(
     _project: ProjectContext,
-    _actor: Actor,
+    actor: Actor,
     input: { task: number },
   ): {
     definitions: TaskDefinitions;
+    selection: SelectionPolicy | null;
+    vote: VoteDetail | null;
     attempts: (Omit<StoredAttempt, "scoring"> & { scoring: AttemptScoringDetail })[];
   } {
-    const { definitions } = this.#task(input.task);
+    const { definitions, selection } = this.#task(input.task);
+    const open = this.votes.open(input.task);
     const attempts = this.#sql
       .exec<AttemptRow>("SELECT * FROM attempts WHERE task = ? ORDER BY number", input.task)
       .map((row) => this.#toAttempt(row))
       .map((a) => ({ ...a, scoring: this.#scoringDetail(a) }));
-    return { definitions, attempts };
+    return { definitions, selection, vote: open === null ? null : this.#voteDetail(open, actor), attempts };
   }
 
   /** The attempt's scoring status, with the run holding its current result. */
@@ -1300,7 +1346,11 @@ export class TaskStore {
     return `${taskRef(input.task)}'s task branch moved; pull first`;
   }
 
-  /** A follow's new head on the attempt's fork, recorded as a push by no user. */
+  /**
+   * A follow's new head on the attempt's fork, recorded as a push by no user. A candidate in the
+   * task's open vote pinned to the head the follow moved on from is pinned to the new one, with its
+   * ballots: a follow isn't its author's push, so it doesn't withdraw it.
+   */
   #followedTo(
     project: ProjectId,
     attempt: StoredAttempt,
@@ -1312,6 +1362,9 @@ export class TaskStore {
       after,
       taskBranch: taskHead,
     });
+    const vote = this.votes.open(attempt.task);
+    const recorded = this.scoring.statusFor(scoredAttempt(attempt)).sha;
+    if (vote !== null && recorded !== null) this.votes.repin(vote.id, attempt.number, { from: recorded, to: after });
     this.#setFollow(attempt, { followed_head: after });
     this.#pushedToSource(null, attempt, after);
     if (attempt.state === "open") this.#request(project, null, attempt, after, "push");
@@ -1653,24 +1706,37 @@ export class TaskStore {
    * Selects an open attempt of an open task as its merge request, approving the attempt's current
    * head, and closes the task's other active attempts (archived once this commits). The merge
    * request is `pending`, or `queued` if its head's gate has already passed. The task's creator or
-   * the project owner (or their aliases) may; the creator may select their own attempt.
+   * the project owner (or their aliases) may; the creator may select their own attempt. Under the
+   * `vote` selection policy, closing a vote selects instead.
+
    */
   async selectAttempt(project: ProjectContext, actor: Actor, input: AttemptInput): Promise<StoredMergeRequest> {
     const current = this.#attempt(input);
     const task = this.#task(current.task);
     this.#mayManageTask(project, actor, task);
     this.#checkSelectable(current);
+    if (selectionPolicy(await loadConfig(this.#repos, project.id), task.selection).policy === "vote") {
+      throw invalidState(`${taskRef(task.number)} is selected by vote; open a vote and close it to select`);
+    }
     const head = await this.#currentHead(project, current);
     const { mr, closed } = this.#sql.transaction(() => {
       // The attempt, the task or its merge requests may have moved while the head was read.
       this.#checkSelectable(this.#attempt(current));
-      const created = this.mergeRequests.select(actor, { task: current.task, attempt: current.number, head });
-      const others = this.#activeAttempts(current.task).filter((a) => a.number !== current.number);
-      for (const other of others) this.#endAttempt(actor, other, "closed");
-      return { mr: this.#evaluate(actor, created), closed: others };
+      return this.#select(actor, current, head);
     });
     await this.#archive(project, closed);
     return mr;
+  }
+
+  /**
+   * Selection's row changes, in the caller's transaction: the merge request approving `head`, and
+   * the task's other active attempts closed. The caller archives `closed` once it commits.
+   */
+  #select(actor: Actor, attempt: StoredAttempt, head: string): { mr: StoredMergeRequest; closed: StoredAttempt[] } {
+    const created = this.mergeRequests.select(actor, { task: attempt.task, attempt: attempt.number, head });
+    const others = this.#activeAttempts(attempt.task).filter((a) => a.number !== attempt.number);
+    for (const other of others) this.#endAttempt(actor, other, "closed");
+    return { mr: this.#evaluate(actor, created), closed: others };
   }
 
   /**
@@ -1739,6 +1805,235 @@ export class TaskStore {
   /** The project's merge queue: the landing merge request first, then the queued ones, first in first out. */
   mergeQueue(_project: ProjectContext, _actor: Actor): StoredMergeRequest[] {
     return this.mergeRequests.queue();
+  }
+
+  // --- votes -----------------------------------------------------------------------------------
+  //
+  // Under the `vote` selection policy, a task's creator can make its selection by vote. Opening one
+  // makes the task's passing attempts its candidates, each pinned to its head. A candidate whose
+  // attempt stops being open, or whose author pushes it from the head it was pinned to, is withdrawn,
+  // and ballots for it stop counting; once it passes again the creator can add it back at its new
+  // head. A follow of the task branch isn't its author's push: it moves the candidate's pin, and its
+  // ballots, to the merge it made, which counts once it passes. Each user has one ballot, which their
+  // aliases share; the latest replaces the earlier. While a vote is open the task's checks, metrics
+  // and selection policy can't change. Closing the vote selects the candidate with the most ballots.
+
+  /**
+   * Opens a vote on the task among the attempts passing now, pinned to their heads, under the
+   * eligibility of the task's selection policy, which must be `vote`. `deadline` (ISO 8601), if
+   * given, is when ballots stop being taken. The task's creator or the project owner may.
+   */
+  async openVote(
+    project: ProjectContext,
+    actor: Actor,
+    input: { task: number; deadline?: string | undefined },
+  ): Promise<VoteDetail> {
+    this.#mayManageTask(project, actor, this.#task(input.task));
+    const config = await loadConfig(this.#repos, project.id);
+
+    // From here to the vote nothing awaits, so two opens can't both pass.
+    const task = this.#task(input.task);
+    this.#mayManageTask(project, actor, task);
+    this.#expect(task, ["open"], "open a vote on");
+    const policy = selectionPolicy(config, task.selection);
+    if (policy.policy !== "vote") {
+      throw invalidState(`${taskRef(task.number)} is selected by its creator; its selection policy isn't vote`);
+    }
+    const deadline = input.deadline === undefined ? null : Date.parse(input.deadline);
+    if (deadline !== null && !(deadline > this.#now().getTime())) {
+      throw new ServiceError("invalidRequest", "deadline must be a time in the future");
+    }
+    if (this.mergeRequests.open(task.number) !== null) {
+      throw invalidState(`${taskRef(task.number)} already has an open merge request`);
+    }
+    if (this.votes.open(task.number) !== null) throw invalidState(`${taskRef(task.number)} already has an open vote`);
+    const at = this.#stamp();
+    const candidates = this.#activeAttempts(task.number)
+      .filter((a) => this.#passing(a))
+      .map((a) => ({ attempt: a.number, head: a.scoring.sha ?? "", added_at: at }));
+    if (candidates.length === 0) throw invalidState(`no attempt of ${taskRef(task.number)} is passing`);
+    const vote = this.#sql.transaction(() => {
+      const opened = this.votes.create(
+        actor,
+        {
+          task: task.number,
+          eligible: policy.eligible,
+          deadline: deadline === null ? null : new Date(deadline).toISOString(),
+          candidates,
+        },
+        at,
+      );
+      this.#journal(actor, "voteOpened", task.number, null, {
+        candidates: candidates.map((c) => attemptRef(task.number, c.attempt)),
+        eligible: policy.eligible,
+      });
+      return opened;
+    });
+    return this.#voteDetail(vote, actor);
+  }
+
+  /**
+   * Casts the actor's ballot in the task's open vote for one of its candidates, replacing their
+   * earlier one; an alias's ballot is its user's. Anyone the vote's eligibility lets in may, before
+   * its deadline, except for their own attempt.
+   */
+  castVote(_project: ProjectContext, actor: Actor, input: AttemptInput): VoteDetail {
+    const current = this.#attempt(input);
+    this.#expect(this.#task(current.task), ["open"], "vote on");
+    const vote = this.#openVote(current.task);
+    if (vote.deadline !== null && Date.parse(vote.deadline) <= this.#now().getTime()) {
+      throw invalidState(`${taskRef(vote.task)}'s vote stopped taking ballots at ${vote.deadline}`);
+    }
+    if (!mayVote(vote.eligible, actor.alias)) {
+      throw new ServiceError("forbidden", `only ${ELIGIBLE_VOTERS[vote.eligible]} may vote on ${taskRef(vote.task)}`);
+    }
+    if (actor.user.id === current.author) {
+      throw new ServiceError("forbidden", `the author of ${current.fork} can't vote for it`);
+    }
+    const candidate = this.#standing(vote, current);
+    if (candidate === null) {
+      throw invalidState(`${current.fork} isn't a candidate in ${taskRef(vote.task)}'s vote`);
+    }
+    this.#sql.transaction(() => {
+      this.votes.cast(vote.id, {
+        voter: actor.user.id,
+        alias: actor.alias,
+        attempt: current.number,
+        head: candidate.head,
+        at: this.#stamp(),
+      });
+      this.#journal(actor, "voteCast", current.task, current.number, { head: candidate.head });
+    });
+    return this.#voteDetail(vote, actor);
+  }
+
+  /**
+   * Adds an attempt that is passing now to the task's open vote, pinned to its head: one that
+   * started passing after the vote opened, or a withdrawn candidate passing again at a new head. The
+   * task's creator or the project owner may.
+   */
+  addVoteCandidate(project: ProjectContext, actor: Actor, input: AttemptInput): VoteDetail {
+    const current = this.#attempt(input);
+    this.#mayManageTask(project, actor, this.#task(current.task));
+    const vote = this.#openVote(current.task);
+    const head = current.scoring.sha;
+    if (!this.#passing(current) || head === null) throw invalidState(`${current.fork} isn't passing`);
+    if (this.#standing(vote, current) !== null) {
+      throw invalidState(`${current.fork} is already a candidate in ${taskRef(vote.task)}'s vote`);
+    }
+    this.#sql.transaction(() => {
+      this.votes.addCandidate(vote.id, { attempt: current.number, head, added_at: this.#stamp() });
+      this.#journal(actor, "candidateAdded", current.task, current.number, { head });
+    });
+    return this.#voteDetail(vote, actor);
+  }
+
+  /**
+   * Closes the task's open vote and selects its winner: the candidate with the most ballots, at the
+   * head it was pinned to, as `selectAttempt` would. A tie goes to the task's creator (or the project
+   * owner), who names one of the tied candidates as `attempt`. With every candidate withdrawn it
+   * closes without a selection. Refused while a candidate is being scored (a follow's merge, which
+   * may yet pass); closing the task still closes it. The task's creator or the project owner may.
+   */
+  async closeVote(
+    project: ProjectContext,
+    actor: Actor,
+    input: { task: number; attempt?: number | undefined },
+  ): Promise<{ vote: VoteDetail; selected: StoredMergeRequest | null }> {
+    const task = this.#task(input.task);
+    this.#mayManageTask(project, actor, task);
+    const { vote, mr, closed } = this.#sql.transaction(() => {
+      const open = this.#openVote(task.number);
+      const detail = this.#voteDetail(open, actor);
+      const scoring = detail.candidates.filter((c) => c.being_scored).map((c) => attemptRef(task.number, c.attempt));
+      if (scoring.length > 0) {
+        throw invalidState(
+          `${taskRef(task.number)}'s vote has candidates still being scored (${scoring.join(", ")}); ` +
+            "close it once scoring finishes",
+        );
+      }
+      const winner = voteWinner(detail, input.attempt);
+      const ended = this.#endVote(actor, open, winner);
+      if (winner === null) return { vote: ended, mr: null, closed: [] };
+      const source = this.#attempt({ task: task.number, number: winner.attempt });
+      this.#checkSelectable(source);
+      return { vote: ended, ...this.#select(actor, source, winner.head) };
+    });
+    await this.#archive(project, closed);
+    return { vote: this.#voteDetail(vote, actor), selected: mr };
+  }
+
+  /** The task's latest vote, open or closed, with the actor's ballot. Anyone signed in may read it. */
+  getVote(_project: ProjectContext, actor: Actor, input: { task: number }): VoteDetail {
+    this.#task(input.task);
+    const vote = this.votes.latest(input.task);
+    if (vote === null) throw new ServiceError("notFound", `${taskRef(input.task)} has never had a vote`);
+    return this.#voteDetail(vote, actor);
+  }
+
+  /** The attempt as a standing candidate of the vote: one not withdrawn. Null when it isn't one. */
+  #standing(vote: StoredVote, attempt: StoredAttempt): StoredCandidate | null {
+    const withdrawn = this.#withdrawn(vote.task);
+    const found = this.votes.candidates(vote.id).find((c) => c.attempt === attempt.number);
+    return found === undefined || withdrawn(found) ? null : found;
+  }
+
+  #openVote(task: number): StoredVote {
+    const vote = this.votes.open(task);
+    if (vote === null) throw invalidState(`${taskRef(task)} has no open vote`);
+    return vote;
+  }
+
+  /**
+   * Closes a vote with `winner`, or none, recording which candidates were withdrawn then, and
+   * journals `voteClosed`; `actor` is null when it closes with its task.
+   */
+  #endVote(actor: Actor | null, vote: StoredVote, winner: StoredCandidate | null): StoredVote {
+    const withdrawn = this.votes.candidates(vote.id).filter(this.#withdrawn(vote.task));
+    const ended = this.votes.close(vote.id, actor, {
+      winner: winner?.attempt ?? null,
+      withdrawn: withdrawn.map((c) => c.attempt),
+      at: this.#stamp(),
+    });
+    this.#journal(actor, "voteClosed", vote.task, null, {
+      winner: winner === null ? null : attemptRef(vote.task, winner.attempt),
+    });
+    return ended;
+  }
+
+  /** The vote as the actor sees it: every candidate's tally, and their own ballot. */
+  #voteDetail(vote: StoredVote, actor: Actor): VoteDetail {
+    return this.votes.detail(vote, actor.user.id, this.#candidateStanding(vote.task));
+  }
+
+  /** Whether a candidate of a vote on `task` is withdrawn: `#candidateStanding` says it isn't standing. */
+  #withdrawn(task: number): (candidate: StoredCandidate) => boolean {
+    const standing = this.#candidateStanding(task);
+    return (candidate) => standing(candidate) !== "standing";
+  }
+
+  /**
+   * Where a candidate of a vote on `task` stands: withdrawn unless it is passing at its pinned head.
+   * Its attempt isn't open, its author pushed its head away from the pin (a follow moves the pin with
+   * it: `#followedTo`), or that head's latest scoring isn't a passed gate: a rescore failed it. Out
+   * only while being scored (`scoring`) when the pinned head is the attempt's head and its scoring is
+   * queued or running: a follow's merge, which counts once it passes. Worked out when read, so a
+   * candidate force-pushed back to its pinned head and passing there stands again, with its ballots.
+   */
+  #candidateStanding(task: number): (candidate: StoredCandidate) => CandidateStanding {
+    return ({ attempt, head }) => {
+      const current = this.#attemptRow({ task, number: attempt });
+      const { sha, status } = this.scoring.statusFor({ task, attempt });
+      if (current?.state !== "open" || sha !== head) return "withdrawn";
+      if (this.scoring.currentRun({ task, attempt })?.result?.gate === "passed") return "standing";
+      return status === "queued" || status === "running" ? "scoring" : "withdrawn";
+    };
+  }
+
+  /** Whether the attempt is passing: open, with its head's latest scoring done and its gate passed. */
+  #passing(attempt: StoredAttempt): boolean {
+    if (attempt.state !== "open" || attempt.scoring.status !== "done") return false;
+    return this.scoring.currentRun(scoredAttempt(attempt))?.result?.gate === "passed";
   }
 
   /**
@@ -2054,12 +2349,18 @@ export class TaskStore {
     throw invalidState(`can't ${verb} ${taskRef(mr.task)}'s merge request: it is ${mr.state}`);
   }
 
-  /** An attempt may be selected while it is open, on an open task with no open merge request. */
+  /**
+   * An attempt may be selected while it is open, on an open task with no open merge request and no
+   * open vote.
+   */
   #checkSelectable(attempt: StoredAttempt): void {
     this.#expect(attempt, ["open"], "select");
     this.#expect(this.#task(attempt.task), ["open"], "select an attempt of");
     if (this.mergeRequests.open(attempt.task) !== null) {
       throw invalidState(`${taskRef(attempt.task)} already has an open merge request`);
+    }
+    if (this.votes.open(attempt.task) !== null) {
+      throw invalidState(`${taskRef(attempt.task)} has an open vote; close it to select its winner`);
     }
   }
 
@@ -2279,7 +2580,10 @@ export class TaskStore {
     });
   }
 
-  /** Moves a task to closed or obsolete, keeping the first close time and who closed it. */
+  /**
+   * Moves a task to closed or obsolete, keeping the first close time and who closed it, and closes its
+   * open vote without a selection, by nobody: the vote closed with its task.
+   */
   #endTask(actor: Actor | null, number: number, to: "closed" | "obsolete"): void {
     this.#sql.exec(
       `UPDATE tasks SET state = ?, closed_at = COALESCE(closed_at, ?), closed_by = COALESCE(closed_by, ?)
@@ -2290,6 +2594,8 @@ export class TaskStore {
       number,
     );
     this.#journal(actor, to === "closed" ? "closed" : "madeObsolete", number, null);
+    const vote = this.votes.open(number);
+    if (vote !== null) this.#endVote(null, vote, null);
   }
 
   /**
@@ -2635,6 +2941,11 @@ export const TASK_METHODS = [
   "markMerged",
   "selectAttempt",
   "approveMergeRequest",
+  "openVote",
+  "castVote",
+  "addVoteCandidate",
+  "closeVote",
+  "getVote",
   "cancelMergeRequest",
   "getMergeRequest",
   "dequeueLogKey",
@@ -2723,7 +3034,13 @@ function toTask(row: TaskRow): StoredTask {
       row.definitions === null
         ? NO_TASK_DEFINITIONS
         : { ...NO_TASK_DEFINITIONS, ...(JSON.parse(row.definitions) as Partial<TaskDefinitions>) },
+    selection: row.selection === null ? null : (JSON.parse(row.selection) as SelectionPolicy),
   };
+}
+
+/** A task's selection policy as stored: null to use the project's. */
+function storedSelection(selection: SelectionPolicy | null): string | null {
+  return selection === null ? null : JSON.stringify(selection);
 }
 
 /** A task's definitions as stored: null for none. */
@@ -2772,6 +3089,28 @@ function mayOwn(project: ProjectContext, actor: Actor): void {
 /** The attempt's author, or one of their aliases, holds its claim. */
 function mayAuthor(actor: Actor, current: StoredAttempt): void {
   if (actor.user.id !== current.author) throw new ServiceError("forbidden", `only the author of ${current.fork} may`);
+}
+
+/**
+ * The vote's winner: the standing candidate with the most ballots. A tie is broken by `named`, one
+ * of the tied candidates; `named`, if given, must be one of the leaders. Null when every candidate
+ * is withdrawn.
+ */
+function voteWinner(vote: VoteDetail, named: number | undefined): CandidateTally | null {
+  const leading = voteLeaders(vote.candidates);
+  const refs = leading.map((c) => attemptRef(vote.task, c.attempt)).join(", ");
+  if (named !== undefined) {
+    const pick = leading.find((c) => c.attempt === named);
+    if (pick === undefined) {
+      const what = leading.length === 1 ? "the vote's winner" : "one of the tied candidates";
+      throw new ServiceError("invalidRequest", `${attemptRef(vote.task, named)} isn't ${what}: ${refs}`);
+    }
+    return pick;
+  }
+  if (leading.length > 1) {
+    throw new ServiceError("invalidRequest", `the vote is tied between ${refs}; name one as attempt to select it`);
+  }
+  return leading[0] ?? null;
 }
 
 function sourceOf(mr: StoredMergeRequest): AttemptInput {

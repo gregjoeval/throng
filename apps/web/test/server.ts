@@ -2,7 +2,7 @@ import type { InferResponseType } from "hono/client";
 import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
 import type { client, FileDiff } from "@/lib/api";
-import type { ArenaAttempt, Metric } from "@/lib/arena";
+import type { ArenaAttempt, Metric, TaskArena } from "@/lib/arena";
 import type { Attempt, ListedTask } from "@/lib/tasks";
 
 /** `GET /api/me` for a human signed in through Access, typed from the platform's routes. */
@@ -44,6 +44,7 @@ export function task(number: number, fields: Partial<ListedTask> = {}): ListedTa
     checks: [],
     metrics: [],
     taskBranch: null,
+    selection: null,
     attemptCount: 0,
     bestGate: null,
     mergeRequestState: null,
@@ -77,6 +78,9 @@ export function attempt(taskNumber: number, number: number, fields: Partial<Atte
   };
 }
 
+/** An arena's selection and vote unless given others: the task's creator selects, and no vote is open. */
+export const NO_VOTE: Pick<TaskArena, "selection" | "vote"> = { selection: { policy: "creator" }, vote: null };
+
 /**
  * Handlers serving `tasks` and their `attempts` in any project: the list (by `?state=`, open and
  * closed when it's absent), each task, each task's attempts, and its arena (each attempt unpushed
@@ -107,7 +111,7 @@ export function serveTasks(tasks: ListedTask[], attempts: Attempt[] = []) {
         .map((a) =>
           arenaAttempt(a.task, a.number, { state: a.state, author: a.author, alias: a.alias, sha: null, base: null }),
         );
-      return HttpResponse.json({ task: found.ref, metrics: [], attempts: arena });
+      return HttpResponse.json({ ...NO_VOTE, task: found.ref, metrics: [], attempts: arena });
     }),
   ];
 }
@@ -200,13 +204,14 @@ export function arenaAttempt(taskNumber: number, number: number, fields: Partial
 /**
  * Handlers serving task `t<n>` with `attempts` everywhere the task page reads them: the task, its
  * attempts (the list's view of the same refs and states, with `notes` by ref) and its arena, plus
- * the declared `metrics`.
+ * the declared `metrics` and the arena's selection policy and open vote, `voting`.
  */
 export function serveArena(
   t: ListedTask,
   attempts: ArenaAttempt[],
   metrics: Metric[] = [],
   notes: Record<string, string> = {},
+  voting: Partial<Pick<TaskArena, "selection" | "vote">> = {},
 ) {
   const listed = attempts.map((a) =>
     attempt(t.number, Number(a.ref.slice(a.ref.lastIndexOf("a") + 1)), {
@@ -217,8 +222,9 @@ export function serveArena(
   );
   return [
     http.get("*/api/projects/:owner/:project/tasks/:t/arena", () =>
-      HttpResponse.json({ task: t.ref, metrics, attempts }),
+      HttpResponse.json({ ...NO_VOTE, ...voting, task: t.ref, metrics, attempts }),
     ),
+
     ...serveTasks([t], listed),
   ];
 }

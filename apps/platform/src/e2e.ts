@@ -115,7 +115,7 @@ export interface E2eDeps<E> {
   previewWorkers: (env: E) => PreviewWorkers;
   logs: (env: E) => LogBucket;
   project: (env: E, id: string) => E2eProjectStub;
-  /** The bearer secret every route needs (the Worker's `SPIKE_TOKEN`). */
+  /** The bearer secret every route needs (the Worker's `E2E_TOKEN`). */
   secret: (env: E) => string;
 }
 

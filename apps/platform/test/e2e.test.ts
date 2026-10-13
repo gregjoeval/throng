@@ -65,7 +65,7 @@ function setup() {
   const logs = new FakeLogs();
   const previewWorkers = new FakePreviewWorkers();
   const destroyed: string[] = [];
-  const app = e2eRoutes<{ SPIKE_TOKEN: string }>({
+  const app = e2eRoutes<{ E2E_TOKEN: string }>({
     db: () => db,
     repos: () => repos,
     previewWorkers: () => previewWorkers,
@@ -77,13 +77,13 @@ function setup() {
       run: async () => null,
       destroy: async () => void destroyed.push(id),
     }),
-    secret: (env) => env.SPIKE_TOKEN,
+    secret: (env) => env.E2E_TOKEN,
   });
   const call = async (method: string, path: string, auth = SECRET) => {
     const res = await app.request(
       path,
       { method, headers: { Authorization: `Bearer ${auth}` } },
-      { SPIKE_TOKEN: SECRET },
+      { E2E_TOKEN: SECRET },
     );
     const type = res.headers.get("Content-Type") ?? "";
     return { status: res.status, body: type.startsWith("application/json") ? ((await res.json()) as Json) : null };

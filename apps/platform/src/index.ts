@@ -40,8 +40,7 @@ export class WebEntrypoint extends WorkerEntrypoint<Env> {
   }
 }
 
-// The e2e suite's routes (`scripts/e2e.ts`). Their bearer secret keeps its old name, SPIKE_TOKEN, so
-// no deployment or CI secret has to change.
+// The e2e suite's routes (`scripts/e2e.ts`), behind the `E2E_TOKEN` bearer secret.
 app.route(
   "/",
   e2eRoutes<Env>({
@@ -62,7 +61,7 @@ app.route(
         destroy: () => stub.destroy(),
       };
     },
-    secret: (env) => env.SPIKE_TOKEN,
+    secret: (env) => env.E2E_TOKEN,
   }),
 );
 

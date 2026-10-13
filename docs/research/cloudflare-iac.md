@@ -51,7 +51,7 @@ Read from `apps/platform/wrangler.jsonc`, `apps/platform/README.md` (Setup), `.g
 - **D1** `throng` and `throng-ci`, ids committed. Migrations are applied by `wrangler d1 migrations apply <db> --remote` before deploy in both workflows. The README creates `throng-ci` by hand with `wrangler d1 create`.
 - **Artifacts** namespaces `throng-spike` and `throng-ci`, as bindings only.
 - **R2** (PR #185) `throng-logs` and `throng-ci-logs`. The README tells you to create them by hand and add the rule with `wrangler r2 bucket lifecycle add … --expire-days 30 --force`.
-- **Secrets** `SPIKE_TOKEN` and `CF_PREVIEW_TOKEN`, declared in `secrets.required`. In `e2e.yml`, `CF_PREVIEW_TOKEN` _is_ the deploy token, passed via `--secrets-file`.
+- **Secrets** `E2E_TOKEN` (named `SPIKE_TOKEN` when this was written; renamed 2026-10-13 in [#172](https://github.com/gregjoeval/throng/issues/172)) and `CF_PREVIEW_TOKEN`, declared in `secrets.required`. In `e2e.yml`, `CF_PREVIEW_TOKEN` _is_ the deploy token, passed via `--secrets-file`.
 - **Shared preview Worker** `throng-fixture-worker`, deployed once by hand from `fixtures/fixture-worker` (README step 2).
 - **Tokens.** One dashboard-created account token with edit on Workers Scripts, Artifacts, D1, Workflows, Containers and R2. It is stored as `CLOUDFLARE_API_TOKEN`, with `CLOUDFLARE_ACCOUNT_ID`, in the GitHub environments `production` and `ci`.
 

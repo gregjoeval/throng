@@ -35,6 +35,7 @@ function openVote(votes: number[], fields: Partial<Vote> = {}): Vote {
       votes: count,
       withdrawn: false,
       beingScored: false,
+      erroredRun: null,
     })),
     myBallot: null,
     ...fields,
@@ -48,8 +49,24 @@ function serveVoting(asked: string[]) {
       asked.push(`${tail} ${await request.text()}`);
       return HttpResponse.json({});
     });
-  return [record("vote/open"), record("vote/close"), record("vote/candidates"), record("vote")];
+  const rescore = http.post("*/api/projects/:owner/:project/attempts/:a/rescore", ({ params }) => {
+    asked.push(`rescore ${String(params["a"])}`);
+    return HttpResponse.json({});
+  });
+  return [record("vote/open"), record("vote/close"), record("vote/candidates"), record("vote"), rescore];
 }
+
+/** An open vote among t1a1 and t1a2 whose rescore of t1a1, a candidate with 2 ballots, errored in run 7. */
+function erroredVote(): Vote {
+  const vote = openVote([2, 1]);
+  vote.candidates = vote.candidates.map((c) =>
+    c.attempt === "t1a1" ? { ...c, votes: 0, withdrawn: true, erroredRun: 7 } : c,
+  );
+  return vote;
+}
+
+/** t1a1 as the arena shows it once its rescore errored: still with the earlier run's passed result. */
+const rescoreErrored = (fields: Partial<ArenaAttempt> = {}) => passing(1, { status: "errored", ...fields });
 
 const lane = (ref: string) => screen.getByRole("region", { name: `Lane ${ref}` });
 const card = (ref: string) =>
@@ -74,6 +91,19 @@ async function arenaWith(
   const app = await renderApp("/ada/alpha/tasks/t1");
   await screen.findByRole("region", { name: "Lanes" });
   return { ...app, asked };
+}
+
+/** `arenaWith`, but bob owns the project and created t1, so the viewer may not manage the vote. */
+async function bobsArenaWith(attempts: ArenaAttempt[], voting: Partial<Pick<TaskArena, "selection" | "vote">>) {
+  server.use(
+    http.get("*/api/projects/:owner/:project", () =>
+      HttpResponse.json({ id: "p", handle: "alpha", owner: bob, createdAt: me.user.createdAt }),
+    ),
+    serveCompare(() => []),
+    ...serveArena(task(1, { creator: bob }), attempts, [], {}, voting),
+  );
+  await renderApp("/ada/alpha/tasks/t1");
+  await screen.findByRole("region", { name: "Lanes" });
 }
 
 describe("the vote banner", () => {
@@ -121,6 +151,17 @@ describe("the vote banner", () => {
 
     expect(within(banner()).getByRole("button", { name: "Close vote" })).toBeDisabled();
     expect(banner()).toHaveTextContent("t1a1 is being scored; close the vote once scoring finishes.");
+  });
+
+  it("shows a candidate whose scoring errored with its run, not withdrawn, and can't close until it's rescored", async () => {
+    await arenaWith([rescoreErrored(), passing(2)], { selection: VOTE_BY_ANYONE, vote: erroredVote() });
+
+    const tallies = within(banner()).getByRole("list", { name: "Tallies" });
+    const items = within(tallies).getAllByRole("listitem");
+    expect(items.map((item) => item.textContent)).toEqual(["t1a1scoring errored (run 7)", "t1a21 vote"]);
+    expect(items[0]).not.toHaveClass("line-through");
+    expect(within(banner()).getByRole("button", { name: "Close vote" })).toBeDisabled();
+    expect(banner()).toHaveTextContent("t1a1's scoring errored; rescore it, then close the vote.");
   });
 
   it("shows a withdrawn candidate whose new head is being scored as withdrawn, and lets the vote close", async () => {
@@ -176,18 +217,7 @@ describe("the vote banner", () => {
   });
 
   it("shows no open or close controls to anyone but the creator and the project owner", async () => {
-    server.use(
-      http.get("*/api/projects/:owner/:project", () =>
-        HttpResponse.json({ id: "p", handle: "alpha", owner: bob, createdAt: me.user.createdAt }),
-      ),
-    );
-    const t = task(1, { creator: bob });
-    server.use(
-      serveCompare(() => []),
-      ...serveArena(t, [passing(1), passing(2)], [], {}, { selection: VOTE_BY_ANYONE }),
-    );
-    await renderApp("/ada/alpha/tasks/t1");
-    await screen.findByRole("region", { name: "Lanes" });
+    await bobsArenaWith([passing(1), passing(2)], { selection: VOTE_BY_ANYONE });
     expect(banner()).toHaveTextContent("Selection is by vote, among anyone. No vote is open yet.");
     expect(within(banner()).queryByRole("button")).toBeNull();
   });
@@ -252,6 +282,25 @@ describe("voting", () => {
     expect(screen.queryByRole("button", { name: "Vote" })).toBeNull();
   });
 
+  it("offers no Vote to a user acting under an alias when only humans may vote", async () => {
+    const asAlias = http.get("*/api/me", () => HttpResponse.json({ ...me, alias: "claude" }));
+    await arenaWith(
+      [passing(1), passing(2)],
+      { selection: { policy: "vote", eligible: "humans" }, vote: openVote([0, 0], { eligible: "humans" }) },
+      [asAlias],
+    );
+    expect(banner()).toHaveTextContent("Users acting as themselves may vote.");
+    expect(screen.queryByRole("button", { name: "Vote" })).toBeNull();
+  });
+
+  it("offers Vote to a user acting as themselves when only humans may vote", async () => {
+    await arenaWith([passing(1), passing(2)], {
+      selection: { policy: "vote", eligible: "humans" },
+      vote: openVote([0, 0], { eligible: "humans" }),
+    });
+    expect(within(lane("t1a1")).getByRole("button", { name: "Vote" })).toBeEnabled();
+  });
+
   it("lets the creator add an attempt that passes after the vote opened", async () => {
     const { user, asked } = await arenaWith([passing(1), passing(2), passing(3)], {
       selection: VOTE_BY_ANYONE,
@@ -260,6 +309,39 @@ describe("voting", () => {
     expect(within(card("t1a1")).queryByRole("button", { name: "Add to vote" })).toBeNull();
     await user.click(within(card("t1a3")).getByRole("button", { name: "Add to vote" }));
     await expect.poll(() => asked).toEqual(['vote/candidates {"attempt":"t1a3"}']);
+  });
+
+  it("offers the task's creator Rescore, not Vote or Add to vote, on a candidate whose scoring errored", async () => {
+    const { user, asked } = await arenaWith([rescoreErrored(), passing(2)], {
+      selection: VOTE_BY_ANYONE,
+      vote: erroredVote(),
+    });
+    expect(within(lane("t1a1")).queryByRole("button", { name: "Vote" })).toBeNull();
+    expect(within(lane("t1a1")).queryByRole("button", { name: "Add to vote" })).toBeNull();
+    await user.click(within(lane("t1a1")).getByRole("button", { name: "Rescore" }));
+    await expect.poll(() => asked).toEqual(["rescore t1a1"]);
+  });
+
+  it("offers Rescore to the author of a candidate whose scoring errored, though they can't manage the vote", async () => {
+    const mine = rescoreErrored({ author: { id: me.user.id, handle: me.user.handle } });
+    await bobsArenaWith([mine, passing(2)], { selection: VOTE_BY_ANYONE, vote: erroredVote() });
+    expect(within(banner()).queryByRole("button", { name: "Close vote" })).toBeNull();
+    expect(within(lane("t1a1")).getByRole("button", { name: "Rescore" })).toBeEnabled();
+  });
+
+  it("offers no Rescore to a voter who isn't the candidate's author, its task's creator or the project owner", async () => {
+    await bobsArenaWith([rescoreErrored(), passing(2)], { selection: VOTE_BY_ANYONE, vote: erroredVote() });
+    expect(within(lane("t1a2")).getByRole("button", { name: "Vote" })).toBeInTheDocument();
+    expect(within(lane("t1a1")).queryByRole("button", { name: "Rescore" })).toBeNull();
+  });
+
+  it("offers no Add to vote on a candidate being rescored, though its earlier result passed", async () => {
+    const vote = openVote([2, 1]);
+    vote.candidates = vote.candidates.map((c) =>
+      c.attempt === "t1a1" ? { ...c, votes: 0, withdrawn: true, beingScored: true } : c,
+    );
+    await arenaWith([passing(1, { status: "running" }), passing(2)], { selection: VOTE_BY_ANYONE, vote });
+    expect(within(lane("t1a1")).queryByRole("button", { name: "Add to vote" })).toBeNull();
   });
 
   it("shows why the platform refused a ballot", async () => {

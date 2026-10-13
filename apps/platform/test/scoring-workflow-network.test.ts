@@ -7,33 +7,26 @@ import { CONFIG_PATH } from "../src/config.ts";
 import type { OutboundAccess } from "../src/network.ts";
 import { NPMRC_PATH } from "../src/npmrc.ts";
 import type { ScoringOutcome, ScoringParams } from "../src/scoring.ts";
-import { RESULT_PREFIX } from "../src/scripts.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { UnreadableRepos } from "./support/unreadable-repos.ts";
+import { importWorkerModule } from "./support/worker-module.ts";
+import { PASSED, result } from "./support/workflow-runs.ts";
 
 const binding = vi.hoisted(() => ({ repos: null as unknown }));
 
-vi.mock("cloudflare:workers", () => ({
-  WorkflowEntrypoint: class {
-    env: unknown;
-    constructor(_ctx: unknown, env: unknown) {
-      this.env = env;
-    }
-  },
-}));
+vi.mock("cloudflare:workers", () => import("./support/cloudflare-workers.ts"));
 vi.mock("../src/artifacts", () => ({ reposFor: () => binding.repos }));
 vi.mock("../src/base", () => ({ attemptBase: async () => null }));
 vi.mock("../src/preview-workers", () => ({ previewWorkersFor: () => ({ ensure: async () => {} }) }));
 
 // Imported by a computed path: the module is Worker code, which this project's Node typecheck can't
 // follow (`cloudflare:workers`), so it is typed here by what the test calls.
-const WORKFLOW_MODULE = "../src/workflows.ts";
-const { ScoringWorkflow } = (await import(WORKFLOW_MODULE)) as {
+const { ScoringWorkflow } = await importWorkerModule<{
   ScoringWorkflow: new (
     ctx: unknown,
     env: unknown,
   ) => { run: (event: unknown, step: unknown) => Promise<ScoringOutcome> };
-};
+}>("workflows");
 
 const ORIGIN = "abc123-main";
 const FORK = "abc123-t1a1";
@@ -41,15 +34,6 @@ const params: ScoringParams = { project: "abc123", attempt: "t1a1", sha: "a".rep
 const config = (host: string) =>
   `preview: {}\nnetwork:\n  allow: [${host}]\nchecks:\n  - { name: test, command: npm test }\n`;
 const npmrc = (host: string) => `@acme:registry=https://${host}/\n`;
-
-const result = (value: unknown) => ({ exitCode: 0, stdout: `${RESULT_PREFIX}${JSON.stringify(value)}\n`, stderr: "" });
-const PASSED = {
-  base: null,
-  shortstat: "",
-  builtinMs: 0,
-  setupFailed: null,
-  checks: [{ exit: 0, durationMs: 1, metrics: {} }],
-};
 
 /** A step that runs `fn`, trying again on failure up to its config's retry limit, as Workflows does. */
 async function stepDo(_name: string, ...rest: unknown[]): Promise<unknown> {

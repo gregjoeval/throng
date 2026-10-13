@@ -1,6 +1,6 @@
 // End-to-end suite against a deployed throng Worker and real Artifacts.
 //
-//   THRONG_URL=https://throng.<subdomain>.workers.dev SPIKE_TOKEN=... pnpm e2e [scenario...]
+//   THRONG_URL=https://throng.<subdomain>.workers.dev E2E_TOKEN=... pnpm e2e [scenario...]
 //
 // Merge queue scenarios, through the product API (`/api`) and the git proxy (`/git`) as the e2e user:
 // zeroconfig (no config: the gate passes with no checks; selecting an attempt closes its sibling, and
@@ -9,7 +9,7 @@
 // lands, the second is dequeued with reason `conflict` and the expected hunk; its author merges main
 // and pushes, which moves it to `needsReview`; approved again, it lands), needsreview (a push to a
 // queued or landing merge request's source dequeues it with `newPush` to `needsReview`, and it
-// doesn't requeue on its own once the new head passes).
+// doesn't requeue on its own once the new head passes; its check's log notes the default Sandbox size).
 //
 // The agent loop over MCP, mcp, through `/mcp` and git only (see `e2e-mcp.ts`), with tokens under
 // aliases so it runs as `user (alias)`: the e2e user's agent
@@ -48,6 +48,8 @@ import { dirname, join } from "node:path";
 import { isDeepStrictEqual, promisify } from "node:util";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { ARCHIVE_REF_PREFIX, archiveRef } from "../src/archive.ts";
+import { DEFAULT_SANDBOX_SIZE } from "../src/config.ts";
+import { sandboxNote } from "../src/logs.ts";
 import { CLONE_RECIPE } from "../src/mcp.ts";
 import { previewName, previewWorkerName } from "../src/preview.ts";
 import { originRepo } from "../src/repos.ts";
@@ -72,7 +74,7 @@ const CHECK_TIMEOUT_MS = 10 * 60 * 1000;
 const PROJECTION_TIMEOUT_MS = 90 * 1000;
 
 const baseUrl = requireEnv("THRONG_URL").replace(/\/$/u, "");
-const e2eSecret = requireEnv("SPIKE_TOKEN");
+const e2eSecret = requireEnv("E2E_TOKEN");
 const projectPrefix = process.env.E2E_PROJECT_PREFIX || "e2e";
 assert(
   /^e2e[a-z0-9]*$/u.test(projectPrefix),
@@ -247,7 +249,8 @@ interface MyListings {
 interface ScoringStatus {
   status: "none" | "queued" | "running" | "done" | "errored";
   sha: string | null;
-  result?: ApiResult;
+  /** The current result, with the run it came from. */
+  result?: ApiResult & { run: number };
 }
 
 const scenarios: Record<string, () => Promise<void>> = {
@@ -497,6 +500,12 @@ async function needsreview(): Promise<void> {
   const scoring = await scoredHead(p, a1, head);
   assert(scoring.result.gate === "passed", `expected the gate to pass: ${JSON.stringify(scoring.result.checks)}`);
   timeline.mark("t1a1 scored");
+  // The config sets no Sandbox size, so the check ran at the default, and its log says so.
+  const slowLog = await throngText(p, `/runs/${scoring.result.run}/logs/slow`, "text/plain");
+  assert(
+    slowLog.includes(`== throng ==\n${sandboxNote(DEFAULT_SANDBOX_SIZE)}\n`),
+    `slow's log doesn't note the ${DEFAULT_SANDBOX_SIZE} Sandbox: ${slowLog.slice(-200)}`,
+  );
 
   await throng(p, "POST", `/tasks/${t1}/selection`, { attempt: a1 });
   const inQueue = await mergeRequestUntil(p, t1, (mr) => mr.state === "queued" || mr.state === "landing");
@@ -1648,10 +1657,10 @@ async function throngApi<T>(p: RealProject, method: string, path: string, body?:
   return JSON.parse(text) as T;
 }
 
-/** A product API route that answers a bare diff. */
-async function throngText(p: RealProject, path: string): Promise<string> {
+/** A product API route that answers text: a bare diff unless `accept` asks for another type. */
+async function throngText(p: RealProject, path: string, accept = "text/x-diff"): Promise<string> {
   const response = await fetch(`${baseUrl}/api/projects/${p.owner}/${p.project}${path}`, {
-    headers: { Authorization: `Bearer ${p.token}`, Accept: "text/x-diff" },
+    headers: { Authorization: `Bearer ${p.token}`, Accept: accept },
   });
   const text = await response.text();
   if (!response.ok) throw new Error(`GET ${path}: ${response.status} ${text}`);

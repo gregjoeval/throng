@@ -44,6 +44,7 @@ describe("POST /api/config/validate", () => {
             preview: null,
             attempts: { limit: null },
             selection: { policy: "creator" },
+            sandbox: { size: "standard-1" },
           },
         },
       });

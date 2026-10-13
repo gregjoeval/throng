@@ -53,6 +53,21 @@ Each scoring run copies the log of every `setup` command, check and preview to t
 
 There's one bucket per environment: `throng-logs`, and `throng-ci-logs` for `ci`. Logs are deleted after 30 days by an R2 lifecycle rule. Wrangler's config can't declare lifecycle rules, so they live in `r2-lifecycle.json`, which CI applies before each deploy (see the setup below).
 
+## Sandbox size
+
+Each role of a run gets its own container (`src/grants.ts`). The ones that run the repository's code, `score`, `check` and `preview`, start at the size the project's `.throng/config.yml` sets:
+
+```yaml
+sandbox:
+  size: standard-1 # lite | standard-1 | standard-2 | standard-3 | standard-4
+```
+
+The sizes are Cloudflare's named instance types, which `RunSandbox` passes to `start({ instance })` (`src/sandbox.ts`). `SANDBOX_RESOURCES` in `src/config.ts` gives each one's memory and vCPU, and `/llms.txt` lists them. When `sandbox.size` is absent, or `main`'s config is missing or invalid, it is `standard-1`. A task's checks and metrics never change it: when they clash with `main`'s config, the run's merged config is invalid, but it still starts at the size `main` sets. Any other value is a config error. The trusted `land` and `follow` containers only run git and always start at `lite`.
+
+The size is read from the origin's `main`, like the rest of the config, never from the attempt's head, so an attempt can't raise its own size; a change applies once it lands. A scoring run takes it from the config it loads from `main`; a landing reads `main`'s config before its conflict check starts the `check` container, which then also runs the retest. A container that is already running keeps its size, and the next one to start takes the current config's. Every stored log a step wrote notes its size under `== throng ==` (`sandbox: standard-1`). Logs are read back at `lite`: the container that wrote them is still running and keeps its size, and one that was lost needs no more to find its log missing.
+
+The default is larger than `lite` (see `SANDBOX_RESOURCES`), so each scoring run costs more than it did when every container was `lite`. Wrangler's `containers` entry sets no `instance_type`: under the `durable_object` scheduling policy, the size is chosen at each `start()`, and `max_instances` caps how many containers run at once, whatever their size.
+
 ## Previews
 
 Each project has its own Worker, `p<projectId>`, and every Preview of its attempts deploys under it (`src/preview-workers.ts`, `src/preview.ts`). A Preview is named after its fork, so its URL is `https://<forkName>-p<projectId>.<subdomain>.workers.dev`; a label that would pass 63 characters keeps the fork name's start plus a hash. Projects never share a Worker's Previews (about 500 per Worker, least recently deployed evicted first), its limits or its settings.
@@ -81,14 +96,14 @@ The **E2E** workflow (`.github/workflows/e2e.yml`) runs `pnpm e2e` against real 
 
 Each run:
 
-1. Generates a random `SPIKE_TOKEN`.
+1. Generates a random `E2E_TOKEN`.
 2. Applies D1 migrations to `throng-ci`.
-3. Builds with `CLOUDFLARE_ENV=ci` and deploys `throng-ci`, setting `SPIKE_TOKEN` and `CF_PREVIEW_TOKEN` (the deploy's own API token).
+3. Builds with `CLOUDFLARE_ENV=ci` and deploys `throng-ci`, setting `E2E_TOKEN` and `CF_PREVIEW_TOKEN` (the deploy's own API token).
 4. Builds and deploys `throng-web-ci` the same way, installs Playwright's Chromium, and waits for `throng-web-ci` to answer.
 5. Runs the e2e scenarios. Every project id starts with `e2eci<run id>r<attempt>p`. Each scenario deletes what its projects made, and the suite revokes its Throng tokens when it ends.
 6. Always deletes everything under that prefix with `pnpm e2e cleanup`, even when the suite fails or is cancelled: each project's D1 row, its Durable Object's storage, its logs in R2, its repos and its preview Worker.
 
-The suite reaches the Worker through its e2e routes, `/e2e/*`, behind the `SPIKE_TOKEN` bearer secret. They refuse any project or repo whose id doesn't start with `e2e`, so they can't reach a real project, and `E2E_PROJECT_PREFIX` must start with `e2e` too.
+The suite reaches the Worker through its e2e routes, `/e2e/*`, behind the `E2E_TOKEN` bearer secret. They refuse any project or repo whose id doesn't start with `e2e`, so they can't reach a real project, and `E2E_PROJECT_PREFIX` must start with `e2e` too.
 
 ### Running it
 
@@ -104,7 +119,7 @@ gh workflow run e2e.yml --ref my-branch     # every scenario, against a branch
 - `zeroconfig`, `conflict`, `needsreview`: the merge queue. These make real projects (with task rows) owned by an e2e user, `e2e@throng.invalid`, through `POST /e2e/projects/:project`, then drive them only through `/api` and the git proxy with that user's Throng token (`POST /e2e/token`). The fixture is the one push that goes around the proxy, since the proxy refuses pushes to the origin's `main`.
   - `zeroconfig`: a project with no `.throng/config.yml`. Selecting `t1a1` closes `t1a2`, and the merge request lands as a merge commit whose parents are the old `main` and the approved head, with the `Throng-Task`, `Throng-Attempt`, `Throng-Merge-Request` and `Approved-by` trailers. It also checks custom refs after landing: both attempts are archived under `refs/attempts/` in the origin.
   - `conflict`: two tasks whose attempts edit the same line. `t1`'s merge request lands, and `t2`'s is dequeued with reason `conflict` and the expected three-way hunk. Its author merges `main` and pushes, which moves it to `needsReview`. Once approved, it lands.
-  - `needsreview`: a slow required check keeps the landing in its retest. A push to the source while it's queued or landing dequeues it with `newPush` to `needsReview`. Once the new head passes, it still doesn't requeue on its own.
+  - `needsreview`: a slow required check keeps the landing in its retest. Its scoring log notes the default Sandbox size, `standard-1`, as the config sets none. A push to the source while it's queued or landing dequeues it with `newPush` to `needsReview`. Once the new head passes, it still doesn't requeue on its own.
 - `mcp`: the agent loop through `/mcp` (with the MCP SDK's client) and git only, on a real project with no config (`agentLoop` in `scripts/e2e-mcp.ts`, which `test/mcp.test.ts` also runs in process). Both agents' tokens are minted under an alias (`POST /e2e/token?alias=claude`), so the loop runs as `user (alias)` and checks the attempt and the verdict record it. The e2e user's agent calls `whoami`, `create_task` and `start_attempts count=2`, clones `t1a1`'s `remote` with the recipe above (through `sh`, with the token in `THRONG_TOKEN`), pushes with no auth of its own, `update_attempt state=open`, waits with `wait_for_attempt until=scored` and checks the result with `get_attempt`. A second e2e user, `e2e-reviewer@throng.invalid` (`POST /e2e/token?as=reviewer&alias=codex`), posts a `merge` verdict. The first selects `t1a1` and waits with `until=mergeRequestChanged` until it merges.
 - `arena`: the attempt arena in a browser. Like `zeroconfig`, it makes a real project as the e2e user, with task `t1` and two attempts: `t1a1` edits `src/greeting.js`, and `t1a2` edits it and `src/index.js`. Once both are scored, Playwright's Chromium opens `t1` on `throng-web-ci` (`THRONG_WEB_URL`) and checks that:
   1. the arena shows lanes `t1a1` and `t1a2`, each with its own files, and each compared against its base (`main`, since the task has no branch);
@@ -137,7 +152,7 @@ gh workflow run e2e.yml --ref my-branch     # every scenario, against a branch
 To run `arena` from your machine, install Chromium once with `pnpm --filter @throng/platform exec playwright install chromium` and point `THRONG_WEB_URL` at any throng-web, such as `pnpm --filter @throng/web dev` (`http://localhost:5173`). Its own platform binding isn't used, since the browser sends API calls to `THRONG_URL`:
 
 ```bash
-THRONG_URL=https://throng-ci.<subdomain>.workers.dev SPIKE_TOKEN=... THRONG_WEB_URL=http://localhost:5173 pnpm e2e arena
+THRONG_URL=https://throng-ci.<subdomain>.workers.dev E2E_TOKEN=... THRONG_WEB_URL=http://localhost:5173 pnpm e2e arena
 ```
 
-The first run creates the `throng-ci` Worker, its Workflow (`throng-ci-scoring`) and its container. `pnpm e2e cleanup` needs `THRONG_URL`, `SPIKE_TOKEN` and an explicit `E2E_PROJECT_PREFIX`, so it can also clear up after a local run.
+The first run creates the `throng-ci` Worker, its Workflow (`throng-ci-scoring`) and its container. `pnpm e2e cleanup` needs `THRONG_URL`, `E2E_TOKEN` and an explicit `E2E_PROJECT_PREFIX`, so it can also clear up after a local run.

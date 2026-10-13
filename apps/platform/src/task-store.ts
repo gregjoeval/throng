@@ -569,7 +569,7 @@ export class TaskStore {
 
   /**
    * What a task defines over the project's config, for a scoring run to merge. None for a task with
-   * no row, like the spike's attempts.
+   * no row, like the e2e routes' attempts.
    */
   definitionsOf(task: number): TaskDefinitions {
     const [row] = this.#sql.exec<TaskRow>("SELECT * FROM tasks WHERE number = ?", task);
@@ -1810,13 +1810,11 @@ export class TaskStore {
   // --- votes -----------------------------------------------------------------------------------
   //
   // Under the `vote` selection policy, a task's creator can make its selection by vote. Opening one
-  // makes the task's passing attempts its candidates, each pinned to its head. A candidate whose
-  // attempt stops being open, or whose author pushes it from the head it was pinned to, is withdrawn,
-  // and ballots for it stop counting; once it passes again the creator can add it back at its new
-  // head. A follow of the task branch isn't its author's push: it moves the candidate's pin, and its
-  // ballots, to the merge it made, which counts once it passes. Each user has one ballot, which their
-  // aliases share; the latest replaces the earlier. While a vote is open the task's checks, metrics
-  // and selection policy can't change. Closing the vote selects the candidate with the most ballots.
+  // makes the task's passing attempts its candidates, each pinned to its head; `#candidateStanding`
+  // says which still count. A withdrawn one can be added back once it passes at a new head. Each
+  // user has one ballot, which their aliases share; the latest replaces the earlier. While a vote is
+  // open the task's checks, metrics and selection policy can't change. Closing the vote selects the
+  // candidate with the most ballots.
 
   /**
    * Opens a vote on the task among the attempts passing now, pinned to their heads, under the
@@ -1848,9 +1846,10 @@ export class TaskStore {
     }
     if (this.votes.open(task.number) !== null) throw invalidState(`${taskRef(task.number)} already has an open vote`);
     const at = this.#stamp();
-    const candidates = this.#activeAttempts(task.number)
-      .filter((a) => this.#passing(a))
-      .map((a) => ({ attempt: a.number, head: a.scoring.sha ?? "", added_at: at }));
+    const candidates = this.#activeAttempts(task.number).flatMap((a) => {
+      const head = this.#passingHead(a);
+      return head === null ? [] : [{ attempt: a.number, head, added_at: at }];
+    });
     if (candidates.length === 0) throw invalidState(`no attempt of ${taskRef(task.number)} is passing`);
     const vote = this.#sql.transaction(() => {
       const opened = this.votes.create(
@@ -1916,8 +1915,8 @@ export class TaskStore {
     const current = this.#attempt(input);
     this.#mayManageTask(project, actor, this.#task(current.task));
     const vote = this.#openVote(current.task);
-    const head = current.scoring.sha;
-    if (!this.#passing(current) || head === null) throw invalidState(`${current.fork} isn't passing`);
+    const head = this.#passingHead(current);
+    if (head === null) throw invalidState(`${current.fork} isn't passing`);
     if (this.#standing(vote, current) !== null) {
       throw invalidState(`${current.fork} is already a candidate in ${taskRef(vote.task)}'s vote`);
     }
@@ -1932,8 +1931,9 @@ export class TaskStore {
    * Closes the task's open vote and selects its winner: the candidate with the most ballots, at the
    * head it was pinned to, as `selectAttempt` would. A tie goes to the task's creator (or the project
    * owner), who names one of the tied candidates as `attempt`. With every candidate withdrawn it
-   * closes without a selection. Refused while a candidate is being scored (a follow's merge, which
-   * may yet pass); closing the task still closes it. The task's creator or the project owner may.
+   * closes without a selection. Refused while a candidate's pinned head has no result yet (see
+   * `#candidateStanding`); closing the task still closes it. The task's creator or the project owner
+   * may.
    */
   async closeVote(
     project: ProjectContext,
@@ -1950,6 +1950,15 @@ export class TaskStore {
         throw invalidState(
           `${taskRef(task.number)}'s vote has candidates still being scored (${scoring.join(", ")}); ` +
             "close it once scoring finishes",
+        );
+      }
+      const errored = detail.candidates.flatMap((c) =>
+        c.errored_run === null ? [] : [`${attemptRef(task.number, c.attempt)} in run ${c.errored_run}`],
+      );
+      if (errored.length > 0) {
+        throw invalidState(
+          `${taskRef(task.number)}'s vote has candidates whose scoring errored (${errored.join(", ")}); ` +
+            "rescore them, then close it",
         );
       }
       const winner = voteWinner(detail, input.attempt);
@@ -2009,31 +2018,49 @@ export class TaskStore {
   /** Whether a candidate of a vote on `task` is withdrawn: `#candidateStanding` says it isn't standing. */
   #withdrawn(task: number): (candidate: StoredCandidate) => boolean {
     const standing = this.#candidateStanding(task);
-    return (candidate) => standing(candidate) !== "standing";
+    return (candidate) => standing(candidate).state !== "standing";
   }
 
   /**
-   * Where a candidate of a vote on `task` stands: withdrawn unless it is passing at its pinned head.
-   * Its attempt isn't open, its author pushed its head away from the pin (a follow moves the pin with
-   * it: `#followedTo`), or that head's latest scoring isn't a passed gate: a rescore failed it. Out
-   * only while being scored (`scoring`) when the pinned head is the attempt's head and its scoring is
-   * queued or running: a follow's merge, which counts once it passes. Worked out when read, so a
-   * candidate force-pushed back to its pinned head and passing there stands again, with its ballots.
+   * Where a candidate of a vote on `task` stands, by the rule that adds one: standing while its
+   * attempt is passing (`#passingHead`) at its pinned head. Withdrawn when its attempt isn't open,
+   * its author pushed its head away from the pin (a follow moves the pin with it: `#followedTo`), or
+   * that head's latest scoring failed the gate. While that head has no result yet it is out but not
+   * withdrawn, and the vote can't close: `scoring` while its scoring (a follow's merge, or a
+   * rescore) is queued or running, `errored` once it ended in error, which says nothing of the head,
+   * until a rescore. Worked out when read, so a candidate force-pushed back to its pinned head and
+   * passing there stands again, with its ballots.
    */
   #candidateStanding(task: number): (candidate: StoredCandidate) => CandidateStanding {
     return ({ attempt, head }) => {
       const current = this.#attemptRow({ task, number: attempt });
-      const { sha, status } = this.scoring.statusFor({ task, attempt });
-      if (current?.state !== "open" || sha !== head) return "withdrawn";
-      if (this.scoring.currentRun({ task, attempt })?.result?.gate === "passed") return "standing";
-      return status === "queued" || status === "running" ? "scoring" : "withdrawn";
+      const scored = current === undefined ? null : this.#scoredHead(current);
+      if (scored?.sha !== head) return { state: "withdrawn" };
+      if (scored.passed) return { state: "standing" };
+      if (scored.status === "queued" || scored.status === "running") return { state: "scoring" };
+      const errored = scored.status === "errored" ? this.scoring.scoredRun({ task, attempt }) : null;
+      return errored === null ? { state: "withdrawn" } : { state: "errored", run: errored };
     };
   }
 
-  /** Whether the attempt is passing: open, with its head's latest scoring done and its gate passed. */
-  #passing(attempt: StoredAttempt): boolean {
-    if (attempt.state !== "open" || attempt.scoring.status !== "done") return false;
-    return this.scoring.currentRun(scoredAttempt(attempt))?.result?.gate === "passed";
+  /** The head the attempt is passing at (see `#scoredHead`); null when it isn't passing. */
+  #passingHead(attempt: AttemptInput & Pick<StoredAttempt, "state">): string | null {
+    const scored = this.#scoredHead(attempt);
+    return scored?.passed === true ? scored.sha : null;
+  }
+
+  /**
+   * An open attempt's head, its latest scoring's status there, and whether it is passing there: that
+   * scoring is done and its gate passed. Null when the attempt isn't open or has no head yet.
+   */
+  #scoredHead(
+    attempt: AttemptInput & Pick<StoredAttempt, "state">,
+  ): { sha: string; status: AttemptScoring["status"]; passed: boolean } | null {
+    if (attempt.state !== "open") return null;
+    const { sha, status } = this.scoring.statusFor(scoredAttempt(attempt));
+    if (sha === null) return null;
+    const passed = status === "done" && this.scoring.currentRun(scoredAttempt(attempt))?.result?.gate === "passed";
+    return { sha, status, passed };
   }
 
   /**

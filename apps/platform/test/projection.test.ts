@@ -1,13 +1,15 @@
 import { describe, expect, it } from "vitest";
+import { CONFIG_PATH } from "../src/config.ts";
 import { MAX_LISTING_PAGE, myListings } from "../src/my-listings.ts";
 import { deliver, MAX_PROJECTION_RETRY_MS, PROJECTION_BATCH, PROJECTION_RETRY_MS } from "../src/projection.ts";
 import { TaskStore } from "../src/task-store.ts";
-import type { AttemptState, ProjectContext, TaskState } from "../src/task-store.ts";
+import type { AttemptState, ProjectContext, TaskState, TaskStoreDeps } from "../src/task-store.ts";
 import type { Actor } from "../src/tokens.ts";
 import type { BatchDatabase, Database, Statement } from "../src/users.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
 import { defined } from "./support/defined.ts";
+import { PASSED } from "./support/results.ts";
 import { testSql } from "./support/task-backend.ts";
 
 const PROJECT: ProjectContext = { id: "abc123", owner: "owner001" };
@@ -33,11 +35,12 @@ async function seed(db: Database): Promise<void> {
     .all();
 }
 
-async function setup() {
+/** A store over an empty origin, built with `options` as well, and a seeded D1 to publish to. */
+async function setup(options: Omit<TaskStoreDeps, "sql" | "repos" | "now"> = {}) {
   const repos = new FakeRepos();
   await repos.create("abc123-main", { defaultBranch: "main" });
   const sql = testSql();
-  const store = new TaskStore({ sql, repos, now: () => new Date("2026-10-10T12:00:00.000Z") });
+  const store = new TaskStore({ sql, repos, now: () => new Date("2026-10-10T12:00:00.000Z"), ...options });
   const db = testDatabase();
   await seed(db);
   const listings = firstPages(myListings({ db }));
@@ -265,6 +268,45 @@ describe("the D1 projection of tasks and attempts", () => {
     expect(store.projection.hasChanges()).toBeFalsy();
     await store.editTask(PROJECT, ada, { task: task.number, title: "Fix the login" });
     expect(store.projection.hasChanges()).toBeTruthy();
+  });
+
+  it("publishes the attempts a vote's close closes, and leaves its winner and task as they were", async () => {
+    const { repos, store, db, listings } = await setup({
+      scoring: {
+        workflow: { create: async () => ({}), get: async () => ({ terminate: async () => {} }) },
+        teardown: async () => {},
+      },
+    });
+    repos.commit("abc123-main", { files: { "README.md": "hi\n" } });
+    repos.writeFile("abc123-main", "main", CONFIG_PATH, "selection: { policy: vote }\n");
+    const task = store.createTask(PROJECT, owner, { title: "Fix login" });
+    const attempts = await store.createAttempts(PROJECT, ada, { task: task.number, count: 3 });
+    for (const attempt of attempts) {
+      const ref = { task: task.number, number: attempt.number };
+      await store.openAttempt(PROJECT, ada, ref);
+      await store.scoring.drain();
+      const run = defined(store.scoring.listRuns({ task: ref.task, attempt: ref.number }).at(-1), "a run");
+      store.scoringFinished(run.id, { status: "done", result: PASSED });
+    }
+    await store.openVote(PROJECT, owner, { task: task.number });
+    store.castVote(PROJECT, bob, { task: task.number, number: 2 });
+    expect(await store.projection.publish(db, PROJECT.id)).toBeNull();
+
+    const closed = await store.closeVote(PROJECT, owner, { task: task.number });
+    expect(closed.selected).toMatchObject({ attempt: 2 });
+    const batch = defined(store.projection.pending(PROJECT.id), "the close's changes");
+    expect(batch.tasks).toEqual([]);
+    expect(batch.attempts.map((a) => [a.number, a.state])).toEqual([
+      [1, "closed"],
+      [3, "closed"],
+    ]);
+    await store.projection.publish(db, PROJECT.id);
+    const listed = await listings.attempts(ada, {});
+    expect(listed.map((a) => [a.ref, a.state]).toSorted()).toEqual([
+      ["t1a1", "closed"],
+      ["t1a2", "open"],
+      ["t1a3", "closed"],
+    ]);
   });
 
   it("backfills the tasks and attempts a store had before the projection existed", async () => {

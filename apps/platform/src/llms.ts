@@ -3,6 +3,8 @@
 // this is the long form, step by step.
 
 import { Hono } from "hono";
+import { DEFAULT_SANDBOX_SIZE, oneOf, SANDBOX_RESOURCES, SANDBOX_SIZES } from "./config.ts";
+import type { SandboxSize } from "./config.ts";
 import { attemptRemote } from "./git-remotes.ts";
 import { CLONE_RECIPE, MAX_FILE_BYTES, MAX_LOG_SLICE_BYTES, MCP_INSTRUCTIONS } from "./mcp.ts";
 import { NPM_REGISTRY_HOST } from "./network.ts";
@@ -84,18 +86,27 @@ Both are read from the origin's \`main\`, never from your attempt: a change to e
    Under the \`vote\` selection policy (\`.throng/config.yml\`'s \`selection: {policy: vote, eligible}\`, or a
    task's own, which only the project owner sets), the selection is a vote and \`select_attempt\` is refused. \`open_vote\` makes the passing attempts
    candidates, each user \`cast_vote\`s once (their aliases share that ballot; never for their own attempt), and
-   \`close_vote\` selects the most-backed candidate, with \`attempt\` breaking a tie. Its author's push to a
-   candidate withdraws it (a follow of the task branch doesn't: the candidate moves to the merge, with its
-   ballots, and is being scored until that merge's scoring finishes: \`close_vote\` is refused until then);
+   \`close_vote\` selects the most-backed candidate, with \`attempt\` breaking a tie. A candidate counts while it
+   is passing at the head it joined at, so its author's push withdraws it (a follow of the task branch doesn't:
+   the candidate moves to the merge, with its ballots). While its head has no result, \`close_vote\` is refused:
+   wait for one being scored, and \`rescore\` one whose scoring errored (\`get_log\` on its run says why);
    \`add_vote_candidate\` adds an attempt that passes later. While a vote is open, the task's checks, metrics and
-   selection policy can't change. \`get_vote\` shows the tallies, which candidates are being scored, and your
-   ballot.
+   selection policy can't change. \`get_vote\` shows the tallies, which candidates are being scored or errored,
+   and your ballot.
 10. If the merge request is dequeued, \`get_dequeue\` says why, with each conflicting file's hunks. Merge \`main\`
     into the attempt, push, and wait for the new head's score. The new head needs approving again:
     \`approve_merge_request\`.
 
 \`update_attempt\` also edits the note and moves an attempt to \`draft\` or \`closed\`; \`hand_off\` gives an
 active attempt to another user.
+
+## The Sandbox
+
+Setup, the checks and the Preview build run in a container whose size the project's \`.throng/config.yml\`
+sets, as in \`sandbox: {size: standard-2}\`. The sizes are ${oneOf(SANDBOX_SIZES.map(describeSize))}.
+The default is ${DEFAULT_SANDBOX_SIZE}. Like the rest of the config, it is read from the origin's \`main\`: an
+attempt that changes it still runs at \`main\`'s size, and the change applies once it lands. Each stored log
+notes the size it ran at under \`== throng ==\`, so a check killed for memory shows how much it had.
 
 ## In short
 
@@ -111,6 +122,12 @@ Every tool wraps a route of the REST API, which takes the same bearer token. Err
 - OpenAPI 3.1 document: ${origin}/api/openapi.json
 - Long-poll an attempt: \`GET ${origin}/api/projects/<owner>/<project>/attempts/t42a3?wait=${DEFAULT_WAIT_SECONDS}&until=scored\`
 `;
+}
+
+/** A Sandbox size with what it gets: `standard-1 (4 GiB, 1/2 vCPU)`. */
+function describeSize(size: SandboxSize): string {
+  const { memory, vcpu } = SANDBOX_RESOURCES[size];
+  return `${size} (${memory}, ${vcpu} vCPU)`;
 }
 
 /** `/llms.txt`, public. */

@@ -115,8 +115,8 @@ export interface E2eDeps<E> {
   previewWorkers: (env: E) => PreviewWorkers;
   logs: (env: E) => LogBucket;
   project: (env: E, id: string) => E2eProjectStub;
-  /** The bearer secret every route needs (the Worker's `SPIKE_TOKEN`). */
-  secret: (env: E) => string;
+  /** The bearer secret every route needs (the Worker's `E2E_TOKEN`); unset or empty, every request is refused. */
+  secret: (env: E) => string | undefined;
 }
 
 /**
@@ -169,6 +169,21 @@ async function e2eProjectsUnder<E>(deps: E2eDeps<E>, env: E, prefix: string): Pr
   return [...ids].filter((id): id is string => id !== undefined && id.startsWith(prefix)).toSorted();
 }
 
+async function sha256(text: string): Promise<Uint8Array> {
+  return new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)));
+}
+
+/**
+ * Whether `given` equals `expected`, in time that doesn't depend on where they differ: both are hashed
+ * first, so the compare runs over equal-length digests.
+ */
+async function sameText(given: string, expected: string): Promise<boolean> {
+  const [a, b] = await Promise.all([sha256(given), sha256(expected)]);
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= (a[i] ?? 0) ^ (b[i] ?? 0);
+  return diff === 0;
+}
+
 /** The `/e2e/*` routes, behind the bearer secret. */
 export function e2eRoutes<E extends object>(deps: E2eDeps<E>) {
   const app = new Hono<{ Bindings: E }>().basePath("/e2e");
@@ -176,7 +191,9 @@ export function e2eRoutes<E extends object>(deps: E2eDeps<E>) {
     c.json({ error: `${what} doesn't start with the e2e prefix ${E2E_PROJECT_PREFIX}` }, 400);
 
   app.use("*", async (c, next) => {
-    if (c.req.header("Authorization") !== `Bearer ${deps.secret(c.env)}`) return c.text("Unauthorized", 401);
+    const secret = deps.secret(c.env);
+    if (!secret || !(await sameText(c.req.header("Authorization") ?? "", `Bearer ${secret}`)))
+      return c.text("Unauthorized", 401);
     await next();
   });
   app.use("/projects/:project/*", async (c, next) => {

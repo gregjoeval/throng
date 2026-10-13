@@ -1,27 +1,24 @@
 // The Landing Workflow's steps against fake bindings: which containers it runs and destroys, and
-// when, and what the `check` container may reach. `cloudflare:workers` and the Artifacts binding are
-// stubbed; each step runs once.
+// when, and the size and access the `check` container starts with. `cloudflare:workers` and the
+// Artifacts binding are stubbed; each step runs once.
 
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { CONFIG_PATH } from "../src/config.ts";
+import type { SandboxSize } from "../src/config.ts";
 import type { LandingOutcome, LandingParams } from "../src/landing.ts";
+import { MISSING_LOG_EXIT } from "../src/logs.ts";
 import type { OutboundAccess } from "../src/network.ts";
 import { NPMRC_PATH } from "../src/npmrc.ts";
-import { RESULT_PREFIX } from "../src/scripts.ts";
+import { importWorkerModule } from "./support/worker-module.ts";
+import { PASSED, result, runOnce } from "./support/workflow-runs.ts";
 
-/** Every `readFile` the landing makes, and the `.npmrc` each `repo@ref` holds. */
+/** Every `readFile` the landing makes, and the files each `repo@ref` holds, by path. */
 const artifacts = vi.hoisted(() => ({
   reads: [] as { repo: string; ref: string; path: string }[],
-  npmrc: new Map<string, string>(),
+  files: new Map<string, Record<string, string>>(),
 }));
 
-vi.mock("cloudflare:workers", () => ({
-  WorkflowEntrypoint: class {
-    env: unknown;
-    constructor(_ctx: unknown, env: unknown) {
-      this.env = env;
-    }
-  },
-}));
+vi.mock("cloudflare:workers", () => import("./support/cloudflare-workers.ts"));
 
 vi.mock("../src/artifacts", () => ({
   reposFor: () => ({
@@ -29,21 +26,18 @@ vi.mock("../src/artifacts", () => ({
     mintToken: async () => ({ token: "t", scope: "read", expiresAt: "" }),
     readFile: async (repo: string, { ref, path }: { ref: string; path: string }) => {
       artifacts.reads.push({ repo, ref, path });
-      const text = path === ".npmrc" ? artifacts.npmrc.get(`${repo}@${ref}`) : undefined;
+      const text = artifacts.files.get(`${repo}@${ref}`)?.[path];
       return text === undefined ? null : new Blob([text]);
     },
   }),
 }));
 
-// Imported by a computed path: the module is Worker code, which this project's Node typecheck can't
-// follow (`cloudflare:workers`), so it is typed here by what the test calls.
-const WORKFLOW_MODULE = "../src/landing-workflow.ts";
-const { LandingWorkflow } = (await import(WORKFLOW_MODULE)) as {
+const { LandingWorkflow } = await importWorkerModule<{
   LandingWorkflow: new (
     ctx: unknown,
     env: unknown,
   ) => { run: (event: unknown, step: unknown) => Promise<LandingOutcome | null> };
-};
+}>("landing-workflow");
 
 const HEAD = "a".repeat(40);
 const MAIN = "b".repeat(40);
@@ -62,36 +56,47 @@ const params: LandingParams = {
   startedAt: 1_700_000_000_000,
 };
 
-const result = (value: unknown) => ({ exitCode: 0, stdout: `${RESULT_PREFIX}${JSON.stringify(value)}\n`, stderr: "" });
-/** The retest's raw score when the merged tree's one required check passed. */
-const RETEST_PASSED = {
-  base: null,
-  shortstat: "",
-  builtinMs: 0,
-  setupFailed: null,
-  checks: [{ exit: 0, durationMs: 1, metrics: {} }],
-};
+/** A merged tree's config with one required check. */
+const REQUIRED = "checks:\n  - { name: test, command: npm test }\n";
+
+beforeEach(() => {
+  artifacts.reads.length = 0;
+  artifacts.files.clear();
+  // Only the origin's `main` has a config: it sets the Sandbox size.
+  artifacts.files.set("abc123-main@main", { [CONFIG_PATH]: "sandbox: { size: standard-2 }\n" });
+});
 
 /**
- * Runs a landing whose merge is clean, with the merged tree's `config` (none by default), recording
- * each container's runs and destroys, and the access each of the `check` container's runs asked for.
+ * Runs a landing whose merge is clean, the merged tree holding `config` (none by default), recording
+ * each container's runs and destroys, the size each script, and each log read, asked its container
+ * for, and the access each of the `check` container's runs asked for.
  */
-async function land(
-  config: string | null = null,
-): Promise<{ events: string[]; outcome: LandingOutcome | null; checkAccess: OutboundAccess[] }> {
+async function land(config: string | null = null): Promise<{
+  events: string[];
+  sizes: [string | undefined, SandboxSize][];
+  logReads: [string | undefined, SandboxSize][];
+  checkAccess: OutboundAccess[];
+  outcome: LandingOutcome | null;
+}> {
   const events: string[] = [];
+  const sizes: [string | undefined, SandboxSize][] = [];
+  const logReads: [string | undefined, SandboxSize][] = [];
   const checkAccess: OutboundAccess[] = [];
   const sandbox = (name: string) => {
     const role = name.split("/").at(-1);
     return {
-      run: async (script: string, { access }: { access: OutboundAccess }) => {
-        if (script.includes("f=logs/")) return { exitCode: 0, stdout: "log\n", stderr: "" };
+      run: async (script: string, { size, access }: { size: SandboxSize; access: OutboundAccess }) => {
+        // Reading a log back: the step wrote none.
+        if (script.includes("f=logs/")) {
+          logReads.push([role, size]);
+          return { exitCode: MISSING_LOG_EXIT, stdout: "", stderr: "" };
+        }
+        sizes.push([role, size]);
         events.push(`run ${role}`);
         if (role !== "check") return result({ kind: "landed", sha: MERGE });
         checkAccess.push(access);
-        return checkAccess.length === 1
-          ? result({ main: MAIN, clean: true, base: MAIN, output: `${TREE}\0`, remerges: [], config })
-          : result(RETEST_PASSED);
+        if (script.includes("THRONG_OUTPUT")) return result(PASSED);
+        return result({ main: MAIN, clean: true, base: MAIN, output: `${TREE}\0`, remerges: [], config });
       },
       destroy: async () => void events.push(`destroy ${role}`),
     };
@@ -104,13 +109,11 @@ async function land(
         landingFinished: async () => void events.push("report"),
       }),
     },
-    LOGS: { put: async () => {} },
     DB: { prepare: () => ({ bind: () => ({ all: async () => ({ results: [{ id: "ada00001", handle: "ada" }] }) }) }) },
   };
-  const step = { do: async (_name: string, ...rest: unknown[]) => (rest.at(-1) as () => Promise<unknown>)() };
   const workflow = new LandingWorkflow({}, env);
-  const outcome = await workflow.run({ payload: params, instanceId: "abc123-t1a1-landing-1" }, step);
-  return { events, outcome, checkAccess };
+  const outcome = await workflow.run({ payload: params, instanceId: "abc123-t1a1-landing-1" }, runOnce);
+  return { events, sizes, logReads, checkAccess, outcome };
 }
 
 describe("LandingWorkflow", () => {
@@ -123,13 +126,24 @@ describe("LandingWorkflow", () => {
     expect(events.slice(-3)).toEqual(["destroy check", "destroy land", "report"]);
   });
 
+  it("starts the check container at main's Sandbox size, though the merged tree sets another, and land at lite", async () => {
+    const merged = `sandbox: { size: standard-4 }\n${REQUIRED}`;
+    const { events, sizes, outcome } = await land(merged);
+    expect(outcome).toEqual({ kind: "landed", sha: MERGE });
+    expect(events.filter((e) => e === "run check")).toHaveLength(2);
+    expect(sizes.filter(([role]) => role === "check").map(([, size]) => size)).toEqual(["standard-2", "standard-2"]);
+    expect(sizes.filter(([role]) => role === "land")).toEqual([["land", "lite"]]);
+  });
+
+  it("reads the retest's logs back at lite, so a lost container isn't restarted at the project's size", async () => {
+    const { logReads } = await land(REQUIRED);
+    expect(logReads).toEqual([["check", "lite"]]);
+  });
+
   it("gives the check container main's .npmrc registries, for both the conflict check and the retest", async () => {
-    artifacts.reads.length = 0;
-    artifacts.npmrc.clear();
-    artifacts.npmrc.set("abc123-main@main", "@acme:registry=https://npm.acme.dev/\n");
-    artifacts.npmrc.set("abc123-t1a1@main", "registry=https://evil.example.com/\n");
-    const required = "checks:\n  - { name: test, command: npm test }\n";
-    const { outcome, checkAccess } = await land(required);
+    artifacts.files.set("abc123-main@main", { [NPMRC_PATH]: "@acme:registry=https://npm.acme.dev/\n" });
+    artifacts.files.set("abc123-t1a1@main", { [NPMRC_PATH]: "registry=https://evil.example.com/\n" });
+    const { outcome, checkAccess } = await land(REQUIRED);
     expect(outcome).toEqual({ kind: "landed", sha: MERGE });
     // The conflict check starts the container, so its access is what the retest runs under.
     expect(checkAccess.map((access) => access.registries)).toEqual([
@@ -137,11 +151,12 @@ describe("LandingWorkflow", () => {
       ["registry.npmjs.org", "npm.acme.dev"],
     ]);
     // Read from the origin's main only: never the fork, and never the merged tree.
-    expect(artifacts.reads).toEqual([{ repo: "abc123-main", ref: "main", path: NPMRC_PATH }]);
+    expect(artifacts.reads.filter((read) => read.path === NPMRC_PATH)).toEqual([
+      { repo: "abc123-main", ref: "main", path: NPMRC_PATH },
+    ]);
   });
 
   it("gives the check container only the npm registry when main has no .npmrc", async () => {
-    artifacts.npmrc.clear();
     const { checkAccess } = await land();
     expect(checkAccess.map((access) => access.registries)).toEqual([["registry.npmjs.org"]]);
   });

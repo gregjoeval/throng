@@ -1,21 +1,21 @@
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep, WorkflowStepConfig } from "cloudflare:workers";
 import { reposFor } from "./artifacts";
-import { parseConfig } from "./config";
+import { loadConfig, parseConfig, sandboxSize } from "./config";
 import { conflictFiles, parseMergeTree } from "./conflicts";
 import type { ConflictDetails } from "./conflicts";
-import { LANDING_ROLES, sandboxName } from "./grants";
+import { LANDING_ROLES, sandboxName, TRUSTED_SIZE } from "./grants";
 import { actedAlias, failedChecks, mergeAuthor, mergeCommitMessage, retestConfig } from "./landing";
 import type { LandingOutcome, LandingParams, Signer } from "./landing";
 import { landingLogKey, logNames } from "./logs";
 import { NO_NETWORK } from "./network";
 import { loadRegistries } from "./npmrc";
-import { buildResult, scorePlan, scoreTimeoutMs } from "./results";
+import { buildResult } from "./results";
 import type { RawScore } from "./results";
 import { conflictCheckScript, landScript, parseResult, retestScript } from "./scripts";
 import type { ConflictCheckResult, LandResult, MergePlan } from "./scripts";
 import { attemptRef } from "./task-refs";
-import { runInSandbox, STEP_RETRIES, storeLogs } from "./workflows";
+import { runInSandbox, runSettings, STEP_RETRIES, storeLogs } from "./workflows";
 
 /**
  * A step that kept failing on infrastructure; the landing ends `errored` naming it. Wraps the error
@@ -38,7 +38,8 @@ const NOTHING_RUN: RawScore = { base: null, shortstat: "", builtinMs: 0, setupFa
  * "Landing" section.
  *
  * 1. Conflict check, in the untrusted `check` container (read grants on the origin and the fork, and
- *    the registries in the `.npmrc` on `main`, read from the origin before the container starts):
+ *    the registries in the `.npmrc` on `main`, read from the origin before the container starts),
+ *    started at the Sandbox size `main`'s config sets:
  *    `git merge-tree` of `main` and the approved head. A conflict ends it `conflict`; a clean merge
  *    records the tree, `main`'s sha and the merged tree's `.throng/config.yml`.
  * 2. Retest, in the same container, only when the merged tree's config has required checks: setup
@@ -102,6 +103,13 @@ export class LandingWorkflow extends WorkflowEntrypoint<Env, LandingParams> {
       ...NO_NETWORK,
       registries: await loadRegistries(reposFor(this.env), params.project),
     }));
+    // The check container starts at the conflict check, before the merged tree's config is known, and
+    // runs the retest too: its size is `main`'s, so an attempt can't raise its own. This step and the
+    // conflict check each read `main`, and see the same commit: merges into it are serialized through
+    // the merge queue, so only this landing could move it, and it hasn't yet.
+    const size = await this.#step(step, "sandbox size", { retries: STEP_RETRIES, timeout: "1 minute" }, async () =>
+      sandboxSize(await loadConfig(reposFor(this.env), params.project)),
+    );
     const checked = await this.#step(step, "conflict check", tenMinutes, async () => {
       const run = await runInSandbox(
         this.env,
@@ -109,7 +117,7 @@ export class LandingWorkflow extends WorkflowEntrypoint<Env, LandingParams> {
         repos,
         "check",
         (g) => conflictCheckScript(g.originRead.remote, g.forkRead.remote, params.head),
-        { network },
+        { network, size },
       );
       const result = parseResult<ConflictCheckResult>(run.stdout);
       if (result === null)
@@ -131,8 +139,7 @@ export class LandingWorkflow extends WorkflowEntrypoint<Env, LandingParams> {
 
     const retest = retestConfig(parseConfig(checked.config));
     if (retest !== null) {
-      const plan = scorePlan(retest);
-      const timeoutMs = scoreTimeoutMs(plan);
+      const { plan, timeoutMs } = runSettings(retest, size);
       const { result, logs } =
         retest.kind === "invalid"
           ? { result: buildResult(retest, NOTHING_RUN), logs: [] }
@@ -143,20 +150,20 @@ export class LandingWorkflow extends WorkflowEntrypoint<Env, LandingParams> {
                 repos,
                 "check",
                 (g) => retestScript(g.originRead.remote, g.forkRead.remote, merge, plan),
-                { network, timeoutMs },
+                { network, timeoutMs, size },
               );
               const raw = parseResult<RawScore>(run.stdout);
               if (raw === null)
                 throw new Error(`retest gave no result (exit ${run.exitCode}): ${run.stderr.slice(-2000)}`);
               const built = buildResult(retest, raw);
               const notes = new Map(built.checks.map((check) => [check.name, check.notes]));
-              const stored = await storeLogs(
-                this.env,
-                sandboxName(instanceId, "check"),
-                logNames(plan),
-                (log) => landingLogKey(params, log),
+              const stored = await storeLogs(this.env, {
+                sandbox: sandboxName(instanceId, "check"),
+                names: logNames(plan),
+                key: (log) => landingLogKey(params, log),
+                size,
                 notes,
-              );
+              });
               return { result: built, logs: stored };
             });
       if (result.gate !== "passed") return { kind: "failedChecks", details: failedChecks(result, logs) };
@@ -175,19 +182,25 @@ export class LandingWorkflow extends WorkflowEntrypoint<Env, LandingParams> {
     if (!claimed) return null;
 
     const landed = await this.#step(step, "land", tenMinutes, async () => {
-      const run = await runInSandbox(this.env, instanceId, repos, "land", (g) =>
-        landScript(g.originWrite.remote, g.forkRead.remote, {
-          ...merge,
-          message: mergeCommitMessage({
-            task: params.task,
-            attempt: params.attempt,
-            title: params.title,
-            approver: signers.approver,
-            coAuthors: signers.coAuthors,
+      const run = await runInSandbox(
+        this.env,
+        instanceId,
+        repos,
+        "land",
+        (g) =>
+          landScript(g.originWrite.remote, g.forkRead.remote, {
+            ...merge,
+            message: mergeCommitMessage({
+              task: params.task,
+              attempt: params.attempt,
+              title: params.title,
+              approver: signers.approver,
+              coAuthors: signers.coAuthors,
+            }),
+            author: mergeAuthor(signers.approver),
+            committedAt: Math.floor(params.startedAt / 1000),
           }),
-          author: mergeAuthor(signers.approver),
-          committedAt: Math.floor(params.startedAt / 1000),
-        }),
+        { size: TRUSTED_SIZE },
       );
       const result = parseResult<LandResult>(run.stdout);
       if (result === null) throw new Error(`land gave no result (exit ${run.exitCode}): ${run.stderr.slice(-2000)}`);

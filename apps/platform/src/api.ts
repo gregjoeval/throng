@@ -10,17 +10,22 @@ import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import type { AccessBindings } from "./access.ts";
 import {
   AttemptLimitSchema,
+  BallotSchema,
+  CloseVoteSchema,
   CreateAttemptsSchema,
   CreateTaskSchema,
   EditAttemptSchema,
   HandOffSchema,
   json,
+  OpenVoteSchema,
   PostVerdictSchema,
   ProjectPathSchema,
   requestTaskService,
+  SelectionPolicyInputSchema,
   SelectionSchema,
   TaskChecksInputSchema,
   TaskMetricsInputSchema,
+  VoteCandidateSchema,
   WaitQuerySchema,
   workersCache,
 } from "./api-shared.ts";
@@ -36,6 +41,7 @@ import {
   METRIC_ORDERS,
   parseConfig,
   SOURCES,
+  VOTE_ELIGIBILITIES,
 } from "./config.ts";
 import { dequeueRoutes } from "./dequeue-api.ts";
 import type { DiffCache } from "./diff.ts";
@@ -55,6 +61,7 @@ import { DEFAULT_TOKEN_TTL_SECONDS, MAX_TOKEN_TTL_SECONDS, tokenService } from "
 import type { Token } from "./tokens.ts";
 import type { User } from "./users.ts";
 import { VERDICT_RECOMMENDATIONS } from "./verdicts.ts";
+import { VOTE_STATES } from "./votes.ts";
 import { MAX_WAITERS_PER_USER } from "./waiters.ts";
 
 const UserSchema = z
@@ -203,6 +210,19 @@ const ConfigCheckSchema = z
   })
   .openapi("Check", { description: "A check the config declares: a command whose exit code is its outcome." });
 
+const VoteEligibilitySchema = z.enum(VOTE_ELIGIBILITIES).openapi({
+  description: "Who may vote: `humans` acting as themselves, `agents` acting under an alias, or `anyone`.",
+});
+
+const SelectionPolicySchema = z
+  .discriminatedUnion("policy", [
+    z.object({ policy: z.literal("creator") }),
+    z.object({ policy: z.literal("vote"), eligible: VoteEligibilitySchema }),
+  ])
+  .openapi("SelectionPolicy", {
+    description: "Who makes a task's selection: its creator, or a vote among eligible users.",
+  });
+
 const TaskSchema = z
   .object({
     ref: z.string().openapi({ description: "The task's reference.", example: "t42" }),
@@ -238,6 +258,9 @@ const TaskSchema = z
           "The task's task branch, `refs/tasks/t42` in the origin, which new attempts start from; null when it has none. " +
           "The task creator or project owner pushes it with `git push throng HEAD:refs/tasks/t42`.",
       }),
+    selection: SelectionPolicySchema.nullable().openapi({
+      description: "Overrides the project's selection policy; null to use the project's.",
+    }),
   })
   .openapi("Task");
 
@@ -263,6 +286,52 @@ const VerdictSchema = z
     superseded: z.boolean().openapi({ description: "Whether its head is no longer the attempt's current head." }),
   })
   .openapi("Verdict");
+
+const ActorRefSchema = UserRefSchema.extend({
+  alias: z.string().nullable().openapi({ description: "The alias they acted under, if any." }),
+}).openapi("ActorRef");
+
+const VoteSchema = z
+  .object({
+    task: z.string().openapi({ example: "t42" }),
+    state: z.enum(VOTE_STATES),
+    eligible: VoteEligibilitySchema,
+    deadline: z.string().nullable().openapi({ description: "When ballots stop being taken; null for none." }),
+    openedBy: ActorRefSchema,
+    openedAt: z.string(),
+    closedBy: ActorRefSchema.nullable().openapi({ description: "Null while open, or when it closed with its task." }),
+    closedAt: z.string().nullable(),
+    winner: z
+      .string()
+      .nullable()
+      .openapi({ description: "The attempt it selected, once closed with a selection.", example: "t42a3" }),
+    candidates: z
+      .array(
+        z
+          .object({
+            attempt: z.string().openapi({ example: "t42a3" }),
+            head: z.string().openapi({ description: "The head it is a candidate at: the one it was passing at." }),
+            addedAt: z.string(),
+            votes: z.number().int().openapi({ description: "The ballots for it at `head`; none while withdrawn." }),
+            withdrawn: z.boolean().openapi({
+              description:
+                "Its head moved from `head`, or it stopped being open. The task's creator can add it again once it passes.",
+            }),
+          })
+          .openapi("VoteCandidateTally"),
+      )
+      .openapi({ description: "In the order they were added." }),
+    myBallot: z
+      .object({
+        attempt: z.string().openapi({ example: "t42a3" }),
+        head: z.string(),
+        alias: z.string().nullable().openapi({ description: "The alias it was cast under, if any." }),
+        at: z.string(),
+      })
+      .nullable()
+      .openapi({ description: "The caller's ballot: their user's, cast as themselves or under any alias." }),
+  })
+  .openapi("Vote", { description: "A task's selection by vote." });
 
 const ListedTaskSchema = TaskSchema.extend({
   attemptCount: z.number().int().openapi({ description: "Its attempts, obsolete ones left out.", example: 3 }),
@@ -510,6 +579,12 @@ const TaskArenaSchema = z
         "Every metric the task's attempts are scored on: those the `.throng/config.yml` on `origin/main` declares, " +
         "then the task's own, in order, each with its `source`; empty when they don't merge into a valid config.",
     }),
+    selection: SelectionPolicySchema.openapi({
+      description:
+        "The selection policy in effect: the task's override, else the `.throng/config.yml` on `origin/main`'s; the " +
+        "creator's when neither sets one.",
+    }),
+    vote: VoteSchema.nullable().openapi({ description: "The task's open vote, or null when it has none." }),
     attempts: z.array(
       ScoringStatusSchema.extend({
         ref: z.string().openapi({ example: "t42a3" }),
@@ -528,10 +603,6 @@ const TaskArenaSchema = z
     ),
   })
   .openapi("TaskArena");
-
-const ActorRefSchema = UserRefSchema.extend({
-  alias: z.string().nullable().openapi({ description: "The alias they acted under, if any." }),
-}).openapi("ActorRef");
 
 const MergeRequestSchema = z
   .object({
@@ -578,6 +649,7 @@ const EditTaskSchema = z
     title: z.string().trim().min(1).max(200).optional(),
     body: z.string().max(65_536).optional().openapi({ description: "Markdown." }),
     attemptLimit: AttemptLimitSchema.optional(),
+    selection: SelectionPolicyInputSchema.optional(),
     checks: TaskChecksInputSchema.optional(),
     metrics: TaskMetricsInputSchema.optional(),
   })
@@ -1110,7 +1182,7 @@ export function apiRoutes(options: ApiOptions = {}) {
         path: "/projects/{owner}/{project}/tasks/{t}",
         operationId: "editTask",
         tags: ["Tasks"],
-        summary: "Edit a task's title, body or attempt limit",
+        summary: "Edit a task's title, body, attempt limit, selection policy, checks or metrics",
         description: "The project owner or the task's creator may. Obsolete tasks can't be edited.",
         security: bearerOnly,
         middleware: [bearer] as const,
@@ -1639,8 +1711,156 @@ export function apiRoutes(options: ApiOptions = {}) {
     )
     .openapi(
       createRoute({
+        method: "post",
+        path: "/projects/{owner}/{project}/tasks/{t}/vote/open",
+        operationId: "openVote",
+        tags: ["Votes"],
+        summary: "Open a vote to select the task's attempt",
+        description:
+          "Under the `vote` selection policy, opens a vote among the attempts passing now, each a candidate at its " +
+          "current head, open to the users the policy's `eligible` lets vote. A push to a candidate during the vote " +
+          "withdraws it, and its ballots stop counting. While the vote is open, the task can't be selected directly. " +
+          "Journals `voteOpened`.",
+        security: bearerOrWeb,
+        middleware: [browser] as const,
+        request: { params: TaskPathSchema, body: { required: false, ...json(OpenVoteSchema) } },
+        responses: {
+          200: { description: "The new vote.", ...json(VoteSchema) },
+          400: errorResponse("The request is invalid, or the deadline isn't in the future."),
+          401: unauthorizedBearer,
+          403: errorResponse(TASK_MANAGERS),
+          404: errorResponse("No such project or task."),
+          409: errorResponse(
+            "`invalidState`: the task isn't open, its selection policy isn't `vote`, it already has an open vote or " +
+              "merge request, or no attempt is passing.",
+          ),
+        },
+      }),
+      async (c) => {
+        const input = { ...taskPath(c.req.valid("param")), ...c.req.valid("json") };
+        return c.json(await tasks(c).openVote(c.var.actor, input), 200);
+      },
+    )
+    .openapi(
+      createRoute({
+        method: "post",
+        path: "/projects/{owner}/{project}/tasks/{t}/vote",
+        operationId: "castVote",
+        tags: ["Votes"],
+        summary: "Cast your ballot in the task's open vote",
+        description:
+          "Backs one candidate. Each user has one ballot: casting again replaces it, and a ballot cast under an alias " +
+          "is its user's. Not for your own attempt, and only for the users the vote's `eligible` lets in, before its " +
+          "deadline. Journals `voteCast`.",
+        security: bearerOrWeb,
+        middleware: [browser] as const,
+        request: { params: TaskPathSchema, body: { required: true, ...json(BallotSchema) } },
+        responses: {
+          200: { description: "The vote with your ballot counted.", ...json(VoteSchema) },
+          400: errorResponse("The request is invalid, or the attempt isn't one of the task's."),
+          401: unauthorizedBearer,
+          403: errorResponse("The vote's eligibility leaves you out, or the attempt is yours."),
+          404: errorResponse("No such project, task or attempt."),
+          409: errorResponse(
+            "`invalidState`: the task has no open vote, its deadline has passed, or the attempt isn't a candidate.",
+          ),
+        },
+      }),
+      async (c) => {
+        const input = { ...taskPath(c.req.valid("param")), ...c.req.valid("json") };
+        return c.json(await tasks(c).castVote(c.var.actor, input), 200);
+      },
+    )
+    .openapi(
+      createRoute({
+        method: "post",
+        path: "/projects/{owner}/{project}/tasks/{t}/vote/candidates",
+        operationId: "addVoteCandidate",
+        tags: ["Votes"],
+        summary: "Add an attempt that passes now to the task's open vote",
+        description:
+          "Makes an attempt a candidate at its current head: one that started passing after the vote opened, or a " +
+          "withdrawn candidate passing again at a new head. Ballots for an earlier head don't count. Journals " +
+          "`candidateAdded`.",
+        security: bearerOrWeb,
+        middleware: [browser] as const,
+        request: { params: TaskPathSchema, body: { required: true, ...json(VoteCandidateSchema) } },
+        responses: {
+          200: { description: "The vote with the candidate.", ...json(VoteSchema) },
+          400: errorResponse("The request is invalid, or the attempt isn't one of the task's."),
+          401: unauthorizedBearer,
+          403: errorResponse(TASK_MANAGERS),
+          404: errorResponse("No such project, task or attempt."),
+          409: errorResponse(
+            "`invalidState`: the task has no open vote, the attempt isn't passing, or it is already a candidate.",
+          ),
+        },
+      }),
+      async (c) => {
+        const input = { ...taskPath(c.req.valid("param")), ...c.req.valid("json") };
+        return c.json(await tasks(c).addVoteCandidate(c.var.actor, input), 200);
+      },
+    )
+    .openapi(
+      createRoute({
+        method: "post",
+        path: "/projects/{owner}/{project}/tasks/{t}/vote/close",
+        operationId: "closeVote",
+        tags: ["Votes"],
+        summary: "Close the task's open vote, selecting its winner",
+        description:
+          "The candidate with the most ballots wins and is selected, at the head it is a candidate at, as `selection` " +
+          "does: it becomes the task's merge request and the task's other active attempts are closed. A tie goes to " +
+          "the task's creator, who names one of the tied candidates as `attempt`. With every candidate withdrawn, the " +
+          "vote closes without a selection. Journals `voteClosed`, then selection's events.",
+        security: bearerOrWeb,
+        middleware: [browser] as const,
+        request: { params: TaskPathSchema, body: { required: false, ...json(CloseVoteSchema) } },
+        responses: {
+          200: {
+            description: "The closed vote, and the merge request it selected (null when it selected none).",
+            ...json(z.object({ vote: VoteSchema, mergeRequest: MergeRequestSchema.nullable() })),
+          },
+          400: errorResponse(
+            "The request is invalid, the vote is tied and `attempt` names none of the tied candidates, or `attempt` " +
+              "isn't the winner.",
+          ),
+          401: unauthorizedBearer,
+          403: errorResponse(TASK_MANAGERS),
+          404: errorResponse("No such project or task."),
+          409: errorResponse("`invalidState`: the task has no open vote, or its winner can't be selected."),
+        },
+      }),
+      async (c) => {
+        const input = { ...taskPath(c.req.valid("param")), ...c.req.valid("json") };
+        return c.json(await tasks(c).closeVote(c.var.actor, input), 200);
+      },
+    )
+    .openapi(
+      createRoute({
+        method: "get",
+        path: "/projects/{owner}/{project}/tasks/{t}/vote",
+        operationId: "getVote",
+        tags: ["Votes"],
+        summary: "Get a task's vote",
+        description: "Its latest vote, open or closed, with each candidate's tally and your own ballot.",
+        security: bearerOrWeb,
+        middleware: [browser] as const,
+        request: { params: TaskPathSchema },
+        responses: {
+          200: { description: "The vote.", ...json(VoteSchema) },
+          400: errorResponse("The task reference is invalid."),
+          401: unauthorizedBearer,
+          404: errorResponse("No such project or task, or the task has never had a vote."),
+        },
+      }),
+      async (c) => c.json(await tasks(c).getVote(c.var.actor, taskPath(c.req.valid("param"))), 200),
+    )
+    .openapi(
+      createRoute({
         method: "get",
         path: "/projects/{owner}/{project}/merge-queue",
+
         operationId: "getMergeQueue",
         tags: ["Merge queue"],
         summary: "The project's merge queue",

@@ -11,7 +11,7 @@ import { TaskStore } from "../src/task-store.ts";
 import type { AttemptInput, ProjectContext } from "../src/task-store.ts";
 import type { Actor } from "../src/tokens.ts";
 import { FakeRepos } from "./fake-repos.ts";
-import { at } from "./support/defined.ts";
+import { at, defined } from "./support/defined.ts";
 import { testSql } from "./support/task-backend.ts";
 
 const PROJECT: ProjectContext = { id: "abc123", owner: "owner001" };
@@ -82,7 +82,7 @@ async function setup(selection = "selection: { policy: vote }\n") {
   const refs: AttemptInput[] = [];
   for (const author of authors) {
     const [created] = await store.createAttempts(PROJECT, author, { task: task.number });
-    refs.push({ task: task.number, number: at([created], 0).number });
+    refs.push({ task: task.number, number: defined(created, "attempt").number });
   }
   const [t1a1, t1a2, t1a3] = refs as [AttemptInput, AttemptInput, AttemptInput];
   const author = (ref: AttemptInput) => at(authors, ref.number - 1);

@@ -278,7 +278,7 @@ export const CheckSchema = z.strictObject({
 });
 
 /** A selection policy as a config, or a task overriding it, writes it. */
-export const SelectionSchema = z
+export const SelectionPolicySchema = z
   .strictObject(
     {
       policy: z.enum(SELECTION_POLICIES, {
@@ -329,7 +329,7 @@ const ConfigSchema = z
             .optional(),
         })
         .optional(),
-      selection: SelectionSchema.optional(),
+      selection: SelectionPolicySchema.optional(),
     },
     { error: "the config must be a mapping" },
   )

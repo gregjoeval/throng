@@ -66,7 +66,7 @@ The sizes are Cloudflare's named instance types, which `RunSandbox` passes to `s
 
 The size is read from the origin's `main`, like the rest of the config, never from the attempt's head, so an attempt can't raise its own size; a change applies once it lands. A scoring run takes it from the config it loads from `main`; a landing reads `main`'s config before its conflict check starts the `check` container, which then also runs the retest. A container that is already running keeps its size, and the next one to start takes the current config's. Every stored log a step wrote notes its size under `== throng ==` (`sandbox: standard-1`). Logs are read back at `lite`: the container that wrote them is still running and keeps its size, and one that was lost needs no more to find its log missing.
 
-The default is 16 times `lite`'s memory, so each scoring run costs more than it did when every container was `lite`. Wrangler's `containers` entry sets no `instance_type`: under the `durable_object` scheduling policy, the size is chosen at each `start()`, and `max_instances` caps how many containers run at once, whatever their size.
+The default is larger than `lite` (see `SANDBOX_RESOURCES`), so each scoring run costs more than it did when every container was `lite`. Wrangler's `containers` entry sets no `instance_type`: under the `durable_object` scheduling policy, the size is chosen at each `start()`, and `max_instances` caps how many containers run at once, whatever their size.
 
 ## Previews
 

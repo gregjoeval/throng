@@ -7,6 +7,7 @@ import type { AppType } from "@throng/platform/app";
 import { hc, parseResponse } from "hono/client";
 import type { ClientResponse, InferResponseType } from "hono/client";
 import { PlatformError } from "@/lib/errors";
+import { attemptHint, encodePath } from "@/lib/paths";
 
 /**
  * Same-origin, so the browser's Access session rides along. Calls go through the global `fetch` at
@@ -279,15 +280,57 @@ export async function reopenAttempt(projectRef: ProjectRef, attempt: string) {
   return parseResponse(projectApi.attempts[":a"].reopen.$post({ param: { ...projectRef, a: attempt } }));
 }
 
+/** The refs a project can be browsed at: `main`, the active attempts and the archived ones, each with its head. */
+export const refsQuery = (projectRef: ProjectRef) =>
+  apiQuery([...projectKey(projectRef), "refs"], (init) => projectApi.refs.$get({ param: projectRef }, { init }));
+
+export type Refs = InferResponseType<typeof projectApi.refs.$get, 200>;
+
 /**
  * `main`'s current head (null before the first push), polled while the page is visible: the arena's
  * "current main" reference compares against it by sha, so a moved `main` is a new compare.
  */
 export const mainHeadQuery = (projectRef: ProjectRef) => ({
-  ...apiQuery([...projectKey(projectRef), "refs"], (init) => projectApi.refs.$get({ param: projectRef }, { init })),
+  ...refsQuery(projectRef),
   select: (refs: { main: { sha: string | null } }) => refs.main.sha,
   refetchInterval: TASK_POLL_MS,
 });
+
+/** Where a browse read looks: a ref, a path in it (`""` for the root), and the fork to find a sha in. */
+export interface BrowseAt {
+  ref: string;
+  path: string;
+  attempt?: string | undefined;
+}
+
+/**
+ * One directory's entries at a ref, folders first. With `sizes`, each file has its size too, which
+ * costs the platform a read per file: ask only where sizes show.
+ */
+export const treeQuery = (projectRef: ProjectRef, { ref, path, attempt }: BrowseAt, { sizes = false } = {}) =>
+  apiQuery([...projectKey(projectRef), "tree", ref, encodePath(path), { attempt, sizes }], (init) => {
+    const param = { ...projectRef, ref: encodeURIComponent(ref) };
+    const query = { ...attemptHint(attempt), ...(sizes ? { sizes: "true" as const } : {}) };
+    // `hc` puts params into the URL as given, so each segment of a path is encoded here.
+    const tail = encodePath(path);
+    return tail === ""
+      ? projectApi.tree[":ref"].$get({ param, query }, { init })
+      : projectApi.tree[":ref"][":path{.+}"].$get({ param: { ...param, path: tail }, query }, { init });
+  });
+
+export type Tree = InferResponseType<(typeof projectApi.tree)[":ref"]["$get"], 200>;
+export type TreeEntry = Tree["entries"][number];
+
+/** One file at a ref: its metadata, and its text when it's text up to 1 MB. */
+export const blobQuery = (projectRef: ProjectRef, { ref, path, attempt }: BrowseAt) =>
+  apiQuery([...projectKey(projectRef), "blob", ref, encodePath(path), { attempt }], (init) =>
+    projectApi.blob[":ref"][":path{.+}"].$get(
+      { param: { ...projectRef, ref: encodeURIComponent(ref), path: encodePath(path) }, query: attemptHint(attempt) },
+      { init },
+    ),
+  );
+
+export type Blob = InferResponseType<(typeof projectApi.blob)[":ref"][":path{.+}"]["$get"], 200>;
 
 /** Queues scoring of a draft's head now. Rejects with hono's `DetailedError` on failure. */
 export async function scoreNow(projectRef: ProjectRef, attempt: string) {

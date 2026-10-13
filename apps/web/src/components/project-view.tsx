@@ -4,10 +4,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import type { ReactNode } from "react";
+import { RefSwitcher } from "@/components/ref-switcher";
 import { ErrorState, Loading } from "@/components/states";
 import { projectQuery } from "@/lib/api";
-import { buildPath, splitPath } from "@/lib/paths";
-import type { ProjectLocation } from "@/lib/paths";
+import { attemptHint, buildPath, splitPath } from "@/lib/paths";
+import type { BrowseLocation, ProjectLocation } from "@/lib/paths";
 import { cn } from "@/lib/utils";
 
 /** The header tab each view sits under. */
@@ -76,45 +77,43 @@ function Tab({ to, active, children }: { to: string; active: boolean; children: 
   );
 }
 
-/** `project / dir / file` at a ref, each part linking to its directory. */
-export function Breadcrumbs({ location }: { location: Extract<ProjectLocation, { path: string }> }) {
-  const parts = splitPath(location.path);
-  const { owner, project, ref } = location;
+/**
+ * Where a code view is: the ref switcher, then `project / dir / file` at that ref, each part
+ * linking to its directory. Project home is the root directory at `main`.
+ */
+export function LocationBar({ location }: { location: BrowseLocation | Extract<ProjectLocation, { view: "home" }> }) {
+  const { owner, project } = location;
+  const { ref, path, attempt } = location.view === "home" ? { ref: "main", path: "", attempt: undefined } : location;
+  const parts = splitPath(path);
   const at = (count: number) =>
-    buildPath({ view: "tree", owner, project, ref, path: parts.slice(0, count).join("/"), ...attemptOf(location) });
+    buildPath({
+      view: "tree",
+      owner,
+      project,
+      ref,
+      path: parts.slice(0, count).join("/"),
+      ...attemptHint(attempt),
+    });
   return (
-    <nav aria-label="Breadcrumbs" className="flex flex-wrap items-center gap-1 font-mono text-sm">
-      <span className="rounded-md border px-1.5 py-0.5 text-xs text-muted-foreground" title="ref">
-        {ref}
-      </span>
-      <Link to={at(0)} className="font-semibold hover:underline">
-        {project}
-      </Link>
-      {parts.map((part, index) => (
-        <span key={index} className="flex items-center gap-1">
-          <span className="text-muted-foreground">/</span>
-          {index === parts.length - 1 ? (
-            <span aria-current="page">{part}</span>
-          ) : (
-            <Link to={at(index + 1)} className="hover:underline">
-              {part}
-            </Link>
-          )}
-        </span>
-      ))}
-    </nav>
-  );
-}
-
-function attemptOf(location: { attempt?: string }) {
-  return location.attempt === undefined ? {} : { attempt: location.attempt };
-}
-
-/** Where a view's content goes until its slice lands. */
-export function Placeholder({ children }: { children: ReactNode }) {
-  return (
-    <div className="rounded-xl border border-dashed px-6 py-12 text-center text-sm text-muted-foreground">
-      {children}
+    <div className="flex flex-wrap items-center gap-3">
+      <RefSwitcher at={location} />
+      <nav aria-label="Breadcrumbs" className="flex flex-wrap items-center gap-1 font-mono text-sm">
+        <Link to={at(0)} className="font-semibold hover:underline">
+          {project}
+        </Link>
+        {parts.map((part, index) => (
+          <span key={index} className="flex items-center gap-1">
+            <span className="text-muted-foreground">/</span>
+            {index === parts.length - 1 ? (
+              <span aria-current="page">{part}</span>
+            ) : (
+              <Link to={at(index + 1)} className="hover:underline">
+                {part}
+              </Link>
+            )}
+          </span>
+        ))}
+      </nav>
     </div>
   );
 }

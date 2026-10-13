@@ -41,6 +41,30 @@ function repoName(project: string, suffix: string): string {
   return name;
 }
 
+/**
+ * A file's text on the project's origin at `ref`, `main` by default, or null when it isn't there.
+ * Files that decide what an attempt runs or reaches (`.throng/config.yml`, `.npmrc`) are only ever
+ * read here, so an attempt can't change them for itself. A failed read throws.
+ */
+export async function readOriginFile(
+  repos: Repos,
+  project: string,
+  path: string,
+  ref = "main",
+): Promise<string | null> {
+  const file = await repos.readFile(originRepo(project), { ref, path });
+  return file === null ? null : file.text();
+}
+
+/**
+ * The ref to read the origin's `main` at so that several reads all see one commit: its sha, or
+ * `main` itself while it has no commits, where every read finds nothing.
+ */
+export async function originMainRef(repos: Repos, project: string): Promise<string> {
+  const [head] = await repos.listCommits(originRepo(project), { ref: "main", limit: 1 });
+  return head?.hash ?? "main";
+}
+
 /** Awaits a repo read, turning a missing repo (`NOT_FOUND`) into null. */
 export async function missingAsNull<T>(read: Promise<T>): Promise<T | null> {
   try {

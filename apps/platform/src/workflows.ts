@@ -2,7 +2,7 @@ import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import { reposFor } from "./artifacts";
 import { attemptBase } from "./base";
-import { loadConfig, sandboxSize } from "./config";
+import { loadConfig, networkAllow, sandboxSize } from "./config";
 import type { ConfigResult, SandboxSize } from "./config";
 import { GRANT_SOURCES, ROLE_GRANTS, sandboxName, SCORING_ROLES, TRUSTED_SIZE } from "./grants";
 import type { RepoCodeRole, RoleGrants, RunGrants, SandboxRole } from "./grants";
@@ -16,10 +16,12 @@ import {
   sandboxNote,
   withNotes,
 } from "./logs";
-import { roleAccess } from "./network";
+import { NO_NETWORK, roleAccess } from "./network";
+import type { NetworkAccess } from "./network";
+import { loadRegistries } from "./npmrc";
 import { previewGrant, previewName } from "./preview";
 import { previewWorkersFor } from "./preview-workers";
-import { forkRepo, originRepo } from "./repos";
+import { forkRepo, originMainRef, originRepo } from "./repos";
 import { buildResult, previewPlan, scorePlan, scoreTimeoutMs, withPreview } from "./results";
 import type { PreviewPlan, RawScore, ScorePlan, ScoringResult } from "./results";
 import type { RunResult } from "./sandbox";
@@ -35,11 +37,12 @@ const PREVIEW_STEP_TIMEOUT_MS = PREVIEW_BUILD_TIMEOUT_MS + 10 * 60 * 1000;
 /** Each step's retries after its first try, for infrastructure errors; then the run ends `errored`. */
 export const STEP_RETRIES = { limit: 2, delay: "5 seconds", backoff: "constant" } as const;
 /** What a container may reach while its logs are read: nothing. It is already running by then. */
-const NO_ACCESS = { grants: [], preview: null, npmRegistry: false, allow: [] };
+const NO_ACCESS = { grants: [], preview: null, ...NO_NETWORK };
 /**
  * One scoring run: scores an attempt's head in a Sandbox and reports the result to the project's
- * Durable Object. The config is read from the origin's `main`, so an attempt can't change its own
- * checks. The container that runs repo code holds read grants only (see `grants.ts`).
+ * Durable Object. The config and the `.npmrc` registry hosts are read from one commit of the origin's
+ * `main`, so an attempt can't change its own checks or widen its own network access, and the two always
+ * agree. The container that runs repo code holds read grants only (see `grants.ts`).
  *
  * When the config has a `preview` section and the gate passed, the head is then deployed as a Worker
  * Preview from a separate container (see `#preview`); a failed Preview never changes the gate.
@@ -54,11 +57,19 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
 
     let outcome: ScoringOutcome;
     try {
+      // Pinned once, so the config and the `.npmrc` are read from the same commit even if `main` moves.
+      const main = await step.do("main", { retries: STEP_RETRIES, timeout: "1 minute" }, () =>
+        originMainRef(reposFor(this.env), params.project),
+      );
       // Named apart from the `config` step it replaced, whose recorded output had another shape.
       const { config, size } = await step.do("config and size", { retries: STEP_RETRIES, timeout: "1 minute" }, () =>
-        this.#config(params),
+        this.#config(params, main),
       );
-      const settings = runSettings(config, size);
+      const registries = await step.do("registries", { retries: STEP_RETRIES, timeout: "1 minute" }, () =>
+        loadRegistries(reposFor(this.env), params.project, main),
+      );
+      // A task's definitions never change `network.allow`, so the run's config gives `main`'s.
+      const settings = runSettings(config, { size, network: { registries, allow: networkAllow(config) } });
       const base = await step.do("base", { retries: STEP_RETRIES, timeout: "1 minute" }, () =>
         attemptBase(reposFor(this.env), params.project, { attempt: params.attempt, head: params.sha }),
       );
@@ -68,7 +79,7 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
       const preview = previewPlan(config, scored);
       let result = scored;
       if (preview !== null) {
-        const { deployed, durationMs, logs } = await this.#preview(instanceId, params, preview, size, step);
+        const { deployed, durationMs, logs } = await this.#preview(instanceId, params, preview, settings, step);
         result = { ...withPreview(scored, deployed, durationMs), logs: [...scored.logs, ...logs] };
       }
       outcome = { status: "done", result };
@@ -89,15 +100,15 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
   }
 
   /**
-   * The run's config, its layers merged once: the project's config on `main`, then what the task
-   * defines over it. A clash between them makes it invalid. The e2e routes' attempts have no task row,
-   * so they get the project's alone. The Sandbox size is the project's own, which a task's
-   * definitions never change, even when they clash.
+   * The run's config, its layers merged once: the project's config at `main` (the run's pinned commit
+   * of it), then what the task defines over it. A clash between them makes it invalid. The e2e routes'
+   * attempts have no task row, so they get the project's alone. The Sandbox size is the project's own,
+   * which a task's definitions never change, even when they clash.
    */
-  async #config(params: ScoringParams): Promise<{ config: ConfigResult; size: SandboxSize }> {
+  async #config(params: ScoringParams, main: string): Promise<{ config: ConfigResult; size: SandboxSize }> {
     const task = parseAttemptRef(params.attempt)?.task;
     const [project, definitions] = await Promise.all([
-      loadConfig(reposFor(this.env), params.project),
+      loadConfig(reposFor(this.env), params.project, main),
       task === undefined ? NO_TASK_DEFINITIONS : this.env.PROJECT.getByName(params.project).definitionsOf(task),
     ]);
     return { config: withTask(project, definitions), size: sandboxSize(project) };
@@ -108,7 +119,7 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
     instanceId: string,
     params: ScoringParams,
     base: string | null,
-    { config, plan, timeoutMs, size }: RunSettings,
+    { config, plan, timeoutMs, size, network }: RunSettings,
   ): Promise<ScoringResult> {
     const run = await runInSandbox(
       this.env,
@@ -116,7 +127,7 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
       params,
       "score",
       (g) => scoreScript(g.forkRead.remote, { sha: params.sha, base }, plan),
-      { allow: plan.allow, timeoutMs, size },
+      { network, timeoutMs, size },
     );
     const raw = parseResult<RawScore>(run.stdout);
     if (raw === null) {
@@ -145,8 +156,8 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
   async #preview(
     instanceId: string,
     params: ScoringParams,
-    { command, allow }: PreviewPlan,
-    size: SandboxSize,
+    { command }: PreviewPlan,
+    { size, network }: MainSettings,
     step: WorkflowStep,
   ): Promise<{ deployed: PreviewScriptResult | null | { error: string }; durationMs: number; logs: string[] }> {
     const { accountId, workerName } = previewGrant(this.env.CF_ACCOUNT_ID, params.project);
@@ -177,7 +188,7 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
                 previewName: name,
                 command,
               }),
-            { allow, timeoutMs: PREVIEW_STEP_TIMEOUT_MS, size },
+            { network, timeoutMs: PREVIEW_STEP_TIMEOUT_MS, size },
           );
           return {
             run: deploy,
@@ -212,30 +223,38 @@ export interface RunRepos {
 }
 
 /**
- * What a scoring run or a retest takes from its config: the config itself, the plan it runs, the
- * step's timeout, and the Sandbox size, which comes from `main`'s config alone.
+ * What the containers that run repository code start with, read from the origin's `main` alone, never
+ * from an attempt or a merged tree: the Sandbox size, and the registries and hosts they may reach.
  */
-export interface RunSettings {
-  config: ConfigResult;
-  plan: ScorePlan;
-  timeoutMs: number;
+export interface MainSettings {
   size: SandboxSize;
-}
-
-/** The run settings for `config`, at `size`. */
-export function runSettings(config: ConfigResult, size: SandboxSize): RunSettings {
-  const plan = scorePlan(config);
-  return { config, plan, timeoutMs: scoreTimeoutMs(plan), size };
+  network: NetworkAccess;
 }
 
 /**
- * How a role's script runs: the size its container starts at, the hosts it may reach besides its
- * grants, and how long it may take. Only a role that runs repository code takes the project's size;
- * a trusted role's is always `TRUSTED_SIZE`.
+ * What a scoring run or a retest takes from its config: the config itself, the plan it runs and the
+ * step's timeout, with `main`'s settings.
+ */
+export interface RunSettings extends MainSettings {
+  config: ConfigResult;
+  plan: ScorePlan;
+  timeoutMs: number;
+}
+
+/** The run settings for `config`, under `main`'s settings. */
+export function runSettings(config: ConfigResult, main: MainSettings): RunSettings {
+  const plan = scorePlan(config);
+  return { config, plan, timeoutMs: scoreTimeoutMs(plan), ...main };
+}
+
+/**
+ * How a role's script runs: the size its container starts at, the registries and hosts it may reach
+ * besides its grants (none by default), and how long it may take. Only a role that runs repository
+ * code takes the project's size; a trusted role's is always `TRUSTED_SIZE`.
  */
 export interface ScriptOptions<R extends SandboxRole> {
   size: R extends RepoCodeRole ? SandboxSize : typeof TRUSTED_SIZE;
-  allow?: string[];
+  network?: NetworkAccess;
   timeoutMs?: number;
 }
 
@@ -250,7 +269,7 @@ export async function runInSandbox<R extends SandboxRole>(
   repos: RunRepos,
   role: R,
   script: (grants: RoleGrants<R>) => string,
-  { size, allow = [], timeoutMs }: ScriptOptions<R>,
+  { size, network = NO_NETWORK, timeoutMs }: ScriptOptions<R>,
 ): Promise<RunResult> {
   const grants = (await mintGrants(env, repos, ROLE_GRANTS[role])) as RoleGrants<R>;
   const sandbox = env.SANDBOX.getByName(sandboxName(instanceId, role));
@@ -259,7 +278,7 @@ export async function runInSandbox<R extends SandboxRole>(
     // reaches the registry.
     access: roleAccess(role, grants, {
       preview: previewGrant(env.CF_ACCOUNT_ID, repos.project),
-      allow,
+      network,
     }),
     size,
     ...(timeoutMs === undefined ? {} : { timeoutMs }),

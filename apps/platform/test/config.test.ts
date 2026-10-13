@@ -452,6 +452,15 @@ describe("loadConfig", () => {
     repos.writeFile("abc123-main", "t1", CONFIG_PATH, "nope: 1\n");
     expect(await loadConfig(repos, "abc123")).toMatchObject({ kind: "valid" });
   });
+
+  it("reads the config at the commit it's given", async () => {
+    const repos = new FakeRepos();
+    await repos.create("abc123-main");
+    const first = repos.commit("abc123-main", { files: { [CONFIG_PATH]: "attempts: { limit: 2 }\n" } });
+    repos.commit("abc123-main", { files: { [CONFIG_PATH]: "attempts: { limit: 3 }\n" } });
+    expect(await loadConfig(repos, "abc123", first.hash)).toMatchObject({ config: { attempts: { limit: 2 } } });
+    expect(await loadConfig(repos, "abc123")).toMatchObject({ config: { attempts: { limit: 3 } } });
+  });
 });
 
 describe("sandboxSize", () => {

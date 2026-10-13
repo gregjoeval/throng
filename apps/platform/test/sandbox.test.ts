@@ -14,7 +14,7 @@ const { RunSandbox } = await importWorkerModule<{
   ) => { run: (script: string, options: unknown) => Promise<{ exitCode: number; startMs: number }> };
 }>("sandbox");
 
-const NO_ACCESS = { grants: [], preview: null, npmRegistry: false, allow: [] };
+const NO_ACCESS = { grants: [], preview: null, registries: [], allow: [] };
 
 /** A RunSandbox over a fake container, and the options each `start` was given. */
 function sandbox() {

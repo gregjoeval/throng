@@ -7,6 +7,7 @@ import { DEFAULT_SANDBOX_SIZE, oneOf, SANDBOX_RESOURCES, SANDBOX_SIZES } from ".
 import type { SandboxSize } from "./config.ts";
 import { attemptRemote } from "./git-remotes.ts";
 import { CLONE_RECIPE, MAX_FILE_BYTES, MAX_LOG_SLICE_BYTES, MCP_INSTRUCTIONS } from "./mcp.ts";
+import { NPM_REGISTRY_HOST } from "./network.ts";
 import { DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS, MAX_WAITERS_PER_USER } from "./waiters.ts";
 
 /** The guide, for a platform served at `origin`. */
@@ -46,6 +47,17 @@ clone sends it too. (With \`git -c … clone\`, the header is used for the clone
 
 Pushing a branch \`t42/<name>\` to the project's origin, \`${origin}/git/<owner>/<project>.git\`, also makes an
 open attempt at \`t42\`. The origin's \`main\` only moves through the merge queue.
+
+## Network access
+
+Setup, the checks and the Preview build have no internet. They may reach, over HTTPS on the default port:
+
+- \`${NPM_REGISTRY_HOST}\`, and each \`registry=\` or \`@scope:registry=\` host in the \`.npmrc\` on the origin's \`main\`
+  (an \`https:\` URL on the default port with a DNS hostname). A registry takes
+  \`GET\` and \`HEAD\` only, even when \`network.allow\` lists it too, so nothing can publish. No credentials are added.
+- The hosts in \`.throng/config.yml\`'s \`network: {allow: [api.example.com]}\`, with any method.
+
+Both are read from the origin's \`main\`, never from your attempt: a change to either applies once it lands.
 
 ## The agent loop
 

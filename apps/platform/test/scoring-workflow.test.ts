@@ -20,6 +20,8 @@ vi.mock("../src/artifacts", () => ({
   reposFor: () => ({
     get: async (name: string) => ({ name, remote: `https://artifacts.invalid/${name}.git` }),
     mintToken: async () => ({ token: "t", scope: "read", expiresAt: "" }),
+    // No commits to pin `main` to, so it's read as `main`; the `.npmrc` read gets the config, and adds nothing.
+    listCommits: async () => [],
     readFile: async (repo: string) => ({ text: async () => (repo === "abc123-main" ? configs.main : HEAD_CONFIG) }),
   }),
 }));

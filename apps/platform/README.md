@@ -79,6 +79,17 @@ Each project has its own Worker, `p<projectId>`, and every Preview of its attemp
 
 `CF_PREVIEW_TOKEN` stays in the platform Worker's env: containers never see it. It creates and deletes projects' Workers and deploys their Previews, so it needs **Account › Workers Scripts › Edit** on the account in `CF_ACCOUNT_ID`, and nothing else. Every project uses one of the account's Worker scripts, so the account's script limit caps the number of projects.
 
+## Network access
+
+A container has no internet (`enableInternet: false`). Only HTTPS on the default port to the hosts its access lists leaves it, through the `OutboundAuth` proxy (`src/network.ts`); the access is fixed when the container starts. Beyond its git grants and the `preview` container's deploy grant, the containers that run repository code (`score`, `preview` and the landing's `check`) may reach:
+
+- **Registries**, for installs: `registry.npmjs.org` and every `registry=` and `@scope:registry=` host in the `.npmrc` on the origin's `main`, if it's an `https:` URL on the default port with a DNS hostname (no IP literal, trailing dot or single label such as `localhost`). Other lines, auth lines included, are ignored. Registries take `GET` and `HEAD` only, so nothing can publish or log in.
+- **`network.allow`** in `.throng/config.yml`: any method.
+
+A registry stays `GET`/`HEAD`-only even when `network.allow` lists its host too: the read-only rule wins, so listing a registry can't open it to publishing. A project that needs to write to such a host has to do it outside Throng. Requests to either kind pass through unchanged: the proxy adds no credentials (private registry credentials are #66). Neither can widen the Cloudflare API or a granted repo's host.
+
+Both are read from the origin's `main`, never from the attempt, so an attempt can't widen its own access. A scoring run or a landing pins `main`'s commit once and reads `.throng/config.yml` and `.npmrc` at it, so the two always agree. A landing reads them before its conflict check starts the `check` container, so the retest gets the same registries and `network.allow` scoring did, never the merged tree's. A missing `.npmrc` adds no registries; a read that fails is retried like the config's, and the run or landing ends `errored` if it keeps failing.
+
 ## E2E job
 
 The **E2E** workflow (`.github/workflows/e2e.yml`) runs `pnpm e2e` against real Artifacts. It deploys the `ci` environment in `wrangler.jsonc`: the `throng-ci` Worker, Artifacts namespace `throng-ci` and D1 database `throng-ci`. It also deploys throng-web's `ci` environment, `throng-web-ci`, bound to `throng-ci`, for the `arena` scenario. It never runs on pull requests or forks, only when started by hand on `gregjoeval/throng`. Runs queue rather than overlap.

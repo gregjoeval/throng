@@ -120,6 +120,10 @@ _Avoid_: Vote (when meaning one user's choice)
 The whole run that produces an attempt's gate and score.
 _Avoid_: CI, pipeline
 
+**Sandbox**:
+The container one role of a scoring run, landing or follow works in, with only that role's grants. Those that run the project's code start at the Sandbox size its config on `main` sets; the trusted ones that only run git start at the smallest.
+_Avoid_: Runner, VM, CI machine
+
 **Arena**:
 The side-by-side comparison of one task's attempts.
 _Avoid_: Comparison view, leaderboard

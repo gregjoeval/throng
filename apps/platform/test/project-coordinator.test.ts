@@ -10,17 +10,9 @@ import type { BatchDatabase } from "../src/users.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
 import { testSql } from "./support/task-backend.ts";
+import { importWorkerModule } from "./support/worker-module.ts";
 
-vi.mock("cloudflare:workers", () => ({
-  DurableObject: class {
-    ctx: unknown;
-    env: unknown;
-    constructor(ctx: unknown, env: unknown) {
-      this.ctx = ctx;
-      this.env = env;
-    }
-  },
-}));
+vi.mock("cloudflare:workers", () => import("./support/cloudflare-workers.ts"));
 
 vi.mock("../src/artifacts", () => ({ reposFor: () => new FakeRepos() }));
 
@@ -31,12 +23,9 @@ interface Coordinator {
   alarm: () => Promise<void>;
 }
 
-// Imported by a computed path: the module is Worker code, which this project's Node typecheck can't
-// follow (`cloudflare:workers`), so it is typed here by what the test calls.
-const PROJECT_MODULE = "../src/project.ts";
-const { ProjectCoordinator } = (await import(PROJECT_MODULE)) as {
+const { ProjectCoordinator } = await importWorkerModule<{
   ProjectCoordinator: new (ctx: unknown, env: unknown) => Coordinator;
-};
+}>("project");
 
 const PROJECT: ProjectContext = { id: "abc123", owner: "owner001" };
 const ada: Actor = { user: { id: "ada00001", handle: "ada", email: "ada@example.com", created_at: "" }, alias: null };

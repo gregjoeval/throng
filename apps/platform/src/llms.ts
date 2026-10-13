@@ -3,6 +3,8 @@
 // this is the long form, step by step.
 
 import { Hono } from "hono";
+import { DEFAULT_SANDBOX_SIZE, oneOf, SANDBOX_RESOURCES, SANDBOX_SIZES } from "./config.ts";
+import type { SandboxSize } from "./config.ts";
 import { attemptRemote } from "./git-remotes.ts";
 import { CLONE_RECIPE, MAX_FILE_BYTES, MAX_LOG_SLICE_BYTES, MCP_INSTRUCTIONS } from "./mcp.ts";
 import { DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS, MAX_WAITERS_PER_USER } from "./waiters.ts";
@@ -86,6 +88,14 @@ open attempt at \`t42\`. The origin's \`main\` only moves through the merge queu
 \`update_attempt\` also edits the note and moves an attempt to \`draft\` or \`closed\`; \`hand_off\` gives an
 active attempt to another user.
 
+## The Sandbox
+
+Setup, the checks and the Preview build run in a container whose size the project's \`.throng/config.yml\`
+sets, as in \`sandbox: {size: standard-2}\`. The sizes are ${oneOf(SANDBOX_SIZES.map(describeSize))}.
+The default is ${DEFAULT_SANDBOX_SIZE}. Like the rest of the config, it is read from the origin's \`main\`: an
+attempt that changes it still runs at \`main\`'s size, and the change applies once it lands. Each stored log
+notes the size it ran at under \`== throng ==\`, so a check killed for memory shows how much it had.
+
 ## In short
 
 This is what the MCP server tells clients in its \`instructions\`:
@@ -100,6 +110,12 @@ Every tool wraps a route of the REST API, which takes the same bearer token. Err
 - OpenAPI 3.1 document: ${origin}/api/openapi.json
 - Long-poll an attempt: \`GET ${origin}/api/projects/<owner>/<project>/attempts/t42a3?wait=${DEFAULT_WAIT_SECONDS}&until=scored\`
 `;
+}
+
+/** A Sandbox size with what it gets: `standard-1 (4 GiB, 1/2 vCPU)`. */
+function describeSize(size: SandboxSize): string {
+  const { memory, vcpu } = SANDBOX_RESOURCES[size];
+  return `${size} (${memory}, ${vcpu} vCPU)`;
 }
 
 /** `/llms.txt`, public. */

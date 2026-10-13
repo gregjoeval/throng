@@ -1,6 +1,8 @@
 // What each Sandbox container may reach. The rule: a container that runs repository code never
 // holds write access to the origin.
 
+import type { SandboxSize } from "./config.ts";
+
 /** A git remote the sandbox may reach; the Worker adds the token on the sandbox's behalf. */
 export interface GitGrant {
   remote: string;
@@ -24,14 +26,21 @@ export const LANDING_ROLES = ["check", "land"] as const satisfies readonly Sandb
 /** The role a Follow Workflow starts a container for: the trusted merge of a task branch into a fork. */
 export const FOLLOW_ROLES = ["follow"] as const satisfies readonly SandboxRole[];
 
-/** Roles whose container runs the repository's own code (npm, its scripts, wrangler builds). */
-export const RUNS_REPO_CODE: Record<SandboxRole, boolean> = {
+/**
+ * Roles whose container runs the repository's own code (npm, its scripts, wrangler builds). They
+ * start at the project's Sandbox size; the trusted roles only run git, and start at `TRUSTED_SIZE`.
+ */
+export const RUNS_REPO_CODE = {
   score: true,
   preview: true,
   check: true,
   land: false,
   follow: false,
-};
+} as const satisfies Record<SandboxRole, boolean>;
+export type RepoCodeRole = { [R in SandboxRole]: (typeof RUNS_REPO_CODE)[R] extends true ? R : never }[SandboxRole];
+
+/** The size the trusted roles' containers start at, whatever the project's config says. */
+export const TRUSTED_SIZE = "lite" satisfies SandboxSize;
 
 /** Every grant a run's roles may get. Each is minted only for the step whose role needs it. */
 export interface RunGrants {

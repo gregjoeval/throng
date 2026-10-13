@@ -93,7 +93,9 @@ export class LandingWorkflow extends WorkflowEntrypoint<Env, LandingParams> {
     const tenMinutes = { retries: STEP_RETRIES, timeout: "10 minutes" } as const;
 
     // The check container starts at the conflict check, before the merged tree's config is known, and
-    // runs the retest too: its size is `main`'s, so an attempt can't raise its own.
+    // runs the retest too: its size is `main`'s, so an attempt can't raise its own. This step and the
+    // conflict check each read `main`, and see the same commit: merges into it are serialized through
+    // the merge queue, so only this landing could move it, and it hasn't yet.
     const size = await this.#step(step, "sandbox size", { retries: STEP_RETRIES, timeout: "1 minute" }, async () =>
       sandboxSize(await loadConfig(reposFor(this.env), params.project)),
     );

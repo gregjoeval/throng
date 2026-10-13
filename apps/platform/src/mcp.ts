@@ -11,13 +11,17 @@ import { Hono } from "hono";
 import type { AccessBindings } from "./access.ts";
 import {
   AttemptQuerySchema,
+  BallotSchema,
+  CloseVoteSchema,
   CreateAttemptsSchema,
   CreateTaskSchema,
   EditAttemptSchema,
   HandOffSchema,
+  OpenVoteSchema,
   PageQuerySchema,
   PostVerdictSchema,
   SelectionSchema,
+  VoteCandidateSchema,
   WaitQuerySchema,
   WaitSecondsSchema,
   workersCache,
@@ -31,7 +35,7 @@ import { ServiceError } from "./errors.ts";
 import { missingLog } from "./logs.ts";
 import { ATTEMPT_STATES, TASK_STATES } from "./task-store.ts";
 import { taskService } from "./tasks.ts";
-import type { MergeRequest, ScoringAnswer } from "./tasks.ts";
+import type { MergeRequest, ScoringAnswer, Vote } from "./tasks.ts";
 import type { Actor } from "./tokens.ts";
 import { DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS } from "./waiters.ts";
 
@@ -138,6 +142,12 @@ function scoringAnswer(scored: ScoringAnswer): CallToolResult {
 /** The answer to a call that moves the task's merge request: its new state. */
 function mergeRequestAnswer(mergeRequest: MergeRequest): CallToolResult {
   return answer(`merge request is ${mergeRequest.state}`, { mergeRequest });
+}
+
+/** The answer to a call that reads or changes the task's vote: its state and each candidate's tally. */
+function voteAnswer(vote: Vote): CallToolResult {
+  const tallies = vote.candidates.map((c) => `${c.attempt} ${c.withdrawn ? "withdrawn" : c.votes}`).join(", ");
+  return answer(`${vote.task}'s vote is ${vote.state}: ${tallies}`, { vote });
 }
 
 /** Runs a tool, turning a service's refusal into a tool error the model can read and act on. */
@@ -475,6 +485,58 @@ function mcpServer({ repos, tasks, logs, diffCache }: Deps, { actor, token, env,
       const dequeue = await service.getDequeue(actor, { ...projectPath(project), task });
       return answer(`dequeued: ${dequeue.reason}`, { dequeue });
     },
+  );
+
+  tool(
+    "open_vote",
+    "Open a vote to select the task's attempt, under the `vote` selection policy: the attempts passing now are its " +
+      "candidates. Optionally with a `deadline` for ballots. The task's creator or the project owner may.",
+    OpenVoteSchema.extend(onTask.shape),
+    async ({ project, task, deadline }) => {
+      return voteAnswer(await service.openVote(actor, { ...projectPath(project), task, deadline }));
+    },
+  );
+
+  tool(
+    "cast_vote",
+    "Back one candidate in the task's open vote. You have one ballot, shared with your aliases: casting again " +
+      "replaces it. Not for your own attempts.",
+    BallotSchema.extend(onTask.shape),
+    async ({ project, task, attempt }) => {
+      return voteAnswer(await service.castVote(actor, { ...projectPath(project), task, attempt }));
+    },
+  );
+
+  tool(
+    "add_vote_candidate",
+    "Add an attempt that passes now to the task's open vote, e.g. one pushed and passing again after a push " +
+      "withdrew it. The task's creator or the project owner may.",
+    VoteCandidateSchema.extend(onTask.shape),
+    async ({ project, task, attempt }) => {
+      return voteAnswer(await service.addVoteCandidate(actor, { ...projectPath(project), task, attempt }));
+    },
+  );
+
+  tool(
+    "close_vote",
+    "Close the task's open vote, selecting the candidate with the most ballots as its merge request. On a tie, " +
+      "name one of the tied candidates as `attempt`. The task's creator or the project owner may.",
+    CloseVoteSchema.extend(onTask.shape),
+    async ({ project, task, attempt }) => {
+      const { vote, mergeRequest } = await service.closeVote(actor, { ...projectPath(project), task, attempt });
+      const summary =
+        mergeRequest === null
+          ? `${vote.task}'s vote closed without a selection`
+          : `${vote.task}'s vote selected ${mergeRequest.attempt}; merge request is ${mergeRequest.state}`;
+      return answer(summary, { vote, mergeRequest });
+    },
+  );
+
+  tool(
+    "get_vote",
+    "The task's latest vote: each candidate's tally, your own ballot, and its winner once closed.",
+    onTask,
+    async ({ project, task }) => voteAnswer(await service.getVote(actor, { ...projectPath(project), task })),
   );
 
   return server;

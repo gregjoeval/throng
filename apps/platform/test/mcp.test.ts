@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import { agentLoop, toolCaller } from "../scripts/e2e-mcp.ts";
 import type { AccessVerifier } from "../src/access.ts";
 import { publicApp } from "../src/app.ts";
+import { CONFIG_PATH } from "../src/config.ts";
 import { DIFF_CAPS } from "../src/diff.ts";
 import { FORWARDED_EMAIL_HEADER } from "../src/forwarded.ts";
 import type { LogStore } from "../src/logs.ts";
@@ -48,6 +49,11 @@ const TOOLS = [
   "approve_merge_request",
   "cancel_merge_request",
   "get_dequeue",
+  "open_vote",
+  "cast_vote",
+  "add_vote_candidate",
+  "close_vote",
+  "get_vote",
 ];
 
 /** An R2 bucket in memory. */
@@ -426,6 +432,46 @@ describe("/mcp", () => {
     const cancelled = await call(greg, "cancel_merge_request", { project, task: "t1" });
     expect(cancelled.data["mergeRequest"]).toMatchObject({ state: "cancelled" });
     expect((await call(greg, "approve_merge_request", { project, task: "t1" })).isError).toBeTruthy();
+  });
+
+  it("runs a vote: open, cast, add a candidate that passes later, read and close", async () => {
+    const { ada, greg, project, projectId, repos, store, pushTo, connect, tokenFor } = await withProject();
+    const bob = await connect(await tokenFor("bob@example.com"));
+    repos.writeFile(`${projectId}-main`, "main", CONFIG_PATH, "selection: { policy: vote }\n");
+    await call(ada, "start_attempts", { project, task: "t1", count: 2 });
+    for (const number of [1, 2]) {
+      await pushTo(number, "ada@example.com");
+      await call(ada, "update_attempt", { project, attempt: `t1a${number}`, state: "open" });
+    }
+    const tasks = store(projectId);
+    await tasks.scoring.drain();
+    /** Finishes the attempt's latest run with `gate`. */
+    const finish = (number: number, gate: "passed" | "failed") => {
+      const run = tasks.scoring.listRuns({ task: 1, attempt: number }).at(-1)?.id ?? 0;
+      tasks.scoringFinished(run, { status: "done", result: { ...PASSED, gate } });
+    };
+    finish(1, "passed");
+    finish(2, "failed");
+
+    const opened = await call(greg, "open_vote", { project, task: "t1" });
+    expect(opened.summary).toBe("t1's vote is open: t1a1 0");
+    expect(opened.data["vote"]).toMatchObject({ state: "open", eligible: "anyone" });
+    expect((await call(ada, "cast_vote", { project, task: "t1", attempt: "t1a1" })).summary).toMatch(/^forbidden: /u);
+
+    await pushTo(2, "ada@example.com");
+    await tasks.scoring.drain();
+    finish(2, "passed");
+    const added = await call(greg, "add_vote_candidate", { project, task: "t1", attempt: "t1a2" });
+    expect(added.summary).toBe("t1's vote is open: t1a1 0, t1a2 0");
+    const cast = await call(bob, "cast_vote", { project, task: "t1", attempt: "t1a2" });
+    expect(cast.summary).toBe("t1's vote is open: t1a1 0, t1a2 1");
+    expect((await call(bob, "get_vote", { project, task: "t1" })).data["vote"]).toMatchObject({
+      myBallot: { attempt: "t1a2" },
+    });
+
+    const closed = await call(greg, "close_vote", { project, task: "t1" });
+    expect(closed.summary).toBe("t1's vote selected t1a2; merge request is queued");
+    expect(closed.data).toMatchObject({ vote: { winner: "t1a2" }, mergeRequest: { attempt: "t1a2" } });
   });
 
   it("hands an attempt to another user", async () => {

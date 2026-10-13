@@ -59,13 +59,14 @@ class FakeLogs implements LogBucket {
   }
 }
 
-function setup() {
+/** The e2e routes over fakes, called with `bindings` (the e2e secret set by default). */
+function setup(bindings: { E2E_TOKEN?: string } = { E2E_TOKEN: SECRET }) {
   const db = testDatabase();
   const repos = new FakeRepos();
   const logs = new FakeLogs();
   const previewWorkers = new FakePreviewWorkers();
   const destroyed: string[] = [];
-  const app = e2eRoutes<{ E2E_TOKEN: string }>({
+  const app = e2eRoutes<{ E2E_TOKEN?: string }>({
     db: () => db,
     repos: () => repos,
     previewWorkers: () => previewWorkers,
@@ -80,11 +81,7 @@ function setup() {
     secret: (env) => env.E2E_TOKEN,
   });
   const call = async (method: string, path: string, auth = SECRET) => {
-    const res = await app.request(
-      path,
-      { method, headers: { Authorization: `Bearer ${auth}` } },
-      { E2E_TOKEN: SECRET },
-    );
+    const res = await app.request(path, { method, headers: { Authorization: `Bearer ${auth}` } }, bindings);
     const type = res.headers.get("Content-Type") ?? "";
     return { status: res.status, body: type.startsWith("application/json") ? ((await res.json()) as Json) : null };
   };
@@ -101,6 +98,20 @@ describe("the e2e routes", () => {
     const { call } = setup();
     expect((await call("POST", "/e2e/token", "wrong")).status).toBe(401);
     expect((await call("POST", "/e2e/token")).status).toBe(200);
+  });
+
+  it("refuse every request when the e2e secret is unset", async () => {
+    const { call } = setup({});
+    expect((await call("POST", "/e2e/token", "undefined")).status).toBe(401);
+    expect((await call("POST", "/e2e/token", "")).status).toBe(401);
+    expect((await call("POST", "/e2e/token")).status).toBe(401);
+  });
+
+  it("refuse every request when the e2e secret is empty", async () => {
+    const { call } = setup({ E2E_TOKEN: "" });
+    expect((await call("POST", "/e2e/token", "")).status).toBe(401);
+    expect((await call("POST", "/e2e/token", "undefined")).status).toBe(401);
+    expect((await call("POST", "/e2e/token")).status).toBe(401);
   });
 
   it("refuse to create a project without the e2e prefix", async () => {

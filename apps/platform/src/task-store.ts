@@ -1284,12 +1284,11 @@ export class TaskStore {
    * next push is checked again, and a task branch push follows it anyway.
    */
   async followIfDropped(project: ProjectContext, _actor: Actor, input: AttemptInput & { head: string }): Promise<void> {
-    const attempt = { task: input.task, number: input.number };
     const { head } = input;
-    const check = this.#toCheck(attempt, head);
+    const check = this.#toCheck(input, head);
     if (check === null) return;
     const { taskHead, known } = check;
-    const fork = attemptRef(attempt.task, attempt.number);
+    const fork = attemptRef(input.task, input.number);
     let contains: boolean | null;
     try {
       contains = await containsCommit(this.#repos, project.id, { attempt: fork, head, known }, taskHead);
@@ -1304,9 +1303,9 @@ export class TaskStore {
     this.#sql.transaction(() => {
       // The task branch, the attempt or its head may have moved on while the head was read: a newer
       // push is checked on its own, and a task branch push queued a follow of its new head.
-      if (this.#toCheck(attempt, head)?.taskHead !== taskHead) return;
-      if (contains) this.#setFollow(attempt, { contains_task_head: head });
-      else this.#queueFollow(project, attempt, taskHead);
+      if (this.#toCheck(input, head)?.taskHead !== taskHead) return;
+      if (contains) this.#setFollow(input, { contains_task_head: head });
+      else this.#queueFollow(project, input, taskHead);
     });
   }
 

@@ -12,10 +12,11 @@ import { NPMRC_PATH } from "../src/npmrc.ts";
 import { importWorkerModule } from "./support/worker-module.ts";
 import { PASSED, result, runOnce } from "./support/workflow-runs.ts";
 
-/** Every `readFile` the landing makes, and the files each `repo@ref` holds, by path. */
+/** Every `readFile` the landing makes, the files each `repo@ref` holds by path, and `main`'s sha. */
 const artifacts = vi.hoisted(() => ({
   reads: [] as { repo: string; ref: string; path: string }[],
   files: new Map<string, Record<string, string>>(),
+  main: "b".repeat(40),
 }));
 
 vi.mock("cloudflare:workers", () => import("./support/cloudflare-workers.ts"));
@@ -24,6 +25,7 @@ vi.mock("../src/artifacts", () => ({
   reposFor: () => ({
     get: async (name: string) => ({ name, remote: `https://artifacts.invalid/${name}.git` }),
     mintToken: async () => ({ token: "t", scope: "read", expiresAt: "" }),
+    listCommits: async (repo: string) => (repo === "abc123-main" ? [{ hash: artifacts.main }] : []),
     readFile: async (repo: string, { ref, path }: { ref: string; path: string }) => {
       artifacts.reads.push({ repo, ref, path });
       const text = artifacts.files.get(`${repo}@${ref}`)?.[path];
@@ -40,7 +42,9 @@ const { LandingWorkflow } = await importWorkerModule<{
 }>("landing-workflow");
 
 const HEAD = "a".repeat(40);
-const MAIN = "b".repeat(40);
+const MAIN = artifacts.main;
+/** Where the origin's `main` is read: at its sha. */
+const ORIGIN_MAIN = `abc123-main@${MAIN}`;
 const TREE = "c".repeat(40);
 const MERGE = "d".repeat(40);
 
@@ -63,7 +67,7 @@ beforeEach(() => {
   artifacts.reads.length = 0;
   artifacts.files.clear();
   // Only the origin's `main` has a config: it sets the Sandbox size.
-  artifacts.files.set("abc123-main@main", { [CONFIG_PATH]: "sandbox: { size: standard-2 }\n" });
+  artifacts.files.set(ORIGIN_MAIN, { [CONFIG_PATH]: "sandbox: { size: standard-2 }\n" });
 });
 
 /**
@@ -141,7 +145,7 @@ describe("LandingWorkflow", () => {
   });
 
   it("gives the check container main's .npmrc registries, for both the conflict check and the retest", async () => {
-    artifacts.files.set("abc123-main@main", { [NPMRC_PATH]: "@acme:registry=https://npm.acme.dev/\n" });
+    artifacts.files.set(ORIGIN_MAIN, { [NPMRC_PATH]: "@acme:registry=https://npm.acme.dev/\n" });
     artifacts.files.set("abc123-t1a1@main", { [NPMRC_PATH]: "registry=https://evil.example.com/\n" });
     const { outcome, checkAccess } = await land(REQUIRED);
     expect(outcome).toEqual({ kind: "landed", sha: MERGE });
@@ -152,8 +156,34 @@ describe("LandingWorkflow", () => {
     ]);
     // Read from the origin's main only: never the fork, and never the merged tree.
     expect(artifacts.reads.filter((read) => read.path === NPMRC_PATH)).toEqual([
-      { repo: "abc123-main", ref: "main", path: NPMRC_PATH },
+      { repo: "abc123-main", ref: MAIN, path: NPMRC_PATH },
     ]);
+  });
+
+  it("gives the check container main's network.allow, for both the conflict check and the retest, never the merged tree's", async () => {
+    artifacts.files.set(ORIGIN_MAIN, { [CONFIG_PATH]: "network: { allow: [api.example.com] }\n" });
+    artifacts.files.set("abc123-t1a1@main", { [CONFIG_PATH]: "network: { allow: [fork.example.com] }\n" });
+    const merged = `network: { allow: [evil.example.com] }\n${REQUIRED}`;
+    const { outcome, checkAccess } = await land(merged);
+    expect(outcome).toEqual({ kind: "landed", sha: MERGE });
+    expect(checkAccess.map((access) => access.allow)).toEqual([["api.example.com"], ["api.example.com"]]);
+  });
+
+  it("reads main's config and .npmrc once each, from the one commit main is at", async () => {
+    artifacts.files.set(ORIGIN_MAIN, {
+      [CONFIG_PATH]: "sandbox: { size: standard-2 }\nnetwork: { allow: [api.example.com] }\n",
+      [NPMRC_PATH]: "@acme:registry=https://npm.acme.dev/\n",
+    });
+    const { checkAccess, sizes } = await land(REQUIRED);
+    expect(artifacts.reads).toEqual([
+      { repo: "abc123-main", ref: MAIN, path: CONFIG_PATH },
+      { repo: "abc123-main", ref: MAIN, path: NPMRC_PATH },
+    ]);
+    expect(sizes.filter(([role]) => role === "check").map(([, size]) => size)).toEqual(["standard-2", "standard-2"]);
+    expect(checkAccess.at(-1)).toMatchObject({
+      registries: ["registry.npmjs.org", "npm.acme.dev"],
+      allow: ["api.example.com"],
+    });
   });
 
   it("gives the check container only the npm registry when main has no .npmrc", async () => {

@@ -2,7 +2,7 @@
 // that turn the project's config and the score script's raw output into it. Metrics parsing and the
 // gate live here so they're tested without a container.
 
-import { DEFAULT_CHECK_TIMEOUT_MS } from "./config.ts";
+import { DEFAULT_CHECK_TIMEOUT_MS, networkAllow } from "./config.ts";
 import type { CheckConfig, ConfigResult, MetricConfig, MetricOrder, Source } from "./config.ts";
 import { parseFrom, typedValue } from "./metric-values.ts";
 import type { MetricFormat, MetricRule, MetricValue } from "./metric-values.ts";
@@ -133,7 +133,7 @@ export function scorePlan(config: ConfigResult): ScorePlan {
         rule: ruleOf(metric),
       })),
     })),
-    allow: config.config.network.allow,
+    allow: networkAllow(config),
   };
 }
 

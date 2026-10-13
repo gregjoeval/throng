@@ -2,7 +2,7 @@ import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import { reposFor } from "./artifacts";
 import { attemptBase } from "./base";
-import { loadConfig, sandboxSize } from "./config";
+import { loadConfig, networkAllow, sandboxSize } from "./config";
 import type { ConfigResult, SandboxSize } from "./config";
 import { GRANT_SOURCES, ROLE_GRANTS, sandboxName, SCORING_ROLES, TRUSTED_SIZE } from "./grants";
 import type { RepoCodeRole, RoleGrants, RunGrants, SandboxRole } from "./grants";
@@ -68,18 +68,18 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
       const registries = await step.do("registries", { retries: STEP_RETRIES, timeout: "1 minute" }, () =>
         loadRegistries(reposFor(this.env), params.project, main),
       );
-      const settings = runSettings(config, size);
-      const network: NetworkAccess = { registries, allow: settings.plan.allow };
+      // A task's definitions never change `network.allow`, so the run's config gives `main`'s.
+      const settings = runSettings(config, { size, network: { registries, allow: networkAllow(config) } });
       const base = await step.do("base", { retries: STEP_RETRIES, timeout: "1 minute" }, () =>
         attemptBase(reposFor(this.env), params.project, { attempt: params.attempt, head: params.sha }),
       );
       const scored = await step.do("score", { retries: STEP_RETRIES, timeout: settings.timeoutMs }, () =>
-        this.#score(instanceId, params, base?.sha ?? null, settings, network),
+        this.#score(instanceId, params, base?.sha ?? null, settings),
       );
       const preview = previewPlan(config, scored);
       let result = scored;
       if (preview !== null) {
-        const { deployed, durationMs, logs } = await this.#preview(instanceId, params, preview, size, network, step);
+        const { deployed, durationMs, logs } = await this.#preview(instanceId, params, preview, settings, step);
         result = { ...withPreview(scored, deployed, durationMs), logs: [...scored.logs, ...logs] };
       }
       outcome = { status: "done", result };
@@ -119,8 +119,7 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
     instanceId: string,
     params: ScoringParams,
     base: string | null,
-    { config, plan, timeoutMs, size }: RunSettings,
-    network: NetworkAccess,
+    { config, plan, timeoutMs, size, network }: RunSettings,
   ): Promise<ScoringResult> {
     const run = await runInSandbox(
       this.env,
@@ -158,8 +157,7 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
     instanceId: string,
     params: ScoringParams,
     { command }: PreviewPlan,
-    size: SandboxSize,
-    network: NetworkAccess,
+    { size, network }: MainSettings,
     step: WorkflowStep,
   ): Promise<{ deployed: PreviewScriptResult | null | { error: string }; durationMs: number; logs: string[] }> {
     const { accountId, workerName } = previewGrant(this.env.CF_ACCOUNT_ID, params.project);
@@ -225,20 +223,28 @@ export interface RunRepos {
 }
 
 /**
- * What a scoring run or a retest takes from its config: the config itself, the plan it runs, the
- * step's timeout, and the Sandbox size, which comes from `main`'s config alone.
+ * What the containers that run repository code start with, read from the origin's `main` alone, never
+ * from an attempt or a merged tree: the Sandbox size, and the registries and hosts they may reach.
  */
-export interface RunSettings {
+export interface MainSettings {
+  size: SandboxSize;
+  network: NetworkAccess;
+}
+
+/**
+ * What a scoring run or a retest takes from its config: the config itself, the plan it runs and the
+ * step's timeout, with `main`'s settings.
+ */
+export interface RunSettings extends MainSettings {
   config: ConfigResult;
   plan: ScorePlan;
   timeoutMs: number;
-  size: SandboxSize;
 }
 
-/** The run settings for `config`, at `size`. */
-export function runSettings(config: ConfigResult, size: SandboxSize): RunSettings {
+/** The run settings for `config`, under `main`'s settings. */
+export function runSettings(config: ConfigResult, main: MainSettings): RunSettings {
   const plan = scorePlan(config);
-  return { config, plan, timeoutMs: scoreTimeoutMs(plan), size };
+  return { config, plan, timeoutMs: scoreTimeoutMs(plan), ...main };
 }
 
 /**

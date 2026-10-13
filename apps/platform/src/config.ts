@@ -417,6 +417,11 @@ export function sandboxSize(config: ConfigResult): SandboxSize {
   return config.kind === "valid" ? config.config.sandbox.size : DEFAULT_SANDBOX_SIZE;
 }
 
+/** The hosts the config's `network.allow` lets checks reach; none without a valid config. */
+export function networkAllow(config: ConfigResult): string[] {
+  return config.kind === "valid" ? config.config.network.allow : [];
+}
+
 /** The project's config, read from its origin's `main`, or from the commit of it `ref` names. */
 export async function loadConfig(repos: Repos, projectId: string, ref = "main"): Promise<ConfigResult> {
   return parseConfig(await readOriginFile(repos, projectId, CONFIG_PATH, ref));

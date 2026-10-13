@@ -88,7 +88,7 @@ A container has no internet (`enableInternet: false`). Only HTTPS on the default
 
 A registry stays `GET`/`HEAD`-only even when `network.allow` lists its host too: the read-only rule wins, so listing a registry can't open it to publishing. A project that needs to write to such a host has to do it outside Throng. Requests to either kind pass through unchanged: the proxy adds no credentials (private registry credentials are #66). Neither can widen the Cloudflare API or a granted repo's host.
 
-Both are read from the origin's `main`, never from the attempt, so an attempt can't widen its own access. A scoring run pins `main`'s commit once and reads `.throng/config.yml` and `.npmrc` at it, so the two always agree. A landing reads `main`'s `.npmrc` before its conflict check starts the `check` container, so the retest gets the same registries scoring did, never the merged tree's. A missing `.npmrc` adds no registries; a read that fails is retried like the config's, and the run or landing ends `errored` if it keeps failing.
+Both are read from the origin's `main`, never from the attempt, so an attempt can't widen its own access. A scoring run or a landing pins `main`'s commit once and reads `.throng/config.yml` and `.npmrc` at it, so the two always agree. A landing reads them before its conflict check starts the `check` container, so the retest gets the same registries and `network.allow` scoring did, never the merged tree's. A missing `.npmrc` adds no registries; a read that fails is retried like the config's, and the run or landing ends `errored` if it keeps failing.
 
 ## E2E job
 

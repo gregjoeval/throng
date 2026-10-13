@@ -1,21 +1,23 @@
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep, WorkflowStepConfig } from "cloudflare:workers";
 import { reposFor } from "./artifacts";
-import { loadConfig, parseConfig, sandboxSize } from "./config";
+import { loadConfig, networkAllow, parseConfig, sandboxSize } from "./config";
 import { conflictFiles, parseMergeTree } from "./conflicts";
 import type { ConflictDetails } from "./conflicts";
 import { LANDING_ROLES, sandboxName, TRUSTED_SIZE } from "./grants";
 import { actedAlias, failedChecks, mergeAuthor, mergeCommitMessage, retestConfig } from "./landing";
 import type { LandingOutcome, LandingParams, Signer } from "./landing";
 import { landingLogKey, logNames } from "./logs";
-import { NO_NETWORK } from "./network";
 import { loadRegistries } from "./npmrc";
+import { originMainRef } from "./repos";
+import type { Repos } from "./repos";
 import { buildResult } from "./results";
 import type { RawScore } from "./results";
 import { conflictCheckScript, landScript, parseResult, retestScript } from "./scripts";
 import type { ConflictCheckResult, LandResult, MergePlan } from "./scripts";
 import { attemptRef } from "./task-refs";
 import { runInSandbox, runSettings, STEP_RETRIES, storeLogs } from "./workflows";
+import type { MainSettings } from "./workflows";
 
 /**
  * A step that kept failing on infrastructure; the landing ends `errored` naming it. Wraps the error
@@ -30,6 +32,19 @@ class StepFailed extends Error {
   }
 }
 
+/**
+ * `main`'s settings for the check container: its config's Sandbox size and `network.allow`, and its
+ * `.npmrc` registries, both files read from the one commit `main` is at.
+ */
+async function loadMainSettings(repos: Repos, project: string): Promise<MainSettings> {
+  const main = await originMainRef(repos, project);
+  const [config, registries] = await Promise.all([
+    loadConfig(repos, project, main),
+    loadRegistries(repos, project, main),
+  ]);
+  return { size: sandboxSize(config), network: { registries, allow: networkAllow(config) } };
+}
+
 /** The raw score of a retest that ran nothing: an invalid config fails without running anything. */
 const NOTHING_RUN: RawScore = { base: null, shortstat: "", builtinMs: 0, setupFailed: null, checks: [] };
 
@@ -37,9 +52,10 @@ const NOTHING_RUN: RawScore = { base: null, shortstat: "", builtinMs: 0, setupFa
  * One landing of the merge queue's front merge request on `origin/main`. See the merge queue spec's
  * "Landing" section.
  *
- * 1. Conflict check, in the untrusted `check` container (read grants on the origin and the fork, and
- *    the registries in the `.npmrc` on `main`, read from the origin before the container starts),
- *    started at the Sandbox size `main`'s config sets:
+ * 1. Conflict check, in the untrusted `check` container (read grants on the origin and the fork, the
+ *    registries in `main`'s `.npmrc` and the hosts in its config's `network.allow`), started at the
+ *    Sandbox size `main`'s config sets. Both files are read from one commit of `main` before the
+ *    container starts:
  *    `git merge-tree` of `main` and the approved head. A conflict ends it `conflict`; a clean merge
  *    records the tree, `main`'s sha and the merged tree's `.throng/config.yml`.
  * 2. Retest, in the same container, only when the merged tree's config has required checks: setup
@@ -96,19 +112,13 @@ export class LandingWorkflow extends WorkflowEntrypoint<Env, LandingParams> {
     const repos = { project: params.project, attempt: ref };
     const tenMinutes = { retries: STEP_RETRIES, timeout: "10 minutes" } as const;
 
-    // The conflict check starts the check container, whose access is then fixed for the retest too, so
-    // it's read first: `main`'s `.npmrc` registries, never the merged tree's. A `main` that moves after
-    // this read can't land, as the land step's lease is on the `main` the conflict check saw.
-    const network = await this.#step(step, "registries", { retries: STEP_RETRIES, timeout: "1 minute" }, async () => ({
-      ...NO_NETWORK,
-      registries: await loadRegistries(reposFor(this.env), params.project),
-    }));
     // The check container starts at the conflict check, before the merged tree's config is known, and
-    // runs the retest too: its size is `main`'s, so an attempt can't raise its own. This step and the
-    // conflict check each read `main`, and see the same commit: merges into it are serialized through
-    // the merge queue, so only this landing could move it, and it hasn't yet.
-    const size = await this.#step(step, "sandbox size", { retries: STEP_RETRIES, timeout: "1 minute" }, async () =>
-      sandboxSize(await loadConfig(reposFor(this.env), params.project)),
+    // runs the retest too, so its size and access are fixed first, from `main` alone: the merged tree
+    // can't raise its size or widen its access. This step and the conflict check each read `main`,
+    // and see the same commit: merges into it are serialized through the merge queue, so only this
+    // landing could move it, and it hasn't yet. Should it move anyway, the land step's lease fails.
+    const main = await this.#step(step, "main settings", { retries: STEP_RETRIES, timeout: "1 minute" }, () =>
+      loadMainSettings(reposFor(this.env), params.project),
     );
     const checked = await this.#step(step, "conflict check", tenMinutes, async () => {
       const run = await runInSandbox(
@@ -117,7 +127,7 @@ export class LandingWorkflow extends WorkflowEntrypoint<Env, LandingParams> {
         repos,
         "check",
         (g) => conflictCheckScript(g.originRead.remote, g.forkRead.remote, params.head),
-        { network, size },
+        main,
       );
       const result = parseResult<ConflictCheckResult>(run.stdout);
       if (result === null)
@@ -139,7 +149,7 @@ export class LandingWorkflow extends WorkflowEntrypoint<Env, LandingParams> {
 
     const retest = retestConfig(parseConfig(checked.config));
     if (retest !== null) {
-      const { plan, timeoutMs } = runSettings(retest, size);
+      const { plan, timeoutMs, size, network } = runSettings(retest, main);
       const { result, logs } =
         retest.kind === "invalid"
           ? { result: buildResult(retest, NOTHING_RUN), logs: [] }

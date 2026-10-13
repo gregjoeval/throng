@@ -1109,13 +1109,16 @@ export class TaskStore {
   // --- following the task branch ---------------------------------------------------------------
   //
   // Active attempts follow their task branch (ADR 0003). A push of the task branch, an author's push
-  // to an attempt that needs update or that drops the task head (a forced push over a follow's
-  // merge), and reopening or starting an attempt on a task with a task branch each queue a follow; the DO's drain starts its Follow Workflow, which claims the push,
-  // merges the task head into the fork's `main` in a trusted container with a lease on the head it
-  // read, and reports. A clean merge is recorded as a push by no user: its new head is scored, and a
-  // merge request it is the source of goes to `needsReview`. A conflict writes nothing and marks
-  // the attempt needs update. A landing that has claimed its push to `main` holds its source's
-  // follow back until it ends.
+  // to an attempt that needs update, and reopening or starting an attempt on a task with a task
+  // branch each queue a follow. So does an author's push that drops the task head (a forced push
+  // over a follow's merge), which the git proxy checks once git has its reply; a check that can't
+  // tell queues nothing, and the next push is checked again. A follow is only ever queued for the
+  // task head the last recorded task branch push left. The DO's drain starts its Follow Workflow,
+  // which claims the push, merges the task head into the fork's `main` in a trusted container with
+  // a lease on the head it read, and reports. A clean merge is recorded as a push by no user: its
+  // new head is scored, and a merge request it is the source of goes to `needsReview`. A conflict
+  // writes nothing and marks the attempt needs update. A landing that has claimed its push to
+  // `main` holds its source's follow back until it ends.
 
   /**
    * Records a push of task `task`'s task branch to `head`, which the git proxy authorized

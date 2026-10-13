@@ -628,7 +628,8 @@ function contentLength(c: GitContext): number | null {
  * updated (`recordPush`, which also queues scoring of an open attempt's new head) and adds a
  * `remote:` line when scoring was queued. The response is buffered for that, which is cheap: a
  * receive-pack response is a report and some progress, never a pack. One that can't be read is
- * passed on as it came, and nothing is recorded.
+ * passed on as it came, and nothing is recorded. Once git has its reply, the new head is checked
+ * for a dropped task branch (`checkPushed`).
  */
 async function recordForkPush(
   c: GitContext,

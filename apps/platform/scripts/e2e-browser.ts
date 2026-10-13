@@ -46,12 +46,22 @@ export async function openBrowser({
     const { pathname, search } = new URL(request.url());
     apiRequests.push(`${pathname}${search}`);
     const headers: Record<string, string> = { authorization: `Bearer ${token}` };
-    for (const name of FORWARDED_HEADERS) {
-      const value = await request.headerValue(name);
-      if (value !== null) headers[name] = value;
+    try {
+      for (const name of FORWARDED_HEADERS) {
+        const value = await request.headerValue(name);
+        if (value !== null) headers[name] = value;
+      }
+      const response = await route.fetch({ url: platformUrl(request.url(), platform), headers });
+      await route.fulfill({ response });
+    } catch (error) {
+      // A request still in flight when the browser closes has nowhere to go.
+      if (page.isClosed() || !browser.isConnected()) return;
+      throw error;
     }
-    const response = await route.fetch({ url: platformUrl(request.url(), platform), headers });
-    await route.fulfill({ response });
   });
-  return { page, apiRequests, close: () => browser.close() };
+  const close = async () => {
+    await page.unrouteAll({ behavior: "ignoreErrors" });
+    await browser.close();
+  };
+  return { page, apiRequests, close };
 }

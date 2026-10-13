@@ -62,7 +62,7 @@ sandbox:
   size: standard-1 # lite | standard-1 | standard-2 | standard-3 | standard-4
 ```
 
-The sizes are Cloudflare's named instance types, which `RunSandbox` passes to `start({ instance })` (`src/sandbox.ts`): `lite` is 256 MiB and 1/16 vCPU, `standard-1` 4 GiB and 1/2 vCPU, up to `standard-4` at 12 GiB and 4 vCPU. When `sandbox.size` is absent, or the config is missing or invalid, it is `standard-1`. Any other value is a config error. The trusted `land` and `follow` containers only run git and always start at `lite`.
+The sizes are Cloudflare's named instance types, which `RunSandbox` passes to `start({ instance })` (`src/sandbox.ts`). `SANDBOX_RESOURCES` in `src/config.ts` gives each one's memory and vCPU, and `/llms.txt` lists them. When `sandbox.size` is absent, or `main`'s config is missing or invalid, it is `standard-1`. Any other value is a config error. The trusted `land` and `follow` containers only run git and always start at `lite`.
 
 The size is read from the origin's `main`, like the rest of the config, never from the attempt's head, so an attempt can't raise its own size; a change applies once it lands. A scoring run takes it from the config it loads from `main`; a landing reads `main`'s config before its conflict check starts the `check` container, which then also runs the retest. A container that is already running keeps its size, and the next one to start takes the current config's. Every stored log a step wrote notes its size under `== throng ==` (`sandbox: standard-1`).
 

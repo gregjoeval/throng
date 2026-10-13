@@ -41,7 +41,15 @@ export type VoteEligibility = (typeof VOTE_ELIGIBILITIES)[number];
  */
 export const SANDBOX_SIZES = ["lite", "standard-1", "standard-2", "standard-3", "standard-4"] as const;
 export type SandboxSize = (typeof SANDBOX_SIZES)[number];
-/** The size when a config sets none, or there's no valid config: 4 GiB, 1/2 vCPU. */
+/** What each Sandbox size gets, as Cloudflare's container limits give it. */
+export const SANDBOX_RESOURCES: Record<SandboxSize, { memory: string; vcpu: string }> = {
+  lite: { memory: "256 MiB", vcpu: "1/16" },
+  "standard-1": { memory: "4 GiB", vcpu: "1/2" },
+  "standard-2": { memory: "6 GiB", vcpu: "1" },
+  "standard-3": { memory: "8 GiB", vcpu: "2" },
+  "standard-4": { memory: "12 GiB", vcpu: "4" },
+};
+/** The size when a config sets none, or there's no valid config (see `SANDBOX_RESOURCES`). */
 export const DEFAULT_SANDBOX_SIZE: SandboxSize = "standard-1";
 
 /** A selection policy: a vote says who is eligible to vote in it. */

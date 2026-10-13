@@ -22,11 +22,12 @@ function setup() {
 }
 
 describe("the Sandbox size", () => {
-  it("names the config key, its sizes, its default and that it's read from main", async () => {
+  it("names the config key, its sizes and their resources, its default and that it's read from main", async () => {
     const { text } = await llms();
     expect(text).toContain("sandbox: {size: standard-2}");
-    expect(text).toContain("lite, standard-1, standard-2, standard-3 or standard-4");
-    expect(text).toContain("The default is standard-1");
+    expect(text).toContain("lite (256 MiB, 1/16 vCPU), standard-1 (4 GiB, 1/2 vCPU), standard-2 (6 GiB, 1 vCPU),");
+    expect(text).toContain("standard-3 (8 GiB, 2 vCPU) or standard-4 (12 GiB, 4 vCPU)");
+    expect(text).toContain("The default is standard-1.");
     expect(text).toContain("read from the origin's `main`");
   });
 });

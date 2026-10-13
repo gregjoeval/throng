@@ -57,6 +57,7 @@ import { basicAuthHeader, parseCommit } from "./e2e-git.ts";
 import type { Commit } from "./e2e-git.ts";
 import { agentLoop, toolCaller } from "./e2e-mcp.ts";
 import type { LoopAttempt } from "./e2e-mcp.ts";
+import { connectionErrorCode, isIdempotent, withRetry } from "./e2e-retry.ts";
 
 const run = promisify(execFile);
 const FIXTURE = new URL("../fixtures/fixture-worker/", import.meta.url).pathname;
@@ -1337,9 +1338,11 @@ async function refs(): Promise<void> {
 
   // The Worker copies b's main into a's archive namespace, as closing an attempt does.
   const bMain = (await git(b.work, "rev-parse", "HEAD")).trim();
+  // copy-ref is safe to repeat: a target ref already at the sha is left as it is.
   const copied = await api<{ sha: string | null }>(
     "POST",
     `/e2e/repos/${originRepo(b.project)}/copy-ref?fromRef=refs/heads/main&to=${originRepo(a.project)}&toRef=${archiveRef("t1a1")}`,
+    { retry: true },
   );
   timeline.mark("worker archived b's main into a");
   assert(copied.sha === bMain, `copy-ref returned ${copied.sha}, expected ${bMain}`);
@@ -1359,6 +1362,7 @@ async function refs(): Promise<void> {
   const restored = await api<{ sha: string | null }>(
     "POST",
     `/e2e/repos/${originRepo(a.project)}/copy-ref?fromRef=${raw}&to=${originRepo(b.project)}&toRef=${archiveRef("t9a9")}`,
+    { retry: true },
   );
   timeline.mark("worker restored a's archive into b");
   assert(restored.sha === archived, `copy-ref returned ${restored.sha}, expected ${archived}`);
@@ -1486,7 +1490,8 @@ let e2eUserToken: Promise<MintedToken> | null = null;
 
 /** The e2e user's Throng token, minted once per run. */
 function e2eUser(): Promise<MintedToken> {
-  e2eUserToken ??= api("POST", "/e2e/token");
+  // A repeat mints a second token, which expires unused with the e2e tokens' TTL.
+  e2eUserToken ??= api("POST", "/e2e/token", { retry: true });
   return e2eUserToken;
 }
 
@@ -1496,7 +1501,8 @@ const e2eAgentTokens: Promise<MintedToken>[] = [];
 /** Mints a Throng token under `alias` for the e2e user, or for the reviewer: a user who isn't the attempts' author. */
 function e2eAgentToken(alias: string, as?: "reviewer"): Promise<MintedToken> {
   const query = new URLSearchParams({ alias, ...(as === undefined ? {} : { as }) });
-  const minted = api<MintedToken>("POST", `/e2e/token?${query}`);
+  // A repeat mints a second token, which expires unused with the e2e tokens' TTL.
+  const minted = api<MintedToken>("POST", `/e2e/token?${query}`, { retry: true });
   e2eAgentTokens.push(minted);
   return minted;
 }
@@ -1513,7 +1519,21 @@ async function revokeE2eTokens(): Promise<void> {
 
 /** Creates the task the scenario expects to be `expected` (numbers are per project, from 1). */
 async function createTask(p: RealProject, expected: string, title: string): Promise<void> {
-  const { ref } = await throng<{ ref: string }>(p, "POST", "/tasks", { title });
+  const create = async () => (await throng<{ ref: string }>(p, "POST", "/tasks", { title })).ref;
+  let ref: string;
+  try {
+    ref = await create();
+  } catch (error) {
+    const code = connectionErrorCode(error);
+    if (code === null) throw error;
+    // The reset POST may have created the task: if `expected` is there with this title it did; otherwise send it again.
+    const made = await throng<ProjectTask>(p, "GET", `/tasks/${expected}`).catch(nullIfNotFound);
+    if (made?.title === title) ref = made.ref;
+    else {
+      console.log(`  retry 1/1 POST /tasks after ${code}`);
+      ref = await create();
+    }
+  }
   assert(ref === expected, `created ${ref}, expected ${expected}`);
 }
 
@@ -1633,29 +1653,54 @@ function throng<T>(p: RealProject, method: string, path: string, body?: unknown)
   return throngApi(p, method, `/projects/${p.owner}/${p.project}${path}`, body);
 }
 
-/** Calls the product API (`/api`) as the e2e user. */
-async function throngApi<T>(p: RealProject, method: string, path: string, body?: unknown): Promise<T> {
-  const response = await fetch(`${baseUrl}/api${path}`, {
-    method,
-    headers: {
-      Authorization: `Bearer ${p.token}`,
-      ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-    },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-  });
-  const text = await response.text();
-  if (!response.ok) throw new Error(`${method} ${path}: ${response.status} ${text}`);
-  return JSON.parse(text) as T;
+/**
+ * Calls the product API (`/api`) as the e2e user. A GET or DELETE is sent again after a connection
+ * error; a POST or PATCH isn't, since the reset one may have taken effect.
+ */
+function throngApi<T>(p: RealProject, method: string, path: string, body?: unknown): Promise<T> {
+  const send = async () => {
+    const response = await fetch(`${baseUrl}/api${path}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${p.token}`,
+        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    const text = await response.text();
+    if (!response.ok) throw new HttpError(`${method} ${path}: ${response.status} ${text}`, response.status);
+    return JSON.parse(text) as T;
+  };
+  return isIdempotent(method) ? withRetry(`${method} /api${path}`, send) : send();
 }
 
 /** A product API route that answers a bare diff. */
-async function throngText(p: RealProject, path: string): Promise<string> {
-  const response = await fetch(`${baseUrl}/api/projects/${p.owner}/${p.project}${path}`, {
-    headers: { Authorization: `Bearer ${p.token}`, Accept: "text/x-diff" },
+function throngText(p: RealProject, path: string): Promise<string> {
+  const url = `/api/projects/${p.owner}/${p.project}${path}`;
+  return withRetry(`GET ${url}`, async () => {
+    const response = await fetch(`${baseUrl}${url}`, {
+      headers: { Authorization: `Bearer ${p.token}`, Accept: "text/x-diff" },
+    });
+    const text = await response.text();
+    if (!response.ok) throw new HttpError(`GET ${path}: ${response.status} ${text}`, response.status);
+    return text;
   });
-  const text = await response.text();
-  if (!response.ok) throw new Error(`GET ${path}: ${response.status} ${text}`);
-  return text;
+}
+
+/** Null for a 404; rethrows any other error. */
+function nullIfNotFound(error: unknown): null {
+  if (error instanceof HttpError && error.status === 404) return null;
+  throw error;
+}
+
+/** A response that wasn't ok. */
+class HttpError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
 }
 
 /** Calls `read` every POLL_MS until it returns something other than null, for at most `timeoutMs`. */
@@ -1707,14 +1752,21 @@ async function cleanUp(project: string, work: string): Promise<void> {
   await rm(work, { recursive: true, force: true });
 }
 
-async function api<T>(method: string, path: string): Promise<T> {
-  const response = await fetch(`${baseUrl}${path}`, {
-    method,
-    headers: { Authorization: `Bearer ${e2eSecret}` },
-  });
-  const body = await response.text();
-  if (!response.ok) throw new Error(`${method} ${path}: ${response.status} ${body}`);
-  return JSON.parse(body) as T;
+/**
+ * Calls an e2e route. A GET or DELETE is sent again after a connection error; any other method
+ * only with `retry`, where its caller has made sure a repeat is harmless.
+ */
+function api<T>(method: string, path: string, { retry = isIdempotent(method) }: { retry?: boolean } = {}): Promise<T> {
+  const send = async () => {
+    const response = await fetch(`${baseUrl}${path}`, {
+      method,
+      headers: { Authorization: `Bearer ${e2eSecret}` },
+    });
+    const body = await response.text();
+    if (!response.ok) throw new HttpError(`${method} ${path}: ${response.status} ${body}`, response.status);
+    return JSON.parse(body) as T;
+  };
+  return retry ? withRetry(`${method} ${path}`, send) : send();
 }
 
 async function git(cwd: string, ...args: string[]): Promise<string> {

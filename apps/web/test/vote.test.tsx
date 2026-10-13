@@ -97,6 +97,18 @@ describe("the vote banner", () => {
     expect(banner()).toHaveTextContent("You voted for t1a3.");
   });
 
+  it("shows a candidate a follow of the task branch moved as being scored, not withdrawn", async () => {
+    const vote = openVote([2, 1]);
+    vote.candidates = vote.candidates.map((c) => (c.attempt === "t1a1" ? { ...c, votes: 0, withdrawn: true } : c));
+    const followed = arenaAttempt(1, 1, { status: "running" });
+    await arenaWith([followed, passing(2)], { selection: VOTE_BY_ANYONE, vote });
+
+    const tallies = within(banner()).getByRole("list", { name: "Tallies" });
+    const items = within(tallies).getAllByRole("listitem");
+    expect(items.map((item) => item.textContent)).toEqual(["t1a1being scored", "t1a21 vote"]);
+    expect(items[0]).not.toHaveClass("line-through");
+  });
+
   it("offers the task's creator to open a vote under the vote policy, with an optional deadline", async () => {
     const { user, asked } = await arenaWith([passing(1), passing(2)], { selection: VOTE_BY_ANYONE });
     expect(banner()).toHaveTextContent("Selection is by vote, among anyone.");

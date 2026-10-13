@@ -41,27 +41,48 @@ function useVoteMutation<T>({ projectRef, task }: InTask, mutationFn: (input: T)
 
 /**
  * The banner over the lanes: the open vote, or under the `vote` policy the way to open one. Nothing
- * under the creator's policy with no vote open. `manage` is whether the viewer may open and close
- * votes; `active` is how many active attempts the task has.
+ * under the creator's policy with no vote open. `attempts` are the task's attempts in the arena;
+ * `manage` is whether the viewer may open and close votes; `active` is how many active attempts the
+ * task has.
  */
 export function VoteBanner({
   projectRef,
   task,
   selection,
   vote,
+  attempts,
   manage,
   active,
-}: InTask & { selection: Selection; vote: Vote | null; manage: boolean; active: number }) {
+}: InTask & { selection: Selection; vote: Vote | null; attempts: ArenaAttempt[]; manage: boolean; active: number }) {
   if (vote === null && selection.policy !== "vote") return null;
   return (
     <section aria-label="Vote" className="flex flex-col gap-2 rounded-xl border px-4 py-3 text-sm">
       {vote === null ? (
         <NoVote projectRef={projectRef} task={task} selection={selection} manage={manage} />
       ) : (
-        <OpenVote projectRef={projectRef} task={task} vote={vote} manage={manage} active={active} />
+        <OpenVote projectRef={projectRef} task={task} vote={vote} attempts={attempts} manage={manage} active={active} />
       )}
     </section>
   );
+}
+
+/**
+ * A candidate's tally, or why it doesn't count now, and how it reads. A candidate out only while its
+ * pinned head is scored isn't struck through: a follow of the task branch moved it to a merge not
+ * scored yet, and its ballots count again once that passes.
+ */
+function tally(candidate: Vote["candidates"][number], attempts: ArenaAttempt[]): { text: string; style: string } {
+  if (!candidate.withdrawn) return { text: plural(candidate.votes, "vote", "votes"), style: "" };
+  const scoring = attempts.some(
+    (a) =>
+      a.ref === candidate.attempt &&
+      a.state === "open" &&
+      a.sha === candidate.head &&
+      (a.status === "queued" || a.status === "running"),
+  );
+  return scoring
+    ? { text: "being scored", style: "text-muted-foreground" }
+    : { text: "withdrawn", style: "text-muted-foreground line-through" };
 }
 
 /** Under the `vote` policy with no vote open: who would vote, and Open vote for whoever may. */
@@ -116,9 +137,10 @@ function OpenVote({
   projectRef,
   task,
   vote,
+  attempts,
   manage,
   active,
-}: InTask & { vote: Vote; manage: boolean; active: number }) {
+}: InTask & { vote: Vote; attempts: ArenaAttempt[]; manage: boolean; active: number }) {
   return (
     <>
       <p className="flex flex-wrap items-baseline gap-x-3">
@@ -131,15 +153,15 @@ function OpenVote({
         )}
       </p>
       <ul aria-label="Tallies" className="flex flex-wrap gap-2">
-        {vote.candidates.map((candidate) => (
-          <li
-            key={candidate.attempt}
-            className={`flex gap-2 rounded-md border px-2 py-0.5 ${candidate.withdrawn ? "text-muted-foreground line-through" : ""}`}
-          >
-            <span className="font-mono">{candidate.attempt}</span>
-            <span>{candidate.withdrawn ? "withdrawn" : plural(candidate.votes, "vote", "votes")}</span>
-          </li>
-        ))}
+        {vote.candidates.map((candidate) => {
+          const { text, style } = tally(candidate, attempts);
+          return (
+            <li key={candidate.attempt} className={`flex gap-2 rounded-md border px-2 py-0.5 ${style}`}>
+              <span className="font-mono">{candidate.attempt}</span>
+              <span>{text}</span>
+            </li>
+          );
+        })}
       </ul>
       {vote.myBallot === null ? null : <p className="text-muted-foreground">You voted for {vote.myBallot.attempt}.</p>}
       {manage ? <CloseVote projectRef={projectRef} task={task} vote={vote} active={active} /> : null}

@@ -101,12 +101,20 @@ The decision, made once per task, that picks the attempt that becomes the task's
 _Avoid_: Judging, winner pick
 
 **Selection policy**:
-Who makes a task's selection: its creator, or a vote among eligible users (acting as themselves, under an alias, or either).
+Who makes a task's selection: its creator, or a vote among eligible users (acting as themselves, under an alias, or either). A project sets it, and only the project owner can override it for one task.
 _Avoid_: Review policy
 
 **Vote**:
 A selection where eligible users each back one candidate attempt and the most-backed attempt wins.
-_Avoid_: Poll, ballot
+_Avoid_: Poll
+
+**Candidate**:
+An attempt in a vote, pinned to the head it was passing at when it joined; its author's push to it withdraws it, and it can be added again once its new head passes. A follow of the task branch moves the pin, and its ballots, to the follow's merge; the candidate is being scored until that merge passes (it counts again) or fails (it is withdrawn), and the vote can't close meanwhile.
+_Avoid_: Nominee, entry
+
+**Ballot**:
+A user's one choice in a vote, for a candidate at its pinned head; their aliases share it, and casting again replaces it.
+_Avoid_: Vote (when meaning one user's choice)
 
 **Scoring**:
 The whole run that produces an attempt's gate and score.

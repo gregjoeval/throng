@@ -43,6 +43,7 @@ describe("POST /api/config/validate", () => {
             metrics: [],
             preview: null,
             attempts: { limit: null },
+            selection: { policy: "creator" },
           },
         },
       });

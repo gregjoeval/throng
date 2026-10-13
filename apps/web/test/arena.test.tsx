@@ -12,6 +12,7 @@ import {
   check,
   MAIN,
   me,
+  NO_VOTE,
   platformCheck,
   result,
   scoredMetrics,
@@ -542,7 +543,7 @@ describe("the arena's rail", () => {
       http.get("*/api/projects/:owner/:project/tasks/t1/arena", () => {
         calls += 1;
         const t1a1 = calls === 1 ? arenaAttempt(1, 1, { status: "running" }) : passing(1);
-        return HttpResponse.json({ task: "t1", metrics: [], attempts: [t1a1, passing(2)] });
+        return HttpResponse.json({ ...NO_VOTE, task: "t1", metrics: [], attempts: [t1a1, passing(2)] });
       }),
       serveCompare(filesByHead, asked),
       ...serveArena(task(1), [passing(1), passing(2)]),

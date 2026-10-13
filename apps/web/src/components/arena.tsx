@@ -1,7 +1,8 @@
 // The arena (variant D): a rail of attempt cards on the left, and the shown attempts' lanes side by
 // side. Clicking a card toggles its lane; lanes keep the order they were added in. Above the lanes,
-// toggles arrange them by attempt or by file, diff them against their bases or current main, and lay
-// the diffs out split or unified; the URL and `localStorage` remember the choice (`arena-view.ts`).
+// the vote banner (under the `vote` selection policy, or while a vote is open), then toggles that
+// arrange them by attempt or by file, diff them against their bases or current main, and lay the
+// diffs out split or unified; the URL and `localStorage` remember the choice (`arena-view.ts`).
 
 import { useQueries, useQuery } from "@tanstack/react-query";
 import { getRouteApi } from "@tanstack/react-router";
@@ -11,13 +12,15 @@ import type { ReactNode } from "react";
 import { ClosedAttempts } from "@/components/closed-attempts";
 import { FileSection } from "@/components/commit-files";
 import { GatePill, Lane, laneCompareQuery, laneReference, VerdictCounts } from "@/components/lane";
-import { useSelect } from "@/components/selection";
+import { useMaySelect, useSelect } from "@/components/selection";
 import { ErrorState, Loading } from "@/components/states";
 import { Button } from "@/components/ui/button";
-import { mainHeadQuery, taskArenaQuery } from "@/lib/api";
+import { useVoteActions, VoteBanner } from "@/components/vote";
+import type { Vote } from "@/components/vote";
+import { mainHeadQuery, taskArenaQuery, taskQuery } from "@/lib/api";
 import type { ProjectRef } from "@/lib/api";
 import { bestValues, formatValue, isBest, metricColumns, sortRail, toggleLane } from "@/lib/arena";
-import type { ArenaAttempt, MetricColumn, RailSort } from "@/lib/arena";
+import type { ArenaAttempt, MetricColumn, RailSort, TaskArena } from "@/lib/arena";
 import { arenaView, fileRows, parseArenaSearch, readStoredView, storageKey, storeView } from "@/lib/arena-view";
 import type { ArenaSearch, ArenaView, Arrangement, Layout, Reference } from "@/lib/arena-view";
 import { isActive } from "@/lib/tasks";
@@ -49,6 +52,8 @@ export function Arena({ projectRef, task, attempts }: InTask & { attempts: Attem
       attempts={arena.data.attempts}
       columns={metricColumns(arena.data.metrics)}
       notes={notes}
+      selection={arena.data.selection}
+      vote={arena.data.vote}
     />
   );
 }
@@ -59,17 +64,28 @@ function ArenaLayout({
   attempts,
   columns,
   notes,
+  selection,
+  vote,
 }: InTask & {
   attempts: ArenaAttempt[];
   columns: MetricColumn[];
   notes: Map<string, string>;
+  selection: TaskArena["selection"];
+  vote: Vote | null;
 }) {
   const active = attempts.filter(isActive);
   const closed = attempts.filter((a) => a.state === "closed");
   const [view, change] = useArenaView(projectRef, task, active);
   const shown = view.lanes.flatMap((ref) => active.filter((a) => a.ref === ref));
   const sideways = shown.length > SHARED_WIDTH_LANES;
+  const manage = useMaySelect(projectRef, useQuery(taskQuery(projectRef, task)).data);
   const select = useSelect(projectRef, task, active.length);
+  const voteActions = useVoteActions({ projectRef, task }, vote, manage);
+  // Under the vote policy, closing a vote selects: each attempt offers the open vote's actions, never Select.
+  const actions = (attempt: ArenaAttempt): ReactNode => {
+    if (voteActions !== null) return voteActions(attempt);
+    return selection.policy === "vote" ? undefined : select?.(attempt.ref);
+  };
   return (
     <div data-testid="arena" className="grid gap-4 lg:grid-cols-[16rem_minmax(0,1fr)] lg:items-start">
       <Rail
@@ -80,9 +96,17 @@ function ArenaLayout({
         columns={columns}
         lanes={view.lanes}
         onToggle={(ref) => change({ lanes: toggleLane(view.lanes, ref) })}
-        select={select}
+        actions={actions}
       />
       <div className="flex min-w-0 flex-col gap-3">
+        <VoteBanner
+          projectRef={projectRef}
+          task={task}
+          selection={selection}
+          vote={vote}
+          manage={manage}
+          active={active.length}
+        />
         <ViewToggles view={view} lanes={shown.length} onChange={change} />
         <section aria-label="Lanes" className="min-w-0 overflow-x-auto pb-2">
           <div
@@ -100,7 +124,7 @@ function ArenaLayout({
                 reference={view.ref}
                 layout={view.layout}
                 files={view.by === "attempt"}
-                actions={select?.(attempt.ref)}
+                actions={actions(attempt)}
               />
             ))}
             {view.by === "file" ? (
@@ -321,14 +345,15 @@ function Rail({
   columns,
   lanes,
   onToggle,
-  select,
+  actions,
 }: InTask & {
   attempts: ArenaAttempt[];
   closed: ArenaAttempt[];
   columns: MetricColumn[];
   lanes: string[];
   onToggle: (ref: string) => void;
-  select: ((ref: string) => ReactNode) | null;
+  /** What each card offers below it: Select, or the open vote's actions. */
+  actions: (attempt: ArenaAttempt) => ReactNode;
 }) {
   const [sort, setSort] = useState<RailSort>("number");
   const best = bestValues(attempts, columns);
@@ -369,7 +394,7 @@ function Rail({
               best={best}
               shown={lanes.includes(attempt.ref)}
               onToggle={() => onToggle(attempt.ref)}
-              footer={select?.(attempt.ref)}
+              footer={actions(attempt)}
             />
           </li>
         ))}
@@ -389,7 +414,7 @@ const SCORING_LABELS: Partial<Record<ArenaAttempt["status"], string>> = {
 /**
  * One attempt's card: its ref, author, gate and scoring status, every metric (the best among passing
  * attempts marked), and its verdict counts. The whole card toggles its lane; `footer` sits below it,
- * outside the toggle, for actions of its own (the selection slice's Select).
+ * outside the toggle, for actions of its own (Select, or the open vote's Vote).
  */
 export function RailCard({
   attempt,
@@ -444,7 +469,7 @@ export function RailCard({
         </dl>
         <VerdictCounts verdicts={attempt.verdicts} />
       </button>
-      {footer === undefined ? null : <div className="border-t px-3 py-2">{footer}</div>}
+      {footer === undefined || footer === null ? null : <div className="border-t px-3 py-2">{footer}</div>}
     </div>
   );
 }

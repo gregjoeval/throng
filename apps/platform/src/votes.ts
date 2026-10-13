@@ -1,12 +1,10 @@
 // Votes, kept in the project Durable Object's SQLite next to tasks and attempts: a task's selection
-// made by vote, under the `vote` selection policy. This module holds the records; the task store
-// decides who may act, which attempts are candidates and when a candidate is withdrawn, and calls it
-// inside its own transactions.
+// made by vote, under the `vote` selection policy. This module holds the records and the rules a vote
+// counts by, which the web app shares; the task store decides who may act, which attempts are
+// candidates and when a candidate is withdrawn, and calls it inside its own transactions.
 
 import type { VoteEligibility } from "./config.ts";
-import { ServiceError } from "./errors.ts";
 import type { ActedBy } from "./merge-requests.ts";
-import { attemptRef } from "./task-refs.ts";
 import type { Sql } from "./task-store.ts";
 import type { Actor } from "./tokens.ts";
 
@@ -113,42 +111,31 @@ const SCHEMA = [
   )`,
 ];
 
-/** Who each eligibility lets vote, as an error names them. */
+/** Who each eligibility lets vote. */
 export const ELIGIBLE_VOTERS: Record<VoteEligibility, string> = {
   humans: "users acting as themselves",
   agents: "users acting under an alias",
   anyone: "anyone",
 };
 
-/** Whether `actor` may cast a ballot in a vote among `eligible`: as themselves, under an alias, or either. */
-export function mayVote(eligible: VoteEligibility, actor: Actor): boolean {
-  if (eligible === "humans") return actor.alias === null;
-  if (eligible === "agents") return actor.alias !== null;
+/**
+ * Whether a user acting under `alias` (null: as themselves) may cast a ballot in a vote among
+ * `eligible`.
+ */
+export function mayVote(eligible: VoteEligibility, alias: string | null): boolean {
+  if (eligible === "humans") return alias === null;
+  if (eligible === "agents") return alias !== null;
   return true;
 }
 
 /**
- * The vote's winner: the standing candidate with the most ballots. A tie is broken by `named`, one
- * of the tied candidates; `named`, if given, must be one of the leaders. Null when every candidate
- * is withdrawn.
+ * The candidates with the most ballots among those not withdrawn: one is the winner, more are a tie.
+ * None when every candidate is withdrawn.
  */
-export function voteWinner(vote: VoteDetail, named: number | undefined): CandidateTally | null {
-  const standing = vote.candidates.filter((c) => !c.withdrawn);
+export function voteLeaders<C extends { votes: number; withdrawn: boolean }>(candidates: readonly C[]): C[] {
+  const standing = candidates.filter((c) => !c.withdrawn);
   const most = Math.max(...standing.map((c) => c.votes));
-  const leading = standing.filter((c) => c.votes === most);
-  const refs = leading.map((c) => attemptRef(vote.task, c.attempt)).join(", ");
-  if (named !== undefined) {
-    const pick = leading.find((c) => c.attempt === named);
-    if (pick === undefined) {
-      const what = leading.length === 1 ? "the vote's winner" : "one of the tied candidates";
-      throw new ServiceError("invalidRequest", `${attemptRef(vote.task, named)} isn't ${what}: ${refs}`);
-    }
-    return pick;
-  }
-  if (leading.length > 1) {
-    throw new ServiceError("invalidRequest", `the vote is tied between ${refs}; name one as attempt to select it`);
-  }
-  return leading[0] ?? null;
+  return standing.filter((c) => c.votes === most);
 }
 
 /** One project's votes. Checks no permission and no attempt state: the task store does. */

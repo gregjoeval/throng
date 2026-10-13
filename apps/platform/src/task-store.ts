@@ -50,8 +50,8 @@ import { attemptRef, reservedTask, taskBranchRef, taskRef } from "./task-refs.ts
 import type { Actor } from "./tokens.ts";
 import { Verdicts } from "./verdicts.ts";
 import type { StoredVerdict, VerdictRecommendation, VerdictSummary } from "./verdicts.ts";
-import { ELIGIBLE_VOTERS, mayVote, Votes, voteWinner } from "./votes.ts";
-import type { StoredCandidate, StoredVote, VoteDetail } from "./votes.ts";
+import { ELIGIBLE_VOTERS, mayVote, voteLeaders, Votes } from "./votes.ts";
+import type { CandidateTally, StoredCandidate, StoredVote, VoteDetail } from "./votes.ts";
 import { alreadyMet, Waiters, watchChanged } from "./waiters.ts";
 import type { AttemptWatch, WaitCondition } from "./waiters.ts";
 
@@ -1749,7 +1749,7 @@ export class TaskStore {
     if (vote.deadline !== null && Date.parse(vote.deadline) <= this.#now().getTime()) {
       throw invalidState(`${taskRef(vote.task)}'s vote stopped taking ballots at ${vote.deadline}`);
     }
-    if (!mayVote(vote.eligible, actor)) {
+    if (!mayVote(vote.eligible, actor.alias)) {
       throw new ServiceError("forbidden", `only ${ELIGIBLE_VOTERS[vote.eligible]} may vote on ${taskRef(vote.task)}`);
     }
     if (actor.user.id === current.author) {
@@ -2917,6 +2917,28 @@ function mayOwn(project: ProjectContext, actor: Actor): void {
 /** The attempt's author, or one of their aliases, holds its claim. */
 function mayAuthor(actor: Actor, current: StoredAttempt): void {
   if (actor.user.id !== current.author) throw new ServiceError("forbidden", `only the author of ${current.fork} may`);
+}
+
+/**
+ * The vote's winner: the standing candidate with the most ballots. A tie is broken by `named`, one
+ * of the tied candidates; `named`, if given, must be one of the leaders. Null when every candidate
+ * is withdrawn.
+ */
+function voteWinner(vote: VoteDetail, named: number | undefined): CandidateTally | null {
+  const leading = voteLeaders(vote.candidates);
+  const refs = leading.map((c) => attemptRef(vote.task, c.attempt)).join(", ");
+  if (named !== undefined) {
+    const pick = leading.find((c) => c.attempt === named);
+    if (pick === undefined) {
+      const what = leading.length === 1 ? "the vote's winner" : "one of the tied candidates";
+      throw new ServiceError("invalidRequest", `${attemptRef(vote.task, named)} isn't ${what}: ${refs}`);
+    }
+    return pick;
+  }
+  if (leading.length > 1) {
+    throw new ServiceError("invalidRequest", `the vote is tied between ${refs}; name one as attempt to select it`);
+  }
+  return leading[0] ?? null;
 }
 
 function sourceOf(mr: StoredMergeRequest): AttemptInput {

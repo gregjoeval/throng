@@ -109,7 +109,7 @@ A selection where eligible users each back one candidate attempt and the most-ba
 _Avoid_: Poll
 
 **Candidate**:
-An attempt in a vote, pinned to the head it was passing at when it joined; its author's push to it withdraws it, and it can be added again once its new head passes. A follow of the task branch moves the pin, and its ballots, to the follow's merge; the candidate is being scored until that merge passes (it counts again) or fails (it is withdrawn), and the vote can't close meanwhile.
+An attempt in a vote, pinned to the head it was passing at when it joined; it counts only while it is passing at that head, the same rule that adds one. Its author's push to it withdraws it, and it can be added again once its new head passes. A follow of the task branch moves the pin, and its ballots, to the follow's merge; the candidate is being scored until that merge passes (it counts again) or fails (it is withdrawn), as it is while its head is rescored, and the vote can't close meanwhile.
 _Avoid_: Nominee, entry
 
 **Ballot**:

@@ -47,7 +47,7 @@ export interface StoredBallot {
 
 /**
  * Where a candidate of an open vote stands: `standing` counts; `scoring` is out only until its pinned
- * head, a follow's merge, finishes being scored; `withdrawn` is out.
+ * head (a follow's merge, or a head being rescored) finishes being scored; `withdrawn` is out.
  */
 export type CandidateStanding = "standing" | "scoring" | "withdrawn";
 
@@ -58,7 +58,7 @@ export type CandidateStanding = "standing" | "scoring" | "withdrawn";
 export interface CandidateTally extends StoredCandidate {
   votes: number;
   withdrawn: boolean;
-  /** Withdrawn only until its pinned head, a follow's merge, finishes being scored. */
+  /** Withdrawn only until its pinned head (a follow's merge, or a head being rescored) finishes being scored. */
   being_scored: boolean;
 }
 

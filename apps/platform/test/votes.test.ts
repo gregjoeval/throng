@@ -146,6 +146,7 @@ async function setup(selection = "selection: { policy: vote }\n") {
   const tally = (as: Actor = owner) => vote(as).candidates.map((c) => [c.attempt, c.votes, c.withdrawn]);
   return {
     repos,
+    sql,
     store,
     journal,
     now,
@@ -208,6 +209,30 @@ describe("opening a vote", () => {
       ref: "t1",
       candidates: ["t1a1", "t1a3"],
     });
+  });
+
+  it("leaves out an attempt being rescored, which can be added once the rescore passes", async () => {
+    const { store, t1a2, scoreAll, score, tally } = await setup();
+    await scoreAll();
+    await store.rescore(PROJECT, cat, t1a2);
+    expect((await store.openVote(PROJECT, cat, { task: 1 })).candidates.map((c) => c.attempt)).toEqual([1, 3]);
+    expect(await code(() => store.addVoteCandidate(PROJECT, cat, t1a2))).toBe("invalidState");
+    await score(t1a2);
+    store.addVoteCandidate(PROJECT, cat, t1a2);
+    expect(tally()).toEqual([
+      [1, 0, false],
+      [3, 0, false],
+      [2, 0, false],
+    ]);
+  });
+
+  it("leaves out an attempt with no recorded head, rather than pinning it to none", async () => {
+    const { sql, store, t1a2, scoreAll } = await setup();
+    await scoreAll();
+    sql.exec("DELETE FROM scoring_heads WHERE task = ? AND attempt = ?", t1a2.task, t1a2.number);
+    const opened = await store.openVote(PROJECT, cat, { task: 1 });
+    expect(opened.candidates.map((c) => c.attempt)).toEqual([1, 3]);
+    expect(opened.candidates.every((c) => /^[0-9a-f]{40}$/.test(c.head))).toBeTruthy();
   });
 
   it("takes the eligibility of the project's policy, or the task's override", async () => {
@@ -380,6 +405,38 @@ describe("candidates", () => {
     await score(t1a1, done("failed"));
     expect(tally()[0]).toEqual([1, 0, true]);
     expect((await store.closeVote(PROJECT, cat, { task: 1 })).vote.winner).toBe(2);
+  });
+
+  it("are being scored while a rescore of their head runs, as an attempt being rescored can't be added", async () => {
+    const { store, t1a1, t1a2, scoreAll, score, vote } = await setup();
+    await scoreAll();
+    await store.openVote(PROJECT, cat, { task: 1 });
+    store.castVote(PROJECT, eve, t1a1);
+    store.castVote(PROJECT, fay, t1a1);
+    store.castVote(PROJECT, dan, t1a2);
+    await store.rescore(PROJECT, cat, t1a1);
+    expect(vote().candidates[0]).toMatchObject({ attempt: 1, votes: 0, withdrawn: true, being_scored: true });
+    expect(await code(store.closeVote(PROJECT, cat, { task: 1 }))).toBe("invalidState");
+    expect(await code(() => store.castVote(PROJECT, owner, t1a1))).toBe("invalidState");
+
+    await score(t1a1);
+    expect(vote().candidates[0]).toMatchObject({ attempt: 1, votes: 2, withdrawn: false, being_scored: false });
+    expect((await store.closeVote(PROJECT, cat, { task: 1 })).vote.winner).toBe(1);
+  });
+
+  it("are withdrawn while a rescore of their head errored, and stand again with their ballots once one passes", async () => {
+    const { store, t1a1, scoreAll, score, vote } = await setup();
+    await scoreAll();
+    await store.openVote(PROJECT, cat, { task: 1 });
+    store.castVote(PROJECT, eve, t1a1);
+    await store.rescore(PROJECT, cat, t1a1);
+    await score(t1a1, { status: "errored", error: "sandbox lost" });
+    expect(vote().candidates[0]).toMatchObject({ attempt: 1, votes: 0, withdrawn: true, being_scored: false });
+    expect(await code(() => store.addVoteCandidate(PROJECT, cat, t1a1))).toBe("invalidState");
+
+    await store.rescore(PROJECT, cat, t1a1);
+    await score(t1a1);
+    expect(vote().candidates[0]).toMatchObject({ attempt: 1, votes: 1, withdrawn: false });
   });
 
   it("stay standing when a follow of the task branch moves their head, and keep their ballots", async () => {

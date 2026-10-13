@@ -527,8 +527,8 @@ function mcpServer({ repos, tasks, logs, diffCache }: Deps, { actor, token, env,
     "close_vote",
     "Close the task's open vote, selecting the candidate with the most ballots as its merge request. On a tie, " +
       "name one of the tied candidates as `attempt`. Refused while a candidate is being scored (a follow of the " +
-      "task branch moved it to a merge not scored yet): close it once scoring finishes. The task's creator or the " +
-      "project owner may.",
+      "task branch moved it to a merge not scored yet, or its head is being rescored): close it once scoring " +
+      "finishes. The task's creator or the project owner may.",
     CloseVoteSchema.extend(onTask.shape),
     async ({ project, task, attempt }) => {
       const { vote, mergeRequest } = await service.closeVote(actor, { ...projectPath(project), task, attempt });

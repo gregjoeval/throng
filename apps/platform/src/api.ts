@@ -329,8 +329,9 @@ const VoteSchema = z
             beingScored: z.boolean().openapi({
               description:
                 "Withdrawn only until `head`, its attempt's head, finishes being scored: a follow of the task branch " +
-                "moved it there. It counts again if `head` passes, and stays withdrawn if it fails. While any candidate " +
-                "is being scored the vote can't be closed. Always false once the vote closed.",
+                "moved it there, or a rescore of it is queued or running. It counts again if `head` passes, and stays " +
+                "withdrawn if it fails. While any candidate is being scored the vote can't be closed. Always false once " +
+                "the vote closed.",
             }),
           })
           .openapi("VoteCandidateTally"),
@@ -1848,7 +1849,7 @@ export function apiRoutes(options: ApiOptions = {}) {
         description:
           "Under the `vote` selection policy, opens a vote among the attempts passing now, each a candidate at its " +
           "current head, open to the users the policy's `eligible` lets vote. Its author's push to a candidate during " +
-          "the vote withdraws it, as does a rescore of its head that fails the gate, and its ballots stop counting; one " +
+          "the vote withdraws it, as does a rescore of its head that doesn't pass, and its ballots stop counting; one " +
           "back at its pinned head and passing there stands again. A follow of the task branch isn't its author's " +
           "push: it moves the candidate, with its ballots, to the follow's merge, which counts once it passes. While " +
           "the vote is open the task's checks, metrics and selection policy can't change. " +

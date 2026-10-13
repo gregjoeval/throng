@@ -3,17 +3,12 @@
 // are stubbed; each step runs once.
 
 import { describe, expect, it, vi } from "vitest";
+import type { SandboxSize } from "../src/config.ts";
 import type { FollowOutcome, FollowParams } from "../src/follows.ts";
-import { RESULT_PREFIX } from "../src/scripts.ts";
+import { importWorkerModule } from "./support/worker-module.ts";
+import { result, runOnce } from "./support/workflow-runs.ts";
 
-vi.mock("cloudflare:workers", () => ({
-  WorkflowEntrypoint: class {
-    env: unknown;
-    constructor(_ctx: unknown, env: unknown) {
-      this.env = env;
-    }
-  },
-}));
+vi.mock("cloudflare:workers", () => import("./support/cloudflare-workers.ts"));
 
 vi.mock("../src/artifacts", () => ({
   reposFor: () => ({
@@ -22,15 +17,12 @@ vi.mock("../src/artifacts", () => ({
   }),
 }));
 
-// Imported by a computed path: the module is Worker code, which this project's Node typecheck can't
-// follow (`cloudflare:workers`), so it is typed here by what the test calls.
-const WORKFLOW_MODULE = "../src/follow-workflow.ts";
-const { FollowWorkflow } = (await import(WORKFLOW_MODULE)) as {
+const { FollowWorkflow } = await importWorkerModule<{
   FollowWorkflow: new (
     ctx: unknown,
     env: unknown,
   ) => { run: (event: unknown, step: unknown) => Promise<FollowOutcome | null> };
-};
+}>("follow-workflow");
 
 const params: FollowParams = {
   project: "abc123",
@@ -46,16 +38,16 @@ const MERGED = { kind: "merged", before: "b".repeat(40), head: "c".repeat(40) } 
 async function follow(claimed: boolean) {
   const events: string[] = [];
   const scripts: string[] = [];
-  const sizes: string[] = [];
+  const sizes: SandboxSize[] = [];
   const reported: [number, FollowOutcome][] = [];
   const env = {
     SANDBOX: {
       getByName: (name: string) => ({
-        run: async (script: string, { size }: { size: string }) => {
+        run: async (script: string, { size }: { size: SandboxSize }) => {
           events.push(`run ${name}`);
           scripts.push(script);
           sizes.push(size);
-          return { exitCode: 0, stdout: `${RESULT_PREFIX}${JSON.stringify(MERGED)}\n`, stderr: "" };
+          return result(MERGED);
         },
         destroy: async () => void events.push(`destroy ${name}`),
       }),
@@ -73,8 +65,10 @@ async function follow(claimed: boolean) {
       }),
     },
   };
-  const step = { do: async (_name: string, ...rest: unknown[]) => (rest.at(-1) as () => Promise<unknown>)() };
-  const outcome = await new FollowWorkflow({}, env).run({ payload: params, instanceId: "abc123-t1a2-follow-7" }, step);
+  const outcome = await new FollowWorkflow({}, env).run(
+    { payload: params, instanceId: "abc123-t1a2-follow-7" },
+    runOnce,
+  );
   return { events, scripts, sizes, reported, outcome };
 }
 

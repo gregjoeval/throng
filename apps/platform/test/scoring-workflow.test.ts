@@ -3,17 +3,12 @@
 // preview Workers are stubbed; each step runs once.
 
 import { describe, expect, it, vi } from "vitest";
+import type { SandboxSize } from "../src/config.ts";
 import type { ScoringOutcome, ScoringParams } from "../src/scoring.ts";
-import { RESULT_PREFIX } from "../src/scripts.ts";
+import { importWorkerModule } from "./support/worker-module.ts";
+import { PASSED, result, runOnce } from "./support/workflow-runs.ts";
 
-vi.mock("cloudflare:workers", () => ({
-  WorkflowEntrypoint: class {
-    env: unknown;
-    constructor(_ctx: unknown, env: unknown) {
-      this.env = env;
-    }
-  },
-}));
+vi.mock("cloudflare:workers", () => import("./support/cloudflare-workers.ts"));
 
 /** The config on the origin's `main`, and on the attempt's own head, which scoring must never read. */
 const MAIN_CONFIG = "sandbox: { size: standard-2 }\npreview: {}\nchecks:\n  - { name: test, command: npm test }\n";
@@ -29,30 +24,18 @@ vi.mock("../src/artifacts", () => ({
 vi.mock("../src/base", () => ({ attemptBase: async () => null }));
 vi.mock("../src/preview-workers", () => ({ previewWorkersFor: () => ({ ensure: async () => {} }) }));
 
-// Imported by a computed path: the module is Worker code, which this project's Node typecheck can't
-// follow (`cloudflare:workers`), so it is typed here by what the test calls.
-const WORKFLOW_MODULE = "../src/workflows.ts";
-const { ScoringWorkflow } = (await import(WORKFLOW_MODULE)) as {
+const { ScoringWorkflow } = await importWorkerModule<{
   ScoringWorkflow: new (
     ctx: unknown,
     env: unknown,
   ) => { run: (event: unknown, step: unknown) => Promise<ScoringOutcome> };
-};
+}>("workflows");
 
 const params: ScoringParams = { project: "abc123", attempt: "t1a1", sha: "a".repeat(40), run: 7 };
 
-const result = (value: unknown) => ({ exitCode: 0, stdout: `${RESULT_PREFIX}${JSON.stringify(value)}\n`, stderr: "" });
-const PASSED = {
-  base: null,
-  shortstat: "",
-  builtinMs: 0,
-  setupFailed: null,
-  checks: [{ exit: 0, durationMs: 1, metrics: {} }],
-};
-
 /** Scores a head whose one check passes and whose Preview deploys, recording sizes and stored logs. */
 async function score() {
-  const sizes: [string | undefined, string][] = [];
+  const sizes: [string | undefined, SandboxSize][] = [];
   const stored = new Map<string, string>();
   const env = {
     CF_ACCOUNT_ID: "acct",
@@ -60,7 +43,7 @@ async function score() {
       getByName: (name: string) => {
         const role = name.split("/").at(-1);
         return {
-          run: async (script: string, { size }: { size: string }) => {
+          run: async (script: string, { size }: { size: SandboxSize }) => {
             sizes.push([role, size]);
             if (script.includes("f=logs/")) return { exitCode: 0, stdout: `${role} log\n`, stderr: "" };
             return role === "score" ? result(PASSED) : result({ ok: true, url: "https://preview.invalid" });
@@ -74,8 +57,7 @@ async function score() {
     },
     LOGS: { put: async (key: string, value: string) => void stored.set(key.split("/").at(-1) ?? key, value) },
   };
-  const step = { do: async (_name: string, ...rest: unknown[]) => (rest.at(-1) as () => Promise<unknown>)() };
-  const outcome = await new ScoringWorkflow({}, env).run({ payload: params, instanceId: "abc123-t1a1-7" }, step);
+  const outcome = await new ScoringWorkflow({}, env).run({ payload: params, instanceId: "abc123-t1a1-7" }, runOnce);
   return { sizes, stored, outcome };
 }
 

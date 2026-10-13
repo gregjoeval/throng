@@ -2,18 +2,13 @@
 // when. `cloudflare:workers` and the Artifacts binding are stubbed; each step runs once.
 
 import { describe, expect, it, vi } from "vitest";
+import type { SandboxSize } from "../src/config.ts";
 import type { LandingOutcome, LandingParams } from "../src/landing.ts";
 import { MISSING_LOG_EXIT } from "../src/logs.ts";
-import { RESULT_PREFIX } from "../src/scripts.ts";
+import { importWorkerModule } from "./support/worker-module.ts";
+import { PASSED, result, runOnce } from "./support/workflow-runs.ts";
 
-vi.mock("cloudflare:workers", () => ({
-  WorkflowEntrypoint: class {
-    env: unknown;
-    constructor(_ctx: unknown, env: unknown) {
-      this.env = env;
-    }
-  },
-}));
+vi.mock("cloudflare:workers", () => import("./support/cloudflare-workers.ts"));
 
 vi.mock("../src/artifacts", () => ({
   reposFor: () => ({
@@ -25,15 +20,12 @@ vi.mock("../src/artifacts", () => ({
   }),
 }));
 
-// Imported by a computed path: the module is Worker code, which this project's Node typecheck can't
-// follow (`cloudflare:workers`), so it is typed here by what the test calls.
-const WORKFLOW_MODULE = "../src/landing-workflow.ts";
-const { LandingWorkflow } = (await import(WORKFLOW_MODULE)) as {
+const { LandingWorkflow } = await importWorkerModule<{
   LandingWorkflow: new (
     ctx: unknown,
     env: unknown,
   ) => { run: (event: unknown, step: unknown) => Promise<LandingOutcome | null> };
-};
+}>("landing-workflow");
 
 const HEAD = "a".repeat(40);
 const MAIN = "b".repeat(40);
@@ -52,32 +44,21 @@ const params: LandingParams = {
   startedAt: 1_700_000_000_000,
 };
 
-const result = (value: unknown) => ({ exitCode: 0, stdout: `${RESULT_PREFIX}${JSON.stringify(value)}\n`, stderr: "" });
-
-/** A retest whose one check passed. */
-const PASSED = {
-  base: null,
-  shortstat: "",
-  builtinMs: 0,
-  setupFailed: null,
-  checks: [{ exit: 0, durationMs: 1, metrics: {} }],
-};
-
 /**
  * Runs a landing whose merge is clean, the merged tree holding `config` (none by default), recording
  * each container's runs and destroys, and the size each run asked its container for.
  */
 async function land(config: string | null = null): Promise<{
   events: string[];
-  sizes: [string | undefined, string][];
+  sizes: [string | undefined, SandboxSize][];
   outcome: LandingOutcome | null;
 }> {
   const events: string[] = [];
-  const sizes: [string | undefined, string][] = [];
+  const sizes: [string | undefined, SandboxSize][] = [];
   const sandbox = (name: string) => {
     const role = name.split("/").at(-1);
     return {
-      run: async (script: string, { size }: { size: string }) => {
+      run: async (script: string, { size }: { size: SandboxSize }) => {
         sizes.push([role, size]);
         // Reading a log back: the step wrote none.
         if (script.includes("f=logs/")) return { exitCode: MISSING_LOG_EXIT, stdout: "", stderr: "" };
@@ -99,9 +80,8 @@ async function land(config: string | null = null): Promise<{
     },
     DB: { prepare: () => ({ bind: () => ({ all: async () => ({ results: [{ id: "ada00001", handle: "ada" }] }) }) }) },
   };
-  const step = { do: async (_name: string, ...rest: unknown[]) => (rest.at(-1) as () => Promise<unknown>)() };
   const workflow = new LandingWorkflow({}, env);
-  const outcome = await workflow.run({ payload: params, instanceId: "abc123-t1a1-landing-1" }, step);
+  const outcome = await workflow.run({ payload: params, instanceId: "abc123-t1a1-landing-1" }, runOnce);
   return { events, sizes, outcome };
 }
 

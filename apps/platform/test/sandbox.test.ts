@@ -2,29 +2,17 @@
 // stubbed; the container records what it was asked.
 
 import { describe, expect, it, vi } from "vitest";
+import type { SandboxSize } from "../src/config.ts";
+import { importWorkerModule } from "./support/worker-module.ts";
 
-vi.mock("cloudflare:workers", () => ({
-  DurableObject: class {
-    ctx: unknown;
-    env: unknown;
-    constructor(ctx: unknown, env: unknown) {
-      this.ctx = ctx;
-      this.env = env;
-    }
-  },
-  // `OutboundAuth` extends it; these tests never call it.
-  WorkerEntrypoint: Object,
-}));
+vi.mock("cloudflare:workers", () => import("./support/cloudflare-workers.ts"));
 
-// Imported by a computed path: the module is Worker code, which this project's Node typecheck can't
-// follow (`cloudflare:workers`), so it is typed here by what the test calls.
-const SANDBOX_MODULE = "../src/sandbox.ts";
-const { RunSandbox } = (await import(SANDBOX_MODULE)) as {
+const { RunSandbox } = await importWorkerModule<{
   RunSandbox: new (
     ctx: unknown,
     env: unknown,
   ) => { run: (script: string, options: unknown) => Promise<{ exitCode: number; startMs: number }> };
-};
+}>("sandbox");
 
 const NO_ACCESS = { grants: [], preview: null, npmRegistry: false, allow: [] };
 
@@ -50,11 +38,14 @@ function sandbox() {
 }
 
 describe("RunSandbox", () => {
-  it.each(["lite", "standard-1", "standard-4"])("starts its container at the size it's given: %s", async (size) => {
-    const { sandbox: box, starts } = sandbox();
-    await box.run("true", { access: NO_ACCESS, size });
-    expect(starts).toEqual([expect.objectContaining({ instance: size, enableInternet: false })]);
-  });
+  it.each<SandboxSize>(["lite", "standard-1", "standard-4"])(
+    "starts its container at the size it's given: %s",
+    async (size) => {
+      const { sandbox: box, starts } = sandbox();
+      await box.run("true", { access: NO_ACCESS, size });
+      expect(starts).toEqual([expect.objectContaining({ instance: size, enableInternet: false })]);
+    },
+  );
 
   it("keeps a running container's size: only the next start takes a new one", async () => {
     const { sandbox: box, starts, container } = sandbox();

@@ -72,10 +72,10 @@ export class ProjectCoordinator extends DurableObject<Env> {
   }
 
   /**
-   * Spike-only: queues scoring of a commit pushed straight to an attempt's fork, outside the git
-   * proxy, for the e2e suite. The spike's attempts have no task rows, so no trigger rules apply.
+   * For the e2e routes only: queues scoring of a commit pushed straight to an attempt's fork, outside
+   * the git proxy. The forks those routes make have no task rows, so no trigger rules apply.
    */
-  async spikeScore(project: string, attempt: string, sha: string): Promise<ScoringRequest> {
+  async e2eScore(project: string, attempt: string, sha: string): Promise<ScoringRequest> {
     const ref = parseAttemptRef(attempt);
     if (ref === null) throw new Error(`not an attempt: ${attempt}`);
     const request = this.#tasks.scoring.request({
@@ -90,8 +90,8 @@ export class ProjectCoordinator extends DurableObject<Env> {
     return request;
   }
 
-  /** Spike-only: one scoring run, with its result, for the e2e suite. */
-  spikeRun(id: number): StoredRun | null {
+  /** For the e2e routes only: one scoring run, with its result. */
+  e2eRun(id: number): StoredRun | null {
     return this.#tasks.scoring.getRun(id);
   }
 

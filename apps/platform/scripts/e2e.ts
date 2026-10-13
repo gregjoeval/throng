@@ -1,6 +1,6 @@
 // End-to-end suite against a deployed throng Worker and real Artifacts.
 //
-//   THRONG_URL=https://throng.<subdomain>.workers.dev SPIKE_TOKEN=... pnpm e2e [scenario...]
+//   THRONG_URL=https://throng.<subdomain>.workers.dev E2E_TOKEN=... pnpm e2e [scenario...]
 //
 // Merge queue scenarios, through the product API (`/api`) and the git proxy (`/git`) as the e2e user:
 // zeroconfig (no config: the gate passes with no checks; selecting an attempt closes its sibling, and
@@ -74,7 +74,7 @@ const CHECK_TIMEOUT_MS = 10 * 60 * 1000;
 const PROJECTION_TIMEOUT_MS = 90 * 1000;
 
 const baseUrl = requireEnv("THRONG_URL").replace(/\/$/u, "");
-const e2eSecret = requireEnv("SPIKE_TOKEN");
+const e2eSecret = requireEnv("E2E_TOKEN");
 const projectPrefix = process.env.E2E_PROJECT_PREFIX || "e2e";
 assert(
   /^e2e[a-z0-9]*$/u.test(projectPrefix),

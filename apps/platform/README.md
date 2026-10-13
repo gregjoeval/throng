@@ -85,14 +85,14 @@ The **E2E** workflow (`.github/workflows/e2e.yml`) runs `pnpm e2e` against real 
 
 Each run:
 
-1. Generates a random `SPIKE_TOKEN`.
+1. Generates a random `E2E_TOKEN`.
 2. Applies D1 migrations to `throng-ci`.
-3. Builds with `CLOUDFLARE_ENV=ci` and deploys `throng-ci`, setting `SPIKE_TOKEN` and `CF_PREVIEW_TOKEN` (the deploy's own API token).
+3. Builds with `CLOUDFLARE_ENV=ci` and deploys `throng-ci`, setting `E2E_TOKEN` and `CF_PREVIEW_TOKEN` (the deploy's own API token).
 4. Builds and deploys `throng-web-ci` the same way, installs Playwright's Chromium, and waits for `throng-web-ci` to answer.
 5. Runs the e2e scenarios. Every project id starts with `e2eci<run id>r<attempt>p`. Each scenario deletes what its projects made, and the suite revokes its Throng tokens when it ends.
 6. Always deletes everything under that prefix with `pnpm e2e cleanup`, even when the suite fails or is cancelled: each project's D1 row, its Durable Object's storage, its logs in R2, its repos and its preview Worker.
 
-The suite reaches the Worker through its e2e routes, `/e2e/*`, behind the `SPIKE_TOKEN` bearer secret. They refuse any project or repo whose id doesn't start with `e2e`, so they can't reach a real project, and `E2E_PROJECT_PREFIX` must start with `e2e` too.
+The suite reaches the Worker through its e2e routes, `/e2e/*`, behind the `E2E_TOKEN` bearer secret. They refuse any project or repo whose id doesn't start with `e2e`, so they can't reach a real project, and `E2E_PROJECT_PREFIX` must start with `e2e` too.
 
 ### Running it
 
@@ -141,7 +141,7 @@ gh workflow run e2e.yml --ref my-branch     # every scenario, against a branch
 To run `arena` from your machine, install Chromium once with `pnpm --filter @throng/platform exec playwright install chromium` and point `THRONG_WEB_URL` at any throng-web, such as `pnpm --filter @throng/web dev` (`http://localhost:5173`). Its own platform binding isn't used, since the browser sends API calls to `THRONG_URL`:
 
 ```bash
-THRONG_URL=https://throng-ci.<subdomain>.workers.dev SPIKE_TOKEN=... THRONG_WEB_URL=http://localhost:5173 pnpm e2e arena
+THRONG_URL=https://throng-ci.<subdomain>.workers.dev E2E_TOKEN=... THRONG_WEB_URL=http://localhost:5173 pnpm e2e arena
 ```
 
-The first run creates the `throng-ci` Worker, its Workflow (`throng-ci-scoring`) and its container. `pnpm e2e cleanup` needs `THRONG_URL`, `SPIKE_TOKEN` and an explicit `E2E_PROJECT_PREFIX`, so it can also clear up after a local run.
+The first run creates the `throng-ci` Worker, its Workflow (`throng-ci-scoring`) and its container. `pnpm e2e cleanup` needs `THRONG_URL`, `E2E_TOKEN` and an explicit `E2E_PROJECT_PREFIX`, so it can also clear up after a local run.

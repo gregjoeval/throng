@@ -92,8 +92,10 @@ export function projectService({ db, repos, previewWorkers, newId = randomProjec
 
       const id = await createOrigin(db, repos, newId);
       let row: ProjectRow | null;
+      // Only a Worker this call made is rolled back: one already there may be another environment's.
+      let createdWorker = false;
       try {
-        await previewWorkers.ensure(id);
+        createdWorker = await previewWorkers.ensure(id);
         row = await db
           .prepare(
             `INSERT INTO projects (id, owner_id, handle) VALUES (?, ?, ?)
@@ -106,9 +108,11 @@ export function projectService({ db, repos, previewWorkers, newId = randomProjec
         await repos.delete(originRepo(id)).catch((deleteError: unknown) => {
           console.error({ event: "project.orphan_repo", repo: originRepo(id), error: String(deleteError) });
         });
-        await previewWorkers.delete(id).catch((deleteError: unknown) => {
-          console.error({ event: "project.orphan_preview_worker", project: id, error: String(deleteError) });
-        });
+        if (createdWorker) {
+          await previewWorkers.delete(id).catch((deleteError: unknown) => {
+            console.error({ event: "project.orphan_preview_worker", project: id, error: String(deleteError) });
+          });
+        }
         // Another request took the handle between the check and the insert.
         if (/UNIQUE constraint failed: projects\.(owner_id|handle)/u.test(String(error))) {
           throw duplicate(owner.handle, input.handle);

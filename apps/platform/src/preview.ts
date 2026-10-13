@@ -6,9 +6,14 @@ export interface PreviewGrant {
   workerName: string;
 }
 
+/** The Cloudflare API path every Workers endpoint of the account sits under. */
+export function workersApiPath(accountId: string): string {
+  return `/client/v4/accounts/${accountId}/workers`;
+}
+
 /** Only the Worker being previewed (and the account's workers.dev subdomain lookup). */
 export function previewPathAllowed(path: string, { accountId, workerName }: PreviewGrant): boolean {
-  const workers = `/client/v4/accounts/${accountId}/workers/`;
+  const workers = `${workersApiPath(accountId)}/`;
   if (!path.startsWith(workers)) return false;
   const rest = path.slice(workers.length);
   return (

@@ -121,6 +121,23 @@ describe("projectService.create", () => {
     expect(await repos.list("aaaaaa")).toEqual([]);
     expect([...previewWorkers.projects]).toEqual([]);
   });
+
+  it("keeps a preview Worker it found already there when the row can't be inserted", async () => {
+    // Another environment in the account may have drawn the same id and made its Worker first.
+    const { db, repos, previewWorkers, greg, service } = await setup(ids("aaaaaa"));
+    previewWorkers.projects.add("aaaaaa");
+    const create = repos.create.bind(repos);
+    repos.create = async (name, opts) => {
+      const repo = await create(name, opts);
+      await db
+        .prepare("INSERT INTO projects (id, owner_id, handle) VALUES (?, ?, ?)")
+        .bind("zzzzzz", greg.user.id, "throng")
+        .first();
+      return repo;
+    };
+    expect((await failure(service.create(greg, { handle: "throng" }))).code).toBe("conflict");
+    expect([...previewWorkers.projects]).toEqual(["aaaaaa"]);
+  });
 });
 
 describe("projectService.get and resolveProject", () => {

@@ -147,6 +147,7 @@ function mergeRequestAnswer(mergeRequest: MergeRequest): CallToolResult {
 /** A vote candidate's tally, or why it doesn't count now. */
 function tally(c: Vote["candidates"][number]): string | number {
   if (c.beingScored) return "being scored";
+  if (c.erroredRun !== null) return `scoring errored in run ${c.erroredRun}; rescore it`;
   return c.withdrawn ? "withdrawn" : c.votes;
 }
 
@@ -526,8 +527,8 @@ function mcpServer({ repos, tasks, logs, diffCache }: Deps, { actor, token, env,
   tool(
     "close_vote",
     "Close the task's open vote, selecting the candidate with the most ballots as its merge request. On a tie, " +
-      "name one of the tied candidates as `attempt`. Refused while a candidate is being scored (a follow of the " +
-      "task branch moved it to a merge not scored yet): close it once scoring finishes. The task's creator or the " +
+      "name one of the tied candidates as `attempt`. Refused while a candidate's head has no result yet: close it " +
+      "once a candidate being scored finishes, or `rescore` one whose scoring errored. The task's creator or the " +
       "project owner may.",
     CloseVoteSchema.extend(onTask.shape),
     async ({ project, task, attempt }) => {

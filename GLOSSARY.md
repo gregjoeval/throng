@@ -109,7 +109,7 @@ A selection where eligible users each back one candidate attempt and the most-ba
 _Avoid_: Poll
 
 **Candidate**:
-An attempt in a vote, pinned to the head it was passing at when it joined; its author's push to it withdraws it, and it can be added again once its new head passes. A follow of the task branch moves the pin, and its ballots, to the follow's merge; the candidate is being scored until that merge passes (it counts again) or fails (it is withdrawn), and the vote can't close meanwhile.
+An attempt in a vote, pinned to the head it was passing at when it joined; it counts only while it is passing at that head, the same rule that adds one. Its author's push to it withdraws it, and it can be added again once its new head passes. A follow of the task branch moves the pin, and its ballots, to the follow's merge. While its pinned head has no result (its scoring is queued or running, or errored, which says nothing of the head) it doesn't count but keeps its ballots, and the vote can't close, until that head passes (it counts again) or fails (it is withdrawn); errored scoring waits for a rescore.
 _Avoid_: Nominee, entry
 
 **Ballot**:
@@ -119,6 +119,10 @@ _Avoid_: Vote (when meaning one user's choice)
 **Scoring**:
 The whole run that produces an attempt's gate and score.
 _Avoid_: CI, pipeline
+
+**Sandbox**:
+The container one role of a scoring run, landing or follow works in, with only that role's grants. Those that run the project's code start at the Sandbox size its config on `main` sets; the trusted ones that only run git start at the smallest.
+_Avoid_: Runner, VM, CI machine
 
 **Arena**:
 The side-by-side comparison of one task's attempts.

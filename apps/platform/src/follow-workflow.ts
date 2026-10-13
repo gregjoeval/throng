@@ -2,7 +2,7 @@ import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import { followMessage } from "./follows";
 import type { FollowOutcome, FollowParams } from "./follows";
-import { FOLLOW_ROLES, sandboxName } from "./grants";
+import { FOLLOW_ROLES, sandboxName, TRUSTED_SIZE } from "./grants";
 import { followScript, parseResult } from "./scripts";
 import type { FollowResult } from "./scripts";
 import { attemptRef } from "./task-refs";
@@ -62,13 +62,19 @@ export class FollowWorkflow extends WorkflowEntrypoint<Env, FollowParams> {
 
   async #follow(instanceId: string, params: FollowParams): Promise<FollowResult> {
     const repos = { project: params.project, attempt: attemptRef(params.task, params.attempt) };
-    const run = await runInSandbox(this.env, instanceId, repos, "follow", (g) =>
-      followScript(g.originRead.remote, g.forkWrite.remote, {
-        task: params.task,
-        taskHead: params.taskHead,
-        message: followMessage(params.task, params.attempt),
-        committedAt: Math.floor(params.startedAt / 1000),
-      }),
+    const run = await runInSandbox(
+      this.env,
+      instanceId,
+      repos,
+      "follow",
+      (g) =>
+        followScript(g.originRead.remote, g.forkWrite.remote, {
+          task: params.task,
+          taskHead: params.taskHead,
+          message: followMessage(params.task, params.attempt),
+          committedAt: Math.floor(params.startedAt / 1000),
+        }),
+      { size: TRUSTED_SIZE },
     );
     const result = parseResult<FollowResult>(run.stdout);
     if (result === null) throw new Error(`follow gave no result (exit ${run.exitCode}): ${run.stderr.slice(-2000)}`);

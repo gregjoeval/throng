@@ -12,6 +12,7 @@ import {
   CheckSchema,
   CONFIG_PATH,
   CREATOR_SELECTS,
+  DEFAULT_SANDBOX_SIZE,
   describeIssue,
   describePath,
   metricConfig,
@@ -91,6 +92,7 @@ export function withTask(project: ConfigResult, task: TaskDefinitions): ConfigRe
     preview: null,
     attempts: { limit: null },
     selection: CREATOR_SELECTS,
+    sandbox: { size: DEFAULT_SANDBOX_SIZE },
   };
   return {
     kind: "valid",

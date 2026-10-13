@@ -2,6 +2,7 @@
 // layout, the log names and the script that reads a log out of the Sandbox (truncated to fit) live
 // here; the R2 lifecycle deletes logs after `LOG_RETENTION_DAYS` (see the README's setup).
 
+import type { SandboxSize } from "./config.ts";
 import { ServiceError } from "./errors.ts";
 import type { ScoringParams } from "./scoring.ts";
 
@@ -90,6 +91,11 @@ tail -c ${keep} "$f"
 /** The logs a score plan may write, in run order: each setup step, then each check. */
 export function logNames(plan: { setup: string[]; checks: { name: string }[] }): string[] {
   return [...plan.setup.map((_, i) => setupLogName(i + 1)), ...plan.checks.map((check) => check.name)];
+}
+
+/** The note on every log a step wrote: the Sandbox size its container ran at. */
+export function sandboxNote(size: SandboxSize): string {
+  return `sandbox: ${size}`;
 }
 
 /**

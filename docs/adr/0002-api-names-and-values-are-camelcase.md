@@ -17,6 +17,16 @@ The MCP server at `/mcp` is the one exception, and only for the names MCP itself
 
 Tool names are snake_case because that is the MCP ecosystem's convention: the reference servers and most others name their tools that way, and the models that call them are trained on those names, so an agent finds and calls `list_tasks` more reliably than `listTasks`. Tool parameters stay camelCase: they are the API's request fields, reused from its schemas, and the data a tool returns is the API's own camelCase JSON. The server ID is kebab-case, as MCP clients key their server configs. The server has no resources yet; any it gains follow the table. A test lists the tools and fails on a tool name that isn't snake_case or a parameter name that isn't camelCase.
 
+## Amendment: externally defined values
+
+An enum value that names something another system defines is served as that system spells it, not camelCased:
+
+| Value                     | Defined by                            | Example              |
+| ------------------------- | ------------------------------------- | -------------------- |
+| A config's `sandbox.size` | Cloudflare's container instance types | `lite`, `standard-1` |
+
+A project writes the value in its `.throng/config.yml`, the platform passes it unchanged to the container API's `start({ instance })`, and Cloudflare's docs use the same spelling, so renaming it would add a mapping layer and a second name for one thing. Names Throng defines stay camelCase. The OpenAPI test allows each such value by where it appears in the document, and its reason points here.
+
 ## Considered options
 
 - **Keep snake_case on the wire and map at the boundary.** Rejected: every camelCase object inside needed a `public*` mapping (results, file diffs, conflict hunks), and enum values would have needed a mapping layer too, or stayed in a third style.

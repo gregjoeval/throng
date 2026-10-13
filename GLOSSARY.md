@@ -106,7 +106,7 @@ _Avoid_: Review policy
 
 **Vote**:
 A selection where eligible users each back one candidate attempt and the most-backed attempt wins.
-_Avoid_: Poll, ballot
+_Avoid_: Poll
 
 **Candidate**:
 An attempt in a vote, pinned to the head it was passing at when it joined; a push to it withdraws it, and it can be added again once its new head passes.

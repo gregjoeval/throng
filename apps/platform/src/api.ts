@@ -40,6 +40,7 @@ import {
   MAX_CONFIG_BYTES,
   METRIC_ORDERS,
   parseConfig,
+  SELECTION_POLICIES,
   SOURCES,
   VOTE_ELIGIBILITIES,
 } from "./config.ts";
@@ -211,14 +212,15 @@ const ConfigCheckSchema = z
   .openapi("Check", { description: "A check the config declares: a command whose exit code is its outcome." });
 
 const VoteEligibilitySchema = z.enum(VOTE_ELIGIBILITIES).openapi({
-  description: "Who may vote: `humans` acting as themselves, `agents` acting under an alias, or `anyone`.",
+  description: "Who may vote: `humans` acting as themselves, `aliases` acting under an alias, or `anyone`.",
 });
 
-const SelectionPolicySchema = z
-  .discriminatedUnion("policy", [
-    z.object({ policy: z.literal("creator") }),
-    z.object({ policy: z.literal("vote"), eligible: VoteEligibilitySchema }),
-  ])
+/** A selection policy as a response shows it; `config.ts`'s `SelectionPolicySchema` reads one from a request. */
+const SelectionPolicyOutSchema = z
+  .object({
+    policy: z.enum(SELECTION_POLICIES),
+    eligible: VoteEligibilitySchema.optional().openapi({ description: "With `vote` only." }),
+  })
   .openapi("SelectionPolicy", {
     description: "Who makes a task's selection: its creator, or a vote among eligible users.",
   });
@@ -258,7 +260,7 @@ const TaskSchema = z
           "The task's task branch, `refs/tasks/t42` in the origin, which new attempts start from; null when it has none. " +
           "The task creator or project owner pushes it with `git push throng HEAD:refs/tasks/t42`.",
       }),
-    selection: SelectionPolicySchema.nullable().openapi({
+    selection: SelectionPolicyOutSchema.nullable().openapi({
       description: "Overrides the project's selection policy; null to use the project's.",
     }),
   })
@@ -579,7 +581,7 @@ const TaskArenaSchema = z
         "Every metric the task's attempts are scored on: those the `.throng/config.yml` on `origin/main` declares, " +
         "then the task's own, in order, each with its `source`; empty when they don't merge into a valid config.",
     }),
-    selection: SelectionPolicySchema.openapi({
+    selection: SelectionPolicyOutSchema.openapi({
       description:
         "The selection policy in effect: the task's override, else the `.throng/config.yml` on `origin/main`'s; the " +
         "creator's when neither sets one.",
@@ -1645,7 +1647,8 @@ export function apiRoutes(options: ApiOptions = {}) {
           "closes the task's other active attempts (archiving their forks). The merge request is `pending`, and enters the " +
           "merge queue once the approved head's latest scoring run is done with a passing gate. A single-attempt task's " +
           "Merge button calls this too. The task's creator or the project owner (or their aliases) may; the creator may " +
-          "select their own attempt. Journals `selected` and `approved`.",
+          "select their own attempt. Under the `vote` selection policy, closing a vote selects instead, and this is " +
+          "refused. Journals `selected` and `approved`.",
         security: bearerOrWeb,
         middleware: [browser] as const,
         request: { params: TaskPathSchema, body: { required: true, ...json(SelectionSchema) } },
@@ -1657,7 +1660,7 @@ export function apiRoutes(options: ApiOptions = {}) {
           404: errorResponse("No such project, task or attempt."),
           409: errorResponse(
             "`invalidState`: the attempt isn't open, the task isn't open, the task already has an open merge request, " +
-              "or the attempt has no commits.",
+              "its selection policy is `vote`, or the attempt has no commits.",
           ),
         },
       }),
@@ -1719,7 +1722,8 @@ export function apiRoutes(options: ApiOptions = {}) {
         description:
           "Under the `vote` selection policy, opens a vote among the attempts passing now, each a candidate at its " +
           "current head, open to the users the policy's `eligible` lets vote. A push to a candidate during the vote " +
-          "withdraws it, and its ballots stop counting. While the vote is open, the task can't be selected directly. " +
+          "withdraws it, as does a rescore of its head that fails the gate, and its ballots stop counting; one back at " +
+          "its pinned head and passing there stands again. " +
           "Journals `voteOpened`.",
         security: bearerOrWeb,
         middleware: [browser] as const,
@@ -1860,7 +1864,6 @@ export function apiRoutes(options: ApiOptions = {}) {
       createRoute({
         method: "get",
         path: "/projects/{owner}/{project}/merge-queue",
-
         operationId: "getMergeQueue",
         tags: ["Merge queue"],
         summary: "The project's merge queue",

@@ -32,7 +32,7 @@ export const CONFIG_LAYERS = SOURCES.filter((source): source is ConfigLayer => s
 /** Who makes a task's selection: its creator, or a vote among eligible users. */
 export const SELECTION_POLICIES = ["creator", "vote"] as const;
 /** Who may vote: users acting as themselves, users acting under an alias, or either. */
-export const VOTE_ELIGIBILITIES = ["humans", "agents", "anyone"] as const;
+export const VOTE_ELIGIBILITIES = ["humans", "aliases", "anyone"] as const;
 export type VoteEligibility = (typeof VOTE_ELIGIBILITIES)[number];
 
 /** A selection policy: a vote says who is eligible to vote in it. */

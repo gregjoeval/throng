@@ -130,7 +130,7 @@ export const SelectionPolicyInputSchema = SelectionPolicySchema.nullable().opena
   description:
     "Overrides the project's selection policy (`.throng/config.yml`'s `selection`); null to use the project's. " +
     "`policy` is `creator` (the task's creator selects) or `vote` (a vote among `eligible` users: `humans` acting " +
-    "as themselves, `agents` acting under an alias, or `anyone`, the default).",
+    "as themselves, `aliases` acting under an alias, or `anyone`, the default).",
   example: { policy: "vote", eligible: "humans" },
 });
 

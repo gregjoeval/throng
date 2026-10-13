@@ -143,7 +143,7 @@ describe("opening a vote", () => {
       opened_by: { user: cat.user.id, alias: null },
       closed_at: null,
       winner: null,
-      my_ballot: null,
+      ballot: null,
     });
     expect(opened.candidates).toEqual([
       { attempt: 1, head: head(t1a1), added_at: expect.any(String), votes: 0, withdrawn: false },
@@ -163,9 +163,9 @@ describe("opening a vote", () => {
     expect((await humans.store.openVote(PROJECT, cat, { task: 1 })).eligible).toBe("humans");
 
     const overridden = await setup("selection: { policy: creator }\n");
-    await overridden.store.editTask(PROJECT, cat, { task: 1, selection: { policy: "vote", eligible: "agents" } });
+    await overridden.store.editTask(PROJECT, cat, { task: 1, selection: { policy: "vote", eligible: "aliases" } });
     await overridden.scoreAll();
-    expect((await overridden.store.openVote(PROJECT, cat, { task: 1 })).eligible).toBe("agents");
+    expect((await overridden.store.openVote(PROJECT, cat, { task: 1 })).eligible).toBe("aliases");
   });
 
   it("is refused when the task's policy is its creator's selection", async () => {
@@ -202,7 +202,8 @@ describe("opening a vote", () => {
 
     const selected = await setup();
     await selected.scoreAll();
-    await selected.store.selectAttempt(PROJECT, cat, t1a1);
+    await selected.store.openVote(PROJECT, cat, { task: 1 });
+    await selected.store.closeVote(PROJECT, cat, { task: 1, attempt: t1a1.number });
     expect(await code(selected.store.openVote(PROJECT, cat, { task: 1 }))).toBe("invalidState");
   });
 });
@@ -222,8 +223,8 @@ describe("casting a vote", () => {
       [2, 0, false],
       [3, 2, false],
     ]);
-    expect(vote(eve).my_ballot).toMatchObject({ attempt: 3, alias: null });
-    expect(vote(owner).my_ballot).toBeNull();
+    expect(vote(eve).ballot).toMatchObject({ attempt: 3, alias: null });
+    expect(vote(owner).ballot).toBeNull();
     expect(journal().at(-1)).toMatchObject({ kind: "voteCast", user: bob.user.id, ref: "t1a3" });
     expect(t1a2.number).toBe(2);
   });
@@ -239,7 +240,7 @@ describe("casting a vote", () => {
       [2, 1, false],
       [3, 0, false],
     ]);
-    expect(vote(eve).my_ballot).toMatchObject({ attempt: 2, alias: "claude" });
+    expect(vote(eve).ballot).toMatchObject({ attempt: 2, alias: "claude" });
   });
 
   it("is refused for your own attempt, even under an alias", async () => {
@@ -252,7 +253,7 @@ describe("casting a vote", () => {
 
   it.each([
     ["humans", "a user as themselves", eve],
-    ["agents", "an alias", eveClaude],
+    ["aliases", "an alias", eveClaude],
     ["anyone", "a user as themselves", eve],
     ["anyone", "an alias", eveClaude],
   ] as const)("among %s, takes a ballot from %s", async (eligible, _, voter) => {
@@ -262,7 +263,7 @@ describe("casting a vote", () => {
 
   it.each([
     ["humans", "an alias", eveClaude],
-    ["agents", "a user as themselves", eve],
+    ["aliases", "a user as themselves", eve],
   ] as const)("among %s, refuses a ballot from %s", async (eligible, _, voter) => {
     const { store, t1a1 } = await openAmong(eligible);
     expect(await code(() => store.castVote(PROJECT, voter, t1a1))).toBe("forbidden");
@@ -315,6 +316,19 @@ describe("candidates", () => {
     expect(tally()).toHaveLength(3);
   });
 
+  it("are withdrawn when a rescore of their head fails the gate, and can't win", async () => {
+    const { store, t1a1, t1a2, scoreAll, score, tally } = await setup();
+    await scoreAll();
+    await store.openVote(PROJECT, cat, { task: 1 });
+    store.castVote(PROJECT, eve, t1a1);
+    store.castVote(PROJECT, fay, t1a1);
+    store.castVote(PROJECT, dan, t1a2);
+    await store.rescore(PROJECT, cat, t1a1);
+    await score(t1a1, done("failed"));
+    expect(tally()[0]).toEqual([1, 0, true]);
+    expect((await store.closeVote(PROJECT, cat, { task: 1 })).vote.winner).toBe(2);
+  });
+
   it("can be added again after a push withdrew them, without the old head's ballots", async () => {
     const { store, t1a1, scoreAll, score, push, tally } = await setup();
     await scoreAll();
@@ -339,7 +353,7 @@ describe("closing a vote", () => {
     expect(await code(store.closeVote(PROJECT, ada, { task: 1 }))).toBe("forbidden");
     const closed = await store.closeVote(PROJECT, cat, { task: 1 });
     expect(closed.vote).toMatchObject({ state: "closed", winner: 2, closed_by: { user: cat.user.id, alias: null } });
-    expect(closed.merge_request).toMatchObject({ attempt: 2, state: "queued", approved_head: head(t1a2) });
+    expect(closed.selected).toMatchObject({ attempt: 2, state: "queued", approved_head: head(t1a2) });
     expect(store.getAttempt(PROJECT, owner, t1a1).state).toBe("closed");
     expect(store.getAttempt(PROJECT, owner, t1a3).state).toBe("closed");
     expect(journal().map((e) => e.kind)).toContain("voteClosed");
@@ -375,13 +389,14 @@ describe("closing a vote", () => {
     await store.openVote(PROJECT, cat, { task: 1 });
     for (const ref of [t1a1, t1a2, t1a3]) push(ref);
     const closed = await store.closeVote(PROJECT, cat, { task: 1 });
-    expect(closed).toMatchObject({ vote: { state: "closed", winner: null }, merge_request: null });
+    expect(closed).toMatchObject({ vote: { state: "closed", winner: null }, selected: null });
     expect(store.getAttempt(PROJECT, owner, t1a1).state).toBe("open");
   });
 
-  it("is needed before the creator selects directly", async () => {
+  it("is the only way to select under the vote policy", async () => {
     const { store, t1a1, scoreAll } = await setup();
     await scoreAll();
+    expect(await code(store.selectAttempt(PROJECT, cat, t1a1))).toBe("invalidState");
     await store.openVote(PROJECT, cat, { task: 1 });
     expect(await code(store.selectAttempt(PROJECT, cat, t1a1))).toBe("invalidState");
     await store.closeVote(PROJECT, cat, { task: 1, attempt: 1 });

@@ -5,7 +5,7 @@
 import { currentBase, readTaskBranch } from "./base.ts";
 import type { Base } from "./base.ts";
 import { loadConfig, selectionPolicy } from "./config.ts";
-import type { CheckConfig, MetricConfig, SelectionPolicy } from "./config.ts";
+import type { CheckConfig, MetricConfig, SelectionPolicy, VoteEligibility } from "./config.ts";
 import type { ConflictDetails, ConflictFile } from "./conflicts.ts";
 import { ServiceError } from "./errors.ts";
 import { attemptRemote } from "./git-remotes.ts";
@@ -177,7 +177,7 @@ export interface MergeRequest {
 export interface Vote {
   task: string;
   state: VoteState;
-  eligible: VoteDetail["eligible"];
+  eligible: VoteEligibility;
   deadline: string | null;
   openedBy: ActorRef;
   openedAt: string;
@@ -670,7 +670,7 @@ export function taskService({ db, repos, backend, origin }: TaskServiceDeps) {
       const tieBreak =
         input.attempt === undefined ? undefined : attemptOfTask({ task: input.task, attempt: input.attempt });
       const closed = await invoke("closeVote", await project(input), actor, { task, attempt: tieBreak?.number });
-      const mr = closed.merge_request;
+      const mr = closed.selected;
       return { vote: await vote(closed.vote), mergeRequest: mr === null ? null : await mergeRequest(mr) };
     },
 
@@ -833,7 +833,7 @@ function publicMergeRequest(mr: StoredMergeRequest, users: Map<string, string>):
 
 function publicVote(v: VoteDetail, users: Map<string, string>): Vote {
   const ref = (attempt: number) => attemptRef(v.task, attempt);
-  const ballot = v.my_ballot;
+  const ballot = v.ballot;
   return {
     task: taskRef(v.task),
     state: v.state,

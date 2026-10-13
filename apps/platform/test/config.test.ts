@@ -121,7 +121,11 @@ describe("parseConfig", () => {
     ["the creator policy", "selection: { policy: creator }\n", { policy: "creator" }],
     ["a vote, anyone eligible by default", "selection: { policy: vote }\n", { policy: "vote", eligible: "anyone" }],
     ["a vote among humans", "selection: { policy: vote, eligible: humans }\n", { policy: "vote", eligible: "humans" }],
-    ["a vote among agents", "selection: { policy: vote, eligible: agents }\n", { policy: "vote", eligible: "agents" }],
+    [
+      "a vote among aliases",
+      "selection: { policy: vote, eligible: aliases }\n",
+      { policy: "vote", eligible: "aliases" },
+    ],
   ])("reads the selection policy: %s", (_, text, selection) => {
     expect(parseConfig(text)).toEqual({ kind: "valid", config: { ...EMPTY, selection } });
   });
@@ -356,7 +360,7 @@ describe("parseConfig", () => {
     [
       "an unknown eligibility",
       "selection: { policy: vote, eligible: bots }\n",
-      /^selection\.eligible: eligible must be humans, agents or anyone$/u,
+      /^selection\.eligible: eligible must be humans, aliases or anyone$/u,
     ],
     [
       "eligibility without a vote",

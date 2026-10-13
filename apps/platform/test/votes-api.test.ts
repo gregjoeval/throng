@@ -109,9 +109,9 @@ describe("a task's selection policy", () => {
   });
 
   it("shows in the arena as the policy in effect", async () => {
-    const { call, base, ada } = await setup("selection: { policy: vote, eligible: agents }\n");
+    const { call, base, ada } = await setup("selection: { policy: vote, eligible: aliases }\n");
     const arena = (await call("GET", `${base}/tasks/t1/arena`, ada)).body;
-    expect(arena["selection"]).toEqual({ policy: "vote", eligible: "agents" });
+    expect(arena["selection"]).toEqual({ policy: "vote", eligible: "aliases" });
     expect(arena["vote"]).toBeNull();
     await call("PATCH", `${base}/tasks/t1`, ada, { selection: { policy: "creator" } });
     expect((await call("GET", `${base}/tasks/t1/arena`, ada)).body["selection"]).toEqual({ policy: "creator" });

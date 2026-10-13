@@ -1577,14 +1577,18 @@ export class TaskStore {
    * Selects an open attempt of an open task as its merge request, approving the attempt's current
    * head, and closes the task's other active attempts (archived once this commits). The merge
    * request is `pending`, or `queued` if its head's gate has already passed. The task's creator or
-   * the project owner (or their aliases) may; the creator may select their own attempt. While the
-   * task has an open vote, closing the vote selects instead.
+   * the project owner (or their aliases) may; the creator may select their own attempt. Under the
+   * `vote` selection policy, closing a vote selects instead.
+
    */
   async selectAttempt(project: ProjectContext, actor: Actor, input: AttemptInput): Promise<StoredMergeRequest> {
     const current = this.#attempt(input);
     const task = this.#task(current.task);
     this.#mayManageTask(project, actor, task);
     this.#checkSelectable(current);
+    if (selectionPolicy(await loadConfig(this.#repos, project.id), task.selection).policy === "vote") {
+      throw invalidState(`${taskRef(task.number)} is selected by vote; open a vote and close it to select`);
+    }
     const head = await this.#currentHead(project, current);
     const { mr, closed } = this.#sql.transaction(() => {
       // The attempt, the task or its merge requests may have moved while the head was read.
@@ -1755,8 +1759,8 @@ export class TaskStore {
     if (actor.user.id === current.author) {
       throw new ServiceError("forbidden", `the author of ${current.fork} can't vote for it`);
     }
-    const candidate = this.#voteDetail(vote, actor).candidates.find((c) => c.attempt === current.number);
-    if (candidate === undefined || candidate.withdrawn) {
+    const candidate = this.#standing(vote, current);
+    if (candidate === null) {
       throw invalidState(`${current.fork} isn't a candidate in ${taskRef(vote.task)}'s vote`);
     }
     this.#sql.transaction(() => {
@@ -1783,8 +1787,7 @@ export class TaskStore {
     const vote = this.#openVote(current.task);
     const head = current.scoring.sha;
     if (!this.#passing(current) || head === null) throw invalidState(`${current.fork} isn't passing`);
-    const standing = this.#voteDetail(vote, actor).candidates.find((c) => c.attempt === current.number);
-    if (standing !== undefined && !standing.withdrawn) {
+    if (this.#standing(vote, current) !== null) {
       throw invalidState(`${current.fork} is already a candidate in ${taskRef(vote.task)}'s vote`);
     }
     this.#sql.transaction(() => {
@@ -1804,7 +1807,7 @@ export class TaskStore {
     project: ProjectContext,
     actor: Actor,
     input: { task: number; attempt?: number | undefined },
-  ): Promise<{ vote: VoteDetail; merge_request: StoredMergeRequest | null }> {
+  ): Promise<{ vote: VoteDetail; selected: StoredMergeRequest | null }> {
     const task = this.#task(input.task);
     this.#mayManageTask(project, actor, task);
     const { vote, mr, closed } = this.#sql.transaction(() => {
@@ -1817,7 +1820,7 @@ export class TaskStore {
       return { vote: ended, ...this.#select(actor, source, winner.head) };
     });
     await this.#archive(project, closed);
-    return { vote: this.#voteDetail(vote, actor), merge_request: mr };
+    return { vote: this.#voteDetail(vote, actor), selected: mr };
   }
 
   /** The task's latest vote, open or closed, with the actor's ballot. Anyone signed in may read it. */
@@ -1826,6 +1829,13 @@ export class TaskStore {
     const vote = this.votes.latest(input.task);
     if (vote === null) throw new ServiceError("notFound", `${taskRef(input.task)} has never had a vote`);
     return this.#voteDetail(vote, actor);
+  }
+
+  /** The attempt as a standing candidate of the vote: one not withdrawn. Null when it isn't one. */
+  #standing(vote: StoredVote, attempt: StoredAttempt): StoredCandidate | null {
+    const withdrawn = this.#withdrawn(vote.task);
+    const found = this.votes.candidates(vote.id).find((c) => c.attempt === attempt.number);
+    return found === undefined || withdrawn(found) ? null : found;
   }
 
   #openVote(task: number): StoredVote {
@@ -1856,11 +1866,17 @@ export class TaskStore {
     return this.votes.detail(vote, actor.user.id, this.#withdrawn(vote.task));
   }
 
-  /** Whether a candidate of a vote on `task` is withdrawn: its attempt isn't open, or its head moved. */
+  /**
+   * Whether a candidate of a vote on `task` is withdrawn: it stopped passing at its pinned head. Its
+   * attempt isn't open, its head moved (a push, or a follow of the task branch), or a rescore of that
+   * head (after the task's checks changed, say) failed its gate. Worked out when read, so a candidate
+   * force-pushed back to its pinned head and passing there stands again, with its ballots.
+   */
   #withdrawn(task: number): (candidate: StoredCandidate) => boolean {
     return ({ attempt, head }) => {
-      const row = this.#attemptRow({ task, number: attempt });
-      return row?.state !== "open" || this.scoring.statusFor({ task, attempt }).sha !== head;
+      const current = this.#attemptRow({ task, number: attempt });
+      if (current?.state !== "open" || this.scoring.statusFor({ task, attempt }).sha !== head) return true;
+      return this.scoring.currentRun({ task, attempt })?.result?.gate !== "passed";
     };
   }
 
@@ -2774,7 +2790,6 @@ export const TASK_METHODS = [
   "addVoteCandidate",
   "closeVote",
   "getVote",
-
   "cancelMergeRequest",
   "getMergeRequest",
   "dequeueLogKey",

@@ -57,7 +57,7 @@ export interface CandidateTally extends StoredCandidate {
 /** A vote with its candidates' tallies and one voter's own ballot. */
 export interface VoteDetail extends StoredVote {
   candidates: CandidateTally[];
-  my_ballot: Omit<StoredBallot, "voter"> | null;
+  ballot: Omit<StoredBallot, "voter"> | null;
 }
 
 interface VoteRow {
@@ -114,7 +114,7 @@ const SCHEMA = [
 /** Who each eligibility lets vote. */
 export const ELIGIBLE_VOTERS: Record<VoteEligibility, string> = {
   humans: "users acting as themselves",
-  agents: "users acting under an alias",
+  aliases: "users acting under an alias",
   anyone: "anyone",
 };
 
@@ -124,7 +124,7 @@ export const ELIGIBLE_VOTERS: Record<VoteEligibility, string> = {
  */
 export function mayVote(eligible: VoteEligibility, alias: string | null): boolean {
   if (eligible === "humans") return alias === null;
-  if (eligible === "agents") return alias !== null;
+  if (eligible === "aliases") return alias !== null;
   return true;
 }
 
@@ -256,7 +256,6 @@ export class Votes {
     );
     const candidates = rows.map(({ withdrawn: closedOut, ...candidate }) => {
       const out = vote.state === "open" ? withdrawn(candidate) : closedOut === 1;
-
       const votes = out
         ? 0
         : ballots.filter((b) => b.attempt === candidate.attempt && b.head === candidate.head).length;
@@ -266,7 +265,7 @@ export class Votes {
     return {
       ...vote,
       candidates,
-      my_ballot: mine === undefined ? null : { alias: mine.alias, attempt: mine.attempt, head: mine.head, at: mine.at },
+      ballot: mine === undefined ? null : { alias: mine.alias, attempt: mine.attempt, head: mine.head, at: mine.at },
     };
   }
 }

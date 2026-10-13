@@ -8,6 +8,7 @@ import { GRANT_SOURCES, ROLE_GRANTS, sandboxName, SCORING_ROLES } from "./grants
 import type { RoleGrants, RunGrants, SandboxRole } from "./grants";
 import { LOG_CONTENT_TYPE, logKey, logNames, MISSING_LOG_EXIT, PREVIEW_LOG, readLogScript, withNotes } from "./logs";
 import { roleAccess } from "./network";
+import { loadRegistries } from "./npmrc";
 import { previewGrant, previewName } from "./preview";
 import { previewWorkersFor } from "./preview-workers";
 import { forkRepo, originRepo } from "./repos";
@@ -26,11 +27,12 @@ const PREVIEW_STEP_TIMEOUT_MS = PREVIEW_BUILD_TIMEOUT_MS + 10 * 60 * 1000;
 /** Each step's retries after its first try, for infrastructure errors; then the run ends `errored`. */
 export const STEP_RETRIES = { limit: 2, delay: "5 seconds", backoff: "constant" } as const;
 /** What a container may reach while its logs are read: nothing. It is already running by then. */
-const NO_ACCESS = { grants: [], preview: null, npmRegistry: false, allow: [] };
+const NO_ACCESS = { grants: [], preview: null, registries: [], allow: [] };
 /**
  * One scoring run: scores an attempt's head in a Sandbox and reports the result to the project's
- * Durable Object. The config is read from the origin's `main`, so an attempt can't change its own
- * checks. The container that runs repo code holds read grants only (see `grants.ts`).
+ * Durable Object. The config and the `.npmrc` registry hosts are read from the origin's `main`, so an
+ * attempt can't change its own checks or widen its own network access. The container that runs repo
+ * code holds read grants only (see `grants.ts`).
  *
  * When the config has a `preview` section and the gate passed, the head is then deployed as a Worker
  * Preview from a separate container (see `#preview`); a failed Preview never changes the gate.
@@ -48,18 +50,21 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
       const config = await step.do("config", { retries: STEP_RETRIES, timeout: "1 minute" }, () =>
         this.#config(params),
       );
+      const registries = await step.do("registries", { retries: STEP_RETRIES, timeout: "1 minute" }, () =>
+        loadRegistries(reposFor(this.env), params.project),
+      );
       const plan = scorePlan(config);
       const timeoutMs = scoreTimeoutMs(plan);
       const base = await step.do("base", { retries: STEP_RETRIES, timeout: "1 minute" }, () =>
         attemptBase(reposFor(this.env), params.project, { attempt: params.attempt, head: params.sha }),
       );
       const scored = await step.do("score", { retries: STEP_RETRIES, timeout: timeoutMs }, () =>
-        this.#score(instanceId, params, base?.sha ?? null, config, plan, timeoutMs),
+        this.#score(instanceId, params, base?.sha ?? null, config, plan, registries, timeoutMs),
       );
       const preview = previewPlan(config, scored);
       let result = scored;
       if (preview !== null) {
-        const { deployed, durationMs, logs } = await this.#preview(instanceId, params, preview, step);
+        const { deployed, durationMs, logs } = await this.#preview(instanceId, params, preview, registries, step);
         result = { ...withPreview(scored, deployed, durationMs), logs: [...scored.logs, ...logs] };
       }
       outcome = { status: "done", result };
@@ -100,6 +105,7 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
     base: string | null,
     config: ConfigResult,
     plan: ScorePlan,
+    registries: string[],
     timeoutMs: number,
   ): Promise<ScoringResult> {
     const run = await runInSandbox(
@@ -108,7 +114,7 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
       params,
       "score",
       (g) => scoreScript(g.forkRead.remote, { sha: params.sha, base }, plan),
-      { allow: plan.allow, timeoutMs },
+      { allow: plan.allow, registries, timeoutMs },
     );
     const raw = parseResult<RawScore>(run.stdout);
     if (raw === null) {
@@ -138,6 +144,7 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
     instanceId: string,
     params: ScoringParams,
     { command, allow }: PreviewPlan,
+    registries: string[],
     step: WorkflowStep,
   ): Promise<{ deployed: PreviewScriptResult | null | { error: string }; durationMs: number; logs: string[] }> {
     const { accountId, workerName } = previewGrant(this.env.CF_ACCOUNT_ID, params.project);
@@ -162,7 +169,7 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
                 previewName: name,
                 command,
               }),
-            { allow, timeoutMs: PREVIEW_STEP_TIMEOUT_MS },
+            { allow, registries, timeoutMs: PREVIEW_STEP_TIMEOUT_MS },
           );
           return {
             run: deploy,
@@ -211,7 +218,7 @@ export async function runInSandbox<R extends SandboxRole>(
   repos: RunRepos,
   role: R,
   script: (grants: RoleGrants<R>) => string,
-  { allow = [], timeoutMs }: { allow?: string[]; timeoutMs?: number } = {},
+  { allow = [], registries = [], timeoutMs }: { allow?: string[]; registries?: string[]; timeoutMs?: number } = {},
 ): Promise<RunResult> {
   const grants = (await mintGrants(env, repos, ROLE_GRANTS[role])) as RoleGrants<R>;
   const sandbox = env.SANDBOX.getByName(sandboxName(instanceId, role));
@@ -221,6 +228,7 @@ export async function runInSandbox<R extends SandboxRole>(
     access: roleAccess(role, grants, {
       preview: previewGrant(env.CF_ACCOUNT_ID, repos.project),
       allow,
+      registries,
     }),
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
   });

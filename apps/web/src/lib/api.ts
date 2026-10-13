@@ -242,6 +242,33 @@ export async function selectAttempt(projectRef: ProjectRef, task: string, attemp
   return parseResponse(tasksApi[":t"].selection.$post({ param: { ...projectRef, t: task }, json: { attempt } }));
 }
 
+const voteApi = tasksApi[":t"].vote;
+
+/**
+ * Opens a vote on the task among its passing attempts, taking ballots until `deadline` (ISO 8601) if
+ * given. Rejects with hono's `DetailedError` on failure.
+ */
+export async function openVote(projectRef: ProjectRef, task: string, deadline?: string) {
+  const json = deadline === undefined ? {} : { deadline };
+  return parseResponse(voteApi.open.$post({ param: { ...projectRef, t: task }, json }));
+}
+
+/** Casts the signed-in user's ballot for `attempt`, replacing theirs. Rejects on failure. */
+export async function castVote(projectRef: ProjectRef, task: string, attempt: string) {
+  return parseResponse(voteApi.$post({ param: { ...projectRef, t: task }, json: { attempt } }));
+}
+
+/** Adds `attempt`, passing now, to the task's open vote. Rejects on failure. */
+export async function addVoteCandidate(projectRef: ProjectRef, task: string, attempt: string) {
+  return parseResponse(voteApi.candidates.$post({ param: { ...projectRef, t: task }, json: { attempt } }));
+}
+
+/** Closes the task's open vote, selecting its winner, or `attempt` to break a tie. Rejects on failure. */
+export async function closeVote(projectRef: ProjectRef, task: string, attempt?: string) {
+  const json = attempt === undefined ? {} : { attempt };
+  return parseResponse(voteApi.close.$post({ param: { ...projectRef, t: task }, json }));
+}
+
 /** Approves the source attempt's current head, or cancels the merge request. Rejects on failure. */
 export async function actOnMergeRequest(projectRef: ProjectRef, task: string, how: "approve" | "cancel") {
   return parseResponse(tasksApi[":t"]["merge-request"][how].$post({ param: { ...projectRef, t: task } }));

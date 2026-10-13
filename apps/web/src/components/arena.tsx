@@ -16,7 +16,7 @@ import { ErrorState, Loading } from "@/components/states";
 import { Button } from "@/components/ui/button";
 import { mainHeadQuery, taskArenaQuery } from "@/lib/api";
 import type { ProjectRef } from "@/lib/api";
-import { bestValues, formatValue, isPassing, metricColumns, sortRail, toggleLane } from "@/lib/arena";
+import { bestValues, formatValue, isBest, metricColumns, sortRail, toggleLane } from "@/lib/arena";
 import type { ArenaAttempt, MetricColumn, RailSort } from "@/lib/arena";
 import { arenaView, fileRows, parseArenaSearch, readStoredView, storageKey, storeView } from "@/lib/arena-view";
 import type { ArenaSearch, ArenaView, Arrangement, Layout, Reference } from "@/lib/arena-view";
@@ -350,11 +350,13 @@ function Rail({
                 {label}
               </option>
             ))}
-            {columns.map((column) => (
-              <option key={column.key} value={column.key}>
-                {column.label}
-              </option>
-            ))}
+            {columns
+              .filter((column) => column.ranking !== null)
+              .map((column) => (
+                <option key={column.key} value={column.key}>
+                  {column.label}
+                </option>
+              ))}
           </select>
         </label>
       </div>
@@ -437,7 +439,7 @@ export function RailCard({
         </span>
         <dl className="grid grid-cols-[1fr_auto] gap-x-3 gap-y-0.5 text-xs">
           {columns.map((column) => (
-            <MetricRow key={column.key} column={column} attempt={attempt} best={best.get(column.key)} />
+            <MetricRow key={column.key} column={column} attempt={attempt} best={best} />
           ))}
         </dl>
         <VerdictCounts verdicts={attempt.verdicts} />
@@ -447,6 +449,7 @@ export function RailCard({
   );
 }
 
+/** A metric of a card, as text: the card is a button, so a URL isn't a link here. */
 function MetricRow({
   column,
   attempt,
@@ -454,18 +457,16 @@ function MetricRow({
 }: {
   column: MetricColumn;
   attempt: ArenaAttempt;
-  best: number | undefined;
+  best: Map<string, number>;
 }) {
-  const value = column.value(attempt);
-  const text = formatValue(value, column.unit);
-  const isBest = value !== null && value === best && isPassing(attempt);
+  const text = formatValue(column.value(attempt), column.unit);
   return (
     <>
       <dt className="text-muted-foreground">{column.label}</dt>
-      <dd className="text-right font-mono tabular-nums">
-        {isBest ? (
+      <dd className="min-w-0 truncate text-right font-mono tabular-nums">
+        {column.ranking !== null && isBest(column, attempt, best) ? (
           <mark
-            title={`Best among passing attempts (${column.order === "asc" ? "lower" : "higher"} is better)`}
+            title={`Best among passing attempts (${column.ranking.hint})`}
             className="rounded bg-yellow-200/70 px-1 text-foreground dark:bg-yellow-500/30"
           >
             {text}

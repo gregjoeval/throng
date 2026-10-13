@@ -43,8 +43,7 @@ const passed: ScoringResult = {
   config: { kind: "none" },
   gate: "passed",
   checks: [],
-  builtin: { filesChanged: 1, additions: 1, deletions: 0, durationMs: 1 },
-  preview: { status: "none" },
+  metrics: {},
   logs: [],
 };
 

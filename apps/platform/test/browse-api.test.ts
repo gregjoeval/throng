@@ -4,7 +4,7 @@ import { apiRoutes } from "../src/api.ts";
 import { webApp } from "../src/app.ts";
 import { ARCHIVE_REF_PREFIX } from "../src/archive.ts";
 import { IMMUTABLE, REF_MAX_AGE_SECONDS } from "../src/browse-api.ts";
-import { MAX_TEXT_BYTES } from "../src/browse.ts";
+import { MAX_SIZED_FILES, MAX_TEXT_BYTES } from "../src/browse.ts";
 import { FORWARDED_EMAIL_HEADER } from "../src/forwarded.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
@@ -202,6 +202,64 @@ describe("GET /tree", () => {
     expect((await get(`${base}/tree/main/src/`)).body).toMatchObject({ path: "src" });
   });
 
+  it("gives each file's size in bytes when asked, and none for a folder", async () => {
+    const { repos, get, origin, base } = await setup();
+    repos.commit(origin, {
+      files: {
+        "src/a.ts": "a",
+        "héllo.md": "héllo\n",
+        "logo.png": PNG,
+        link: { content: "héllo.md", type: "symlink" },
+      },
+    });
+    const entries = defined((await get(`${base}/tree/main?sizes=true`)).body)["entries"];
+    expect(entries.map((e: Json) => [e.name, e.size])).toEqual([
+      ["src", null],
+      ["héllo.md", 7],
+      ["link", 9],
+      ["logo.png", 12],
+    ]);
+    const src = defined((await get(`${base}/tree/main/src?sizes=true`)).body)["entries"];
+    expect(src.map((e: Json) => [e.name, e.size])).toEqual([["a.ts", 1]]);
+  });
+
+  it("sizes only the first files of a big directory, leaving the rest null", async () => {
+    const { repos, get, origin, base } = await setup();
+    const names = Array.from({ length: MAX_SIZED_FILES + 2 }, (_, i) => `f${String(i).padStart(4, "0")}.txt`);
+    repos.commit(origin, { files: { "sub/a": "a", ...Object.fromEntries(names.map((name) => [name, "xy"])) } });
+    const entries: Json[] = defined((await get(`${base}/tree/main?sizes=true`)).body)["entries"];
+    expect(entries.map((e) => e.size)).toEqual([null, ...names.map((_, i) => (i < MAX_SIZED_FILES ? 2 : null))]);
+  });
+
+  it("serves a repeated listing's sizes from the cache, reading no blobs", async () => {
+    const store = new Map<string, Response>();
+    const cache = {
+      match: async (key: Request) => store.get(key.url)?.clone(),
+      put: async (key: Request, res: Response) => void store.set(key.url, res.clone()),
+    };
+    const { repos, get, origin, base } = await setup({ diffCache: () => cache });
+    repos.commit(origin, { files: { "a.md": "a", "b.md": "bb" } });
+    const first = await get(`${base}/tree/main?sizes=true`);
+    const reads = repos.calls.length;
+    expect((await get(`${base}/tree/main?sizes=true`)).body).toEqual(first.body);
+    expect(repos.calls.slice(reads).map((c) => c.method)).not.toContain("readBlob");
+  });
+
+  it("reads no blobs for a listing unless sizes are asked for", async () => {
+    const { repos, get, origin, base } = await setup();
+    repos.commit(origin, { files: { "a.md": "a", "src/b.ts": "b" } });
+    let reads = 0;
+    const readBlob = repos.readBlob.bind(repos);
+    repos.readBlob = async (name, hash) => {
+      reads += 1;
+      return readBlob(name, hash);
+    };
+    const entries = defined((await get(`${base}/tree/main`)).body)["entries"];
+    expect(entries.map((e: Json) => Object.hasOwn(e, "size"))).toEqual([false, false]);
+    expect(reads).toBe(0);
+    expect((await get(`${base}/tree/main?sizes=maybe`)).status).toBe(400);
+  });
+
   it("handles paths with spaces and unicode", async () => {
     const { repos, get, origin, base } = await setup();
     repos.commit(origin, { files: { "my docs/héllo wörld/日本.md": "こんにちは\n" } });
@@ -240,8 +298,21 @@ describe("GET /blob and /raw", () => {
       size: 20,
       binary: false,
       tooLarge: false,
+      contentType: "text/plain; charset=utf-8",
       content: "export const a = 1;\n",
     });
+  });
+
+  it("gives each file the content type /raw serves it as", async () => {
+    const { repos, get, origin, base } = await setup();
+    repos.commit(origin, { files: { "a.avif": PNG, "logo.PNG": PNG, "data.bin": PNG, "page.html": "<p>hi</p>" } });
+    const typeOf = async (path: string) => defined((await get(`${base}/blob/main/${path}`)).body)["contentType"];
+    expect(await typeOf("a.avif")).toBe("image/avif");
+    expect(await typeOf("logo.PNG")).toBe("image/png");
+    expect(await typeOf("data.bin")).toBe("application/octet-stream");
+    expect(await typeOf("page.html")).toBe("text/plain; charset=utf-8");
+    const raw = await get(`${base}/raw/main/a.avif`);
+    expect(raw.headers.get("Content-Type")).toBe("image/avif");
   });
 
   it("flags binary and too-large files without content", async () => {

@@ -21,7 +21,7 @@
 // `e2e-browser.ts`): two scored attempts load as lanes against their base, by file lines up their
 // files, and selecting one there lands its merge request and closes the task.
 //
-// Scoring scenarios, through the e2e routes (`/e2e/*`): metrics (a passing project whose checks report metrics), failing (a required check fails the gate),
+// Scoring scenarios, through the e2e routes (`/e2e/*`): metrics (a check writes two JSON files into $THRONG_OUTPUT and fails; metrics are read from both), taskmetrics (a task adds a metric over a project check, scored with source task; a clash main later adds makes the next run invalid; through `/api`), taskchecks (a task adds a metric over a project check and a required check of its own; the gate follows the task check; making the check optional rescores the open attempts; through `/api`), failing (a required check fails the gate),
 // invalid (an invalid config fails the gate with a config entry), preview (a passing gate deploys a
 // Worker Preview built with `preview.command`, and its URL serves it), coalesce (two quick pushes; the first
 // run is cancelled and only the newest sha is scored), intrusion (an attempt's checks try to push to
@@ -105,6 +105,24 @@ class Timeline {
   }
 }
 
+/** A check in a run's result: Throng's own (`_diff`, `_preview`) are `platform`, the config's `project`. */
+interface Check {
+  name: string;
+  source: "platform" | "project" | "task";
+  required: boolean;
+  outcome: string;
+  durationMs: number;
+  notes: string[];
+}
+
+/** One metric in a run's result, as far as the scenarios read it. */
+interface Metric {
+  source: "platform" | "project" | "task";
+  type: "boolean" | "number" | "string" | "enum";
+  value: boolean | number | string | null;
+  note?: string;
+}
+
 /** What a run reports, as far as the scenarios read it (see `src/results.ts`). */
 interface Run {
   id: number;
@@ -114,17 +132,19 @@ interface Run {
     base: string | null;
     config: { kind: string; error?: string };
     gate: "passed" | "failed";
-    checks: { name: string; required: boolean; outcome: string; metrics: Record<string, number>; notes: string[] }[];
-    builtin: { filesChanged: number; additions: number; deletions: number; durationMs: number };
+    checks: Check[];
+    metrics: Record<string, Metric>;
     logs: string[];
-    preview:
-      | { status: "none" }
-      | { status: "ready"; url: string }
-      | { status: "failed" }
-      | { status: "errored"; error: string };
   } | null;
   error: string | null;
 }
+
+/** The checks a project's config defined, without Throng's own. */
+const configChecks = (result: { checks: Check[] }) => result.checks.filter((c) => c.source !== "platform");
+
+/** `_diff`'s files changed, lines added and lines deleted. */
+const diffSize = (result: { metrics: Record<string, Metric> }) =>
+  ["filesChanged", "additions", "deletions"].map((key) => result.metrics[`_diff.${key}`]?.value ?? null);
 
 /** A project driven through the product API as the e2e user (see `setUpRealProject`). */
 interface RealProject {
@@ -174,10 +194,10 @@ interface Dequeue {
 }
 
 interface ApiResult {
-  config: { kind: string };
+  config: { kind: string; error?: string };
   gate: "passed" | "failed";
-  checks: { name: string; outcome: string }[];
-  builtin: { filesChanged: number; additions: number; deletions: number };
+  checks: Check[];
+  metrics: Record<string, Metric>;
 }
 
 interface ScoringStatus {
@@ -193,6 +213,8 @@ const scenarios: Record<string, () => Promise<void>> = {
   mcp,
   arena,
   metrics,
+  taskmetrics,
+  taskchecks,
   failing,
   invalid,
   preview,
@@ -256,12 +278,12 @@ async function zeroconfig(): Promise<void> {
   const scoring = await scoredHead(p, a1, head);
   const { result } = scoring;
   assert(result.config.kind === "none", `expected no config, got ${JSON.stringify(result.config)}`);
-  assert(result.gate === "passed" && result.checks.length === 0, "expected a passing gate with no checks");
-  const { filesChanged, additions, deletions } = result.builtin;
+  assert(result.gate === "passed" && configChecks(result).length === 0, "expected a passing gate with no checks");
   assert(
-    filesChanged === 1 && additions === 1 && deletions === 1,
-    `unexpected diff size ${JSON.stringify(result.builtin)}`,
+    JSON.stringify(result.checks.map((c) => [c.name, c.outcome])) === '[["_diff","passed"],["_preview","skipped"]]',
+    `expected only Throng's own checks, _preview skipped: ${JSON.stringify(result.checks)}`,
   );
+  assert(diffSize(result).join() === "1,1,1", `unexpected diff size ${JSON.stringify(diffSize(result))}`);
 
   const selected = await throng<MergeRequest>(p, "POST", `/tasks/${t1}/selection`, { attempt: a1 });
   timeline.mark("t1a1 selected");
@@ -573,22 +595,45 @@ async function describePage({ page }: BrowserSession): Promise<void> {
   console.error(`page at ${page.url()}:\n${text}`);
 }
 
-/** A passing project whose checks report metrics: declared ones are kept, the rest noted. */
+/**
+ * A passing project whose optional `report` check writes two JSON files into `$THRONG_OUTPUT`, then
+ * fails: its metrics are still read from both files, through objects and an array, and one whose path
+ * doesn't exist is null with a note naming the segment and the keys there.
+ */
 async function metrics(): Promise<void> {
   const timeline = new Timeline();
   const { project, work } = await setUpProject(timeline, {
     // The fixture is an ES module package, so no `require`.
-    "scripts/metrics.js": `import { writeFileSync } from "node:fs";
-writeFileSync(process.env.THRONG_METRICS, JSON.stringify({ coverage: 87.5, stray: 1 }));
+    "scripts/report.js": `import { writeFileSync } from "node:fs";
+const out = process.env.THRONG_OUTPUT;
+writeFileSync(
+  out + "/report.json",
+  JSON.stringify({
+    numTotalTests: 12,
+    success: true,
+    grade: "b",
+    url: "https://ci.example.test/1",
+    testResults: [{ name: "greeting", duration: 7 }],
+  }),
+);
+writeFileSync(out + "/coverage-summary.json", JSON.stringify({ total: { lines: { pct: 87.5 } } }));
+process.exit(1);
 `,
     ".throng/config.yml": `checks:
   - name: test
     command: npm test
-  - name: coverage
-    command: node scripts/metrics.js
+  - name: report
+    command: node scripts/report.js
     required: false
-    metrics:
-      - { name: coverage, unit: "%", order: desc }
+metrics:
+  - { name: tests, from: report.report.numTotalTests, type: number }
+  - { name: slowest, from: report.report.testResults.0.duration, type: number, unit: ms, order: asc }
+  - { name: coverage, from: report.coverage-summary.total.lines.pct, type: number, unit: "%" }
+  - { name: branches, from: report.coverage-summary.total.branches.pct, type: number, unit: "%" }
+  - { name: green, from: report.report.success, type: boolean }
+  - { name: grade, from: report.report.grade, type: enum, values: [a, b, c] }
+  - { name: report-url, from: report.report.url, type: string, format: url }
+  - { name: unlisted, from: report.report.grade, type: enum, values: [a] }
 `,
   });
   const fork = await createAttempt(project, "t1a1", timeline);
@@ -597,21 +642,220 @@ writeFileSync(process.env.THRONG_METRICS, JSON.stringify({ coverage: 87.5, stray
 
   const result = await scored(project, sha);
   assert(result.gate === "passed", `expected the gate to pass: ${JSON.stringify(result.checks)}`);
-  const [test, coverage] = result.checks;
+  const [test, reporter] = configChecks(result);
   assert(
-    test?.outcome === "passed" && coverage?.outcome === "passed",
+    test?.outcome === "passed" && reporter?.outcome === "failed",
     `unexpected outcomes ${JSON.stringify(result.checks)}`,
   );
-  assert(coverage.metrics.coverage === 87.5, `coverage not recorded: ${JSON.stringify(coverage.metrics)}`);
+  const expected: Record<string, number> = { tests: 12, slowest: 7, coverage: 87.5 };
+  for (const [name, value] of Object.entries(expected)) {
+    const metric = result.metrics[name];
+    assert(
+      metric?.source === "project" && metric.type === "number" && metric.value === value,
+      `${name} not read from the failed check's output as ${value}: ${JSON.stringify(metric)}`,
+    );
+  }
+  const typed: Record<string, Metric> = {
+    green: { source: "project", type: "boolean", value: true },
+    grade: { source: "project", type: "enum", value: "b" },
+    "report-url": { source: "project", type: "string", value: "https://ci.example.test/1" },
+    unlisted: {
+      source: "project",
+      type: "enum",
+      value: null,
+      note: 'report.report.grade: "b" is not one of its values: a',
+    },
+  };
+  for (const [name, want] of Object.entries(typed)) {
+    const metric = result.metrics[name];
+    assert(
+      metric?.source === want.source &&
+        metric.type === want.type &&
+        metric.value === want.value &&
+        metric.note === want.note,
+      `${name} not read as ${JSON.stringify(want)}: ${JSON.stringify(metric)}`,
+    );
+  }
+  const missing = result.metrics["branches"];
   assert(
-    coverage.notes.some((n) => n.includes("stray")),
-    "the undeclared metric was not noted",
+    missing?.value === null &&
+      missing.note === "report.coverage-summary.total.branches: no key branches; keys there: lines",
+    `expected branches null with a note: ${JSON.stringify(missing)}`,
   );
   assert(
-    JSON.stringify(result.logs) === JSON.stringify(["test", "coverage"]),
+    result.metrics["test"]?.type === "enum" && result.metrics["test"].value === "passed",
+    `expected test's outcome metric: ${JSON.stringify(result.metrics["test"])}`,
+  );
+  assert(
+    JSON.stringify(result.logs) === JSON.stringify(["test", "report"]),
     `expected both checks' logs stored: ${JSON.stringify(result.logs)}`,
   );
   await finish(project, work, timeline);
+}
+
+/** `taskmetrics`' project config: a `report` check writing coverage, read as `coverage`. */
+const TASK_METRICS_CONFIG = `checks:
+  - name: report
+    command: node scripts/report.js
+metrics:
+  - { name: coverage, from: report.coverage-summary.total.lines.pct, type: number, unit: "%" }
+`;
+
+/**
+ * A task adds a metric over the project's `report` check: saving one that clashes with the project's
+ * names is refused, and the task's metric is scored with `source: task`. Then `main` gains a metric
+ * with the task's name, and the attempt's next run is `config: invalid`, naming the clash.
+ */
+async function taskmetrics(): Promise<void> {
+  const timeline = new Timeline();
+  const p = await setUpRealProject(timeline, {
+    "scripts/report.js": `import { writeFileSync } from "node:fs";
+writeFileSync(process.env.THRONG_OUTPUT + "/coverage-summary.json", JSON.stringify({ total: { lines: { pct: 87.5, total: 40 } } }));
+`,
+    ".throng/config.yml": TASK_METRICS_CONFIG,
+  });
+  const fixture = (await git(p.work, "rev-parse", "HEAD")).trim();
+  const [t1, a1] = ["t1", "t1a1"];
+  const lines = { name: "lines", from: "report.coverage-summary.total.lines.total", type: "number", order: "asc" };
+  const refused = await throng(p, "POST", "/tasks", { title: "Cover", metrics: [{ ...lines, name: "coverage" }] }).then(
+    () => null,
+    (error: unknown) => String(error),
+  );
+  assert(
+    refused?.includes("400") === true && refused.includes("coverage is also a metric's name in .throng/config.yml"),
+    `expected a clashing task metric refused, got ${refused ?? "a created task"}`,
+  );
+  const { ref, metrics: saved } = await throng<{ ref: string; metrics: { name: string }[] }>(p, "POST", "/tasks", {
+    title: "Cover",
+    metrics: [lines],
+  });
+  assert(ref === t1 && saved.map((m) => m.name).join() === "lines", `unexpected task ${ref}: ${JSON.stringify(saved)}`);
+  await createAttempts(p, t1, [a1], timeline);
+  const head = await editAndPush(p, a1, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
+  await throng(p, "POST", `/attempts/${a1}/open`);
+  const { result } = await scoredHead(p, a1, head);
+  assert(result.config.kind === "valid" && result.gate === "passed", `unexpected result ${JSON.stringify(result)}`);
+  const metric = result.metrics["lines"];
+  assert(
+    metric?.source === "task" && metric.value === 40 && result.metrics["coverage"]?.source === "project",
+    `expected lines from the task over report's output: ${JSON.stringify(result.metrics)}`,
+  );
+  timeline.mark("task metric scored");
+
+  // The project now names a metric `lines` too: around the proxy, which refuses pushes to `main`.
+  await git(p.work, "checkout", "-q", "-b", "config", fixture);
+  await writeFile(
+    join(p.work, ".throng/config.yml"),
+    `${TASK_METRICS_CONFIG}  - { name: lines, from: report.coverage-summary.total.lines.pct, type: number }\n`,
+  );
+  await git(p.work, "commit", "-q", "-am", "config: lines");
+  await git(p.work, ...auth(p.origin.token), "push", "-q", p.origin.remote, "HEAD:refs/heads/main");
+  await git(p.work, "checkout", "-q", "main");
+  timeline.mark("main names lines");
+  const next = await editAndPush(
+    p,
+    a1,
+    "src/greeting.js",
+    (s) => s.replace("hello from a1", "hello again"),
+    "a1 again",
+  );
+  const clashed = (await scoredHead(p, a1, next)).result;
+  assert(
+    clashed.config.kind === "invalid" &&
+      clashed.gate === "failed" &&
+      clashed.config.error?.includes("lines is also a metric's name") === true,
+    `expected the clash to make the config invalid: ${JSON.stringify(clashed.config)}`,
+  );
+  await finish(p.project, p.work, timeline);
+}
+
+/**
+ * A task adds a metric over the project's `report` check and a required `smoke` check of its own,
+ * which needs the greeting to say who it's from. Both attempts show the task's check and metrics with
+ * `source: task`, after the project's; the gate follows `smoke`: passed for a1, failed for a2. Then
+ * the task makes `smoke` optional, which rescores the open a2 at the same head: `smoke` still fails,
+ * but the gate passes.
+ */
+const SMOKE = { name: "smoke", command: "node scripts/smoke.js", timeout: "2m" };
+
+async function taskchecks(): Promise<void> {
+  const timeline = new Timeline();
+  const p = await setUpRealProject(timeline, {
+    "scripts/report.js": `import { writeFileSync } from "node:fs";
+writeFileSync(process.env.THRONG_OUTPUT + "/coverage-summary.json", JSON.stringify({ total: { lines: { pct: 87.5, total: 40 } } }));
+`,
+    "scripts/smoke.js": `import { readFileSync, writeFileSync } from "node:fs";
+const ok = readFileSync("src/greeting.js", "utf8").includes("hello from");
+writeFileSync(process.env.THRONG_OUTPUT + "/smoke.json", JSON.stringify({ ok }));
+process.exit(ok ? 0 : 1);
+`,
+    ".throng/config.yml": TASK_METRICS_CONFIG,
+  });
+  const [t1, a1, a2] = ["t1", "t1a1", "t1a2"];
+  const { ref, checks } = await throng<{ ref: string; checks: { name: string; source: string; required: boolean }[] }>(
+    p,
+    "POST",
+    "/tasks",
+    {
+      title: "Greet",
+      checks: [SMOKE],
+      metrics: [
+        { name: "lines", from: "report.coverage-summary.total.lines.total", type: "number", order: "asc" },
+        { name: "smoked", from: "smoke.smoke.ok", type: "boolean" },
+      ],
+    },
+  );
+  assert(
+    ref === t1 && checks.map((c) => `${c.name}:${c.source}:${String(c.required)}`).join() === "smoke:task:true",
+    `unexpected task ${ref}: ${JSON.stringify(checks)}`,
+  );
+  const fixture = (await git(p.work, "rev-parse", "HEAD")).trim();
+  await createAttempts(p, t1, [a1, a2], timeline);
+  const passing = await editAndPush(p, a1, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
+  // Start a2 from the same main, not from a1's edit.
+  await git(p.work, "checkout", "-q", "--detach", fixture);
+  const unsigned = await editAndPush(p, a2, "src/greeting.js", (s) => s.replace('"hello"', '"bye"'), "a2");
+  for (const attempt of [a1, a2]) await throng(p, "POST", `/attempts/${attempt}/open`);
+  const passed = (await scoredHead(p, a1, passing)).result;
+  const failed = (await scoredHead(p, a2, unsigned)).result;
+  for (const [result, gate, outcome, ok] of [
+    [passed, "passed", "passed", true],
+    [failed, "failed", "failed", false],
+  ] as const) {
+    const ran = configChecks(result).map((c) => `${c.name}:${c.source}:${String(c.required)}:${c.outcome}`);
+    assert(
+      result.config.kind === "valid" &&
+        result.gate === gate &&
+        ran.join() === `report:project:true:passed,smoke:task:true:${outcome}`,
+      `expected the gate to follow smoke (${gate}): ${JSON.stringify({ gate: result.gate, ran, config: result.config })}`,
+    );
+    const { lines, smoked, smoke } = result.metrics;
+    assert(
+      lines?.source === "task" &&
+        lines.value === 40 &&
+        smoked?.source === "task" &&
+        smoked.value === ok &&
+        smoke?.source === "task" &&
+        smoke.value === outcome,
+      `expected the task's metrics with source task: ${JSON.stringify(result.metrics)}`,
+    );
+  }
+  timeline.mark("task check gated");
+
+  await throng(p, "PATCH", `/tasks/${t1}`, { checks: [{ ...SMOKE, required: false }] });
+  const rescored = await poll(`${a2}'s rescore under the edited checks`, async () => {
+    const s = await throng<ScoringStatus>(p, "GET", `/attempts/${a2}/scoring`);
+    assert(s.status !== "errored", `${a2}'s rescore errored`);
+    const smoke = s.result?.checks.find((c) => c.name === "smoke");
+    return s.sha === unsigned && s.status === "done" && smoke?.required === false ? (s.result ?? null) : null;
+  });
+  const smoke = rescored.checks.find((c) => c.name === "smoke");
+  assert(
+    rescored.gate === "passed" && smoke?.outcome === "failed",
+    `expected the rescore to fail smoke and pass the gate: ${JSON.stringify(rescored)}`,
+  );
+  timeline.mark("edit rescored");
+  await finish(p.project, p.work, timeline);
 }
 
 /** A required check that fails fails the gate; an optional one that passes doesn't save it. */
@@ -633,13 +877,15 @@ async function failing(): Promise<void> {
   const result = await scored(project, sha);
   assert(result.gate === "failed", "expected the gate to fail");
   assert(
-    result.checks.map((c) => c.outcome).join() === "failed,passed",
+    configChecks(result)
+      .map((c) => c.outcome)
+      .join() === "failed,passed",
     `expected failed then passed, got ${JSON.stringify(result.checks)}`,
   );
   await finish(project, work, timeline);
 }
 
-/** An invalid config fails the gate with a single `config` entry, and runs no checks. */
+/** An invalid config fails the gate with its error on `config`, and runs only Throng's `_diff`. */
 async function invalid(): Promise<void> {
   const timeline = new Timeline();
   const { project, work } = await setUpProject(timeline, {
@@ -655,10 +901,15 @@ async function invalid(): Promise<void> {
   const result = await scored(project, sha);
   assert(result.config.kind === "invalid" && result.gate === "failed", `expected an invalid config to fail the gate`);
   assert(
-    result.checks.length === 1 && result.checks[0]?.name === "config",
-    `expected one config entry, got ${JSON.stringify(result.checks)}`,
+    result.config.error?.includes("checks[0].name") === true,
+    `expected the config's error, got ${JSON.stringify(result.config)}`,
   );
-  assert(result.builtin.filesChanged === 1, "the built-in metrics were not recorded");
+  assert(configChecks(result).length === 0, `expected no config checks, got ${JSON.stringify(result.checks)}`);
+  assert(
+    result.checks.find((c) => c.name === "_preview")?.notes.join() === "skipped: the config is invalid",
+    `expected _preview skipped for the invalid config: ${JSON.stringify(result.checks)}`,
+  );
+  assert(diffSize(result)[0] === 1, `_diff was not recorded: ${JSON.stringify(result.metrics)}`);
   await finish(project, work, timeline);
 }
 
@@ -681,16 +932,25 @@ async function preview(): Promise<void> {
   const result = await scored(project, sha);
   timeline.mark("scored");
   assert(result.gate === "passed", `expected the gate to pass: ${JSON.stringify(result.checks)}`);
-  const deployed = result.preview;
-  assert(deployed.status === "ready", `expected a ready Preview, got ${JSON.stringify(deployed)}`);
+  const check = result.checks.find((c) => c.name === "_preview");
   assert(
-    new URL(deployed.url).hostname.startsWith(`t1a1-p${project}-`),
-    `the Preview is not named after the fork and project: ${deployed.url}`,
+    check?.source === "platform" && check.outcome === "passed" && result.metrics["_preview"]?.value === "passed",
+    `expected _preview to pass, got ${JSON.stringify(check)}`,
+  );
+  const deployed = result.metrics["_preview.url"];
+  assert(
+    deployed?.type === "string" && typeof deployed.value === "string",
+    `expected _preview.url, got ${JSON.stringify(deployed)}`,
+  );
+  const previewUrl = deployed.value;
+  assert(
+    new URL(previewUrl).hostname.startsWith(`t1a1-p${project}-`),
+    `the Preview is not named after the fork and project: ${previewUrl}`,
   );
   assert(result.logs.includes("preview.deploy"), `expected the Preview's log stored: ${JSON.stringify(result.logs)}`);
 
   // A new Preview's hostname can take a moment to answer.
-  const url = `${deployed.url}?name=e2e`;
+  const url = `${previewUrl}?name=e2e`;
   const deadline = Date.now() + 2 * 60 * 1000;
   let last = "";
   while (Date.now() < deadline) {

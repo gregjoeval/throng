@@ -74,8 +74,7 @@ const PASSED: ScoringResult = {
   config: { kind: "none" },
   gate: "passed",
   checks: [],
-  builtin: { filesChanged: 1, additions: 1, deletions: 1, durationMs: 1 },
-  preview: { status: "none" },
+  metrics: {},
   logs: [],
 };
 
@@ -375,6 +374,18 @@ describe("/mcp", () => {
     const missing = await call(greg, "get_dequeue", { project, task: "t1" });
     expect(missing.summary).toMatch(/^notFound: /u);
     expect((await call(greg, "list_tasks", { project: "throng" })).isError).toBeTruthy();
+  });
+
+  it("creates a task with its own checks and metrics, as REST does", async () => {
+    const { ada, project } = await withProject();
+    const smoke = { name: "smoke", command: "./smoke.sh" };
+    const smoked = { name: "smoked", from: "smoke.report.ok", type: "boolean" };
+    const created = await call(ada, "create_task", { project, title: "Smoke", checks: [smoke], metrics: [smoked] });
+    expect(created.isError).toBeFalsy();
+    expect(created.data["task"]).toMatchObject({
+      checks: [{ ...smoke, source: "task" }],
+      metrics: [{ ...smoked, source: "task" }],
+    });
   });
 
   it("waits on an attempt, answering changed: false when nothing changed", async () => {

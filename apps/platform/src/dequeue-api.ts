@@ -20,11 +20,11 @@ import { CONFLICT_CAPS, CONFLICT_TYPES } from "./conflicts.ts";
 import { diffFile } from "./diff.ts";
 import type { FileSide } from "./diff.ts";
 import { errorBody, errorResponse, ServiceError } from "./errors.ts";
+import { FAILED_CHECK_OUTCOMES } from "./landing.ts";
 import { LOG_CONTENT_TYPE } from "./logs.ts";
 import type { LogStore } from "./logs.ts";
 import { DEQUEUE_REASONS } from "./merge-requests.ts";
 import type { Repos } from "./repos.ts";
-import { CHECK_OUTCOMES } from "./results.ts";
 import type { TaskBackend } from "./tasks.ts";
 
 export interface DequeueOptions {
@@ -91,7 +91,7 @@ const FailedChecksDetailsSchema = z
     checks: z.array(
       z.object({
         name: z.string(),
-        outcome: z.enum(CHECK_OUTCOMES).exclude(["passed"]),
+        outcome: z.enum(FAILED_CHECK_OUTCOMES),
         log: z.string().nullable().openapi({ description: "For `GET …/merge-request/dequeue/logs/{name}`." }),
       }),
     ),

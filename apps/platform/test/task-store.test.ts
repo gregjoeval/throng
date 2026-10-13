@@ -114,6 +114,7 @@ describe("tasks", () => {
       closed_at: null,
       closed_by: null,
       attempt_limit: null,
+      definitions: { checks: [], metrics: [] },
     });
     expect(t2).toMatchObject({ number: 2, body: "**md**", attempt_limit: 2 });
     await store.obsoleteTask(PROJECT, owner, { task: 2 });
@@ -143,15 +144,36 @@ describe("tasks", () => {
     expect(store.listTasks(PROJECT, bob, { state: "closed" }).map((t) => t.number)).toEqual([3]);
   });
 
-  it("edits title, body and attempt limit, keeping what isn't given", () => {
+  it("edits title, body and attempt limit, keeping what isn't given", async () => {
     const { store } = setup();
     store.createTask(PROJECT, ada, { title: "a", body: "b", attemptLimit: 3 });
-    expect(store.editTask(PROJECT, ada, { task: 1, title: "A" })).toMatchObject({
+    expect(await store.editTask(PROJECT, ada, { task: 1, title: "A" })).toMatchObject({
       title: "A",
       body: "b",
       attempt_limit: 3,
     });
-    expect(store.editTask(PROJECT, owner, { task: 1, attemptLimit: null })).toMatchObject({ attempt_limit: null });
+    expect(await store.editTask(PROJECT, owner, { task: 1, attemptLimit: null })).toMatchObject({
+      attempt_limit: null,
+    });
+  });
+
+  it("gives a scoring run a task's definitions, and none for an attempt with no task row", async () => {
+    const { store } = setup();
+    const lines = {
+      name: "lines",
+      from: "test.report.lines",
+      type: "number",
+      unit: null,
+      order: "asc",
+      source: "task",
+    } as const;
+    store.createTask(PROJECT, ada, { title: "a", metrics: [lines] });
+    expect(store.definitionsOf(1)).toEqual({ checks: [], metrics: [lines] });
+    await store.editTask(PROJECT, ada, { task: 1, title: "A" });
+    expect(store.definitionsOf(1)).toEqual({ checks: [], metrics: [lines] });
+    await store.editTask(PROJECT, ada, { task: 1, metrics: [] });
+    expect(store.definitionsOf(1)).toEqual({ checks: [], metrics: [] });
+    expect(store.definitionsOf(7)).toEqual({ checks: [], metrics: [] });
   });
 
   it("lets the owner or the creator edit, close and reopen, and nobody else", async () => {
@@ -674,7 +696,7 @@ describe("archive", () => {
 
   it("holds the cap while a reopen's fork is made", async () => {
     const { store, repos } = await withWork();
-    store.editTask(PROJECT, ada, { task: 1, attemptLimit: 1 });
+    await store.editTask(PROJECT, ada, { task: 1, attemptLimit: 1 });
     await store.closeAttempt(PROJECT, ada, t1a1);
     const fork = repos.fork.bind(repos);
     let racing: Promise<unknown> | undefined;
@@ -919,7 +941,8 @@ describe("migrate", () => {
     });
     const run = store.getScoringRun(PROJECT, ada, { run: 1 });
     expect(run.trigger).toBe("scoreNow");
-    expect(run.result?.checks[0]?.outcome).toBe("timedOut");
+    expect(run.result?.checks.find((c) => c.name === "test")?.outcome).toBe("timedOut");
+    expect(run.result?.metrics["test"]).toMatchObject({ type: "enum", value: "timedOut" });
     expect(sql.exec("SELECT kind FROM journal ORDER BY id")).toEqual(
       ["returnedToDraft", "handedOff", "madeObsolete", "mainAdvanced", "needsReview", "scoringQueued", "forkReady"].map(
         (kind) => ({ kind }),

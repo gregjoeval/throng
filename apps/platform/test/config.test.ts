@@ -7,6 +7,7 @@ const EMPTY: Config = {
   setup: [],
   network: { allow: [] },
   checks: [],
+  metrics: [],
   preview: null,
   attempts: { limit: null },
 };
@@ -23,16 +24,20 @@ checks:
     command: pnpm test
     required: true
     timeout: 10m
-    metrics:
-      - { name: coverage, unit: "%", order: descending }
   - name: bundle
     command: pnpm build && node scripts/size.js
     required: false
     timeout: 90s
-    metrics:
-      - { name: bundle_kb, unit: KB, order: asc }
-      - { name: gzip-kb, order: ascending }
-      - { name: score, order: desc }
+metrics:
+  - { name: coverage, from: test.coverage-summary.total.lines.pct, type: number, unit: "%" }
+  - { name: bundle_kb, from: bundle.size.files.0.kb, type: number, unit: KB, order: asc }
+  - { name: gzip-kb, from: bundle.size.gzip, type: number, order: ascending }
+  - { name: score, from: bundle.size.score, type: number, order: desc }
+  - { name: typed, from: test.report.typed, type: boolean }
+  - { name: untyped, from: test.report.untyped, type: boolean, order: asc }
+  - { name: grade, from: test.report.grade, type: enum, values: [a, b, c] }
+  - { name: summary, from: test.report.summary, type: string }
+  - { name: report-url, from: test.report.url, type: string, format: url }
 preview:
   command: pnpm build
 attempts:
@@ -40,7 +45,8 @@ attempts:
 `;
 
 const check = (fields: string) => `checks:\n  - { name: test, command: pnpm test, ${fields} }\n`;
-const metric = (fields: string) => check(`metrics: [{ ${fields} }]`);
+const metric = (fields: string) => `checks:\n  - { name: test, command: pnpm test }\nmetrics:\n  - { ${fields} }\n`;
+const FROM = "from: test.report.total";
 
 describe("parseConfig", () => {
   it("is none without a file", () => {
@@ -56,7 +62,7 @@ describe("parseConfig", () => {
     expect(parseConfig(text)).toEqual({ kind: "valid", config: EMPTY });
   });
 
-  it("reads every field, normalising orders, timeouts and hosts", () => {
+  it("reads every field, normalising orders, timeouts and hosts, and defaulting booleans to true-best", () => {
     expect(parseConfig(FULL)).toEqual({
       kind: "valid",
       config: {
@@ -68,19 +74,40 @@ describe("parseConfig", () => {
             command: "pnpm test",
             required: true,
             timeoutMs: 10 * 60_000,
-            metrics: [{ name: "coverage", unit: "%", order: "desc" }],
+            source: "project",
           },
           {
             name: "bundle",
             command: "pnpm build && node scripts/size.js",
             required: false,
             timeoutMs: 90_000,
-            metrics: [
-              { name: "bundle_kb", unit: "KB", order: "asc" },
-              { name: "gzip-kb", unit: null, order: "asc" },
-              { name: "score", unit: null, order: "desc" },
-            ],
+            source: "project",
           },
+        ],
+        metrics: [
+          {
+            name: "coverage",
+            from: "test.coverage-summary.total.lines.pct",
+            type: "number",
+            unit: "%",
+            order: "desc",
+            source: "project",
+          },
+          {
+            name: "bundle_kb",
+            from: "bundle.size.files.0.kb",
+            type: "number",
+            unit: "KB",
+            order: "asc",
+            source: "project",
+          },
+          { name: "gzip-kb", from: "bundle.size.gzip", type: "number", unit: null, order: "asc", source: "project" },
+          { name: "score", from: "bundle.size.score", type: "number", unit: null, order: "desc", source: "project" },
+          { name: "typed", from: "test.report.typed", type: "boolean", order: "desc", source: "project" },
+          { name: "untyped", from: "test.report.untyped", type: "boolean", order: "asc", source: "project" },
+          { name: "grade", from: "test.report.grade", type: "enum", values: ["a", "b", "c"], source: "project" },
+          { name: "summary", from: "test.report.summary", type: "string", format: null, source: "project" },
+          { name: "report-url", from: "test.report.url", type: "string", format: "url", source: "project" },
         ],
         preview: { command: "pnpm build" },
         attempts: { limit: 4 },
@@ -88,21 +115,27 @@ describe("parseConfig", () => {
     });
   });
 
-  it("defaults a check to required, a 10m timeout and no metrics", () => {
+  it("defaults a check to required and a 10m timeout", () => {
     const result = parseConfig("checks:\n  - name: lint\n    command: pnpm lint\n");
     expect(result).toEqual({
       kind: "valid",
       config: {
         ...EMPTY,
         checks: [
-          { name: "lint", command: "pnpm lint", required: true, timeoutMs: DEFAULT_CHECK_TIMEOUT_MS, metrics: [] },
+          {
+            name: "lint",
+            command: "pnpm lint",
+            required: true,
+            timeoutMs: DEFAULT_CHECK_TIMEOUT_MS,
+            source: "project",
+          },
         ],
       },
     });
   });
 
   it.each([
-    ["empty sections", "setup: []\nnetwork: {}\nchecks: []\nattempts: {}\n", EMPTY],
+    ["empty sections", "setup: []\nnetwork: {}\nchecks: []\nmetrics: []\nattempts: {}\n", EMPTY],
     ["a preview without a command", "preview: {}\n", { ...EMPTY, preview: { command: null } }],
   ])("accepts %s", (_, text, config) => {
     expect(parseConfig(text)).toEqual({ kind: "valid", config });
@@ -137,19 +170,18 @@ describe("parseConfig", () => {
     ["an unknown check key", check("image: node"), /^checks\[0\]\.image: unknown key$/u],
     [
       "an unknown metric key",
-      metric("name: x, order: asc, weight: 2"),
-      /^checks\[0\]\.metrics\[0\]\.weight: unknown key$/u,
+      metric(`name: x, ${FROM}, type: number, weight: 2`),
+      /^metrics\[0\]\.weight: unknown key$/u,
     ],
     ["an unknown preview key", "preview: { url: x }\n", /^preview\.url: unknown key$/u],
     ["an unknown attempts key", "attempts: { max: 2 }\n", /^attempts\.max: unknown key$/u],
     // target
     [
       "a metric target",
-      metric("name: x, order: asc, target: 90"),
-      /^checks\[0\]\.metrics\[0\]\.target: target is reserved/u,
+      metric(`name: x, ${FROM}, type: number, target: 90`),
+      /^metrics\[0\]\.target: target is reserved/u,
     ],
-    ["a null metric target", metric("name: x, order: asc, target:"), /target is reserved/u],
-    // setup and network
+    ["a null metric target", metric(`name: x, ${FROM}, type: number, target:`), /target is reserved/u],
     ["setup that isn't a list", "setup: pnpm install\n", /^setup: /u],
     ["an empty setup command", 'setup: [""]\n', /^setup\[0\]: must not be empty$/u],
     ["a non-string setup command", "setup: [1]\n", /^setup\[0\]: must be a string$/u],
@@ -171,7 +203,21 @@ describe("parseConfig", () => {
     ],
     ["an uppercase check name", "checks: [{ name: Test, command: x }]\n", /^checks\[0\]\.name: check name must match/u],
     ["a check name starting with a dash", "checks: [{ name: -t, command: x }]\n", /^checks\[0\]\.name: /u],
-    ["a check name with a dot", "checks: [{ name: a.b, command: x }]\n", /^checks\[0\]\.name: /u],
+    [
+      "a check name with a dot",
+      "checks: [{ name: a.b, command: x }]\n",
+      /^checks\[0\]\.name: check name must not contain a dot; dots separate the parts of a metric's from$/u,
+    ],
+    [
+      "a check name starting with _",
+      "checks: [{ name: _diff, command: x }]\n",
+      /^checks\[0\]\.name: check name must not start with _, which is reserved for Throng's own checks and metrics$/u,
+    ],
+    [
+      "inline metrics under a check",
+      check("metrics: [{ name: coverage, order: desc }]"),
+      /^checks\[0\]\.metrics: a check no longer declares metrics; .*top-level metrics list.*from: <check>\.<file>\.<path>.*\$THRONG_OUTPUT/u,
+    ],
     ["a non-boolean required", check("required: yes"), /^checks\[0\]\.required: required must be true or false$/u],
     ["a numeric timeout", check("timeout: 600"), /^checks\[0\]\.timeout: /u],
     [
@@ -180,27 +226,115 @@ describe("parseConfig", () => {
       /^checks\[1\]\.name: duplicate check name t$/u,
     ],
     // metrics
-    ["a metric without an order", metric("name: x"), /^checks\[0\]\.metrics\[0\]\.order: order is required/u],
-    ["an unknown order", metric("name: x, order: up"), /^checks\[0\]\.metrics\[0\]\.order: order must be/u],
-    ["a metric without a name", metric("order: asc"), /^checks\[0\]\.metrics\[0\]\.name: /u],
+    [
+      "a metric without a type",
+      metric(`name: x, ${FROM}`),
+      /^metrics\[0\]\.type: type is required: boolean, number, string or enum$/u,
+    ],
+    [
+      "an unknown type",
+      metric(`name: x, ${FROM}, type: float`),
+      /^metrics\[0\]\.type: type must be boolean, number, string or enum$/u,
+    ],
+    [
+      "a format on a number",
+      metric(`name: x, ${FROM}, type: number, format: url`),
+      /^metrics\[0\]\.format: format is only for a string metric$/u,
+    ],
+    [
+      "an unknown format",
+      metric(`name: x, ${FROM}, type: string, format: email`),
+      /^metrics\[0\]\.format: format must be url$/u,
+    ],
+    [
+      "values on a number",
+      metric(`name: x, ${FROM}, type: number, values: [a]`),
+      /^metrics\[0\]\.values: values are only for an enum metric$/u,
+    ],
+    [
+      "an enum without values",
+      metric(`name: x, ${FROM}, type: enum`),
+      /^metrics\[0\]\.values: an enum metric needs its values, best first$/u,
+    ],
+    [
+      "an enum with no values",
+      metric(`name: x, ${FROM}, type: enum, values: []`),
+      /^metrics\[0\]\.values: an enum metric needs its values, best first$/u,
+    ],
+    [
+      "an enum with a non-string value",
+      metric(`name: x, ${FROM}, type: enum, values: [a, 1]`),
+      /^metrics\[0\]\.values\[1\]: must be a string$/u,
+    ],
+    [
+      "an enum with a duplicate value",
+      metric(`name: x, ${FROM}, type: enum, values: [a, b, a]`),
+      /^metrics\[0\]\.values\[2\]: duplicate value a$/u,
+    ],
+    [
+      "an order on a string, which never ranks",
+      metric(`name: x, ${FROM}, type: string, order: asc`),
+      /^metrics\[0\]\.order: a string metric has no order$/u,
+    ],
+    [
+      "an order on an enum, whose values give its order",
+      metric(`name: x, ${FROM}, type: enum, values: [a], order: asc`),
+      /^metrics\[0\]\.order: an enum metric's order is its values, best first$/u,
+    ],
+    [
+      "a unit on a boolean",
+      metric(`name: x, ${FROM}, type: boolean, unit: KB`),
+      /^metrics\[0\]\.unit: unit is only for a number metric$/u,
+    ],
+    ["an unknown order", metric(`name: x, ${FROM}, type: number, order: up`), /^metrics\[0\]\.order: order must be/u],
+    ["a metric without a name", metric(`${FROM}, type: number`), /^metrics\[0\]\.name: /u],
     [
       "a bad metric name",
-      metric("name: Bundle KB, order: asc"),
-      /^checks\[0\]\.metrics\[0\]\.name: metric name must match/u,
-    ],
-    ["a non-string unit", metric("name: x, order: asc, unit: 1"), /^checks\[0\]\.metrics\[0\]\.unit: /u],
-    [
-      "a duplicate metric name within a check",
-      metric("name: x, order: asc }, { name: x, order: desc"),
-      /^checks\[0\]\.metrics\[1\]\.name: duplicate metric name x$/u,
+      metric(`name: Bundle KB, ${FROM}, type: number`),
+      /^metrics\[0\]\.name: metric name must match/u,
     ],
     [
-      "a duplicate metric name across checks",
-      "checks:\n  - { name: a, command: a, metrics: [{ name: x, order: asc }] }\n" +
-        "  - { name: b, command: b, metrics: [{ name: x, order: asc }] }\n",
-      /^checks\[1\]\.metrics\[0\]\.name: duplicate metric name x$/u,
+      "a metric name starting with _",
+      metric(`name: _size, ${FROM}, type: number`),
+      /^metrics\[0\]\.name: metric name must not start with _, which is reserved/u,
     ],
-    // preview and attempts
+    [
+      "a metric name with a dot",
+      metric(`name: lines.pct, ${FROM}, type: number`),
+      /^metrics\[0\]\.name: metric name must not contain a dot/u,
+    ],
+    ["a non-string unit", metric(`name: x, ${FROM}, type: number, unit: 1`), /^metrics\[0\]\.unit: /u],
+    ["a metric without a from", metric("name: x, type: number"), /^metrics\[0\]\.from: from is required/u],
+    [
+      "a from without a path",
+      metric("name: x, from: test.report, type: number"),
+      /^metrics\[0\]\.from: from must be <check>\.<file>\.<path>, like test\.coverage-summary\.total\.lines\.pct$/u,
+    ],
+    [
+      "a from with an empty segment",
+      metric("name: x, from: test..total, type: number"),
+      /^metrics\[0\]\.from: from must be/u,
+    ],
+    [
+      "a from with a / in its file",
+      metric("name: x, from: test.a/b.total, type: number"),
+      /^metrics\[0\]\.from: from must be/u,
+    ],
+    [
+      "a from naming an unknown check",
+      metric("name: x, from: tests.report.total, type: number"),
+      /^metrics\[0\]\.from: no check is named tests$/u,
+    ],
+    [
+      "a duplicate metric name",
+      metric(`name: x, ${FROM}, type: number }\n  - { name: x, ${FROM}, type: number`),
+      /^metrics\[1\]\.name: duplicate metric name x$/u,
+    ],
+    [
+      "a metric named like a check, whose outcome is a metric of that name",
+      metric(`name: test, ${FROM}, type: number`),
+      /^metrics\[0\]\.name: metric name test is also a check's name$/u,
+    ],
     ["a preview that isn't a mapping", "preview: pnpm build\n", /^preview: preview must be a mapping$/u],
     ["an empty preview command", "preview: { command: '' }\n", /^preview\.command: must not be empty$/u],
     ["a zero limit", "attempts: { limit: 0 }\n", /^attempts\.limit: limit must be a positive integer$/u],
@@ -213,12 +347,14 @@ describe("parseConfig", () => {
   });
 
   it("reports every problem, one per line", () => {
-    const result = parseConfig("checks:\n  - { name: Bad, command: x, metrics: [{ name: m, target: 1 }] }\nextra: 1\n");
+    const result = parseConfig(
+      "checks:\n  - { name: Bad, command: x }\nmetrics:\n  - { name: m, from: Bad.r.x, target: 1 }\nextra: 1\n",
+    );
     expect(result.kind === "invalid" ? result.error.split("\n").toSorted() : []).toEqual([
-      "checks[0].metrics[0].order: order is required: ascending, asc, descending or desc",
-      "checks[0].metrics[0].target: target is reserved and not supported yet; remove it",
       "checks[0].name: check name must match ^[a-z0-9][a-z0-9_-]*$",
       "extra: unknown key",
+      "metrics[0].target: target is reserved and not supported yet; remove it",
+      "metrics[0].type: type is required: boolean, number, string or enum",
     ]);
   });
 

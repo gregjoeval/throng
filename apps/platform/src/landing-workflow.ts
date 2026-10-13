@@ -1,5 +1,6 @@
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep, WorkflowStepConfig } from "cloudflare:workers";
+import { reposFor } from "./artifacts";
 import { parseConfig } from "./config";
 import { conflictFiles, parseMergeTree } from "./conflicts";
 import type { ConflictDetails } from "./conflicts";
@@ -7,6 +8,8 @@ import { LANDING_ROLES, sandboxName } from "./grants";
 import { actedAlias, failedChecks, mergeAuthor, mergeCommitMessage, retestConfig } from "./landing";
 import type { LandingOutcome, LandingParams, Signer } from "./landing";
 import { landingLogKey, logNames } from "./logs";
+import { NO_NETWORK } from "./network";
+import { loadRegistries } from "./npmrc";
 import { buildResult, scorePlan, scoreTimeoutMs } from "./results";
 import type { RawScore } from "./results";
 import { conflictCheckScript, landScript, parseResult, retestScript } from "./scripts";
@@ -34,11 +37,13 @@ const NOTHING_RUN: RawScore = { base: null, shortstat: "", builtinMs: 0, setupFa
  * One landing of the merge queue's front merge request on `origin/main`. See the merge queue spec's
  * "Landing" section.
  *
- * 1. Conflict check, in the untrusted `check` container (read grants on the origin and the fork):
+ * 1. Conflict check, in the untrusted `check` container (read grants on the origin and the fork, and
+ *    the registries in the `.npmrc` on `main`, read from the origin before the container starts):
  *    `git merge-tree` of `main` and the approved head. A conflict ends it `conflict`; a clean merge
  *    records the tree, `main`'s sha and the merged tree's `.throng/config.yml`.
  * 2. Retest, in the same container, only when the merged tree's config has required checks: setup
- *    and the required checks on the merged tree, with the scoring runner, outbound policy and logs. A
+ *    and the required checks on the merged tree, with the scoring runner, outbound policy and logs, and
+ *    the container's access from step 1: the merged tree's files never widen it. A
  *    required check not passing, or an invalid config, ends it `failedChecks`. Reading the merged
  *    tree's config rather than `main`'s lets a merge request that fixes a broken config land.
  * 3. Land, in the trusted `land` container (origin write, fork read, no repository code). The `check`
@@ -90,9 +95,21 @@ export class LandingWorkflow extends WorkflowEntrypoint<Env, LandingParams> {
     const repos = { project: params.project, attempt: ref };
     const tenMinutes = { retries: STEP_RETRIES, timeout: "10 minutes" } as const;
 
+    // The conflict check starts the check container, whose access is then fixed for the retest too, so
+    // it's read first: `main`'s `.npmrc` registries, never the merged tree's. A `main` that moves after
+    // this read can't land, as the land step's lease is on the `main` the conflict check saw.
+    const network = await this.#step(step, "registries", { retries: STEP_RETRIES, timeout: "1 minute" }, async () => ({
+      ...NO_NETWORK,
+      registries: await loadRegistries(reposFor(this.env), params.project),
+    }));
     const checked = await this.#step(step, "conflict check", tenMinutes, async () => {
-      const run = await runInSandbox(this.env, instanceId, repos, "check", (g) =>
-        conflictCheckScript(g.originRead.remote, g.forkRead.remote, params.head),
+      const run = await runInSandbox(
+        this.env,
+        instanceId,
+        repos,
+        "check",
+        (g) => conflictCheckScript(g.originRead.remote, g.forkRead.remote, params.head),
+        { network },
       );
       const result = parseResult<ConflictCheckResult>(run.stdout);
       if (result === null)
@@ -126,7 +143,7 @@ export class LandingWorkflow extends WorkflowEntrypoint<Env, LandingParams> {
                 repos,
                 "check",
                 (g) => retestScript(g.originRead.remote, g.forkRead.remote, merge, plan),
-                { allow: plan.allow, timeoutMs },
+                { network, timeoutMs },
               );
               const raw = parseResult<RawScore>(run.stdout);
               if (raw === null)

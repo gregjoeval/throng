@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { loadRegistries, NPMRC_PATH, parseRegistries } from "../src/npmrc.ts";
-import type { Repos } from "../src/repos.ts";
 import { FakeRepos } from "./fake-repos.ts";
+import { UnreadableRepos } from "./support/unreadable-repos.ts";
 
 describe("parseRegistries", () => {
   it("takes the hostnames of the default and scoped registries", () => {
@@ -37,6 +37,18 @@ describe("parseRegistries", () => {
       "registry=https://npm.example.com/",
     ].join("\r\n");
     expect(parseRegistries(npmrc)).toEqual(["npm.example.com"]);
+  });
+
+  it("ignores hosts a container can't be opened to: IP literals, a trailing dot, single labels", () => {
+    const npmrc = [
+      "registry=https://10.0.0.1/",
+      "@a:registry=https://[::1]/",
+      "@b:registry=https://[fd00::1]/npm/",
+      "@c:registry=https://npm.c.dev./",
+      "@d:registry=https://localhost/",
+      "@e:registry=https://npm.e.dev/",
+    ].join("\n");
+    expect(parseRegistries(npmrc)).toEqual(["npm.e.dev"]);
   });
 
   it("lists each host once", () => {
@@ -76,14 +88,33 @@ describe("loadRegistries", () => {
     ]);
   });
 
+  it("reads the .npmrc at the commit it's given", async () => {
+    const repos = setup();
+    const first = repos.commit(ORIGIN, { files: { [NPMRC_PATH]: "registry=https://first.example.com/\n" } });
+    repos.commit(ORIGIN, { files: { [NPMRC_PATH]: "registry=https://second.example.com/\n" } });
+    expect(await loadRegistries(repos, "abc123", first.hash)).toEqual(["first.example.com"]);
+    expect(await loadRegistries(repos, "abc123")).toEqual(["second.example.com"]);
+  });
+
   it("adds nothing when the origin has no .npmrc", async () => {
     const repos = setup();
     repos.commit(ORIGIN, { files: { "README.md": "hi\n" } });
     expect(await loadRegistries(repos, "abc123")).toEqual([]);
   });
 
-  it("adds nothing, rather than failing, when the .npmrc can't be read", async () => {
-    const failing = { readFile: async () => Promise.reject(new Error("artifacts unavailable")) } as unknown as Repos;
-    expect(await loadRegistries(failing, "abc123")).toEqual([]);
+  it("skips the lines it can't use and keeps the rest", async () => {
+    const repos = setup();
+    const npmrc = "registry=not a url\n@a:registry=https://10.0.0.1/\n\u0000\uFFFD=\n@b:registry=https://npm.b.dev/\n";
+    repos.commit(ORIGIN, { files: { [NPMRC_PATH]: npmrc } });
+    expect(await loadRegistries(repos, "abc123")).toEqual(["npm.b.dev"]);
+  });
+
+  it("fails when the .npmrc can't be read, so the step retries rather than caching no registries", async () => {
+    const repos = new UnreadableRepos();
+    await expect(loadRegistries(repos, "abc123")).rejects.toBe(repos.error);
+  });
+
+  it("fails when the origin is missing, as reading the config does", async () => {
+    await expect(loadRegistries(new FakeRepos(), "abc123")).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
 });

@@ -7,7 +7,8 @@ import { parseDocument } from "yaml";
 import { z } from "zod";
 import { METRIC_FORMATS, METRIC_TYPES, parseFrom } from "./metric-values.ts";
 import type { MetricFormat } from "./metric-values.ts";
-import { originRepo } from "./repos.ts";
+import { HOSTNAME } from "./network.ts";
+import { readOriginFile } from "./repos.ts";
 import type { Repos } from "./repos.ts";
 
 export const CONFIG_PATH = ".throng/config.yml";
@@ -105,7 +106,6 @@ const ORDERS: Record<(typeof ORDER_ALIASES)[number], MetricOrder> = {
 };
 const DURATION = /^(\d+)(s|m|h)$/u;
 const UNIT_MS = { s: 1000, m: 60 * 1000, h: 60 * 60 * 1000 } as const;
-const HOST = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/u;
 
 const name = (what: string) =>
   z.string({ error: `${what} must be a string` }).superRefine((text, ctx) => {
@@ -311,7 +311,7 @@ const ConfigSchema = z
               z
                 .string({ error: "must be a string" })
                 .toLowerCase()
-                .regex(HOST, "must be a hostname, like api.github.com, without a scheme or port"),
+                .regex(HOSTNAME, "must be a hostname, like api.github.com, without a scheme or port"),
               { error: "allow must be a list of hostnames" },
             )
             .optional(),
@@ -386,10 +386,9 @@ export function selectionPolicy(config: ConfigResult, override: SelectionPolicy 
   return config.kind === "valid" ? config.config.selection : CREATOR_SELECTS;
 }
 
-/** The project's config, read from its origin's `main`. */
-export async function loadConfig(repos: Repos, projectId: string): Promise<ConfigResult> {
-  const file = await repos.readFile(originRepo(projectId), { ref: "main", path: CONFIG_PATH });
-  return parseConfig(file === null ? null : await file.text());
+/** The project's config, read from its origin's `main`, or from the commit of it `ref` names. */
+export async function loadConfig(repos: Repos, projectId: string, ref = "main"): Promise<ConfigResult> {
+  return parseConfig(await readOriginFile(repos, projectId, CONFIG_PATH, ref));
 }
 
 export function describeIssue(issue: z.core.$ZodIssue): string {

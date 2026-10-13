@@ -1,8 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { SANDBOX_ROLES } from "../src/grants.ts";
 import type { GitGrant, RunGrants } from "../src/grants.ts";
-import { interceptedHosts, outboundDecision, registryAllows, roleAccess } from "../src/network.ts";
-import type { OutboundAccess } from "../src/network.ts";
+import {
+  HOSTNAME,
+  interceptedHosts,
+  isHttpsOnDefaultPort,
+  NO_NETWORK,
+  outboundDecision,
+  roleAccess,
+} from "../src/network.ts";
+import type { NetworkAccess, OutboundAccess } from "../src/network.ts";
 import { previewGrant } from "../src/preview.ts";
 
 const NPM = ["registry.npmjs.org"];
@@ -10,22 +17,27 @@ const registry = (path: string) => new URL(`https://registry.npmjs.org${path}`);
 const acme = (path: string) => new URL(`https://npm.acme.dev${path}`);
 const api = (path: string) => new URL(`https://api.cloudflare.com/client/v4/accounts/acct/workers/${path}`);
 
-describe("registryAllows", () => {
-  it("lets installs read package metadata and tarballs", () => {
-    expect(registryAllows("GET", registry("/is-number"), NPM)).toBeTruthy();
-    expect(registryAllows("GET", registry("/is-number/-/is-number-7.0.0.tgz"), NPM)).toBeTruthy();
-    expect(registryAllows("HEAD", registry("/@scope%2fpkg"), NPM)).toBeTruthy();
+describe("isHttpsOnDefaultPort", () => {
+  it("is true for HTTPS on the default port only", () => {
+    expect(isHttpsOnDefaultPort(new URL("https://npm.acme.dev/x"))).toBeTruthy();
+    expect(isHttpsOnDefaultPort(new URL("https://npm.acme.dev:443/x"))).toBeTruthy();
+    for (const url of ["http://npm.acme.dev/x", "https://npm.acme.dev:8443/x", "ftp://npm.acme.dev/x"]) {
+      expect({ url, ok: isHttpsOnDefaultPort(new URL(url)) }).toEqual({ url, ok: false });
+    }
   });
+});
 
-  it("refuses anything that writes: publish, unpublish, login", () => {
-    for (const method of ["PUT", "POST", "DELETE", "PATCH"]) {
-      expect(registryAllows(method, registry("/is-number"), NPM)).toBeFalsy();
+describe("HOSTNAME", () => {
+  it("takes lowercase DNS names", () => {
+    for (const host of ["registry.npmjs.org", "npm.acme.dev", "a-b.c1.example.io"]) {
+      expect({ host, ok: HOSTNAME.test(host) }).toEqual({ host, ok: true });
     }
   });
 
-  it("only covers the npm registry, over HTTPS", () => {
-    expect(registryAllows("GET", new URL("https://registry.yarnpkg.com/is-number"), NPM)).toBeFalsy();
-    expect(registryAllows("GET", new URL("http://registry.npmjs.org/is-number"), NPM)).toBeFalsy();
+  it("refuses IP literals, a trailing dot, single labels, ports and anything else an intercept can't take", () => {
+    for (const host of ["10.0.0.1", "[::1]", "::1", "npm.acme.dev.", "localhost", "npm.acme.dev:8443", "", "-a.dev"]) {
+      expect({ host, ok: HOSTNAME.test(host) }).toEqual({ host, ok: false });
+    }
   });
 });
 
@@ -43,16 +55,26 @@ const access = (overrides: Partial<OutboundAccess> = {}): OutboundAccess => ({
 });
 
 describe("outboundDecision", () => {
-  it("passes registry reads through unchanged, adding no credentials", () => {
-    expect(outboundDecision("GET", registry("/is-number"), access({ registries: NPM }))).toEqual({ action: "pass" });
+  it("passes registry reads through unchanged, adding no credentials: metadata and tarballs", () => {
+    for (const [method, path] of [
+      ["GET", "/is-number"],
+      ["GET", "/is-number/-/is-number-7.0.0.tgz"],
+      ["HEAD", "/@scope%2fpkg"],
+    ] as const) {
+      expect(outboundDecision(method, registry(path), access({ registries: NPM }))).toEqual({ action: "pass" });
+    }
+  });
+
+  it("refuses anything that writes to a registry: publish, unpublish, login", () => {
+    for (const method of ["PUT", "POST", "DELETE", "PATCH"]) {
+      expect(outboundDecision(method, registry("/is-number"), access({ registries: NPM }))).toEqual({
+        action: "deny",
+      });
+    }
   });
 
   it("refuses the registry to containers without registry access, even if its host is intercepted", () => {
     expect(outboundDecision("GET", registry("/is-number"), access())).toEqual({ action: "deny" });
-  });
-
-  it("refuses registry writes even with registry access", () => {
-    expect(outboundDecision("PUT", registry("/is-number"), access({ registries: NPM }))).toEqual({ action: "deny" });
   });
 
   it("adds a git grant's token for its repo only", () => {
@@ -81,10 +103,14 @@ describe("outboundDecision", () => {
     }
   });
 
-  it("refuses plain HTTP and unknown hosts", () => {
-    expect(outboundDecision("GET", new URL("http://registry.npmjs.org/x"), access({ registries: NPM }))).toEqual({
-      action: "deny",
-    });
+  it("refuses plain HTTP, other ports and unknown hosts", () => {
+    for (const url of [
+      "http://registry.npmjs.org/x",
+      "https://registry.npmjs.org:8443/x",
+      "https://registry.yarnpkg.com/x",
+    ]) {
+      expect(outboundDecision("GET", new URL(url), access({ registries: NPM }))).toEqual({ action: "deny" });
+    }
     expect(outboundDecision("GET", new URL("https://example.com/"), access({ registries: NPM }))).toEqual({
       action: "deny",
     });
@@ -194,7 +220,7 @@ describe("roleAccess", () => {
   const deploy = new URL("https://api.cloudflare.com/client/v4/accounts/acct/workers/scripts/fixture");
 
   it("gives the preview container the Preview deploy grant, a fork read grant and nothing that writes a repo", () => {
-    const given = roleAccess("preview", grants, { preview, allow: [], registries: [] });
+    const given = roleAccess("preview", grants, { preview, network: NO_NETWORK });
     expect(given).toEqual({ grants: [grants.forkRead], preview, registries: NPM, allow: [] });
     expect(outboundDecision("PUT", deploy, given)).toEqual({ action: "preview-token" });
     for (const repo of ["p1-main", "p1-t1a1"]) {
@@ -203,7 +229,7 @@ describe("roleAccess", () => {
   });
 
   it("lets a project's preview container deploy under its own Worker only, never another project's", () => {
-    const given = roleAccess("preview", grants, { preview: previewGrant("acct", "abc123"), allow: [], registries: [] });
+    const given = roleAccess("preview", grants, { preview: previewGrant("acct", "abc123"), network: NO_NETWORK });
     expect(outboundDecision("POST", api("workers/pabc123/previews"), given)).toEqual({ action: "preview-token" });
     for (const path of [
       "workers/pxyz789/previews",
@@ -222,7 +248,7 @@ describe("roleAccess", () => {
 
   it("gives the Preview deploy grant to no other container", () => {
     for (const role of SANDBOX_ROLES.filter((r) => r !== "preview")) {
-      const given = roleAccess(role, grants, { preview, allow: [], registries: [] });
+      const given = roleAccess(role, grants, { preview, network: NO_NETWORK });
       expect({ role, preview: given.preview }).toEqual({ role, preview: null });
       expect(outboundDecision("PUT", deploy, given)).toEqual({ action: "deny" });
     }
@@ -230,29 +256,61 @@ describe("roleAccess", () => {
 
   it("opens network.allow and the registry only to containers that run repository code", () => {
     const allow = ["api.github.com"];
-    expect(roleAccess("score", grants, { preview, allow, registries: [] })).toMatchObject({ registries: NPM, allow });
-    expect(roleAccess("land", grants, { preview, allow, registries: [] })).toMatchObject({ registries: [], allow: [] });
+    expect(roleAccess("score", grants, { preview, network: { allow, registries: [] } })).toMatchObject({
+      registries: NPM,
+      allow,
+    });
+    expect(roleAccess("land", grants, { preview, network: { allow, registries: [] } })).toMatchObject({
+      registries: [],
+      allow: [],
+    });
   });
 
   it("adds the origin's .npmrc registries to the npm registry, only for containers that run repository code", () => {
     const registries = ["npm.acme.dev", "registry.npmjs.org"];
     for (const role of ["score", "preview", "check"] as const) {
-      expect({ role, registries: roleAccess(role, grants, { preview, allow: [], registries }).registries }).toEqual({
+      expect({
+        role,
+        registries: roleAccess(role, grants, { preview, network: { allow: [], registries } }).registries,
+      }).toEqual({
         role,
         registries: ["registry.npmjs.org", "npm.acme.dev"],
       });
     }
     for (const role of ["land", "follow"] as const) {
-      expect({ role, registries: roleAccess(role, grants, { preview, allow: [], registries }).registries }).toEqual({
+      expect({
+        role,
+        registries: roleAccess(role, grants, { preview, network: { allow: [], registries } }).registries,
+      }).toEqual({
         role,
         registries: [],
       });
     }
   });
 
+  it("keeps every registry read-only even when network.allow lists it too", () => {
+    const network: NetworkAccess = {
+      allow: ["npm.acme.dev", "registry.npmjs.org", "api.github.com"],
+      registries: ["npm.acme.dev"],
+    };
+    const given = roleAccess("score", grants, { preview, network });
+    for (const host of ["npm.acme.dev", "registry.npmjs.org"]) {
+      expect({ host, decision: outboundDecision("GET", new URL(`https://${host}/x`), given) }).toEqual({
+        host,
+        decision: { action: "pass" },
+      });
+      expect({ host, decision: outboundDecision("PUT", new URL(`https://${host}/x`), given) }).toEqual({
+        host,
+        decision: { action: "deny" },
+      });
+    }
+    // A host only network.allow lists still takes any method.
+    expect(outboundDecision("POST", new URL("https://api.github.com/x"), given)).toEqual({ action: "pass" });
+  });
+
   it("gives a landing's conflict check and retest container read grants on the origin and the fork only", () => {
     const allow = ["api.github.com"];
-    const given = roleAccess("check", grants, { preview, allow, registries: [] });
+    const given = roleAccess("check", grants, { preview, network: { allow, registries: [] } });
     expect(given).toEqual({ grants: [grants.originRead, grants.forkRead], preview: null, registries: NPM, allow });
     for (const repo of ["p1-main", "p1-t1a1"]) {
       expect(outboundDecision("POST", pushTo(repo), given)).toEqual({ action: "deny" });
@@ -260,7 +318,7 @@ describe("roleAccess", () => {
   });
 
   it("gives a landing's trusted land container origin write and fork read, and nothing else", () => {
-    const given = roleAccess("land", grants, { preview, allow: ["api.github.com"], registries: [] });
+    const given = roleAccess("land", grants, { preview, network: { allow: ["api.github.com"], registries: [] } });
     expect(given).toEqual({
       grants: [grants.originWrite, grants.forkRead],
       preview: null,
@@ -274,7 +332,7 @@ describe("roleAccess", () => {
   });
 
   it("gives a follow's trusted container origin read and fork write, and nothing else", () => {
-    const given = roleAccess("follow", grants, { preview, allow: ["api.github.com"], registries: [] });
+    const given = roleAccess("follow", grants, { preview, network: { allow: ["api.github.com"], registries: [] } });
     expect(given).toEqual({
       grants: [grants.originRead, grants.forkWrite],
       preview: null,

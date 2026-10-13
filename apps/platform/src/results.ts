@@ -169,19 +169,21 @@ export function gateFor(checks: CheckResult[]): Gate {
   return checks.every((c) => !c.required || c.outcome === "passed") ? "passed" : "failed";
 }
 
-/** What the preview container runs, and the hosts its build may reach beyond the npm registry. */
+/**
+ * What the preview container runs. Its build reaches the same hosts the score script does: the
+ * run's network access (see `ScoringWorkflow`).
+ */
 export interface PreviewPlan {
   command: string | null;
-  allow: string[];
 }
 
 /**
- * Whether to deploy a Preview, its build step and its `network.allow`: only when the config has a
- * `preview` section and the gate passed. Null means no Preview, and `_preview` stays skipped.
+ * Whether to deploy a Preview, and its build step: only when the config has a `preview` section and
+ * the gate passed. Null means no Preview, and `_preview` stays skipped.
  */
 export function previewPlan(config: ConfigResult, result: ScoringResult): PreviewPlan | null {
   if (config.kind !== "valid" || config.config.preview === null || result.gate !== "passed") return null;
-  return { command: config.config.preview.command, allow: config.config.network.allow };
+  return { command: config.config.preview.command };
 }
 
 /** A check with its metrics, before its outcome metric is added. */

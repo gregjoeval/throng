@@ -411,13 +411,8 @@ describe("previewPlan", () => {
   const passed = buildResult(WITH_PREVIEW, raw());
 
   it("deploys a Preview, with the configured build command, when preview is configured and the gate passed", () => {
-    expect(previewPlan(WITH_PREVIEW, passed)).toEqual({ command: "npm run build", allow: [] });
-    expect(previewPlan(parseConfig("preview: {}\n"), passed)).toEqual({ command: null, allow: [] });
-  });
-
-  it("lets the build reach the config's network.allow hosts, as scoring does", () => {
-    const config = parseConfig("preview: {}\nnetwork:\n  allow: [fonts.example.com]\n");
-    expect(previewPlan(config, buildResult(config, raw()))).toEqual({ command: null, allow: ["fonts.example.com"] });
+    expect(previewPlan(WITH_PREVIEW, passed)).toEqual({ command: "npm run build" });
+    expect(previewPlan(parseConfig("preview: {}\n"), passed)).toEqual({ command: null });
   });
 
   it("deploys nothing when the gate failed", () => {

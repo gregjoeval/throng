@@ -836,6 +836,28 @@ describe("migrate", () => {
     expect([alias(1), alias(2), alias(3)]).toEqual(["claude", null, null]);
   });
 
+  it("gives tasks from before task_head the head of their latest task branch push, which follows then take", () => {
+    const sql = testSql();
+    sql.exec(`CREATE TABLE tasks (number INTEGER PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL,
+      creator TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, closed_at TEXT, closed_by TEXT,
+      attempt_limit INTEGER)`);
+    sql.exec(`CREATE TABLE journal (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER, kind TEXT, detail TEXT,
+      user_id TEXT, alias TEXT, task INTEGER, attempt INTEGER)`);
+    sql.exec("INSERT INTO tasks VALUES (1, 'a', '', 'ada00001', 'open', '', NULL, NULL, NULL)");
+    const [older, newer] = ["a".repeat(40), "b".repeat(40)];
+    for (const head of [older, newer]) {
+      sql.exec(
+        "INSERT INTO journal (at, kind, detail, task) VALUES (0, 'taskBranchPushed', ?, 1)",
+        JSON.stringify({ ref: "t1", head }),
+      );
+    }
+    migrate(sql);
+    migrate(sql);
+    const { follows } = new TaskStore({ sql, repos: new FakeRepos() });
+    for (const taskHead of [newer, older]) follows.request({ project: PROJECT.id, task: 1, attempt: 1, taskHead });
+    expect(follows.startable().map((f) => f.task_head)).toEqual([newer]);
+  });
+
   it("moves values stored in snake_case to camelCase, and reads old JSON in camelCase", () => {
     const sql = testSql();
     const repos = new FakeRepos();

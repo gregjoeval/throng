@@ -262,13 +262,33 @@ export const AttemptQuerySchema = z.object({
     .openapi({ description: "For a sha that isn't in origin: the attempt whose fork to look in.", example: "t42a3" }),
 });
 
-export const PageQuerySchema = z.object({
-  offset: z.coerce.number().int().min(0).default(0).openapi({ description: "Commits to skip." }),
-  limit: z.coerce
-    .number()
-    .int()
-    .min(1)
-    .max(MAX_COMMITS_PAGE)
-    .default(DEFAULT_COMMITS_PAGE)
-    .openapi({ description: `Defaults to ${DEFAULT_COMMITS_PAGE}, at most ${MAX_COMMITS_PAGE}.` }),
-});
+/**
+ * `offset` and `limit` query parameters, how every list route pages: skip `offset` items, then take at
+ * most `limit`. Its response carries `next`, the next page's offset, null on the last page.
+ */
+export function pageQuerySchema(items: string, defaultLimit: number, maxLimit: number) {
+  return z.object({
+    offset: z.coerce
+      .number()
+      .int()
+      .min(0)
+      .default(0)
+      .openapi({ description: `${items} to skip.` }),
+    limit: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(maxLimit)
+      .default(defaultLimit)
+      .openapi({ description: `Defaults to ${defaultLimit}, at most ${maxLimit}.` }),
+  });
+}
+
+export const PageQuerySchema = pageQuerySchema("Commits", DEFAULT_COMMITS_PAGE, MAX_COMMITS_PAGE);
+
+/** A page's `offset`, `limit` and `next` in a list route's response. */
+export const PageSchema = {
+  offset: z.number().int(),
+  limit: z.number().int(),
+  next: z.number().int().nullable().openapi({ description: "The next page's offset; null on the last page." }),
+};

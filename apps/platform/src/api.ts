@@ -18,6 +18,8 @@ import {
   HandOffSchema,
   json,
   OpenVoteSchema,
+  pageQuerySchema,
+  PageSchema,
   PostVerdictSchema,
   ProjectPathSchema,
   requestTaskService,
@@ -52,6 +54,8 @@ import { LOG_CONTENT_TYPE, LOG_RETENTION_DAYS, MAX_LOG_BYTES, missingLog } from 
 import type { LogStore } from "./logs.ts";
 import { DEQUEUE_REASONS, MERGE_REQUEST_STATES } from "./merge-requests.ts";
 import { METRIC_FORMATS, METRIC_TYPES } from "./metric-values.ts";
+import { DEFAULT_LISTING_PAGE, MAX_LISTING_PAGE, myListings } from "./my-listings.ts";
+import { MAX_PROJECTION_RETRY_MS } from "./projection.ts";
 import { MAX_PROJECT_HANDLE, PROJECT_HANDLE, projectService } from "./projects.ts";
 import type { Repos } from "./repos.ts";
 import { CHECK_OUTCOMES, GATES } from "./results.ts";
@@ -346,6 +350,27 @@ const ListedTaskSchema = TaskSchema.extend({
     .nullable()
     .openapi({ description: "Its latest merge request's state, or null when it has none." }),
 }).openapi("ListedTask");
+
+const PROJECTION_NOTE =
+  "Read from a copy every project publishes after each change, so it trails the project: usually by seconds, " +
+  `but by up to ${MAX_PROJECTION_RETRY_MS / 60_000} minutes while that copy can't be written. ` +
+  "Obsolete ones are left out unless `state=obsolete` asks for them. " +
+  `Paged by \`offset\` and \`limit\`: ${DEFAULT_LISTING_PAGE} by default, at most ${MAX_LISTING_PAGE}.`;
+
+const MyListingQuerySchema = pageQuerySchema("Items", DEFAULT_LISTING_PAGE, MAX_LISTING_PAGE);
+
+/** A task as a listing across projects shows it: the fields the projection carries, and its project. */
+const MyTaskSchema = TaskSchema.pick({
+  ref: true,
+  number: true,
+  title: true,
+  state: true,
+  creator: true,
+  createdAt: true,
+  closedAt: true,
+})
+  .extend({ project: ProjectSchema })
+  .openapi("MyTask");
 
 /** Where an attempt was copied from: provenance only, never its base. */
 const AliasSchema = z.string().nullable().openapi({
@@ -665,6 +690,21 @@ const AttemptPathSchema = ProjectPathSchema.extend({
   a: z.string().openapi({ description: "An attempt reference.", example: "t42a3" }),
 });
 
+/** An attempt as a listing across projects shows it: the fields the projection carries, its task and project. */
+const MyAttemptSchema = AttemptSchema.pick({
+  ref: true,
+  number: true,
+  state: true,
+  author: true,
+  createdAt: true,
+  closedAt: true,
+})
+  .extend({
+    project: ProjectSchema,
+    task: z.object({ ref: z.string().openapi({ example: "t42" }), number: z.number().int(), title: z.string() }),
+  })
+  .openapi("MyAttempt");
+
 const WaitedAttemptSchema = AttemptSchema.extend({
   changed: z
     .boolean()
@@ -731,6 +771,9 @@ export interface ApiOptions extends AuthOptions {
   /** Where commit diffs and blob sizes are cached: the Workers Cache API by default, none outside a Worker. */
   diffCache?: (env: AccessBindings) => DiffCache | undefined;
 }
+
+/** The caller's tasks and attempts across projects, read from the D1 projection. */
+const myListingsFor = (env: AccessBindings) => myListings({ db: env.DB });
 
 function noRepos(): Repos {
   throw new Error("this API was built without repos");
@@ -970,6 +1013,58 @@ export function apiRoutes(options: ApiOptions = {}) {
         const { user, alias } = c.var.actor;
         const token = c.var.token === null ? null : { id: c.var.token.id, expiresAt: c.var.token.expires_at };
         return c.json({ user: publicUser(user), alias, token }, 200);
+      },
+    )
+    .openapi(
+      createRoute({
+        method: "get",
+        path: "/me/tasks",
+        operationId: "listMyTasks",
+        tags: ["Users"],
+        summary: "List the tasks the caller created, across every project",
+        description: `The caller's user's tasks, also when an alias's token calls, newest first. ${PROJECTION_NOTE}`,
+        security: bearerOrWeb,
+        middleware: [browser] as const,
+        request: { query: MyListingQuerySchema.extend({ state: z.enum(TASK_STATES).optional() }) },
+        responses: {
+          200: {
+            description: "One page of the caller's tasks.",
+            ...json(z.object({ tasks: z.array(MyTaskSchema), ...PageSchema })),
+          },
+          400: errorResponse("The request is invalid."),
+          401: unauthorizedBearer,
+        },
+      }),
+      async (c) => {
+        const query = c.req.valid("query");
+        const page = await myListingsFor(c.env).tasks(c.var.actor, query);
+        return c.json({ ...page, offset: query.offset, limit: query.limit }, 200);
+      },
+    )
+    .openapi(
+      createRoute({
+        method: "get",
+        path: "/me/attempts",
+        operationId: "listMyAttempts",
+        tags: ["Users"],
+        summary: "List the attempts the caller authors, across every project",
+        description: `The caller's user's attempts, also when an alias's token calls, newest first. ${PROJECTION_NOTE}`,
+        security: bearerOrWeb,
+        middleware: [browser] as const,
+        request: { query: MyListingQuerySchema.extend({ state: z.enum(ATTEMPT_STATES).optional() }) },
+        responses: {
+          200: {
+            description: "One page of the caller's attempts.",
+            ...json(z.object({ attempts: z.array(MyAttemptSchema), ...PageSchema })),
+          },
+          400: errorResponse("The request is invalid."),
+          401: unauthorizedBearer,
+        },
+      }),
+      async (c) => {
+        const query = c.req.valid("query");
+        const page = await myListingsFor(c.env).attempts(c.var.actor, query);
+        return c.json({ ...page, offset: query.offset, limit: query.limit }, 200);
       },
     )
     .openapi(

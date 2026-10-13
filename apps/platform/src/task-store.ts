@@ -7,7 +7,7 @@
 // handles when it answers.
 
 import { archiveRef } from "./archive.ts";
-import { taskBranchHead } from "./base.ts";
+import { containsCommit, taskBranchHead } from "./base.ts";
 import { migrateValues, normaliseLandingOutcome } from "./casing.ts";
 import { addColumns, renameColumns } from "./columns.ts";
 import { CONFIG_PATH, loadConfig, selectionPolicy } from "./config.ts";
@@ -30,6 +30,7 @@ import type {
   StoredMergeRequest,
 } from "./merge-requests.ts";
 import { isZeroId } from "./pkt-line.ts";
+import { migrateProjection, Projection } from "./projection.ts";
 import { forkRepo, originRepo } from "./repos.ts";
 import type { Repos } from "./repos.ts";
 import { GATES } from "./results.ts";
@@ -62,6 +63,14 @@ export const TASK_STATES = ["open", "closed", "obsolete"] as const;
 export const ATTEMPT_STATES = ["draft", "open", "merged", "closed", "obsolete"] as const;
 export type TaskState = (typeof TASK_STATES)[number];
 export type AttemptState = (typeof ATTEMPT_STATES)[number];
+
+/**
+ * The states a listing of tasks or attempts shows: the one its `state` asks for, or else every state
+ * but obsolete. Bind it as JSON, read with `state IN (SELECT value FROM json_each(?))`.
+ */
+export function listedStates<S extends TaskState | AttemptState>(all: readonly S[], state: S | undefined): string {
+  return JSON.stringify(state === undefined ? all.filter((s) => s !== "obsolete") : [state]);
+}
 
 /** Draft and open attempts are active: they have a fork and a claim, and count toward the cap. */
 const ACTIVE = ["draft", "open"] as const;
@@ -191,10 +200,15 @@ export interface Sql {
   transaction: <T>(fn: () => T) => T;
 }
 
-/** What `recordPush` did: the scoring it queued, and what to tell the pusher of their merge request. */
+/**
+ * What `recordPush` did: the scoring it queued, what to tell the pusher of their merge request, and
+ * the attempt's new head, which the proxy checks (`followIfDropped`) once git has its reply; null
+ * when the push didn't move it.
+ */
 export interface PushRecord {
   scoring: ScoringRequest | null;
   mergeRequest: PushNotice | null;
+  head: string | null;
 }
 
 /** The merge request news a push to its source attempt carries back to the pusher. */
@@ -303,6 +317,8 @@ interface TaskRow {
   definitions: string | null;
   /** `SelectionPolicy` as JSON; null to use the project's. */
   selection: string | null;
+  /** The head its task branch's last recorded push left, or null when it has none. */
+  task_head: string | null;
 }
 
 /** A push-to-create between forking and creating its attempt. */
@@ -335,6 +351,8 @@ interface AttemptRow {
   needs_update: string | null;
   /** The head a follow last wrote to its fork, until its author pushes again. */
   followed_head: string | null;
+  /** A head of the attempt known to contain its task head, where checking a later push stops. */
+  contains_task_head: string | null;
 }
 
 const SCHEMA = [
@@ -349,7 +367,9 @@ const SCHEMA = [
     closed_at TEXT,
     closed_by TEXT,
     attempt_limit INTEGER,
-    definitions TEXT
+    definitions TEXT,
+    selection TEXT,
+    task_head TEXT
   )`,
   `CREATE TABLE IF NOT EXISTS attempts (
     task INTEGER NOT NULL REFERENCES tasks (number),
@@ -366,6 +386,7 @@ const SCHEMA = [
     needs_update TEXT,
     followed_head TEXT,
     alias TEXT,
+    contains_task_head TEXT,
     PRIMARY KEY (task, number)
   )`,
   // Branch names are unique per project among active attempts.
@@ -400,13 +421,19 @@ const JOURNAL_RENAMES = [["agent", "alias"]] as const;
  * Columns added to attempts after their table was made: where a forked attempt was copied from, how
  * it follows its task branch, and the alias its author started it under.
  */
-const ATTEMPT_COLUMNS = ["forked_from INTEGER", "needs_update TEXT", "followed_head TEXT", "alias TEXT"];
+const ATTEMPT_COLUMNS = [
+  "forked_from INTEGER",
+  "needs_update TEXT",
+  "followed_head TEXT",
+  "alias TEXT",
+  "contains_task_head TEXT",
+];
 
 /**
  * Columns added to tasks after their table was made: what a task defines over the project's config,
- * and its selection policy.
+ * its selection policy and the head of its task branch.
  */
-const TASK_COLUMNS = ["definitions TEXT", "selection TEXT"];
+const TASK_COLUMNS = ["definitions TEXT", "selection TEXT", "task_head TEXT"];
 
 /**
  * Creates the store's tables, adds the journal's and attempts' newer columns to tables that predate
@@ -417,7 +444,15 @@ export function migrate(sql: Sql): void {
   for (const table of DROPPED_TABLES) sql.exec(`DROP TABLE IF EXISTS ${table}`);
   renameColumns(sql, "journal", JOURNAL_RENAMES);
   addColumns(sql, "journal", JOURNAL_COLUMNS);
-  addColumns(sql, "tasks", TASK_COLUMNS);
+  if (addColumns(sql, "tasks", TASK_COLUMNS).includes("task_head")) {
+    // Tasks whose task branch was pushed before `task_head` take it from their latest push.
+    sql.exec(
+      `UPDATE tasks SET task_head = (
+         SELECT json_extract(detail, '$.head') FROM journal
+         WHERE kind = 'taskBranchPushed' AND journal.task = tasks.number ORDER BY id DESC LIMIT 1
+       )`,
+    );
+  }
   const added = addColumns(sql, "attempts", ATTEMPT_COLUMNS);
   if (added.includes("alias")) {
     // Attempts made before `alias` take it from their `created` entry (renamed above), unless handed off since.
@@ -464,6 +499,8 @@ export class TaskStore {
   readonly verdicts: Verdicts;
   /** The project's votes. */
   readonly votes: Votes;
+  /** What of its tasks and attempts is still to be published to the D1 projection. */
+  readonly projection: Projection;
   readonly #landing: LandingRunner | null;
   /** Active attempts' follows of their task branch. */
   readonly follows: Follows;
@@ -478,8 +515,10 @@ export class TaskStore {
     this.#landing = landing;
     this.#follow = follow;
     migrate(sql);
+    migrateProjection(sql, now());
+    this.projection = new Projection({ sql });
     this.landings = new Landings({ sql, now });
-    this.follows = new Follows({ sql, now });
+    this.follows = new Follows({ sql, now, taskHead: (task) => this.#taskHead(task) });
     this.verdicts = new Verdicts({ sql });
     this.votes = new Votes({ sql });
     this.scoring = new ScoringQueue({
@@ -535,17 +574,21 @@ export class TaskStore {
 
   /** The project's tasks by number. Obsolete tasks are left out unless `state` asks for them. */
   listTasks(_project: ProjectContext, _actor: Actor, input: { state?: TaskState | undefined }): ListedTask[] {
-    const rows =
-      input.state === undefined
-        ? this.#sql.exec<TaskRow>("SELECT * FROM tasks WHERE state != 'obsolete' ORDER BY number")
-        : this.#sql.exec<TaskRow>("SELECT * FROM tasks WHERE state = ? ORDER BY number", input.state);
+    const rows = this.#sql.exec<TaskRow>(
+      "SELECT * FROM tasks WHERE state IN (SELECT value FROM json_each(?)) ORDER BY number",
+      listedStates(TASK_STATES, input.state),
+    );
     return rows.map((row) => this.#listed(toTask(row)));
   }
 
   /** The task with its attempt count, best gate and latest merge request's state. */
   #listed(task: StoredTask): ListedTask {
     const attempts = this.#sql
-      .exec<AttemptRow>("SELECT * FROM attempts WHERE task = ? AND state != 'obsolete'", task.number)
+      .exec<AttemptRow>(
+        "SELECT * FROM attempts WHERE task = ? AND state IN (SELECT value FROM json_each(?))",
+        task.number,
+        listedStates(ATTEMPT_STATES, undefined),
+      )
       .map((row) => toAttempt(row));
     const gates = attempts.map((a) => this.scoring.currentRun(scoredAttempt(a))?.result?.gate);
     // `passed` is best, then `failed`; GATES lists them in that order.
@@ -774,17 +817,11 @@ export class TaskStore {
     input: { task: number; state?: AttemptState | undefined },
   ): StoredAttempt[] {
     this.#task(input.task);
-    const rows =
-      input.state === undefined
-        ? this.#sql.exec<AttemptRow>(
-            "SELECT * FROM attempts WHERE task = ? AND state != 'obsolete' ORDER BY number",
-            input.task,
-          )
-        : this.#sql.exec<AttemptRow>(
-            "SELECT * FROM attempts WHERE task = ? AND state = ? ORDER BY number",
-            input.task,
-            input.state,
-          );
+    const rows = this.#sql.exec<AttemptRow>(
+      "SELECT * FROM attempts WHERE task = ? AND state IN (SELECT value FROM json_each(?)) ORDER BY number",
+      input.task,
+      listedStates(ATTEMPT_STATES, input.state),
+    );
     return rows.map((row) => this.#toAttempt(row));
   }
 
@@ -878,7 +915,10 @@ export class TaskStore {
   /** Every attempt in the project, by task and then number, leaving out obsolete ones. For the ref list. */
   listProjectAttempts(_project: ProjectContext, _actor: Actor): StoredAttempt[] {
     return this.#sql
-      .exec<AttemptRow>("SELECT * FROM attempts WHERE state != 'obsolete' ORDER BY task, number")
+      .exec<AttemptRow>(
+        "SELECT * FROM attempts WHERE state IN (SELECT value FROM json_each(?)) ORDER BY task, number",
+        listedStates(ATTEMPT_STATES, undefined),
+      )
       .map((row) => this.#toAttempt(row));
   }
 
@@ -1120,7 +1160,8 @@ export class TaskStore {
    * fork, with the old and new ids so force-pushes show up afterwards, and queues scoring when the
    * attempt is open and its head moved; the scoring queue skips a head it already covers. The
    * proxy checked the claim before forwarding the push, and the push has landed, so this checks
-   * nothing. Returns the scoring request, or null when the push asked for none.
+   * nothing, and leaves checking whether the new head dropped the task branch to `followIfDropped`.
+   * Returns the scoring request, or null when the push asked for none, and the new head.
    */
   recordPush(project: ProjectContext, actor: Actor, input: AttemptInput & { updates: PushedRef[] }): PushRecord {
     const current = this.#attempt(input);
@@ -1129,13 +1170,13 @@ export class TaskStore {
       if (head !== null) this.#authorMoved(project, current);
       const needsReview = head !== null && this.#pushedToSource(actor, current, head);
       const mergeRequest = this.#pushNotice(current, needsReview ? head : null);
-      if (head === null) return { scoring: null, mergeRequest };
+      if (head === null) return { scoring: null, mergeRequest, head };
       // A draft isn't scored, but its old result no longer describes its head.
       if (current.state !== "open") {
         this.scoring.moveHead({ ...scoredAttempt(current), sha: head });
-        return { scoring: null, mergeRequest };
+        return { scoring: null, mergeRequest, head };
       }
-      return { scoring: this.#request(project, actor, current, head, "push"), mergeRequest };
+      return { scoring: this.#request(project, actor, current, head, "push"), mergeRequest, head };
     });
   }
 
@@ -1159,12 +1200,15 @@ export class TaskStore {
   //
   // Active attempts follow their task branch (ADR 0003). A push of the task branch, an author's push
   // to an attempt that needs update, and reopening or starting an attempt on a task with a task
-  // branch each queue a follow; the DO's drain starts its Follow Workflow, which claims the push,
-  // merges the task head into the fork's `main` in a trusted container with a lease on the head it
-  // read, and reports. A clean merge is recorded as a push by no user: its new head is scored, and a
-  // merge request it is the source of goes to `needsReview`. A conflict writes nothing and marks
-  // the attempt needs update. A landing that has claimed its push to `main` holds its source's
-  // follow back until it ends.
+  // branch each queue a follow. So does an author's push that drops the task head (a forced push
+  // over a follow's merge), which the git proxy checks once git has its reply; a check that can't
+  // tell queues nothing, and the next push is checked again. A follow is only ever queued for the
+  // task head the last recorded task branch push left. The DO's drain starts its Follow Workflow,
+  // which claims the push, merges the task head into the fork's `main` in a trusted container with
+  // a lease on the head it read, and reports. A clean merge is recorded as a push by no user: its
+  // new head is scored, and a merge request it is the source of goes to `needsReview`. A conflict
+  // writes nothing and marks the attempt needs update. A landing that has claimed its push to
+  // `main` holds its source's follow back until it ends.
 
   /**
    * Records a push of task `task`'s task branch to `head`, which the git proxy authorized
@@ -1174,6 +1218,8 @@ export class TaskStore {
   recordTaskBranchPush(project: ProjectContext, actor: Actor, input: { task: number; head: string }): string[] {
     return this.#sql.transaction(() => {
       this.#task(input.task);
+      this.#sql.exec("UPDATE tasks SET task_head = ? WHERE number = ?", input.head, input.task);
+      this.#sql.exec("UPDATE attempts SET contains_task_head = NULL WHERE task = ?", input.task);
       this.#journal(actor, "taskBranchPushed", input.task, null, { head: input.head });
       const active = this.#activeAttempts(input.task);
       for (const attempt of active) {
@@ -1236,6 +1282,8 @@ export class TaskStore {
           const { head } = outcome;
           const recorded = this.scoring.statusFor(scoredAttempt(attempt)).sha;
           this.#setFollow(attempt, { needs_update: null });
+          if (current.task_head === this.#taskHead(attempt.task))
+            this.#setFollow(attempt, { contains_task_head: head });
           // A `current` head other than the recorded one is this follow's own push, made before its
           // step was retried. An attempt with no recorded head yet has nothing to move on from.
           const [moved, before] =
@@ -1292,7 +1340,10 @@ export class TaskStore {
     else this.scoring.moveHead({ ...scoredAttempt(attempt), sha: after });
   }
 
-  #setFollow(attempt: AttemptInput, set: Partial<Pick<AttemptRow, "needs_update" | "followed_head">>): void {
+  #setFollow(
+    attempt: AttemptInput,
+    set: Partial<Pick<AttemptRow, "needs_update" | "followed_head" | "contains_task_head">>,
+  ): void {
     for (const [column, value] of Object.entries(set)) {
       this.#sql.exec(
         `UPDATE attempts SET ${column} = ? WHERE task = ? AND number = ?`,
@@ -1312,6 +1363,53 @@ export class TaskStore {
   #landingHolds(attempt: AttemptInput): boolean {
     const mr = this.mergeRequests.open(attempt.task);
     return mr !== null && mr.attempt === attempt.number && this.#pushing(mr);
+  }
+
+  /**
+   * For the git proxy, once it has answered an author's push that moved the attempt to `head`
+   * (`recordPush`): queues a follow of the task head when `head` doesn't contain it, as a forced
+   * push over a follow's merge does; when it does, remembers `head`, where checking a later push
+   * stops. Nothing to check (`#toCheck`) checks nothing. A check that can't tell, because a commit
+   * can't be read or the history is too long to walk, is logged and queues nothing: the attempt's
+   * next push is checked again, and a task branch push follows it anyway.
+   */
+  async followIfDropped(project: ProjectContext, _actor: Actor, input: AttemptInput & { head: string }): Promise<void> {
+    const { head } = input;
+    const check = this.#toCheck(input, head);
+    if (check === null) return;
+    const { taskHead, known } = check;
+    const fork = attemptRef(input.task, input.number);
+    let contains: boolean | null;
+    try {
+      contains = await containsCommit(this.#repos, project.id, { attempt: fork, head, known }, taskHead);
+    } catch (error) {
+      console.error({ event: "follow.check_failed", attempt: fork, head, taskHead, error: String(error) });
+      return;
+    }
+    if (contains === null) {
+      console.warn({ event: "follow.check_unknown", attempt: fork, head, taskHead });
+      return;
+    }
+    this.#sql.transaction(() => {
+      // The task branch, the attempt or its head may have moved on while the head was read: a newer
+      // push is checked on its own, and a task branch push queued a follow of its new head.
+      if (this.#toCheck(input, head)?.taskHead !== taskHead) return;
+      if (contains) this.#setFollow(input, { contains_task_head: head });
+      else this.#queueFollow(project, input, taskHead);
+    });
+  }
+
+  /**
+   * What checking the attempt's head `head` needs: its task head, and the head known to contain it.
+   * Null when there is nothing to check: the attempt ended, or needs update (`#authorMoved` queued
+   * its follow), `head` is no longer its head, or its task has no task branch.
+   */
+  #toCheck(input: AttemptInput, head: string): { taskHead: string; known: string | null } | null {
+    const row = this.#attemptRow(input);
+    if (row === undefined || !isActive(row.state) || row.needs_update !== null) return null;
+    if (this.scoring.statusFor(scoredAttempt(row)).sha !== head) return null;
+    const taskHead = this.#taskHead(row.task);
+    return taskHead === null ? null : { taskHead, known: row.contains_task_head };
   }
 
   /** Queues a follow of the task's task branch for an attempt that (re)starts, when the task has one. */
@@ -2182,6 +2280,12 @@ export class TaskStore {
     return toTask(row);
   }
 
+  /** The head of the task's task branch, as its last recorded push left it; null when it has none. */
+  #taskHead(task: number): string | null {
+    const [row] = this.#sql.exec<Pick<TaskRow, "task_head">>("SELECT task_head FROM tasks WHERE number = ?", task);
+    return row?.task_head ?? null;
+  }
+
   #openMergeRequest(task: number): StoredMergeRequest {
     const mr = this.mergeRequests.open(task);
     if (mr === null) throw invalidState(`${taskRef(task)} has no open merge request`);
@@ -2802,6 +2906,7 @@ export const TASK_METHODS = [
   "recordTaskBranchPush",
   "pullFirstNotice",
   "recordPush",
+  "followIfDropped",
   "routeBranchPush",
   "completeBranchPush",
   "abandonBranchPush",

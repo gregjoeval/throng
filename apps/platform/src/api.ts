@@ -38,10 +38,12 @@ import { browseRoutes } from "./browse-api.ts";
 import {
   CONFIG_LAYERS,
   CONFIG_NAME,
+  DEFAULT_SANDBOX_SIZE,
   MAX_CHECK_TIMEOUT_MS,
   MAX_CONFIG_BYTES,
   METRIC_ORDERS,
   parseConfig,
+  SANDBOX_SIZES,
   SELECTION_POLICIES,
   SOURCES,
   VOTE_ELIGIBILITIES,
@@ -746,6 +748,11 @@ const ConfigSchema = z
       .openapi({ description: "Null when the project doesn't deploy previews." }),
     attempts: z.object({
       limit: z.number().int().nullable().openapi({ description: "Null to use the default cap on active attempts." }),
+    }),
+    sandbox: z.object({
+      size: z.enum(SANDBOX_SIZES).openapi({
+        description: `The size of the containers that run the project's code; \`${DEFAULT_SANDBOX_SIZE}\` unless set.`,
+      }),
     }),
   })
   .openapi("Config");

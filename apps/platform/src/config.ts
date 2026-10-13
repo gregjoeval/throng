@@ -1,4 +1,4 @@
-// A project's `.throng/config.yml`: its setup, checks, metrics, preview and attempt cap. `parseConfig`
+// A project's `.throng/config.yml`: its setup, checks, metrics, preview, attempt cap and Sandbox size. `parseConfig`
 // is pure, so the API's validate endpoint, the attempt cap and scoring all read a config the same
 // way. `loadConfig` always reads it from the origin's `main`, so an attempt can't change its own
 // checks.
@@ -34,6 +34,15 @@ export const SELECTION_POLICIES = ["creator", "vote"] as const;
 /** Who may vote: users acting as themselves, users acting under an alias, or either. */
 export const VOTE_ELIGIBILITIES = ["humans", "aliases", "anyone"] as const;
 export type VoteEligibility = (typeof VOTE_ELIGIBILITIES)[number];
+
+/**
+ * The Sandbox sizes a project may choose for the containers that run its code: the named instance
+ * types the container API's `start({ instance })` takes.
+ */
+export const SANDBOX_SIZES = ["lite", "standard-1", "standard-2", "standard-3", "standard-4"] as const;
+export type SandboxSize = (typeof SANDBOX_SIZES)[number];
+/** The size when a config sets none, or there's no valid config: 4 GiB, 1/2 vCPU. */
+export const DEFAULT_SANDBOX_SIZE: SandboxSize = "standard-1";
 
 /** A selection policy: a vote says who is eligible to vote in it. */
 export type SelectionPolicy = { policy: "creator" } | { policy: "vote"; eligible: VoteEligibility };
@@ -86,6 +95,8 @@ export interface Config {
   attempts: { limit: number | null };
   /** Who makes each task's selection, unless a task overrides it. */
   selection: SelectionPolicy;
+  /** The size of the containers that run the repository's code: `score`, `check` and `preview`. */
+  sandbox: { size: SandboxSize };
 }
 
 export type ConfigResult =
@@ -330,6 +341,12 @@ const ConfigSchema = z
         })
         .optional(),
       selection: SelectionPolicySchema.optional(),
+      sandbox: z
+        .strictObject(
+          { size: z.enum(SANDBOX_SIZES, { error: `size must be ${oneOf(SANDBOX_SIZES)}` }).optional() },
+          { error: "sandbox must be a mapping" },
+        )
+        .optional(),
     },
     { error: "the config must be a mapping" },
   )
@@ -373,6 +390,7 @@ export function parseConfig(text: string | null): ConfigResult {
       preview: config.preview === undefined ? null : { command: config.preview.command ?? null },
       attempts: { limit: config.attempts?.limit ?? null },
       selection: config.selection ?? CREATOR_SELECTS,
+      sandbox: { size: config.sandbox?.size ?? DEFAULT_SANDBOX_SIZE },
     },
   };
 }
@@ -384,6 +402,11 @@ export function parseConfig(text: string | null): ConfigResult {
 export function selectionPolicy(config: ConfigResult, override: SelectionPolicy | null): SelectionPolicy {
   if (override !== null) return override;
   return config.kind === "valid" ? config.config.selection : CREATOR_SELECTS;
+}
+
+/** The size of the containers that run the repository's code: the config's, else the default. */
+export function sandboxSize(config: ConfigResult): SandboxSize {
+  return config.kind === "valid" ? config.config.sandbox.size : DEFAULT_SANDBOX_SIZE;
 }
 
 /** The project's config, read from its origin's `main`. */

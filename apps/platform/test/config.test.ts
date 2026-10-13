@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { CONFIG_PATH, DEFAULT_CHECK_TIMEOUT_MS, loadConfig, MAX_CONFIG_BYTES, parseConfig } from "../src/config.ts";
+import {
+  CONFIG_PATH,
+  DEFAULT_CHECK_TIMEOUT_MS,
+  DEFAULT_SANDBOX_SIZE,
+  loadConfig,
+  MAX_CONFIG_BYTES,
+  parseConfig,
+  sandboxSize,
+} from "../src/config.ts";
 import type { Config } from "../src/config.ts";
 import { FakeRepos } from "./fake-repos.ts";
 
@@ -11,6 +19,7 @@ const EMPTY: Config = {
   preview: null,
   attempts: { limit: null },
   selection: { policy: "creator" },
+  sandbox: { size: "standard-1" },
 };
 
 const FULL = `
@@ -43,6 +52,8 @@ preview:
   command: pnpm build
 attempts:
   limit: 4
+sandbox:
+  size: standard-2
 `;
 
 const check = (fields: string) => `checks:\n  - { name: test, command: pnpm test, ${fields} }\n`;
@@ -113,6 +124,7 @@ describe("parseConfig", () => {
         preview: { command: "pnpm build" },
         attempts: { limit: 4 },
         selection: { policy: "creator" },
+        sandbox: { size: "standard-2" },
       },
     });
   });
@@ -128,6 +140,17 @@ describe("parseConfig", () => {
     ],
   ])("reads the selection policy: %s", (_, text, selection) => {
     expect(parseConfig(text)).toEqual({ kind: "valid", config: { ...EMPTY, selection } });
+  });
+
+  it.each(["lite", "standard-1", "standard-2", "standard-3", "standard-4"] as const)("reads the sandbox size %s", (size) => {
+    expect(parseConfig(`sandbox: { size: ${size} }\n`)).toEqual({ kind: "valid", config: { ...EMPTY, sandbox: { size } } });
+  });
+
+  it.each([
+    ["no sandbox", ""],
+    ["a sandbox without a size", "sandbox: {}\n"],
+  ])("defaults the sandbox size to standard-1 with %s", (_, text) => {
+    expect(parseConfig(text)).toMatchObject({ kind: "valid", config: { sandbox: { size: "standard-1" } } });
   });
 
   it("defaults a check to required and a 10m timeout", () => {
@@ -355,6 +378,19 @@ describe("parseConfig", () => {
     ["a zero limit", "attempts: { limit: 0 }\n", /^attempts\.limit: limit must be a positive integer$/u],
     ["a fractional limit", "attempts: { limit: 1.5 }\n", /^attempts\.limit: limit must be a positive integer$/u],
     ["a string limit", "attempts: { limit: two }\n", /^attempts\.limit: limit must be a positive integer$/u],
+    [
+      "an unknown sandbox size",
+      "sandbox: { size: huge }\n",
+      /^sandbox\.size: size must be lite, standard-1, standard-2, standard-3 or standard-4$/u,
+    ],
+    [
+      "a numeric sandbox size",
+      "sandbox: { size: 2 }\n",
+      /^sandbox\.size: size must be lite, standard-1, standard-2, standard-3 or standard-4$/u,
+    ],
+    ["custom sandbox resources", "sandbox: { size: { vcpu: 1 } }\n", /^sandbox\.size: size must be lite/u],
+    ["a sandbox that isn't a mapping", "sandbox: standard-2\n", /^sandbox: sandbox must be a mapping$/u],
+    ["an unknown sandbox key", "sandbox: { memory: 4096 }\n", /^sandbox\.memory: unknown key$/u],
     ["a selection without a policy", "selection: {}\n", /^selection\.policy: policy is required: creator or vote$/u],
     ["an unknown policy", "selection: { policy: judge }\n", /^selection\.policy: policy must be creator or vote$/u],
     [
@@ -409,5 +445,24 @@ describe("loadConfig", () => {
     expect(await loadConfig(repos, "abc123")).toEqual({ kind: "valid", config: { ...EMPTY, attempts: { limit: 2 } } });
     repos.writeFile("abc123-main", "t1", CONFIG_PATH, "nope: 1\n");
     expect(await loadConfig(repos, "abc123")).toMatchObject({ kind: "valid" });
+  });
+});
+
+describe("sandboxSize", () => {
+  it("is main's, whatever an attempt's head sets", async () => {
+    const repos = new FakeRepos();
+    await repos.create("abc123-main");
+    await repos.create("abc123-t1a1");
+    repos.writeFile("abc123-main", "main", CONFIG_PATH, "sandbox: { size: standard-2 }\n");
+    repos.writeFile("abc123-t1a1", "main", CONFIG_PATH, "sandbox: { size: standard-4 }\n");
+    expect(sandboxSize(await loadConfig(repos, "abc123"))).toBe("standard-2");
+  });
+
+
+  it("is the config's size, or the default when there is no valid config", () => {
+    expect(sandboxSize(parseConfig("sandbox: { size: standard-3 }\n"))).toBe("standard-3");
+    expect(sandboxSize(parseConfig(""))).toBe("standard-1");
+    expect(sandboxSize({ kind: "none" })).toBe(DEFAULT_SANDBOX_SIZE);
+    expect(sandboxSize({ kind: "invalid", error: "x" })).toBe(DEFAULT_SANDBOX_SIZE);
   });
 });

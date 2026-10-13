@@ -10,12 +10,14 @@ const CAMEL = /^[a-z][a-zA-Z0-9]*$/u;
 
 /**
  * Names that keep a format someone else defined, matched by where they appear. Header parameters
- * are HTTP headers (`If-None-Match`), named by HTTP's conventions, not ours. (Security schemes'
+ * are HTTP headers (`If-None-Match`), named by HTTP's conventions, not ours; a config's Sandbox sizes are Cloudflare's instance type
+ * names (`standard-1`), which a config writes as Cloudflare does. (Security schemes'
  * header names, media types and literal path segments such as `merge-request` aren't names or
  * values in a body or parameter, so the walk doesn't check them.)
  */
 const ALLOWED: { where: RegExp; why: string }[] = [
   { where: /\/parameters\/\d+\[in=header\]\/name$/u, why: "HTTP header names" },
+  { where: /\/Config\/properties\/sandbox\/properties\/size\/enum$/u, why: "Cloudflare's container instance types" },
 ];
 
 type Json = Record<string, unknown>;

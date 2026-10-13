@@ -97,6 +97,37 @@ async function mergeBase(repos: Repos, one: Side, two: Side): Promise<string | n
 }
 
 /**
+ * Whether commit `head` on attempt `attempt`'s fork has `commit` from the origin in its history: an
+ * ancestry test, read through `Repos` with the same walk limit as `attemptBase`. The walk stops early
+ * at `known`, a commit of the fork already known to contain `commit`. Null when it can't tell: `head`
+ * can't be read, or the walk reached its limit. A read that fails throws.
+ */
+export async function containsCommit(
+  repos: Repos,
+  project: string,
+  { attempt, head, known = null }: { attempt: string; head: string; known?: string | null },
+  commit: string,
+): Promise<boolean | null> {
+  const marks = new Map<string, number>([[head, ONE]]);
+  marks.set(commit, (marks.get(commit) ?? 0) | TWO);
+  const sides = [
+    { repo: forkRepo(project, attempt), sha: head },
+    { repo: originRepo(project), sha: commit },
+  ];
+  let walked = 0;
+  let readHead = false;
+  for await (const { next } of walkNewestFirst(repos, head === commit ? [sides[0] as Side] : sides, marks)) {
+    walked++;
+    readHead ||= next === head;
+    const mark = marks.get(next) ?? 0;
+    if (next === known && mark & ONE) return true;
+    // The first commit both reach is their merge base, which is `commit` when `head` contains it.
+    if (mark === BOTH) return next === commit;
+  }
+  return readHead && walked < MAX_BASE_WALK ? false : null;
+}
+
+/**
  * How many commits `head` reaches that `other` (null for none) doesn't, both in `repo`: `git rev-list
  * --count head ^other`. Stops once every commit left to walk is one `other` reaches.
  */

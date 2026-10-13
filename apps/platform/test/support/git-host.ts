@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { promisify } from "node:util";
+import type { ExecutionContext } from "hono";
 import { copyRepoRef } from "../../src/git-client.ts";
 import type { Commit, CopyRef, RepoInfo, Repos, RepoToken, TokenScope, TreeEntry } from "../../src/repos.ts";
 
@@ -238,8 +239,11 @@ export class LocalGitHost implements Repos {
       });
   }
 
-  async readCommit(): Promise<Commit | null> {
-    throw new Error("LocalGitHost doesn't read commits");
+  async readCommit(name: string, hash: string): Promise<Commit | null> {
+    if (!(await this.#exists(name))) throw repoError("NOT_FOUND", name);
+    if (!/^[0-9a-f]{40}$/u.test(hash)) return null;
+    const [commit] = await this.listCommits(name, { ref: hash, limit: 1 });
+    return commit ?? null;
   }
 
   async readTree(): Promise<TreeEntry[] | null> {
@@ -327,12 +331,23 @@ export interface Recorded {
   body: Buffer;
 }
 
-/** Serves `app.fetch` on a local port, recording every response it sends. */
+/**
+ * Serves `app.fetch` on a local port, recording every response it sends. Work a request hands to
+ * `waitUntil` runs after its response, as in a Worker; `settled` waits for all of it so far.
+ */
 export async function serve(
-  app: { fetch: (request: Request, env: unknown) => Response | Promise<Response> },
+  app: {
+    fetch: (request: Request, env: unknown, ctx: ExecutionContext) => Response | Promise<Response>;
+  },
   env: unknown,
-): Promise<{ origin: string; responses: Recorded[]; close: () => Promise<void> }> {
+): Promise<{ origin: string; responses: Recorded[]; settled: () => Promise<void>; close: () => Promise<void> }> {
   const responses: Recorded[] = [];
+  const pending: Promise<unknown>[] = [];
+  const ctx = {
+    waitUntil: (promise: Promise<unknown>) => void pending.push(promise),
+    passThroughOnException: () => {},
+    props: {},
+  } satisfies ExecutionContext;
   const server = createServer((req, res) => {
     void (async () => {
       const url = `http://${req.headers.host}${req.url}`;
@@ -346,7 +361,7 @@ export async function serve(
         headers,
         ...(hasBody ? { body: Readable.toWeb(req), duplex: "half" } : {}),
       } as RequestInit;
-      const response = await app.fetch(new Request(url, init), env);
+      const response = await app.fetch(new Request(url, init), env, ctx);
       const recorded: Recorded = { status: response.status, headers: [...response.headers], body: Buffer.alloc(0) };
       responses.push(recorded);
       res.writeHead(response.status, Object.fromEntries(response.headers));
@@ -367,6 +382,9 @@ export async function serve(
   return {
     origin: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
     responses,
+    settled: async () => {
+      while (pending.length > 0) await Promise.allSettled(pending.splice(0));
+    },
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };
 }

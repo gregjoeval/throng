@@ -120,7 +120,7 @@ export interface E2eDeps<E> {
 }
 
 /**
- * Deletes everything an e2e project made: its D1 row (nothing else in D1 refers to a project), its
+ * Deletes everything an e2e project made: its D1 row (its projected tasks and attempts go with it), its
  * Durable Object's storage, its logs in R2, its repos and its preview Worker.
  */
 export async function deleteE2eProject<E>(deps: E2eDeps<E>, env: E, id: string): Promise<void> {
@@ -132,6 +132,10 @@ export async function deleteE2eProject<E>(deps: E2eDeps<E>, env: E, id: string):
     .prepare("DELETE FROM projects WHERE id = ? AND owner_id = ? RETURNING id")
     .bind(id, owner.id)
     .first();
+  // The project's alarm can still publish between the delete above and `destroy()`. D1 refuses its
+  // rows (their project is gone, and foreign keys are enforced), so the delivery fails whole and
+  // backs off until `destroy()` clears the alarm. Had one landed, no listing would show it: listings
+  // join `projects`.
   await deps.project(env, id).destroy();
   await deleteLogs(deps.logs(env), `${LOG_PREFIX}${id}/`);
   // Before the repos: a sweep finds a project by its row or its repos, so a failure here is retried.

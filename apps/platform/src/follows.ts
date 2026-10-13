@@ -78,22 +78,32 @@ interface FollowRow extends Omit<StoredFollow, "status"> {
 export class Follows {
   readonly #sql: Sql;
   readonly #now: () => Date;
+  /** The head of a task's task branch, as its last recorded push left it. */
+  readonly #taskHead: (task: number) => string | null;
 
-  constructor({ sql, now }: { sql: Sql; now: () => Date }) {
+  constructor({ sql, now, taskHead }: { sql: Sql; now: () => Date; taskHead: (task: number) => string | null }) {
     this.#sql = sql;
     this.#now = now;
+    this.#taskHead = taskHead;
     sql.exec(SCHEMA);
   }
 
-  /** Queues a follow of `taskHead`, or moves the attempt's queued one on to it. */
+  /**
+   * Queues a follow of `taskHead`, or moves the attempt's queued one on to it, when it is the task
+   * branch's head. A request for any other head is dropped, so a queued follow never goes back to an
+   * older head: the push that moved the task branch past it queued a follow of the newer one.
+   */
   request(input: { project: string; task: number; attempt: number; taskHead: string }): void {
+    if (input.taskHead !== this.#taskHead(input.task)) return;
     const [queued] = this.#sql.exec<FollowRow>(
       "SELECT * FROM follows WHERE task = ? AND attempt = ? AND status = 'queued'",
       input.task,
       input.attempt,
     );
     if (queued !== undefined) {
-      this.#sql.exec("UPDATE follows SET task_head = ? WHERE id = ?", input.taskHead, queued.id);
+      if (queued.task_head !== input.taskHead) {
+        this.#sql.exec("UPDATE follows SET task_head = ? WHERE id = ?", input.taskHead, queued.id);
+      }
       return;
     }
     this.#sql.exec(
@@ -105,7 +115,7 @@ export class Follows {
     );
   }
 
-  /** Queues `follow` to run again, from the same task head. */
+  /** Queues `follow` to run again, from the same task head unless the task branch has moved on. */
   requeue(follow: StoredFollow): void {
     this.request({ ...follow, taskHead: follow.task_head });
   }

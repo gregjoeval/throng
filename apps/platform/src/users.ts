@@ -5,6 +5,11 @@ export interface Database {
   prepare: (sql: string) => Statement;
 }
 
+/** D1 with `batch`: the statements run in one round trip, as one transaction. */
+export interface BatchDatabase extends Database {
+  batch: (statements: Statement[]) => Promise<unknown>;
+}
+
 export interface Statement {
   bind: (...values: unknown[]) => Statement;
   first: <T = Record<string, unknown>>() => Promise<T | null>;

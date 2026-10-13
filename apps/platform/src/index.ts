@@ -56,8 +56,8 @@ app.route(
       return {
         note: (kind, detail) => stub.note(kind, detail),
         journal: (since) => stub.journal(since),
-        score: (project, attempt, sha) => stub.spikeScore(project, attempt, sha),
-        run: (run) => stub.spikeRun(run),
+        score: (project, attempt, sha) => stub.e2eScore(project, attempt, sha),
+        run: (run) => stub.e2eRun(run),
         destroy: () => stub.destroy(),
       };
     },

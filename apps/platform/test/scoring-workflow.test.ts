@@ -42,7 +42,13 @@ const { ScoringWorkflow } = (await import(WORKFLOW_MODULE)) as {
 const params: ScoringParams = { project: "abc123", attempt: "t1a1", sha: "a".repeat(40), run: 7 };
 
 const result = (value: unknown) => ({ exitCode: 0, stdout: `${RESULT_PREFIX}${JSON.stringify(value)}\n`, stderr: "" });
-const PASSED = { base: null, shortstat: "", builtinMs: 0, setupFailed: null, checks: [{ exit: 0, durationMs: 1, metrics: {} }] };
+const PASSED = {
+  base: null,
+  shortstat: "",
+  builtinMs: 0,
+  setupFailed: null,
+  checks: [{ exit: 0, durationMs: 1, metrics: {} }],
+};
 
 /** Scores a head whose one check passes and whose Preview deploys, recording sizes and stored logs. */
 async function score() {
@@ -78,7 +84,7 @@ describe("ScoringWorkflow", () => {
     const { sizes, outcome } = await score();
     expect(outcome.status).toBe("done");
     expect(new Set(sizes.map(([role]) => role))).toEqual(new Set(["score", "preview"]));
-    expect(sizes.every(([, size]) => size === "standard-2")).toBe(true);
+    expect(new Set(sizes.map(([, size]) => size))).toEqual(new Set(["standard-2"]));
   });
 
   it("records the size in each log it stores", async () => {

@@ -142,9 +142,15 @@ describe("parseConfig", () => {
     expect(parseConfig(text)).toEqual({ kind: "valid", config: { ...EMPTY, selection } });
   });
 
-  it.each(["lite", "standard-1", "standard-2", "standard-3", "standard-4"] as const)("reads the sandbox size %s", (size) => {
-    expect(parseConfig(`sandbox: { size: ${size} }\n`)).toEqual({ kind: "valid", config: { ...EMPTY, sandbox: { size } } });
-  });
+  it.each(["lite", "standard-1", "standard-2", "standard-3", "standard-4"] as const)(
+    "reads the sandbox size %s",
+    (size) => {
+      expect(parseConfig(`sandbox: { size: ${size} }\n`)).toEqual({
+        kind: "valid",
+        config: { ...EMPTY, sandbox: { size } },
+      });
+    },
+  );
 
   it.each([
     ["no sandbox", ""],
@@ -457,7 +463,6 @@ describe("sandboxSize", () => {
     repos.writeFile("abc123-t1a1", "main", CONFIG_PATH, "sandbox: { size: standard-4 }\n");
     expect(sandboxSize(await loadConfig(repos, "abc123"))).toBe("standard-2");
   });
-
 
   it("is the config's size, or the default when there is no valid config", () => {
     expect(sandboxSize(parseConfig("sandbox: { size: standard-3 }\n"))).toBe("standard-3");

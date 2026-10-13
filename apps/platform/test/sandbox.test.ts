@@ -12,7 +12,8 @@ vi.mock("cloudflare:workers", () => ({
       this.env = env;
     }
   },
-  WorkerEntrypoint: class {},
+  // `OutboundAuth` extends it; these tests never call it.
+  WorkerEntrypoint: Object,
 }));
 
 // Imported by a computed path: the module is Worker code, which this project's Node typecheck can't

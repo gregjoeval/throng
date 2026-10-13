@@ -55,7 +55,13 @@ const params: LandingParams = {
 const result = (value: unknown) => ({ exitCode: 0, stdout: `${RESULT_PREFIX}${JSON.stringify(value)}\n`, stderr: "" });
 
 /** A retest whose one check passed. */
-const PASSED = { base: null, shortstat: "", builtinMs: 0, setupFailed: null, checks: [{ exit: 0, durationMs: 1, metrics: {} }] };
+const PASSED = {
+  base: null,
+  shortstat: "",
+  builtinMs: 0,
+  setupFailed: null,
+  checks: [{ exit: 0, durationMs: 1, metrics: {} }],
+};
 
 /**
  * Runs a landing whose merge is clean, the merged tree holding `config` (none by default), recording

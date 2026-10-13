@@ -74,9 +74,10 @@ open attempt at \`t42\`. The origin's \`main\` only moves through the merge queu
    candidates, each user \`cast_vote\`s once (their aliases share that ballot; never for their own attempt), and
    \`close_vote\` selects the most-backed candidate, with \`attempt\` breaking a tie. Its author's push to a
    candidate withdraws it (a follow of the task branch doesn't: the candidate moves to the merge, with its
-   ballots); \`add_vote_candidate\` adds an attempt that passes later. While a vote is open, the task's checks,
-   metrics and selection policy can't change. \`get_vote\` shows the tallies and
-   your ballot.
+   ballots, and is being scored until that merge's scoring finishes: \`close_vote\` is refused until then);
+   \`add_vote_candidate\` adds an attempt that passes later. While a vote is open, the task's checks, metrics and
+   selection policy can't change. \`get_vote\` shows the tallies, which candidates are being scored, and your
+   ballot.
 10. If the merge request is dequeued, \`get_dequeue\` says why, with each conflicting file's hunks. Merge \`main\`
     into the attempt, push, and wait for the new head's score. The new head needs approving again:
     \`approve_merge_request\`.

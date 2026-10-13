@@ -325,6 +325,12 @@ const VoteSchema = z
                 "task branch moves `head` to its merge, which counts once it passes). The task's creator can add it " +
                 "again once it passes.",
             }),
+            beingScored: z.boolean().openapi({
+              description:
+                "Withdrawn only until `head`, its attempt's head, finishes being scored: a follow of the task branch " +
+                "moved it there. It counts again if `head` passes, and stays withdrawn if it fails. While any candidate " +
+                "is being scored the vote can't be closed. Always false once the vote closed.",
+            }),
           })
           .openapi("VoteCandidateTally"),
       )
@@ -1924,7 +1930,8 @@ export function apiRoutes(options: ApiOptions = {}) {
           "The candidate with the most ballots wins and is selected, at the head it is a candidate at, as `selection` " +
           "does: it becomes the task's merge request and the task's other active attempts are closed. A tie goes to " +
           "the task's creator, who names one of the tied candidates as `attempt`. With every candidate withdrawn, the " +
-          "vote closes without a selection. Journals `voteClosed`, then selection's events.",
+          "vote closes without a selection. Not while a candidate is `beingScored`: wait for its scoring to finish. " +
+          "Journals `voteClosed`, then selection's events.",
         security: bearerOrWeb,
         middleware: [browser] as const,
         request: { params: TaskPathSchema, body: { required: false, ...json(CloseVoteSchema) } },
@@ -1940,7 +1947,10 @@ export function apiRoutes(options: ApiOptions = {}) {
           401: unauthorizedBearer,
           403: errorResponse(TASK_MANAGERS),
           404: errorResponse("No such project or task."),
-          409: errorResponse("`invalidState`: the task has no open vote, or its winner can't be selected."),
+          409: errorResponse(
+            "`invalidState`: the task has no open vote, a candidate is still `beingScored`, or its winner can't be " +
+              "selected.",
+          ),
         },
       }),
       async (c) => {

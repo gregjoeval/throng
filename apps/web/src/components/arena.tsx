@@ -104,7 +104,6 @@ function ArenaLayout({
           task={task}
           selection={selection}
           vote={vote}
-          attempts={attempts}
           manage={manage}
           active={active.length}
         />

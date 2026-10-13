@@ -52,7 +52,7 @@ import type { Actor } from "./tokens.ts";
 import { Verdicts } from "./verdicts.ts";
 import type { StoredVerdict, VerdictRecommendation, VerdictSummary } from "./verdicts.ts";
 import { ELIGIBLE_VOTERS, mayVote, voteLeaders, Votes } from "./votes.ts";
-import type { CandidateTally, StoredCandidate, StoredVote, VoteDetail } from "./votes.ts";
+import type { CandidateStanding, CandidateTally, StoredCandidate, StoredVote, VoteDetail } from "./votes.ts";
 import { alreadyMet, Waiters, watchChanged } from "./waiters.ts";
 import type { AttemptWatch, WaitCondition } from "./waiters.ts";
 
@@ -1932,7 +1932,8 @@ export class TaskStore {
    * Closes the task's open vote and selects its winner: the candidate with the most ballots, at the
    * head it was pinned to, as `selectAttempt` would. A tie goes to the task's creator (or the project
    * owner), who names one of the tied candidates as `attempt`. With every candidate withdrawn it
-   * closes without a selection. The task's creator or the project owner may.
+   * closes without a selection. Refused while a candidate is being scored (a follow's merge, which
+   * may yet pass); closing the task still closes it. The task's creator or the project owner may.
    */
   async closeVote(
     project: ProjectContext,
@@ -1943,7 +1944,15 @@ export class TaskStore {
     this.#mayManageTask(project, actor, task);
     const { vote, mr, closed } = this.#sql.transaction(() => {
       const open = this.#openVote(task.number);
-      const winner = voteWinner(this.#voteDetail(open, actor), input.attempt);
+      const detail = this.#voteDetail(open, actor);
+      const scoring = detail.candidates.filter((c) => c.being_scored).map((c) => attemptRef(task.number, c.attempt));
+      if (scoring.length > 0) {
+        throw invalidState(
+          `${taskRef(task.number)}'s vote has candidates still being scored (${scoring.join(", ")}); ` +
+            "close it once scoring finishes",
+        );
+      }
+      const winner = voteWinner(detail, input.attempt);
       const ended = this.#endVote(actor, open, winner);
       if (winner === null) return { vote: ended, mr: null, closed: [] };
       const source = this.#attempt({ task: task.number, number: winner.attempt });
@@ -1994,21 +2003,30 @@ export class TaskStore {
 
   /** The vote as the actor sees it: every candidate's tally, and their own ballot. */
   #voteDetail(vote: StoredVote, actor: Actor): VoteDetail {
-    return this.votes.detail(vote, actor.user.id, this.#withdrawn(vote.task));
+    return this.votes.detail(vote, actor.user.id, this.#candidateStanding(vote.task));
+  }
+
+  /** Whether a candidate of a vote on `task` is withdrawn: `#candidateStanding` says it isn't standing. */
+  #withdrawn(task: number): (candidate: StoredCandidate) => boolean {
+    const standing = this.#candidateStanding(task);
+    return (candidate) => standing(candidate) !== "standing";
   }
 
   /**
-   * Whether a candidate of a vote on `task` is withdrawn: it isn't passing at its pinned head. Its
-   * attempt isn't open, its author pushed its head away from the pin (a follow moves the pin with
-   * it: `#followedTo`), or that head's latest scoring isn't a passed gate: a rescore failed it, or a
-   * follow's merge is still being scored. Worked out when read, so a candidate force-pushed back to
-   * its pinned head and passing there stands again, with its ballots.
+   * Where a candidate of a vote on `task` stands: withdrawn unless it is passing at its pinned head.
+   * Its attempt isn't open, its author pushed its head away from the pin (a follow moves the pin with
+   * it: `#followedTo`), or that head's latest scoring isn't a passed gate: a rescore failed it. Out
+   * only while being scored (`scoring`) when the pinned head is the attempt's head and its scoring is
+   * queued or running: a follow's merge, which counts once it passes. Worked out when read, so a
+   * candidate force-pushed back to its pinned head and passing there stands again, with its ballots.
    */
-  #withdrawn(task: number): (candidate: StoredCandidate) => boolean {
+  #candidateStanding(task: number): (candidate: StoredCandidate) => CandidateStanding {
     return ({ attempt, head }) => {
       const current = this.#attemptRow({ task, number: attempt });
-      if (current?.state !== "open" || this.scoring.statusFor({ task, attempt }).sha !== head) return true;
-      return this.scoring.currentRun({ task, attempt })?.result?.gate !== "passed";
+      const { sha, status } = this.scoring.statusFor({ task, attempt });
+      if (current?.state !== "open" || sha !== head) return "withdrawn";
+      if (this.scoring.currentRun({ task, attempt })?.result?.gate === "passed") return "standing";
+      return status === "queued" || status === "running" ? "scoring" : "withdrawn";
     };
   }
 

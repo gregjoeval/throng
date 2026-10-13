@@ -46,12 +46,20 @@ export interface StoredBallot {
 }
 
 /**
+ * Where a candidate of an open vote stands: `standing` counts; `scoring` is out only until its pinned
+ * head, a follow's merge, finishes being scored; `withdrawn` is out.
+ */
+export type CandidateStanding = "standing" | "scoring" | "withdrawn";
+
+/**
  * A candidate with its tally: the ballots for its pinned head, none while it is withdrawn. A closed
  * vote's candidates stay as they were when it closed.
  */
 export interface CandidateTally extends StoredCandidate {
   votes: number;
   withdrawn: boolean;
+  /** Withdrawn only until its pinned head, a follow's merge, finishes being scored. */
+  being_scored: boolean;
 }
 
 /** A vote with its candidates' tallies and one voter's own ballot. */
@@ -258,10 +266,10 @@ export class Votes {
 
   /**
    * The vote with each candidate's tally and `voter`'s own ballot. A candidate is out while the vote
-   * is open if `withdrawn` says so (its head moved, say), and once closed if it was out then; it has
-   * no votes. A ballot counts only for the head it was cast at.
+   * is open unless `standing` says it stands (its head moved, say), and once closed if it was out
+   * then; it has no votes. A ballot counts only for the head it was cast at.
    */
-  detail(vote: StoredVote, voter: string, withdrawn: (candidate: StoredCandidate) => boolean): VoteDetail {
+  detail(vote: StoredVote, voter: string, standing: (candidate: StoredCandidate) => CandidateStanding): VoteDetail {
     const ballots = this.#sql.exec<StoredBallot>(
       "SELECT voter, alias, attempt, head, at FROM ballots WHERE vote = ?",
       vote.id,
@@ -271,11 +279,12 @@ export class Votes {
       vote.id,
     );
     const candidates = rows.map(({ withdrawn: closedOut, ...candidate }) => {
-      const out = vote.state === "open" ? withdrawn(candidate) : closedOut === 1;
+      const now = vote.state === "open" ? standing(candidate) : null;
+      const out = now === null ? closedOut === 1 : now !== "standing";
       const votes = out
         ? 0
         : ballots.filter((b) => b.attempt === candidate.attempt && b.head === candidate.head).length;
-      return { ...candidate, votes, withdrawn: out };
+      return { ...candidate, votes, withdrawn: out, being_scored: now === "scoring" };
     });
     const mine = ballots.find((b) => b.voter === voter);
     return {

@@ -42,7 +42,6 @@ export function SingleAttemptView({
               task={task.ref}
               selection={arena.data.selection}
               vote={arena.data.vote}
-              attempts={arena.data.attempts}
               manage={maySelect}
               active={1}
             />

@@ -34,6 +34,7 @@ function openVote(votes: number[], fields: Partial<Vote> = {}): Vote {
       addedAt: me.user.createdAt,
       votes: count,
       withdrawn: false,
+      beingScored: false,
     })),
     myBallot: null,
     ...fields,
@@ -99,7 +100,9 @@ describe("the vote banner", () => {
 
   it("shows a candidate a follow of the task branch moved as being scored, not withdrawn", async () => {
     const vote = openVote([2, 1]);
-    vote.candidates = vote.candidates.map((c) => (c.attempt === "t1a1" ? { ...c, votes: 0, withdrawn: true } : c));
+    vote.candidates = vote.candidates.map((c) =>
+      c.attempt === "t1a1" ? { ...c, votes: 0, withdrawn: true, beingScored: true } : c,
+    );
     const followed = arenaAttempt(1, 1, { status: "running" });
     await arenaWith([followed, passing(2)], { selection: VOTE_BY_ANYONE, vote });
 
@@ -107,6 +110,27 @@ describe("the vote banner", () => {
     const items = within(tallies).getAllByRole("listitem");
     expect(items.map((item) => item.textContent)).toEqual(["t1a1being scored", "t1a21 vote"]);
     expect(items[0]).not.toHaveClass("line-through");
+  });
+
+  it("can't close the vote while a candidate is being scored, and says why", async () => {
+    const vote = openVote([2, 1]);
+    vote.candidates = vote.candidates.map((c) =>
+      c.attempt === "t1a1" ? { ...c, votes: 0, withdrawn: true, beingScored: true } : c,
+    );
+    await arenaWith([arenaAttempt(1, 1, { status: "running" }), passing(2)], { selection: VOTE_BY_ANYONE, vote });
+
+    expect(within(banner()).getByRole("button", { name: "Close vote" })).toBeDisabled();
+    expect(banner()).toHaveTextContent("t1a1 is being scored; close the vote once scoring finishes.");
+  });
+
+  it("shows a withdrawn candidate whose new head is being scored as withdrawn, and lets the vote close", async () => {
+    const vote = openVote([2, 1]);
+    vote.candidates = vote.candidates.map((c) => (c.attempt === "t1a1" ? { ...c, votes: 0, withdrawn: true } : c));
+    await arenaWith([arenaAttempt(1, 1, { status: "running" }), passing(2)], { selection: VOTE_BY_ANYONE, vote });
+
+    const tallies = within(banner()).getByRole("list", { name: "Tallies" });
+    expect(within(tallies).getAllByRole("listitem")[0]).toHaveTextContent("withdrawn");
+    expect(within(banner()).getByRole("button", { name: "Close vote" })).toBeEnabled();
   });
 
   it("offers the task's creator to open a vote under the vote policy, with an optional deadline", async () => {

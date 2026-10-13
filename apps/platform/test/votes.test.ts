@@ -199,8 +199,8 @@ describe("opening a vote", () => {
       ballot: null,
     });
     expect(opened.candidates).toEqual([
-      { attempt: 1, head: head(t1a1), added_at: expect.any(String), votes: 0, withdrawn: false },
-      { attempt: 3, head: head(t1a3), added_at: expect.any(String), votes: 0, withdrawn: false },
+      { attempt: 1, head: head(t1a1), added_at: expect.any(String), votes: 0, withdrawn: false, being_scored: false },
+      { attempt: 3, head: head(t1a3), added_at: expect.any(String), votes: 0, withdrawn: false, being_scored: false },
     ]);
     expect(journal().at(-1)).toMatchObject({
       kind: "voteOpened",
@@ -502,6 +502,67 @@ describe("closing a vote", () => {
     expect(await code(store.selectAttempt(PROJECT, cat, t1a1))).toBe("invalidState");
     await store.closeVote(PROJECT, cat, { task: 1, attempt: 1 });
     expect(store.getMergeRequest(PROJECT, owner, { task: 1 }).attempt).toBe(1);
+  });
+
+  it("is refused while a candidate a follow moved is being scored, and selects it once it passes", async () => {
+    const { store, t1a1, t1a2, scoreAll, score, moveTaskBranch, follow, vote, head } = await setup();
+    await scoreAll();
+    await store.openVote(PROJECT, cat, { task: 1 });
+    store.castVote(PROJECT, eve, t1a1);
+    store.castVote(PROJECT, fay, t1a1);
+    store.castVote(PROJECT, dan, t1a2);
+    await moveTaskBranch();
+    await follow(t1a1);
+    expect(vote().candidates[0]).toMatchObject({ attempt: 1, withdrawn: true, being_scored: true });
+
+    const refused = await store.closeVote(PROJECT, cat, { task: 1 }).catch((error: unknown) => error);
+    expect(refused).toMatchObject({
+      code: "invalidState",
+      message: "t1's vote has candidates still being scored (t1a1); close it once scoring finishes",
+    });
+    expect(vote().state).toBe("open");
+
+    await score(t1a1);
+    expect(vote().candidates[0]).toMatchObject({ votes: 2, withdrawn: false, being_scored: false });
+    const closed = await store.closeVote(PROJECT, cat, { task: 1 });
+    expect(closed.selected).toMatchObject({ attempt: 1, approved_head: head(t1a1) });
+  });
+
+  it("goes ahead once a followed candidate's scoring fails it, leaving that candidate withdrawn", async () => {
+    const { store, t1a1, t1a2, scoreAll, score, moveTaskBranch, follow } = await setup();
+    await scoreAll();
+    await store.openVote(PROJECT, cat, { task: 1 });
+    store.castVote(PROJECT, eve, t1a1);
+    store.castVote(PROJECT, dan, t1a2);
+    await moveTaskBranch();
+    await follow(t1a1);
+    await score(t1a1, done("failed"));
+    const closed = await store.closeVote(PROJECT, cat, { task: 1 });
+    expect(closed.vote.winner).toBe(2);
+    expect(closed.vote.candidates[0]).toMatchObject({ attempt: 1, withdrawn: true, being_scored: false });
+  });
+
+  it("isn't held up by a candidate its author's push withdrew while its new head is scored", async () => {
+    const { store, t1a1, t1a2, scoreAll, push, vote } = await setup();
+    await scoreAll();
+    await store.openVote(PROJECT, cat, { task: 1 });
+    store.castVote(PROJECT, eve, t1a1);
+    store.castVote(PROJECT, dan, t1a2);
+    push(t1a1);
+    await store.scoring.drain();
+    expect(store.getAttempt(PROJECT, owner, t1a1).scoring.status).not.toBe("done");
+    expect(vote().candidates[0]).toMatchObject({ withdrawn: true, being_scored: false });
+    expect((await store.closeVote(PROJECT, cat, { task: 1 })).vote.winner).toBe(2);
+  });
+
+  it("happens with its task even while a followed candidate is being scored", async () => {
+    const { store, t1a1, scoreAll, moveTaskBranch, follow, vote } = await setup();
+    await scoreAll();
+    await store.openVote(PROJECT, cat, { task: 1 });
+    await moveTaskBranch();
+    await follow(t1a1);
+    await store.closeTask(PROJECT, cat, { task: 1 });
+    expect(vote()).toMatchObject({ state: "closed", winner: null, closed_by: null });
   });
 
   it("happens with the task when the task is closed, closed by nobody", async () => {

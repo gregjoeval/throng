@@ -144,9 +144,15 @@ function mergeRequestAnswer(mergeRequest: MergeRequest): CallToolResult {
   return answer(`merge request is ${mergeRequest.state}`, { mergeRequest });
 }
 
+/** A vote candidate's tally, or why it doesn't count now. */
+function tally(c: Vote["candidates"][number]): string | number {
+  if (c.beingScored) return "being scored";
+  return c.withdrawn ? "withdrawn" : c.votes;
+}
+
 /** The answer to a call that reads or changes the task's vote: its state and each candidate's tally. */
 function voteAnswer(vote: Vote): CallToolResult {
-  const tallies = vote.candidates.map((c) => `${c.attempt} ${c.withdrawn ? "withdrawn" : c.votes}`).join(", ");
+  const tallies = vote.candidates.map((c) => `${c.attempt} ${tally(c)}`).join(", ");
   return answer(`${vote.task}'s vote is ${vote.state}: ${tallies}`, { vote });
 }
 
@@ -520,7 +526,9 @@ function mcpServer({ repos, tasks, logs, diffCache }: Deps, { actor, token, env,
   tool(
     "close_vote",
     "Close the task's open vote, selecting the candidate with the most ballots as its merge request. On a tie, " +
-      "name one of the tied candidates as `attempt`. The task's creator or the project owner may.",
+      "name one of the tied candidates as `attempt`. Refused while a candidate is being scored (a follow of the " +
+      "task branch moved it to a merge not scored yet): close it once scoring finishes. The task's creator or the " +
+      "project owner may.",
     CloseVoteSchema.extend(onTask.shape),
     async ({ project, task, attempt }) => {
       const { vote, mergeRequest } = await service.closeVote(actor, { ...projectPath(project), task, attempt });

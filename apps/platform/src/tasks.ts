@@ -185,7 +185,14 @@ export interface Vote {
   closedAt: string | null;
   /** The attempt it selected, `t42a3`, once closed with a selection. */
   winner: string | null;
-  candidates: { attempt: string; head: string; addedAt: string; votes: number; withdrawn: boolean }[];
+  candidates: {
+    attempt: string;
+    head: string;
+    addedAt: string;
+    votes: number;
+    withdrawn: boolean;
+    beingScored: boolean;
+  }[];
   myBallot: { attempt: string; head: string; alias: string | null; at: string } | null;
 }
 
@@ -850,6 +857,7 @@ function publicVote(v: VoteDetail, users: Map<string, string>): Vote {
       addedAt: c.added_at,
       votes: c.votes,
       withdrawn: c.withdrawn,
+      beingScored: c.being_scored,
     })),
     myBallot:
       ballot === null ? null : { attempt: ref(ballot.attempt), head: ballot.head, alias: ballot.alias, at: ballot.at },

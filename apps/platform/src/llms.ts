@@ -3,6 +3,7 @@
 // this is the long form, step by step.
 
 import { Hono } from "hono";
+import { DEFAULT_SANDBOX_SIZE, oneOf, SANDBOX_SIZES } from "./config.ts";
 import { attemptRemote } from "./git-remotes.ts";
 import { CLONE_RECIPE, MAX_FILE_BYTES, MAX_LOG_SLICE_BYTES, MCP_INSTRUCTIONS } from "./mcp.ts";
 import { DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS, MAX_WAITERS_PER_USER } from "./waiters.ts";
@@ -84,6 +85,14 @@ open attempt at \`t42\`. The origin's \`main\` only moves through the merge queu
 
 \`update_attempt\` also edits the note and moves an attempt to \`draft\` or \`closed\`; \`hand_off\` gives an
 active attempt to another user.
+
+## The Sandbox
+
+Setup, the checks and the Preview build run in a container whose size the project's \`.throng/config.yml\`
+sets, as in \`sandbox: {size: standard-2}\`: ${oneOf(SANDBOX_SIZES)}. The default is ${DEFAULT_SANDBOX_SIZE}
+(4 GiB, 1/2 vCPU). Like the rest of the config, it is read from the origin's \`main\`: an attempt that changes it
+still runs at \`main\`'s size, and the change applies once it lands. Each stored log notes the size it ran at
+under \`== throng ==\`, so a check killed for memory shows how much it had.
 
 ## In short
 

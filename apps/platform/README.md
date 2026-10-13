@@ -53,6 +53,21 @@ Each scoring run copies the log of every `setup` command, check and preview to t
 
 There's one bucket per environment: `throng-logs`, and `throng-ci-logs` for `ci`. Logs are deleted after 30 days by an R2 lifecycle rule. Wrangler's config can't declare lifecycle rules, so they live in `r2-lifecycle.json`, which CI applies before each deploy (see the setup below).
 
+## Sandbox size
+
+Each role of a run gets its own container (`src/grants.ts`). The ones that run the repository's code, `score`, `check` and `preview`, start at the size the project's `.throng/config.yml` sets:
+
+```yaml
+sandbox:
+  size: standard-1 # lite | standard-1 | standard-2 | standard-3 | standard-4
+```
+
+The sizes are Cloudflare's named instance types, which `RunSandbox` passes to `start({ instance })` (`src/sandbox.ts`): `lite` is 256 MiB and 1/16 vCPU, `standard-1` 4 GiB and 1/2 vCPU, up to `standard-4` at 12 GiB and 4 vCPU. When `sandbox.size` is absent, or the config is missing or invalid, it is `standard-1`. Any other value is a config error. The trusted `land` and `follow` containers only run git and always start at `lite`.
+
+The size is read from the origin's `main`, like the rest of the config, never from the attempt's head, so an attempt can't raise its own size; a change applies once it lands. A scoring run takes it from the config it loads from `main`; a landing reads `main`'s config before its conflict check starts the `check` container, which then also runs the retest. A container that is already running keeps its size, and the next one to start takes the current config's. Every stored log a step wrote notes its size under `== throng ==` (`sandbox: standard-1`).
+
+The default is 16 times `lite`'s memory, so each scoring run costs more than it did when every container was `lite`. Wrangler's `containers` entry sets no `instance_type`: under the `durable_object` scheduling policy, the size is chosen at each `start()`, and `max_instances` caps how many containers run at once, whatever their size.
+
 ## Previews
 
 Each project has its own Worker, `p<projectId>`, and every Preview of its attempts deploys under it (`src/preview-workers.ts`, `src/preview.ts`). A Preview is named after its fork, so its URL is `https://<forkName>-p<projectId>.<subdomain>.workers.dev`; a label that would pass 63 characters keeps the fork name's start plus a hash. Projects never share a Worker's Previews (about 500 per Worker, least recently deployed evicted first), its limits or its settings.
@@ -93,7 +108,7 @@ gh workflow run e2e.yml --ref my-branch     # every scenario, against a branch
 - `zeroconfig`, `conflict`, `needsreview`: the merge queue. These make real projects (with task rows) owned by an e2e user, `e2e@throng.invalid`, through `POST /e2e/projects/:project`, then drive them only through `/api` and the git proxy with that user's Throng token (`POST /e2e/token`). The fixture is the one push that goes around the proxy, since the proxy refuses pushes to the origin's `main`.
   - `zeroconfig`: a project with no `.throng/config.yml`. Selecting `t1a1` closes `t1a2`, and the merge request lands as a merge commit whose parents are the old `main` and the approved head, with the `Throng-Task`, `Throng-Attempt`, `Throng-Merge-Request` and `Approved-by` trailers. It also checks custom refs after landing: both attempts are archived under `refs/attempts/` in the origin.
   - `conflict`: two tasks whose attempts edit the same line. `t1`'s merge request lands, and `t2`'s is dequeued with reason `conflict` and the expected three-way hunk. Its author merges `main` and pushes, which moves it to `needsReview`. Once approved, it lands.
-  - `needsreview`: a slow required check keeps the landing in its retest. A push to the source while it's queued or landing dequeues it with `newPush` to `needsReview`. Once the new head passes, it still doesn't requeue on its own.
+  - `needsreview`: a slow required check keeps the landing in its retest. Its scoring log notes the default Sandbox size, `standard-1`, as the config sets none. A push to the source while it's queued or landing dequeues it with `newPush` to `needsReview`. Once the new head passes, it still doesn't requeue on its own.
 - `mcp`: the agent loop through `/mcp` (with the MCP SDK's client) and git only, on a real project with no config (`agentLoop` in `scripts/e2e-mcp.ts`, which `test/mcp.test.ts` also runs in process). Both agents' tokens are minted under an alias (`POST /e2e/token?alias=claude`), so the loop runs as `user (alias)` and checks the attempt and the verdict record it. The e2e user's agent calls `whoami`, `create_task` and `start_attempts count=2`, clones `t1a1`'s `remote` with the recipe above (through `sh`, with the token in `THRONG_TOKEN`), pushes with no auth of its own, `update_attempt state=open`, waits with `wait_for_attempt until=scored` and checks the result with `get_attempt`. A second e2e user, `e2e-reviewer@throng.invalid` (`POST /e2e/token?as=reviewer&alias=codex`), posts a `merge` verdict. The first selects `t1a1` and waits with `until=mergeRequestChanged` until it merges.
 - `arena`: the attempt arena in a browser. Like `zeroconfig`, it makes a real project as the e2e user, with task `t1` and two attempts: `t1a1` edits `src/greeting.js`, and `t1a2` edits it and `src/index.js`. Once both are scored, Playwright's Chromium opens `t1` on `throng-web-ci` (`THRONG_WEB_URL`) and checks that:
   1. the arena shows lanes `t1a1` and `t1a2`, each with its own files, and each compared against its base (`main`, since the task has no branch);

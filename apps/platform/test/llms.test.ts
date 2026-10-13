@@ -21,6 +21,16 @@ function setup() {
   return { app, env };
 }
 
+describe("the Sandbox size", () => {
+  it("names the config key, its sizes, its default and that it's read from main", async () => {
+    const { text } = await llms();
+    expect(text).toContain("sandbox: {size: standard-2}");
+    expect(text).toContain("lite, standard-1, standard-2, standard-3 or standard-4");
+    expect(text).toContain("The default is standard-1");
+    expect(text).toContain("read from the origin's `main`");
+  });
+});
+
 async function llms() {
   const { app, env } = setup();
   const res = await app.request(`${ORIGIN}/llms.txt`, {}, env);

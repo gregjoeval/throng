@@ -131,7 +131,7 @@ const name = (what: string) =>
     if (message !== null) ctx.addIssue({ code: "custom", message });
   });
 /** `a`, `a or b`, `a, b or c`. */
-const oneOf = (values: readonly string[]) =>
+export const oneOf = (values: readonly string[]) =>
   values.length === 1 ? (values[0] ?? "") : `${values.slice(0, -1).join(", ")} or ${values.at(-1) ?? ""}`;
 const FROM_FORMAT = "from must be <check>.<file>.<path>, like test.coverage-summary.total.lines.pct";
 const command = z.string({ error: "must be a string" }).trim().min(1, "must not be empty");

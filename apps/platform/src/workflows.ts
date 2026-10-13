@@ -54,12 +54,12 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
 
     let outcome: ScoringOutcome;
     try {
-      const config = await step.do("config", { retries: STEP_RETRIES, timeout: "1 minute" }, () =>
+      // Named apart from the `config` step it replaced, whose recorded output had another shape.
+      const { config, size } = await step.do("config and size", { retries: STEP_RETRIES, timeout: "1 minute" }, () =>
         this.#config(params),
       );
       const plan = scorePlan(config);
       const timeoutMs = scoreTimeoutMs(plan);
-      const size = sandboxSize(config);
       const base = await step.do("base", { retries: STEP_RETRIES, timeout: "1 minute" }, () =>
         attemptBase(reposFor(this.env), params.project, { attempt: params.attempt, head: params.sha }),
       );
@@ -92,15 +92,16 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
   /**
    * The run's config, its layers merged once: the project's config on `main`, then what the task
    * defines over it. A clash between them makes it invalid. The spike's attempts have no task row,
-   * so they get the project's alone.
+   * so they get the project's alone. The Sandbox size is the project's own, which a task's
+   * definitions never change, even when they clash.
    */
-  async #config(params: ScoringParams): Promise<ConfigResult> {
+  async #config(params: ScoringParams): Promise<{ config: ConfigResult; size: SandboxSize }> {
     const task = parseAttemptRef(params.attempt)?.task;
     const [project, definitions] = await Promise.all([
       loadConfig(reposFor(this.env), params.project),
       task === undefined ? NO_TASK_DEFINITIONS : this.env.PROJECT.getByName(params.project).definitionsOf(task),
     ]);
-    return withTask(project, definitions);
+    return { config: withTask(project, definitions), size: sandboxSize(project) };
   }
 
   /** Runs the score script in the run's own container, stores its logs and builds its result. */
@@ -302,7 +303,9 @@ export async function storeLogs(
   const stored: string[] = [];
   for (const name of names) {
     try {
-      const read = await sandbox.run(readLogScript(name), { access: NO_ACCESS, size });
+      // Its container is already running, so it keeps its size; if it was lost, a log read needs no
+      // more than the smallest to find the log missing.
+      const read = await sandbox.run(readLogScript(name), { access: NO_ACCESS, size: TRUSTED_SIZE });
       if (read.exitCode !== 0 && read.exitCode !== MISSING_LOG_EXIT) {
         throw new Error(`exit ${read.exitCode}: ${read.stderr.slice(-500)}`);
       }

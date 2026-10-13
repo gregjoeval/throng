@@ -46,22 +46,28 @@ const params: LandingParams = {
 
 /**
  * Runs a landing whose merge is clean, the merged tree holding `config` (none by default), recording
- * each container's runs and destroys, and the size each run asked its container for.
+ * each container's runs and destroys, and the size each script, and each log read, asked its
+ * container for.
  */
 async function land(config: string | null = null): Promise<{
   events: string[];
   sizes: [string | undefined, SandboxSize][];
+  logReads: [string | undefined, SandboxSize][];
   outcome: LandingOutcome | null;
 }> {
   const events: string[] = [];
   const sizes: [string | undefined, SandboxSize][] = [];
+  const logReads: [string | undefined, SandboxSize][] = [];
   const sandbox = (name: string) => {
     const role = name.split("/").at(-1);
     return {
       run: async (script: string, { size }: { size: SandboxSize }) => {
-        sizes.push([role, size]);
         // Reading a log back: the step wrote none.
-        if (script.includes("f=logs/")) return { exitCode: MISSING_LOG_EXIT, stdout: "", stderr: "" };
+        if (script.includes("f=logs/")) {
+          logReads.push([role, size]);
+          return { exitCode: MISSING_LOG_EXIT, stdout: "", stderr: "" };
+        }
+        sizes.push([role, size]);
         events.push(`run ${role}`);
         if (role !== "check") return result({ kind: "landed", sha: MERGE });
         if (script.includes("THRONG_OUTPUT")) return result(PASSED);
@@ -82,7 +88,7 @@ async function land(config: string | null = null): Promise<{
   };
   const workflow = new LandingWorkflow({}, env);
   const outcome = await workflow.run({ payload: params, instanceId: "abc123-t1a1-landing-1" }, runOnce);
-  return { events, sizes, outcome };
+  return { events, sizes, logReads, outcome };
 }
 
 describe("LandingWorkflow", () => {
@@ -100,11 +106,12 @@ describe("LandingWorkflow", () => {
     const { events, sizes, outcome } = await land(merged);
     expect(outcome).toEqual({ kind: "landed", sha: MERGE });
     expect(events.filter((e) => e === "run check")).toHaveLength(2);
-    expect(sizes.filter(([role]) => role === "check").map(([, size]) => size)).toEqual([
-      "standard-2",
-      "standard-2",
-      "standard-2",
-    ]);
+    expect(sizes.filter(([role]) => role === "check").map(([, size]) => size)).toEqual(["standard-2", "standard-2"]);
     expect(sizes.filter(([role]) => role === "land")).toEqual([["land", "lite"]]);
+  });
+
+  it("reads the retest's logs back at lite, so a lost container isn't restarted at the project's size", async () => {
+    const { logReads } = await land("checks:\n  - { name: test, command: npm test }\n");
+    expect(logReads).toEqual([["check", "lite"]]);
   });
 });

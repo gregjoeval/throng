@@ -74,6 +74,18 @@ export async function resolveProject(db: Database, owner: string, handle: string
   return row === null ? null : project(row);
 }
 
+/** The projects with the given ids, by id; an unknown id is left out. */
+export async function projectsById(db: Database, ids: readonly string[]): Promise<Map<string, Project>> {
+  const unique = [...new Set(ids)];
+  if (unique.length === 0) return new Map();
+  // One bound JSON array, not one parameter per id: D1 binds at most 100 parameters to a statement.
+  const { results } = await db
+    .prepare(`${SELECT_PROJECT} WHERE p.id IN (SELECT value FROM json_each(?))`)
+    .bind(JSON.stringify(unique))
+    .all<ProjectRow>();
+  return new Map(results.map((row) => [row.id, project(row)]));
+}
+
 /** The project services. Every signed-in actor may create projects and read any project in P0. */
 export function projectService({ db, repos, newId = randomProjectId }: ProjectDeps) {
   return {

@@ -29,6 +29,11 @@
 // registry), refs (attempt archive refs: pushable, listed, kept across pushes to main, and copied by
 // the Worker).
 //
+// The D1 projection, me: a task and an attempt reach the e2e user's `/api/me/tasks` and
+// `/api/me/attempts` with the fields the project's own API gives them; a title edit overwrites the
+// projected title; an obsolete task and attempt leave the default listings but stay under
+// `state=obsolete`.
+//
 // Every project id starts with E2E_PROJECT_PREFIX (default `e2e`; lowercase alphanumeric, starting
 // with `e2e`, which the Worker's e2e routes insist on). Each scenario deletes what its projects made
 // (D1 rows, Durable Object storage, logs and repos), and the run revokes its tokens when it ends.
@@ -39,7 +44,7 @@ import { execFile } from "node:child_process";
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { promisify } from "node:util";
+import { isDeepStrictEqual, promisify } from "node:util";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { ARCHIVE_REF_PREFIX, archiveRef } from "../src/archive.ts";
 import { CLONE_RECIPE } from "../src/mcp.ts";
@@ -61,6 +66,8 @@ const TEST_CHECK = `checks:
     command: npm test
 `;
 const CHECK_TIMEOUT_MS = 10 * 60 * 1000;
+/** How long a change may take to reach the D1 projection; delivery usually takes seconds. */
+const PROJECTION_TIMEOUT_MS = 90 * 1000;
 
 const baseUrl = requireEnv("THRONG_URL").replace(/\/$/u, "");
 const e2eSecret = requireEnv("SPIKE_TOKEN");
@@ -200,6 +207,41 @@ interface ApiResult {
   metrics: Record<string, Metric>;
 }
 
+/** A project as the API returns it (`src/projects.ts`). */
+interface Project {
+  id: string;
+  handle: string;
+  owner: { id: string; handle: string };
+  createdAt: string;
+}
+
+/** What the `me` scenario reads of a task and an attempt from the project's own API. */
+interface ProjectTask {
+  ref: string;
+  number: number;
+  title: string;
+  state: string;
+  creator: { id: string; handle: string };
+  createdAt: string;
+  closedAt: string | null;
+}
+
+interface ProjectAttempt {
+  ref: string;
+  task: number;
+  number: number;
+  state: string;
+  author: { id: string; handle: string };
+  createdAt: string;
+  closedAt: string | null;
+}
+
+/** A row of `/api/me/tasks` and of `/api/me/attempts`, read from the D1 projection (`src/my-listings.ts`). */
+interface MyListings {
+  tasks: ProjectTask & { project: Project };
+  attempts: Omit<ProjectAttempt, "task"> & { project: Project; task: { ref: string; number: number; title: string } };
+}
+
 interface ScoringStatus {
   status: "none" | "queued" | "running" | "done" | "errored";
   sha: string | null;
@@ -222,6 +264,7 @@ const scenarios: Record<string, () => Promise<void>> = {
   intrusion,
   deps,
   refs,
+  me,
 };
 
 async function main(): Promise<void> {
@@ -858,6 +901,98 @@ process.exit(ok ? 0 : 1);
   await finish(p.project, p.work, timeline);
 }
 
+/**
+ * The D1 projection behind `/api/me/*`. A task and its attempt reach the e2e user's listings with the
+ * fields the project's own API gives them. A title edit, a later version, overwrites the projected
+ * title in the task's row and its attempt's. Making the task obsolete, which obsoletes its attempt,
+ * hides both from the default listings, while `state=obsolete` still lists them.
+ */
+async function me(): Promise<void> {
+  const timeline = new Timeline();
+  const p = await setUpRealProject(timeline);
+  const [t1, a1] = ["t1", "t1a1"];
+  await createTask(p, t1, "Project me");
+  await createAttempts(p, t1, [a1], timeline);
+  const project = await throng<Project>(p, "GET", "");
+  /** The rows the projection should hold for t1 and t1a1, from the project's own API. */
+  const expected = async () => {
+    const task = await throng<ProjectTask>(p, "GET", `/tasks/${t1}`);
+    const { task: number, ...attempt } = await throng<ProjectAttempt>(p, "GET", `/attempts/${a1}`);
+    return {
+      task: { ...pick(task, "ref", "number", "title", "state", "creator", "createdAt", "closedAt"), project },
+      attempt: {
+        ...pick(attempt, "ref", "number", "state", "author", "createdAt", "closedAt"),
+        project,
+        task: { ref: task.ref, number, title: task.title },
+      },
+    };
+  };
+  /** Waits until both rows reach the projection (under `state`, if given) as `done` wants, then checks them whole. */
+  const projected = async (
+    done: (task: MyListings["tasks"], attempt: MyListings["attempts"]) => boolean,
+    state?: string,
+  ) => {
+    const want = await expected();
+    const [task, attempt] = await poll(
+      `${t1} and ${a1} in /me${state === undefined ? "" : ` (state=${state})`}`,
+      async () => {
+        const t = (await myRows(p, "tasks", state)).find((row) => row.ref === t1);
+        const a = (await myRows(p, "attempts", state)).find((row) => row.ref === a1);
+        return t !== undefined && a !== undefined && done(t, a) ? ([t, a] as const) : null;
+      },
+      PROJECTION_TIMEOUT_MS,
+    );
+    assert(
+      isDeepStrictEqual(task, want.task),
+      `/me/tasks has ${JSON.stringify(task)}, expected ${JSON.stringify(want.task)}`,
+    );
+    assert(
+      isDeepStrictEqual(attempt, want.attempt),
+      `/me/attempts has ${JSON.stringify(attempt)}, expected ${JSON.stringify(want.attempt)}`,
+    );
+  };
+
+  await projected(() => true);
+  timeline.mark("t1 and t1a1 projected");
+
+  const title = "Project me, edited";
+  await throng(p, "PATCH", `/tasks/${t1}`, { title });
+  await projected((task, attempt) => task.title === title && attempt.task.title === title);
+  timeline.mark("edited title projected");
+
+  await throng(p, "POST", `/tasks/${t1}/obsolete`);
+  await projected((task, attempt) => task.state === "obsolete" && attempt.state === "obsolete", "obsolete");
+  timeline.mark("obsolete projected");
+  const listed = [...(await myRows(p, "tasks")), ...(await myRows(p, "attempts"))].map((r) => r.ref);
+  assert(listed.length === 0, `the default listings still show ${listed.join(", ")}`);
+  await finish(p.project, p.work, timeline);
+}
+
+/** The project's rows in the e2e user's `/api/me/<kind>`, under `state` or the default states, from every page. */
+async function myRows<K extends keyof MyListings>(p: RealProject, kind: K, state?: string): Promise<MyListings[K][]> {
+  const rows: MyListings[K][] = [];
+  for (let offset: number | null = 0; offset !== null;) {
+    const query = new URLSearchParams({
+      offset: String(offset),
+      limit: "100",
+      ...(state === undefined ? {} : { state }),
+    });
+    const page = await throngApi<Record<K, MyListings[K][]> & { next: number | null }>(
+      p,
+      "GET",
+      `/me/${kind}?${query}`,
+    );
+    rows.push(...page[kind].filter((r) => r.project.id === p.project));
+    offset = page.next;
+  }
+  return rows;
+}
+
+/** `value` with only `keys`. */
+function pick<T, K extends keyof T>(value: T, ...keys: K[]): Pick<T, K> {
+  return Object.fromEntries(keys.map((k) => [k, value[k]])) as Pick<T, K>;
+}
+
 /** A required check that fails fails the gate; an optional one that passes doesn't save it. */
 async function failing(): Promise<void> {
   const timeline = new Timeline();
@@ -1470,8 +1605,13 @@ async function assertArchived(p: RealProject, attempt: string, sha: string): Pro
 }
 
 /** Calls the product API for the project as the e2e user. */
-async function throng<T>(p: RealProject, method: string, path: string, body?: unknown): Promise<T> {
-  const response = await fetch(`${baseUrl}/api/projects/${p.owner}/${p.project}${path}`, {
+function throng<T>(p: RealProject, method: string, path: string, body?: unknown): Promise<T> {
+  return throngApi(p, method, `/projects/${p.owner}/${p.project}${path}`, body);
+}
+
+/** Calls the product API (`/api`) as the e2e user. */
+async function throngApi<T>(p: RealProject, method: string, path: string, body?: unknown): Promise<T> {
+  const response = await fetch(`${baseUrl}/api${path}`, {
     method,
     headers: {
       Authorization: `Bearer ${p.token}`,
@@ -1494,9 +1634,9 @@ async function throngText(p: RealProject, path: string): Promise<string> {
   return text;
 }
 
-/** Calls `read` every POLL_MS until it returns something other than null. */
-async function poll<T>(what: string, read: () => Promise<T | null>): Promise<T> {
-  const deadline = Date.now() + CHECK_TIMEOUT_MS;
+/** Calls `read` every POLL_MS until it returns something other than null, for at most `timeoutMs`. */
+async function poll<T>(what: string, read: () => Promise<T | null>, timeoutMs = CHECK_TIMEOUT_MS): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const value = await read();
     if (value !== null) return value;

@@ -30,6 +30,7 @@ import type {
   StoredMergeRequest,
 } from "./merge-requests.ts";
 import { isZeroId } from "./pkt-line.ts";
+import { migrateProjection, Projection } from "./projection.ts";
 import { forkRepo, originRepo } from "./repos.ts";
 import type { Repos } from "./repos.ts";
 import { GATES } from "./results.ts";
@@ -60,6 +61,14 @@ export const TASK_STATES = ["open", "closed", "obsolete"] as const;
 export const ATTEMPT_STATES = ["draft", "open", "merged", "closed", "obsolete"] as const;
 export type TaskState = (typeof TASK_STATES)[number];
 export type AttemptState = (typeof ATTEMPT_STATES)[number];
+
+/**
+ * The states a listing of tasks or attempts shows: the one its `state` asks for, or else every state
+ * but obsolete. Bind it as JSON, read with `state IN (SELECT value FROM json_each(?))`.
+ */
+export function listedStates<S extends TaskState | AttemptState>(all: readonly S[], state: S | undefined): string {
+  return JSON.stringify(state === undefined ? all.filter((s) => s !== "obsolete") : [state]);
+}
 
 /** Draft and open attempts are active: they have a fork and a claim, and count toward the cap. */
 const ACTIVE = ["draft", "open"] as const;
@@ -475,6 +484,8 @@ export class TaskStore {
   readonly landings: Landings;
   /** The project's verdicts. */
   readonly verdicts: Verdicts;
+  /** What of its tasks and attempts is still to be published to the D1 projection. */
+  readonly projection: Projection;
   readonly #landing: LandingRunner | null;
   /** Active attempts' follows of their task branch. */
   readonly follows: Follows;
@@ -489,6 +500,8 @@ export class TaskStore {
     this.#landing = landing;
     this.#follow = follow;
     migrate(sql);
+    migrateProjection(sql, now());
+    this.projection = new Projection({ sql });
     this.landings = new Landings({ sql, now });
     this.follows = new Follows({ sql, now, taskHead: (task) => this.#taskHead(task) });
     this.verdicts = new Verdicts({ sql });
@@ -544,17 +557,21 @@ export class TaskStore {
 
   /** The project's tasks by number. Obsolete tasks are left out unless `state` asks for them. */
   listTasks(_project: ProjectContext, _actor: Actor, input: { state?: TaskState | undefined }): ListedTask[] {
-    const rows =
-      input.state === undefined
-        ? this.#sql.exec<TaskRow>("SELECT * FROM tasks WHERE state != 'obsolete' ORDER BY number")
-        : this.#sql.exec<TaskRow>("SELECT * FROM tasks WHERE state = ? ORDER BY number", input.state);
+    const rows = this.#sql.exec<TaskRow>(
+      "SELECT * FROM tasks WHERE state IN (SELECT value FROM json_each(?)) ORDER BY number",
+      listedStates(TASK_STATES, input.state),
+    );
     return rows.map((row) => this.#listed(toTask(row)));
   }
 
   /** The task with its attempt count, best gate and latest merge request's state. */
   #listed(task: StoredTask): ListedTask {
     const attempts = this.#sql
-      .exec<AttemptRow>("SELECT * FROM attempts WHERE task = ? AND state != 'obsolete'", task.number)
+      .exec<AttemptRow>(
+        "SELECT * FROM attempts WHERE task = ? AND state IN (SELECT value FROM json_each(?))",
+        task.number,
+        listedStates(ATTEMPT_STATES, undefined),
+      )
       .map((row) => toAttempt(row));
     const gates = attempts.map((a) => this.scoring.currentRun(scoredAttempt(a))?.result?.gate);
     // `passed` is best, then `failed`; GATES lists them in that order.
@@ -782,17 +799,11 @@ export class TaskStore {
     input: { task: number; state?: AttemptState | undefined },
   ): StoredAttempt[] {
     this.#task(input.task);
-    const rows =
-      input.state === undefined
-        ? this.#sql.exec<AttemptRow>(
-            "SELECT * FROM attempts WHERE task = ? AND state != 'obsolete' ORDER BY number",
-            input.task,
-          )
-        : this.#sql.exec<AttemptRow>(
-            "SELECT * FROM attempts WHERE task = ? AND state = ? ORDER BY number",
-            input.task,
-            input.state,
-          );
+    const rows = this.#sql.exec<AttemptRow>(
+      "SELECT * FROM attempts WHERE task = ? AND state IN (SELECT value FROM json_each(?)) ORDER BY number",
+      input.task,
+      listedStates(ATTEMPT_STATES, input.state),
+    );
     return rows.map((row) => this.#toAttempt(row));
   }
 
@@ -882,7 +893,10 @@ export class TaskStore {
   /** Every attempt in the project, by task and then number, leaving out obsolete ones. For the ref list. */
   listProjectAttempts(_project: ProjectContext, _actor: Actor): StoredAttempt[] {
     return this.#sql
-      .exec<AttemptRow>("SELECT * FROM attempts WHERE state != 'obsolete' ORDER BY task, number")
+      .exec<AttemptRow>(
+        "SELECT * FROM attempts WHERE state IN (SELECT value FROM json_each(?)) ORDER BY task, number",
+        listedStates(ATTEMPT_STATES, undefined),
+      )
       .map((row) => this.#toAttempt(row));
   }
 

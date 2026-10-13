@@ -11,7 +11,7 @@ import { DIFF_CAPS } from "../src/diff.ts";
 import { FORWARDED_EMAIL_HEADER } from "../src/forwarded.ts";
 import type { LogStore } from "../src/logs.ts";
 import { MAX_FILE_BYTES, MAX_LOG_SLICE_BYTES } from "../src/mcp.ts";
-import type { ScoringResult } from "../src/results.ts";
+import type { ScoringOutcome } from "../src/scoring.ts";
 import type { TaskBackend } from "../src/tasks.ts";
 import type { Actor } from "../src/tokens.ts";
 import { userForEmail } from "../src/users.ts";
@@ -20,6 +20,7 @@ import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
 import type { Json } from "./support/json.ts";
 import { FakePreviewWorkers } from "./support/preview-workers.ts";
+import { PASSED } from "./support/results.ts";
 import { testTaskBackends } from "./support/task-backend.ts";
 
 const verify: AccessVerifier = async (token) => (token.startsWith("as:") ? { email: token.slice(3) } : null);
@@ -75,15 +76,6 @@ async function call(client: Client, name: string, args: Record<string, unknown> 
   const texts = (result.content as { type: string; text: string }[]).map((c) => c.text);
   return { isError: result.isError === true, summary: texts[0] ?? "", data: result.structuredContent as Json };
 }
-
-const PASSED: ScoringResult = {
-  base: null,
-  config: { kind: "none" },
-  gate: "passed",
-  checks: [],
-  metrics: {},
-  logs: [],
-};
 
 /** Workflows that start and do nothing: `runPlatform` reports for them. */
 const runner = {
@@ -474,6 +466,36 @@ describe("/mcp", () => {
     const closed = await call(greg, "close_vote", { project, task: "t1" });
     expect(closed.summary).toBe("t1's vote selected t1a2; merge request is queued");
     expect(closed.data).toMatchObject({ vote: { winner: "t1a2" }, mergeRequest: { attempt: "t1a2" } });
+  });
+
+  it("shows a candidate whose rescore errored, with its run, and won't close until a rescore passes", async () => {
+    const { ada, greg, project, projectId, repos, store, pushTo } = await withProject();
+    repos.writeFile(`${projectId}-main`, "main", CONFIG_PATH, "selection: { policy: vote }\n");
+    await call(ada, "start_attempts", { project, task: "t1" });
+    await pushTo(1, "ada@example.com");
+    await call(ada, "update_attempt", { project, attempt: "t1a1", state: "open" });
+    const tasks = store(projectId);
+    /** Ends t1a1's latest run with `outcome`; returns its id. */
+    const finish = async (outcome: ScoringOutcome) => {
+      await tasks.scoring.drain();
+      const run = tasks.scoring.listRuns({ task: 1, attempt: 1 }).at(-1)?.id ?? 0;
+      tasks.scoringFinished(run, outcome);
+      return run;
+    };
+    await finish({ status: "done", result: PASSED });
+    await call(greg, "open_vote", { project, task: "t1" });
+
+    await call(ada, "rescore", { project, attempt: "t1a1" });
+    const run = await finish({ status: "errored", error: "sandbox lost" });
+    const errored = await call(greg, "get_vote", { project, task: "t1" });
+    expect(errored.summary).toBe(`t1's vote is open: t1a1 scoring errored in run ${run}; rescore it`);
+    expect(errored.data["vote"]["candidates"][0]).toMatchObject({ withdrawn: true, erroredRun: run });
+    expect((await call(greg, "close_vote", { project, task: "t1" })).summary).toMatch(/^invalidState: .*errored/u);
+
+    await call(ada, "rescore", { project, attempt: "t1a1" });
+    await finish({ status: "done", result: PASSED });
+    const closed = await call(greg, "close_vote", { project, task: "t1" });
+    expect(closed.data).toMatchObject({ vote: { winner: "t1a1" } });
   });
 
   it("refuses a ballot cast under an alias in a vote among humans", async () => {

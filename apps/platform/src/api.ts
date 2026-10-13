@@ -322,17 +322,28 @@ const VoteSchema = z
             votes: z.number().int().openapi({ description: "The ballots for it at `head`; none while withdrawn." }),
             withdrawn: z.boolean().openapi({
               description:
-                "Its author pushed it away from `head`, it stopped being open, or `head` isn't passing (a follow of the " +
-                "task branch moves `head` to its merge, which counts once it passes). The task's creator can add it " +
-                "again once it passes.",
+                "It doesn't count now: it counts only while its attempt is open and passing at `head`. Its author " +
+                "pushed it away from `head`, or `head`'s latest scoring failed the gate; the task's creator can add it " +
+                "again once it passes. A follow of the task branch isn't its author's push: it moves `head`, with the " +
+                "ballots, to its merge. Also true while `beingScored` or with an `erroredRun`.",
             }),
             beingScored: z.boolean().openapi({
               description:
-                "Withdrawn only until `head`, its attempt's head, finishes being scored: a follow of the task branch " +
-                "moved it there, or a rescore of it is queued or running. It counts again if `head` passes, and stays " +
-                "withdrawn if it fails. While any candidate is being scored the vote can't be closed. Always false once " +
-                "the vote closed.",
+                "Withdrawn only until `head`, its attempt's head, finishes being scored: a follow's merge, or a rescore " +
+                "queued or running. It counts again if `head` passes, and stays withdrawn if it fails. The vote can't " +
+                "be closed meanwhile. Always false once the vote closed.",
             }),
+            erroredRun: z
+              .number()
+              .int()
+              .nullable()
+              .openapi({
+                description:
+                  "The run whose error left `head` with no result (`GET …/runs/{runId}` and its logs say why). The " +
+                  "candidate keeps its ballots and is withdrawn only until a rescore of `head` passes, which its " +
+                  "attempt's author, the task's creator or the project owner may ask for; the vote can't be closed " +
+                  "meanwhile. Always null once the vote closed.",
+              }),
           })
           .openapi("VoteCandidateTally"),
       )
@@ -1519,12 +1530,12 @@ export function apiRoutes(options: ApiOptions = {}) {
     )
     .openapi(
       scoringRoute(
-        bearerRoute,
+        webRoute,
         "rescore",
         "rescoreAttempt",
         "Score an open attempt's head again",
         "Queues a new run for the head even if it already has a finished one. A head already queued or running " +
-          "isn't queued again.",
+          "isn't queued again. The arena's Rescore button, on a vote candidate whose scoring errored, calls this too.",
         RESCORERS,
         "the attempt isn't open",
       ),
@@ -1848,11 +1859,9 @@ export function apiRoutes(options: ApiOptions = {}) {
         summary: "Open a vote to select the task's attempt",
         description:
           "Under the `vote` selection policy, opens a vote among the attempts passing now, each a candidate at its " +
-          "current head, open to the users the policy's `eligible` lets vote. Its author's push to a candidate during " +
-          "the vote withdraws it, as does a rescore of its head that doesn't pass, and its ballots stop counting; one " +
-          "back at its pinned head and passing there stands again. A follow of the task branch isn't its author's " +
-          "push: it moves the candidate, with its ballots, to the follow's merge, which counts once it passes. While " +
-          "the vote is open the task's checks, metrics and selection policy can't change. " +
+          "current head, open to the users the policy's `eligible` lets vote. A candidate counts while it is passing " +
+          "at that head; `withdrawn`, `beingScored` and `erroredRun` in `VoteCandidateTally` say when it doesn't. " +
+          "While the vote is open the task's checks, metrics and selection policy can't change. " +
           "Journals `voteOpened`.",
         security: bearerOrWeb,
         middleware: [browser] as const,
@@ -1945,8 +1954,8 @@ export function apiRoutes(options: ApiOptions = {}) {
           "The candidate with the most ballots wins and is selected, at the head it is a candidate at, as `selection` " +
           "does: it becomes the task's merge request and the task's other active attempts are closed. A tie goes to " +
           "the task's creator, who names one of the tied candidates as `attempt`. With every candidate withdrawn, the " +
-          "vote closes without a selection. Not while a candidate is `beingScored`: wait for its scoring to finish. " +
-          "Journals `voteClosed`, then selection's events.",
+          "vote closes without a selection. Not while a candidate is `beingScored` (wait for its scoring to finish) " +
+          "or has an `erroredRun` (rescore it). Journals `voteClosed`, then selection's events.",
         security: bearerOrWeb,
         middleware: [browser] as const,
         request: { params: TaskPathSchema, body: { required: false, ...json(CloseVoteSchema) } },
@@ -1963,8 +1972,8 @@ export function apiRoutes(options: ApiOptions = {}) {
           403: errorResponse(TASK_MANAGERS),
           404: errorResponse("No such project or task."),
           409: errorResponse(
-            "`invalidState`: the task has no open vote, a candidate is still `beingScored`, or its winner can't be " +
-              "selected.",
+            "`invalidState`: the task has no open vote, a candidate is still `beingScored` or has an `erroredRun`, or " +
+              "its winner can't be selected.",
           ),
         },
       }),

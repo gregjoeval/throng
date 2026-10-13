@@ -72,13 +72,13 @@ open attempt at \`t42\`. The origin's \`main\` only moves through the merge queu
    Under the \`vote\` selection policy (\`.throng/config.yml\`'s \`selection: {policy: vote, eligible}\`, or a
    task's own, which only the project owner sets), the selection is a vote and \`select_attempt\` is refused. \`open_vote\` makes the passing attempts
    candidates, each user \`cast_vote\`s once (their aliases share that ballot; never for their own attempt), and
-   \`close_vote\` selects the most-backed candidate, with \`attempt\` breaking a tie. Its author's push to a
-   candidate withdraws it (a follow of the task branch doesn't: the candidate moves to the merge, with its
-   ballots, and is being scored until that merge's scoring finishes, as it is while its head is rescored:
-   \`close_vote\` is refused until then);
+   \`close_vote\` selects the most-backed candidate, with \`attempt\` breaking a tie. A candidate counts while it
+   is passing at the head it joined at, so its author's push withdraws it (a follow of the task branch doesn't:
+   the candidate moves to the merge, with its ballots). While its head has no result, \`close_vote\` is refused:
+   wait for one being scored, and \`rescore\` one whose scoring errored (\`get_log\` on its run says why);
    \`add_vote_candidate\` adds an attempt that passes later. While a vote is open, the task's checks, metrics and
-   selection policy can't change. \`get_vote\` shows the tallies, which candidates are being scored, and your
-   ballot.
+   selection policy can't change. \`get_vote\` shows the tallies, which candidates are being scored or errored,
+   and your ballot.
 10. If the merge request is dequeued, \`get_dequeue\` says why, with each conflicting file's hunks. Merge \`main\`
     into the attempt, push, and wait for the new head's score. The new head needs approving again:
     \`approve_merge_request\`.

@@ -46,10 +46,11 @@ export interface StoredBallot {
 }
 
 /**
- * Where a candidate of an open vote stands: `standing` counts; `scoring` is out only until its pinned
- * head (a follow's merge, or a head being rescored) finishes being scored; `withdrawn` is out.
+ * Where a candidate of an open vote stands: `standing` counts and `withdrawn` is out. `scoring` and
+ * `errored` are out only until its pinned head has a result: its scoring is queued or running, or
+ * ended in error in `run`, which a rescore retries.
  */
-export type CandidateStanding = "standing" | "scoring" | "withdrawn";
+export type CandidateStanding = { state: "standing" | "scoring" | "withdrawn" } | { state: "errored"; run: number };
 
 /**
  * A candidate with its tally: the ballots for its pinned head, none while it is withdrawn. A closed
@@ -58,8 +59,10 @@ export type CandidateStanding = "standing" | "scoring" | "withdrawn";
 export interface CandidateTally extends StoredCandidate {
   votes: number;
   withdrawn: boolean;
-  /** Withdrawn only until its pinned head (a follow's merge, or a head being rescored) finishes being scored. */
+  /** Withdrawn only until its pinned head finishes being scored. */
   being_scored: boolean;
+  /** The run whose error left its pinned head with no result; withdrawn only until a rescore passes. */
+  errored_run: number | null;
 }
 
 /** A vote with its candidates' tallies and one voter's own ballot. */
@@ -280,11 +283,12 @@ export class Votes {
     );
     const candidates = rows.map(({ withdrawn: closedOut, ...candidate }) => {
       const now = vote.state === "open" ? standing(candidate) : null;
-      const out = now === null ? closedOut === 1 : now !== "standing";
+      const out = now === null ? closedOut === 1 : now.state !== "standing";
       const votes = out
         ? 0
         : ballots.filter((b) => b.attempt === candidate.attempt && b.head === candidate.head).length;
-      return { ...candidate, votes, withdrawn: out, being_scored: now === "scoring" };
+      const erroredRun = now?.state === "errored" ? now.run : null;
+      return { ...candidate, votes, withdrawn: out, being_scored: now?.state === "scoring", errored_run: erroredRun };
     });
     const mine = ballots.find((b) => b.voter === voter);
     return {

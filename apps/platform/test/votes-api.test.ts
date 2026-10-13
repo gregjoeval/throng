@@ -7,12 +7,14 @@ import { apiRoutes } from "../src/api.ts";
 import { CONFIG_PATH } from "../src/config.ts";
 import type { FollowParams } from "../src/follows.ts";
 import { FORWARDED_EMAIL_HEADER } from "../src/forwarded.ts";
+import type { ScoringOutcome } from "../src/scoring.ts";
 import type { User } from "../src/users.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
 import { at } from "./support/defined.ts";
 import type { Json } from "./support/json.ts";
 import { FakePreviewWorkers } from "./support/preview-workers.ts";
+import { PASSED } from "./support/results.ts";
 import { testTaskBackends } from "./support/task-backend.ts";
 
 /** Access sessions are `as:<email>`. */
@@ -82,6 +84,13 @@ async function setup(selection = "selection: { policy: vote }\n") {
   const base = "/projects/greg/throng";
   const bobUser = (await call("GET", "/me", bob)).body["user"] as User;
   const tasks = store(projectId);
+  /** Ends t1a`number`'s latest run with `outcome`, a pass by default; returns the run's id. */
+  const finish = async (number: number, outcome: ScoringOutcome = { status: "done", result: PASSED }) => {
+    await tasks.scoring.drain();
+    const run = at(tasks.scoring.listRuns({ task: 1, attempt: number }), -1);
+    tasks.scoringFinished(run.id, outcome);
+    return run.id;
+  };
 
   await call("POST", `${base}/tasks`, ada, { title: "Fix it" });
   await call("POST", `${base}/tasks/t1/attempts`, bob, { count: 2 });
@@ -97,12 +106,7 @@ async function setup(selection = "selection: { policy: vote }\n") {
     );
     heads.push(after);
     await call("POST", `${base}/attempts/t1a${number}/open`, bob);
-    await tasks.scoring.drain();
-    const run = at(tasks.scoring.listRuns({ task: 1, attempt: number }), -1);
-    tasks.scoringFinished(run.id, {
-      status: "done",
-      result: { base: null, config: { kind: "none" }, gate: "passed", checks: [], metrics: {}, logs: [] },
-    });
+    await finish(number);
   }
   /** ada pushes the task branch and t1a1's follow merges it, leaving the merge to be scored. */
   const followT1a1 = async () => {
@@ -120,7 +124,7 @@ async function setup(selection = "selection: { policy: vote }\n") {
     const merged = repos.commit(fork, { files: { "README.md": "merged\n" }, parents: [before, taskHead] }).hash;
     await tasks.followFinished(params.follow, { kind: "merged", before, head: merged });
   };
-  return { call, base, greg, ada, bob, cat, catClaude, heads, followT1a1 };
+  return { call, base, greg, ada, bob, cat, catClaude, heads, finish, followT1a1 };
 }
 
 describe("a task's selection policy", () => {
@@ -196,6 +200,7 @@ describe("a vote", () => {
             votes: 0,
             withdrawn: false,
             beingScored: false,
+            erroredRun: null,
           },
           {
             attempt: "t1a2",
@@ -204,6 +209,7 @@ describe("a vote", () => {
             votes: 0,
             withdrawn: false,
             beingScored: false,
+            erroredRun: null,
           },
         ],
         myBallot: null,
@@ -259,6 +265,40 @@ describe("a vote", () => {
         },
       },
     });
+  });
+
+  it("is 409 to close while a candidate's rescore errored, naming the run, until a rescore passes", async () => {
+    const { call, base, ada, bob, cat, finish } = await setup();
+    await call("POST", `${base}/tasks/t1/vote/open`, ada, {});
+    await call("POST", `${base}/tasks/t1/vote`, cat, { attempt: "t1a1" });
+    await call("POST", `${base}/attempts/t1a1/rescore`, bob);
+    const run = await finish(1, { status: "errored", error: "sandbox lost" });
+    const vote = (await call("GET", `${base}/tasks/t1/vote`, ada)).body;
+    expect(vote["candidates"][0]).toMatchObject({
+      attempt: "t1a1",
+      votes: 0,
+      withdrawn: true,
+      beingScored: false,
+      erroredRun: run,
+    });
+    const errored = (await call("GET", `${base}/runs/${run}`, ada)).body;
+    expect(errored).toMatchObject({ status: "errored", error: "sandbox lost" });
+    expect(await call("POST", `${base}/tasks/t1/vote/close`, ada, {})).toMatchObject({
+      status: 409,
+      body: {
+        error: {
+          code: "invalidState",
+          message: `t1's vote has candidates whose scoring errored (t1a1 in run ${run}); rescore them, then close it`,
+        },
+      },
+    });
+
+    const rescored = await call("POST", `${base}/attempts/t1a1/rescore`, { web: "bob@example.com" });
+    expect(rescored).toMatchObject({ status: 200, body: { queued: true } });
+    await finish(1);
+    const closed = await call("POST", `${base}/tasks/t1/vote/close`, ada, {});
+    expect(closed.body["vote"]).toMatchObject({ winner: "t1a1" });
+    expect(closed.body["vote"]["candidates"][0]).toMatchObject({ votes: 1, erroredRun: null });
   });
 
   it("opens and closes with no request body", async () => {

@@ -200,8 +200,24 @@ describe("opening a vote", () => {
       ballot: null,
     });
     expect(opened.candidates).toEqual([
-      { attempt: 1, head: head(t1a1), added_at: expect.any(String), votes: 0, withdrawn: false, being_scored: false },
-      { attempt: 3, head: head(t1a3), added_at: expect.any(String), votes: 0, withdrawn: false, being_scored: false },
+      {
+        attempt: 1,
+        head: head(t1a1),
+        added_at: expect.any(String),
+        votes: 0,
+        withdrawn: false,
+        being_scored: false,
+        errored_run: null,
+      },
+      {
+        attempt: 3,
+        head: head(t1a3),
+        added_at: expect.any(String),
+        votes: 0,
+        withdrawn: false,
+        being_scored: false,
+        errored_run: null,
+      },
     ]);
     expect(journal().at(-1)).toMatchObject({
       kind: "voteOpened",
@@ -229,6 +245,7 @@ describe("opening a vote", () => {
   it("leaves out an attempt with no recorded head, rather than pinning it to none", async () => {
     const { sql, store, t1a2, scoreAll } = await setup();
     await scoreAll();
+    // Raw SQL: nothing forgets a head once a push records it, so no API reaches this state.
     sql.exec("DELETE FROM scoring_heads WHERE task = ? AND attempt = ?", t1a2.task, t1a2.number);
     const opened = await store.openVote(PROJECT, cat, { task: 1 });
     expect(opened.candidates.map((c) => c.attempt)).toEqual([1, 3]);
@@ -395,7 +412,7 @@ describe("candidates", () => {
   });
 
   it("are withdrawn when a rescore of their head fails the gate, and can't win", async () => {
-    const { store, t1a1, t1a2, scoreAll, score, tally } = await setup();
+    const { store, t1a1, t1a2, scoreAll, score, tally, vote } = await setup();
     await scoreAll();
     await store.openVote(PROJECT, cat, { task: 1 });
     store.castVote(PROJECT, eve, t1a1);
@@ -404,6 +421,7 @@ describe("candidates", () => {
     await store.rescore(PROJECT, cat, t1a1);
     await score(t1a1, done("failed"));
     expect(tally()[0]).toEqual([1, 0, true]);
+    expect(vote().candidates[0]).toMatchObject({ being_scored: false, errored_run: null });
     expect((await store.closeVote(PROJECT, cat, { task: 1 })).vote.winner).toBe(2);
   });
 
@@ -424,19 +442,52 @@ describe("candidates", () => {
     expect((await store.closeVote(PROJECT, cat, { task: 1 })).vote.winner).toBe(1);
   });
 
-  it("are withdrawn while a rescore of their head errored, and stand again with their ballots once one passes", async () => {
-    const { store, t1a1, scoreAll, score, vote } = await setup();
+  it("aren't withdrawn when a rescore of their head errors: the vote waits, with their ballots, for one that passes", async () => {
+    const { store, t1a1, t1a2, scoreAll, score, vote } = await setup();
     await scoreAll();
     await store.openVote(PROJECT, cat, { task: 1 });
     store.castVote(PROJECT, eve, t1a1);
+    store.castVote(PROJECT, fay, t1a1);
+    store.castVote(PROJECT, dan, t1a2);
     await store.rescore(PROJECT, cat, t1a1);
     await score(t1a1, { status: "errored", error: "sandbox lost" });
-    expect(vote().candidates[0]).toMatchObject({ attempt: 1, votes: 0, withdrawn: true, being_scored: false });
+    const errored = at(store.scoring.listRuns({ task: 1, attempt: 1 }), -1).id;
+    expect(vote().candidates[0]).toMatchObject({
+      attempt: 1,
+      votes: 0,
+      withdrawn: true,
+      being_scored: false,
+      errored_run: errored,
+    });
+    const refused = await store.closeVote(PROJECT, cat, { task: 1 }).catch((error: unknown) => error);
+    expect(refused).toMatchObject({
+      code: "invalidState",
+      message: `t1's vote has candidates whose scoring errored (t1a1 in run ${errored}); rescore them, then close it`,
+    });
+    expect(await code(() => store.castVote(PROJECT, owner, t1a1))).toBe("invalidState");
     expect(await code(() => store.addVoteCandidate(PROJECT, cat, t1a1))).toBe("invalidState");
 
-    await store.rescore(PROJECT, cat, t1a1);
+    await store.rescore(PROJECT, ada, t1a1);
+    expect(vote().candidates[0]).toMatchObject({ withdrawn: true, being_scored: true, errored_run: null });
     await score(t1a1);
-    expect(vote().candidates[0]).toMatchObject({ attempt: 1, votes: 1, withdrawn: false });
+    expect(vote().candidates[0]).toMatchObject({ attempt: 1, votes: 2, withdrawn: false, errored_run: null });
+    expect((await store.closeVote(PROJECT, cat, { task: 1 })).vote.winner).toBe(1);
+  });
+
+  it("aren't withdrawn when the scoring of a follow's merge errors", async () => {
+    const { store, t1a1, scoreAll, score, moveTaskBranch, follow, vote } = await setup();
+    await scoreAll();
+    await store.openVote(PROJECT, cat, { task: 1 });
+    store.castVote(PROJECT, eve, t1a1);
+    await moveTaskBranch();
+    await follow(t1a1);
+    await score(t1a1, { status: "errored", error: "sandbox lost" });
+    expect(vote().candidates[0]).toMatchObject({
+      withdrawn: true,
+      being_scored: false,
+      errored_run: expect.any(Number),
+    });
+    expect(await code(store.closeVote(PROJECT, cat, { task: 1 }))).toBe("invalidState");
   });
 
   it("stay standing when a follow of the task branch moves their head, and keep their ballots", async () => {

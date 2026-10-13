@@ -40,7 +40,7 @@ export const RUNS_REPO_CODE = {
 export type RepoCodeRole = { [R in SandboxRole]: (typeof RUNS_REPO_CODE)[R] extends true ? R : never }[SandboxRole];
 
 /** The size the trusted roles' containers start at, whatever the project's config says. */
-export const TRUSTED_SIZE: SandboxSize = "lite";
+export const TRUSTED_SIZE = "lite" satisfies SandboxSize;
 
 /** Every grant a run's roles may get. Each is minted only for the step whose role needs it. */
 export interface RunGrants {

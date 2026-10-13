@@ -4,16 +4,16 @@ import { reposFor } from "./artifacts";
 import { loadConfig, parseConfig, sandboxSize } from "./config";
 import { conflictFiles, parseMergeTree } from "./conflicts";
 import type { ConflictDetails } from "./conflicts";
-import { LANDING_ROLES, sandboxName } from "./grants";
+import { LANDING_ROLES, sandboxName, TRUSTED_SIZE } from "./grants";
 import { actedAlias, failedChecks, mergeAuthor, mergeCommitMessage, retestConfig } from "./landing";
 import type { LandingOutcome, LandingParams, Signer } from "./landing";
 import { landingLogKey, logNames } from "./logs";
-import { buildResult, scorePlan, scoreTimeoutMs } from "./results";
+import { buildResult } from "./results";
 import type { RawScore } from "./results";
 import { conflictCheckScript, landScript, parseResult, retestScript } from "./scripts";
 import type { ConflictCheckResult, LandResult, MergePlan } from "./scripts";
 import { attemptRef } from "./task-refs";
-import { runInSandbox, STEP_RETRIES, storeLogs } from "./workflows";
+import { runInSandbox, runSettings, STEP_RETRIES, storeLogs } from "./workflows";
 
 /**
  * A step that kept failing on infrastructure; the landing ends `errored` naming it. Wraps the error
@@ -126,8 +126,7 @@ export class LandingWorkflow extends WorkflowEntrypoint<Env, LandingParams> {
 
     const retest = retestConfig(parseConfig(checked.config));
     if (retest !== null) {
-      const plan = scorePlan(retest);
-      const timeoutMs = scoreTimeoutMs(plan);
+      const { plan, timeoutMs } = runSettings(retest, size);
       const { result, logs } =
         retest.kind === "invalid"
           ? { result: buildResult(retest, NOTHING_RUN), logs: [] }
@@ -145,14 +144,13 @@ export class LandingWorkflow extends WorkflowEntrypoint<Env, LandingParams> {
                 throw new Error(`retest gave no result (exit ${run.exitCode}): ${run.stderr.slice(-2000)}`);
               const built = buildResult(retest, raw);
               const notes = new Map(built.checks.map((check) => [check.name, check.notes]));
-              const stored = await storeLogs(
-                this.env,
-                sandboxName(instanceId, "check"),
-                logNames(plan),
-                (log) => landingLogKey(params, log),
+              const stored = await storeLogs(this.env, {
+                sandbox: sandboxName(instanceId, "check"),
+                names: logNames(plan),
+                key: (log) => landingLogKey(params, log),
                 size,
                 notes,
-              );
+              });
               return { result: built, logs: stored };
             });
       if (result.gate !== "passed") return { kind: "failedChecks", details: failedChecks(result, logs) };
@@ -171,19 +169,25 @@ export class LandingWorkflow extends WorkflowEntrypoint<Env, LandingParams> {
     if (!claimed) return null;
 
     const landed = await this.#step(step, "land", tenMinutes, async () => {
-      const run = await runInSandbox(this.env, instanceId, repos, "land", (g) =>
-        landScript(g.originWrite.remote, g.forkRead.remote, {
-          ...merge,
-          message: mergeCommitMessage({
-            task: params.task,
-            attempt: params.attempt,
-            title: params.title,
-            approver: signers.approver,
-            coAuthors: signers.coAuthors,
+      const run = await runInSandbox(
+        this.env,
+        instanceId,
+        repos,
+        "land",
+        (g) =>
+          landScript(g.originWrite.remote, g.forkRead.remote, {
+            ...merge,
+            message: mergeCommitMessage({
+              task: params.task,
+              attempt: params.attempt,
+              title: params.title,
+              approver: signers.approver,
+              coAuthors: signers.coAuthors,
+            }),
+            author: mergeAuthor(signers.approver),
+            committedAt: Math.floor(params.startedAt / 1000),
           }),
-          author: mergeAuthor(signers.approver),
-          committedAt: Math.floor(params.startedAt / 1000),
-        }),
+        { size: TRUSTED_SIZE },
       );
       const result = parseResult<LandResult>(run.stdout);
       if (result === null) throw new Error(`land gave no result (exit ${run.exitCode}): ${run.stderr.slice(-2000)}`);

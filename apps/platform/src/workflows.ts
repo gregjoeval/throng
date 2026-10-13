@@ -81,7 +81,7 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
 
   /**
    * The run's config, its layers merged once: the project's config on `main`, then what the task
-   * defines over it. A clash between them makes it invalid. The spike's attempts have no task row,
+   * defines over it. A clash between them makes it invalid. The e2e routes' attempts have no task row,
    * so they get the project's alone.
    */
   async #config(params: ScoringParams): Promise<ConfigResult> {

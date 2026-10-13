@@ -569,7 +569,7 @@ export class TaskStore {
 
   /**
    * What a task defines over the project's config, for a scoring run to merge. None for a task with
-   * no row, like the spike's attempts.
+   * no row, like the e2e routes' attempts.
    */
   definitionsOf(task: number): TaskDefinitions {
     const [row] = this.#sql.exec<TaskRow>("SELECT * FROM tasks WHERE number = ?", task);

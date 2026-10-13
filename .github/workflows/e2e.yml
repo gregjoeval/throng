@@ -50,11 +50,11 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
         working-directory: .
-      - name: Generate this run's SPIKE_TOKEN
+      - name: Generate this run's E2E_TOKEN
         run: |
           token=$(openssl rand -hex 32)
           echo "::add-mask::$token"
-          echo "SPIKE_TOKEN=$token" >> "$GITHUB_ENV"
+          echo "E2E_TOKEN=$token" >> "$GITHUB_ENV"
       - name: Apply D1 migrations
         if: hashFiles('apps/platform/migrations/*.sql') != ''
         run: pnpm exec wrangler d1 migrations apply throng-ci --remote
@@ -69,7 +69,7 @@ jobs:
           secrets="$RUNNER_TEMP/throng-ci-secrets.env"
           trap 'rm -f "$secrets"' EXIT
           # The Worker uses CF_PREVIEW_TOKEN to upload Worker Previews; the deploy token covers that.
-          printf 'SPIKE_TOKEN=%s\nCF_PREVIEW_TOKEN=%s\n' "$SPIKE_TOKEN" "$CLOUDFLARE_API_TOKEN" > "$secrets"
+          printf 'E2E_TOKEN=%s\nCF_PREVIEW_TOKEN=%s\n' "$E2E_TOKEN" "$CLOUDFLARE_API_TOKEN" > "$secrets"
           # The build already resolved the `ci` environment into dist/; with CLOUDFLARE_ENV still set,
           # wrangler would apply it again and deploy `throng-ci-ci`.
           env -u CLOUDFLARE_ENV pnpm exec wrangler deploy --config dist/throng/wrangler.json --secrets-file "$secrets" | tee "$RUNNER_TEMP/deploy.log"
@@ -81,15 +81,15 @@ jobs:
           echo "THRONG_URL=$url" >> "$GITHUB_ENV"
       - name: Wait for the new deployment
         run: |
-          # A new Worker's workers.dev route, and a new SPIKE_TOKEN, can take a moment to go live.
+          # A new Worker's workers.dev route, and a new E2E_TOKEN, can take a moment to go live.
           for _ in $(seq 60); do
-            status=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $SPIKE_TOKEN" \
+            status=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $E2E_TOKEN" \
               "$THRONG_URL/e2e/repos?prefix=$E2E_PROJECT_PREFIX" || true)
             if [ "$status" = 200 ]; then exit 0; fi
             echo "throng-ci answered $status; waiting"
             sleep 5
           done
-          echo "::error::$THRONG_URL never accepted this run's SPIKE_TOKEN"
+          echo "::error::$THRONG_URL never accepted this run's E2E_TOKEN"
           exit 1
       # The arena scenario drives throng-web in a browser. Its `ci` environment binds to throng-ci.
       - name: Deploy throng-web-ci

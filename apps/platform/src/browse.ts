@@ -298,7 +298,7 @@ export type BrowseService = ReturnType<typeof browseService>;
  * Walks from a root tree to the entry at `path`, one `readTree` per directory. The root itself is
  * an entry with an empty path. Null when any part of the path is missing or isn't a directory.
  */
-export async function walk(repos: Repos, repo: string, rootTree: string, path: string): Promise<Entry | null> {
+async function walk(repos: Repos, repo: string, rootTree: string, path: string): Promise<Entry | null> {
   let entry: Entry = { name: "", path: "", mode: "40000", hash: rootTree, type: "tree" };
   for (const part of segments(path)) {
     if (entry.type !== "tree") return null;

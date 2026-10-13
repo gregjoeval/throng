@@ -232,7 +232,7 @@ describe("opening a vote", () => {
     sql.exec("DELETE FROM scoring_heads WHERE task = ? AND attempt = ?", t1a2.task, t1a2.number);
     const opened = await store.openVote(PROJECT, cat, { task: 1 });
     expect(opened.candidates.map((c) => c.attempt)).toEqual([1, 3]);
-    expect(opened.candidates.every((c) => /^[0-9a-f]{40}$/.test(c.head))).toBeTruthy();
+    expect(opened.candidates.every((c) => /^[0-9a-f]{40}$/u.test(c.head))).toBeTruthy();
   });
 
   it("takes the eligibility of the project's policy, or the task's override", async () => {
@@ -516,6 +516,19 @@ describe("closing a vote", () => {
     expect(store.getAttempt(PROJECT, owner, t1a3).state).toBe("closed");
     expect(journal().map((e) => e.kind)).toContain("voteClosed");
     expect(journal().find((e) => e.kind === "voteClosed")).toMatchObject({ ref: "t1", winner: "t1a2" });
+  });
+
+  it("still closes and selects once its deadline has passed", async () => {
+    const { store, t1a1, t1a2, scoreAll, now, advance, head } = await setup();
+    await scoreAll();
+    await store.openVote(PROJECT, cat, { task: 1, deadline: new Date(now().getTime() + 60_000).toISOString() });
+    store.castVote(PROJECT, eve, t1a1);
+    store.castVote(PROJECT, fay, t1a1);
+    store.castVote(PROJECT, dan, t1a2);
+    advance(120_000);
+    const closed = await store.closeVote(PROJECT, cat, { task: 1 });
+    expect(closed.vote).toMatchObject({ state: "closed", winner: 1 });
+    expect(closed.selected).toMatchObject({ attempt: 1, approved_head: head(t1a1) });
   });
 
   it("leaves a tie to the creator, who names one of the tied attempts", async () => {

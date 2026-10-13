@@ -261,6 +261,28 @@ describe("a vote", () => {
     });
   });
 
+  it("opens and closes with no request body", async () => {
+    const { call, base, ada, cat } = await setup();
+    const opened = await call("POST", `${base}/tasks/t1/vote/open`, ada);
+    expect(opened).toMatchObject({ status: 200, body: { state: "open", deadline: null } });
+    await call("POST", `${base}/tasks/t1/vote`, cat, { attempt: "t1a2" });
+    const closed = await call("POST", `${base}/tasks/t1/vote/close`, ada);
+    expect(closed).toMatchObject({ status: 200, body: { vote: { state: "closed", winner: "t1a2" } } });
+    expect(closed.body["mergeRequest"]).toMatchObject({ attempt: "t1a2" });
+  });
+
+  it("among humans, refuses a ballot cast under an alias with 403, as a token or on the web", async () => {
+    const { call, base, ada, cat, catClaude } = await setup("selection: { policy: vote, eligible: humans }\n");
+    await call("POST", `${base}/tasks/t1/vote/open`, ada, {});
+    expect(await call("POST", `${base}/tasks/t1/vote`, catClaude, { attempt: "t1a1" })).toMatchObject({
+      status: 403,
+      body: { error: { code: "forbidden", message: "only users acting as themselves may vote on t1" } },
+    });
+    const web = await call("POST", `${base}/tasks/t1/vote`, { web: "dan@example.com" }, { attempt: "t1a1" });
+    expect(web.body["candidates"][0]).toMatchObject({ attempt: "t1a1", votes: 1 });
+    expect((await call("POST", `${base}/tasks/t1/vote`, cat, { attempt: "t1a1" })).status).toBe(200);
+  });
+
   it("closes by nobody when its task closes", async () => {
     const { call, base, ada } = await setup();
     await call("POST", `${base}/tasks/t1/vote/open`, ada, {});

@@ -476,6 +476,26 @@ describe("/mcp", () => {
     expect(closed.data).toMatchObject({ vote: { winner: "t1a2" }, mergeRequest: { attempt: "t1a2" } });
   });
 
+  it("refuses a ballot cast under an alias in a vote among humans", async () => {
+    const { greg, claude, project, projectId, repos, store, pushTo, connect, tokenFor } = await withProject();
+    const bob = await connect(await tokenFor("bob@example.com"));
+    repos.writeFile(`${projectId}-main`, "main", CONFIG_PATH, "selection: { policy: vote, eligible: humans }\n");
+    await call(bob, "start_attempts", { project, task: "t1" });
+    await pushTo(1, "bob@example.com");
+    await call(bob, "update_attempt", { project, attempt: "t1a1", state: "open" });
+    const tasks = store(projectId);
+    await tasks.scoring.drain();
+    const run = tasks.scoring.listRuns({ task: 1, attempt: 1 }).at(-1)?.id ?? 0;
+    tasks.scoringFinished(run, { status: "done", result: PASSED });
+    await call(greg, "open_vote", { project, task: "t1" });
+
+    const refused = await call(claude, "cast_vote", { project, task: "t1", attempt: "t1a1" });
+    expect(refused).toMatchObject({
+      isError: true,
+      summary: "forbidden: only users acting as themselves may vote on t1",
+    });
+  });
+
   it("hands an attempt to another user", async () => {
     const { claude, project } = await withProject();
     await call(claude, "start_attempts", { project, task: "t1" });

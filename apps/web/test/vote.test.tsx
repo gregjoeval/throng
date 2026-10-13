@@ -252,6 +252,25 @@ describe("voting", () => {
     expect(screen.queryByRole("button", { name: "Vote" })).toBeNull();
   });
 
+  it("offers no Vote to a user acting under an alias when only humans may vote", async () => {
+    const asAlias = http.get("*/api/me", () => HttpResponse.json({ ...me, alias: "claude" }));
+    await arenaWith(
+      [passing(1), passing(2)],
+      { selection: { policy: "vote", eligible: "humans" }, vote: openVote([0, 0], { eligible: "humans" }) },
+      [asAlias],
+    );
+    expect(banner()).toHaveTextContent("Users acting as themselves may vote.");
+    expect(screen.queryByRole("button", { name: "Vote" })).toBeNull();
+  });
+
+  it("offers Vote to a user acting as themselves when only humans may vote", async () => {
+    await arenaWith([passing(1), passing(2)], {
+      selection: { policy: "vote", eligible: "humans" },
+      vote: openVote([0, 0], { eligible: "humans" }),
+    });
+    expect(within(lane("t1a1")).getByRole("button", { name: "Vote" })).toBeEnabled();
+  });
+
   it("lets the creator add an attempt that passes after the vote opened", async () => {
     const { user, asked } = await arenaWith([passing(1), passing(2), passing(3)], {
       selection: VOTE_BY_ANYONE,

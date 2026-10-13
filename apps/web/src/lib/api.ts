@@ -337,6 +337,11 @@ export async function scoreNow(projectRef: ProjectRef, attempt: string) {
   return parseResponse(projectApi.attempts[":a"].score.$post({ param: { ...projectRef, a: attempt } }));
 }
 
+/** Queues scoring of an open attempt's head again. Rejects with hono's `DetailedError` on failure. */
+export async function rescore(projectRef: ProjectRef, attempt: string) {
+  return parseResponse(projectApi.attempts[":a"].rescore.$post({ param: { ...projectRef, a: attempt } }));
+}
+
 /** The task's attempts by number, obsolete ones left out, polled while the page is visible. */
 export const taskAttemptsQuery = (projectRef: ProjectRef, task: string) => ({
   ...apiQuery([...taskKey(projectRef, task), "attempts"], (init) =>

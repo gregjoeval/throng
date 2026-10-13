@@ -2,11 +2,20 @@ import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import { reposFor } from "./artifacts";
 import { attemptBase } from "./base";
-import { loadConfig } from "./config";
-import type { ConfigResult } from "./config";
-import { GRANT_SOURCES, ROLE_GRANTS, sandboxName, SCORING_ROLES } from "./grants";
-import type { RoleGrants, RunGrants, SandboxRole } from "./grants";
-import { LOG_CONTENT_TYPE, logKey, logNames, MISSING_LOG_EXIT, PREVIEW_LOG, readLogScript, withNotes } from "./logs";
+import { loadConfig, sandboxSize } from "./config";
+import type { ConfigResult, SandboxSize } from "./config";
+import { GRANT_SOURCES, ROLE_GRANTS, sandboxName, SCORING_ROLES, TRUSTED_SIZE } from "./grants";
+import type { RepoCodeRole, RoleGrants, RunGrants, SandboxRole } from "./grants";
+import {
+  LOG_CONTENT_TYPE,
+  logKey,
+  logNames,
+  MISSING_LOG_EXIT,
+  PREVIEW_LOG,
+  readLogScript,
+  sandboxNote,
+  withNotes,
+} from "./logs";
 import { roleAccess } from "./network";
 import { previewGrant, previewName } from "./preview";
 import { previewWorkersFor } from "./preview-workers";
@@ -50,16 +59,17 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
       );
       const plan = scorePlan(config);
       const timeoutMs = scoreTimeoutMs(plan);
+      const size = sandboxSize(config);
       const base = await step.do("base", { retries: STEP_RETRIES, timeout: "1 minute" }, () =>
         attemptBase(reposFor(this.env), params.project, { attempt: params.attempt, head: params.sha }),
       );
       const scored = await step.do("score", { retries: STEP_RETRIES, timeout: timeoutMs }, () =>
-        this.#score(instanceId, params, base?.sha ?? null, config, plan, timeoutMs),
+        this.#score(instanceId, params, base?.sha ?? null, config, plan, timeoutMs, size),
       );
       const preview = previewPlan(config, scored);
       let result = scored;
       if (preview !== null) {
-        const { deployed, durationMs, logs } = await this.#preview(instanceId, params, preview, step);
+        const { deployed, durationMs, logs } = await this.#preview(instanceId, params, preview, size, step);
         result = { ...withPreview(scored, deployed, durationMs), logs: [...scored.logs, ...logs] };
       }
       outcome = { status: "done", result };
@@ -101,6 +111,7 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
     config: ConfigResult,
     plan: ScorePlan,
     timeoutMs: number,
+    size: SandboxSize,
   ): Promise<ScoringResult> {
     const run = await runInSandbox(
       this.env,
@@ -108,7 +119,7 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
       params,
       "score",
       (g) => scoreScript(g.forkRead.remote, { sha: params.sha, base }, plan),
-      { allow: plan.allow, timeoutMs },
+      { allow: plan.allow, timeoutMs, size },
     );
     const raw = parseResult<RawScore>(run.stdout);
     if (raw === null) {
@@ -121,6 +132,7 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
       sandboxName(instanceId, "score"),
       logNames(plan),
       (log) => logKey(params, log),
+      size,
       notes,
     );
     return { ...result, logs };
@@ -138,6 +150,7 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
     instanceId: string,
     params: ScoringParams,
     { command, allow }: PreviewPlan,
+    size: SandboxSize,
     step: WorkflowStep,
   ): Promise<{ deployed: PreviewScriptResult | null | { error: string }; durationMs: number; logs: string[] }> {
     const { accountId, workerName } = previewGrant(this.env.CF_ACCOUNT_ID, params.project);
@@ -162,13 +175,17 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
                 previewName: name,
                 command,
               }),
-            { allow, timeoutMs: PREVIEW_STEP_TIMEOUT_MS },
+            { allow, timeoutMs: PREVIEW_STEP_TIMEOUT_MS, size },
           );
           return {
             run: deploy,
             durationMs: Date.now() - started,
-            logs: await storeLogs(this.env, sandboxName(instanceId, "preview"), [PREVIEW_LOG], (log) =>
-              logKey(params, log),
+            logs: await storeLogs(
+              this.env,
+              sandboxName(instanceId, "preview"),
+              [PREVIEW_LOG],
+              (log) => logKey(params, log),
+              size,
             ),
           };
         },
@@ -186,7 +203,7 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
       // A lost Sandbox can't give its log back either; that still mustn't end the run.
       const logs = await step
         .do("preview logs", { retries: STEP_RETRIES }, () =>
-          storeLogs(this.env, sandboxName(instanceId, "preview"), [PREVIEW_LOG], (log) => logKey(params, log)),
+          storeLogs(this.env, sandboxName(instanceId, "preview"), [PREVIEW_LOG], (log) => logKey(params, log), size),
         )
         .catch(() => []);
       return { deployed: { error: message }, durationMs: 0, logs };
@@ -200,6 +217,20 @@ export interface RunRepos {
   attempt: string;
 }
 
+/** How a script runs: the hosts it may reach besides its grants, and how long it may take. */
+interface ScriptOptions {
+  allow?: string[];
+  timeoutMs?: number;
+}
+
+/**
+ * A role's script options. A role that runs repository code needs the project's Sandbox size; a
+ * trusted role takes none, as its container always starts at `TRUSTED_SIZE`.
+ */
+type RoleOptions<R extends SandboxRole> = R extends RepoCodeRole
+  ? [ScriptOptions & { size: SandboxSize }]
+  : [(ScriptOptions & { size?: never })?];
+
 /**
  * Runs a script in the role's own container with only that role's grants. They're minted here, in
  * the step, so a retry never holds a stale one. Exit codes 10 and up are infrastructure failures
@@ -211,8 +242,9 @@ export async function runInSandbox<R extends SandboxRole>(
   repos: RunRepos,
   role: R,
   script: (grants: RoleGrants<R>) => string,
-  { allow = [], timeoutMs }: { allow?: string[]; timeoutMs?: number } = {},
+  ...[options]: RoleOptions<R>
 ): Promise<RunResult> {
+  const { allow = [], timeoutMs, size = TRUSTED_SIZE }: ScriptOptions & { size?: SandboxSize } = options ?? {};
   const grants = (await mintGrants(env, repos, ROLE_GRANTS[role])) as RoleGrants<R>;
   const sandbox = env.SANDBOX.getByName(sandboxName(instanceId, role));
   const result = await sandbox.run(script(grants), {
@@ -222,6 +254,7 @@ export async function runInSandbox<R extends SandboxRole>(
       preview: previewGrant(env.CF_ACCOUNT_ID, repos.project),
       allow,
     }),
+    size,
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
   });
   if (result.exitCode >= 10) {
@@ -253,25 +286,29 @@ async function mintGrants<K extends keyof RunGrants>(
 
 /**
  * Copies a container's logs to R2 under `key(name)`, truncated over `MAX_LOG_BYTES`, with each log's
- * `notes` appended (see `withNotes`), and returns the names stored. A step that never ran wrote no
- * log, unless it has notes; a log that fails to copy is left out rather than failing the run.
+ * `notes` appended (see `withNotes`), and returns the names stored. Each log a step wrote also notes
+ * the Sandbox `size` its container ran at. A step that never ran wrote no log, unless it has notes;
+ * a log that fails to copy is left out rather than failing the run.
  */
 export async function storeLogs(
   env: Env,
   sandboxId: string,
   names: string[],
   key: (name: string) => string,
+  size: SandboxSize,
   notes: ReadonlyMap<string, string[]> = new Map(),
 ): Promise<string[]> {
   const sandbox = env.SANDBOX.getByName(sandboxId);
   const stored: string[] = [];
   for (const name of names) {
     try {
-      const read = await sandbox.run(readLogScript(name), { access: NO_ACCESS });
+      const read = await sandbox.run(readLogScript(name), { access: NO_ACCESS, size });
       if (read.exitCode !== 0 && read.exitCode !== MISSING_LOG_EXIT) {
         throw new Error(`exit ${read.exitCode}: ${read.stderr.slice(-500)}`);
       }
-      const log = withNotes(read.exitCode === MISSING_LOG_EXIT ? null : read.stdout, notes.get(name) ?? []);
+      const ran = read.exitCode !== MISSING_LOG_EXIT;
+      const own = notes.get(name) ?? [];
+      const log = withNotes(ran ? read.stdout : null, ran ? [sandboxNote(size), ...own] : own);
       if (log === null) continue;
       await env.LOGS.put(key(name), log, { httpMetadata: { contentType: LOG_CONTENT_TYPE } });
       stored.push(name);

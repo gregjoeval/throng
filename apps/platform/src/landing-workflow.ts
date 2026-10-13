@@ -1,6 +1,7 @@
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep, WorkflowStepConfig } from "cloudflare:workers";
-import { parseConfig } from "./config";
+import { reposFor } from "./artifacts";
+import { loadConfig, parseConfig, sandboxSize } from "./config";
 import { conflictFiles, parseMergeTree } from "./conflicts";
 import type { ConflictDetails } from "./conflicts";
 import { LANDING_ROLES, sandboxName } from "./grants";
@@ -34,7 +35,8 @@ const NOTHING_RUN: RawScore = { base: null, shortstat: "", builtinMs: 0, setupFa
  * One landing of the merge queue's front merge request on `origin/main`. See the merge queue spec's
  * "Landing" section.
  *
- * 1. Conflict check, in the untrusted `check` container (read grants on the origin and the fork):
+ * 1. Conflict check, in the untrusted `check` container (read grants on the origin and the fork),
+ *    started at the Sandbox size `main`'s config sets:
  *    `git merge-tree` of `main` and the approved head. A conflict ends it `conflict`; a clean merge
  *    records the tree, `main`'s sha and the merged tree's `.throng/config.yml`.
  * 2. Retest, in the same container, only when the merged tree's config has required checks: setup
@@ -90,9 +92,19 @@ export class LandingWorkflow extends WorkflowEntrypoint<Env, LandingParams> {
     const repos = { project: params.project, attempt: ref };
     const tenMinutes = { retries: STEP_RETRIES, timeout: "10 minutes" } as const;
 
+    // The check container starts at the conflict check, before the merged tree's config is known, and
+    // runs the retest too: its size is `main`'s, so an attempt can't raise its own.
+    const size = await this.#step(step, "sandbox size", { retries: STEP_RETRIES, timeout: "1 minute" }, async () =>
+      sandboxSize(await loadConfig(reposFor(this.env), params.project)),
+    );
     const checked = await this.#step(step, "conflict check", tenMinutes, async () => {
-      const run = await runInSandbox(this.env, instanceId, repos, "check", (g) =>
-        conflictCheckScript(g.originRead.remote, g.forkRead.remote, params.head),
+      const run = await runInSandbox(
+        this.env,
+        instanceId,
+        repos,
+        "check",
+        (g) => conflictCheckScript(g.originRead.remote, g.forkRead.remote, params.head),
+        { size },
       );
       const result = parseResult<ConflictCheckResult>(run.stdout);
       if (result === null)
@@ -126,7 +138,7 @@ export class LandingWorkflow extends WorkflowEntrypoint<Env, LandingParams> {
                 repos,
                 "check",
                 (g) => retestScript(g.originRead.remote, g.forkRead.remote, merge, plan),
-                { allow: plan.allow, timeoutMs },
+                { allow: plan.allow, timeoutMs, size },
               );
               const raw = parseResult<RawScore>(run.stdout);
               if (raw === null)
@@ -138,6 +150,7 @@ export class LandingWorkflow extends WorkflowEntrypoint<Env, LandingParams> {
                 sandboxName(instanceId, "check"),
                 logNames(plan),
                 (log) => landingLogKey(params, log),
+                size,
                 notes,
               );
               return { result: built, logs: stored };

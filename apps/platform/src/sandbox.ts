@@ -1,4 +1,5 @@
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
+import type { SandboxSize } from "./config";
 import { CLOUDFLARE_API_HOST, interceptedHosts, outboundDecision } from "./network";
 import type { OutboundAccess } from "./network";
 
@@ -25,6 +26,8 @@ const EXEC_ENV = {
 export interface RunOptions {
   /** What the container may reach; fixed when it starts. */
   access: OutboundAccess;
+  /** The instance type the container starts at; a container already running keeps its own. */
+  size: SandboxSize;
   /** How long the script may run before it is stopped. */
   timeoutMs?: number;
 }
@@ -91,9 +94,9 @@ export class RunSandbox extends DurableObject<Env> {
     this.#exports = ctx.exports;
   }
 
-  /** Runs a bash script in /workspace, starting the container (with its grants) if needed. */
-  async run(script: string, { access, timeoutMs = COMMAND_TIMEOUT_MS }: RunOptions): Promise<RunResult> {
-    const startMs = await this.#ensureStarted(access, timeoutMs);
+  /** Runs a bash script in /workspace, starting the container (with its grants and size) if needed. */
+  async run(script: string, { access, size, timeoutMs = COMMAND_TIMEOUT_MS }: RunOptions): Promise<RunResult> {
+    const startMs = await this.#ensureStarted(access, size, timeoutMs);
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), timeoutMs);
     const began = Date.now();
@@ -121,14 +124,14 @@ export class RunSandbox extends DurableObject<Env> {
     if (this.#container.running) await this.#container.destroy();
   }
 
-  async #ensureStarted(access: OutboundAccess, timeoutMs: number): Promise<number> {
+  async #ensureStarted(access: OutboundAccess, size: SandboxSize, timeoutMs: number): Promise<number> {
     if (this.#container.running) return 0;
     const image = this.#container.images.sandbox;
     if (image === undefined) throw new Error("The sandbox image is not configured");
     const began = Date.now();
     this.#container.start({
       image,
-      instance: "lite",
+      instance: size,
       // Only intercepted HTTPS leaves the container.
       enableInternet: false,
     });

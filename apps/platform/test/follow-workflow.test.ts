@@ -46,13 +46,15 @@ const MERGED = { kind: "merged", before: "b".repeat(40), head: "c".repeat(40) } 
 async function follow(claimed: boolean) {
   const events: string[] = [];
   const scripts: string[] = [];
+  const sizes: string[] = [];
   const reported: [number, FollowOutcome][] = [];
   const env = {
     SANDBOX: {
       getByName: (name: string) => ({
-        run: async (script: string) => {
+        run: async (script: string, { size }: { size: string }) => {
           events.push(`run ${name}`);
           scripts.push(script);
+          sizes.push(size);
           return { exitCode: 0, stdout: `${RESULT_PREFIX}${JSON.stringify(MERGED)}\n`, stderr: "" };
         },
         destroy: async () => void events.push(`destroy ${name}`),
@@ -73,7 +75,7 @@ async function follow(claimed: boolean) {
   };
   const step = { do: async (_name: string, ...rest: unknown[]) => (rest.at(-1) as () => Promise<unknown>)() };
   const outcome = await new FollowWorkflow({}, env).run({ payload: params, instanceId: "abc123-t1a2-follow-7" }, step);
-  return { events, scripts, reported, outcome };
+  return { events, scripts, sizes, reported, outcome };
 }
 
 describe("FollowWorkflow", () => {
@@ -89,6 +91,11 @@ describe("FollowWorkflow", () => {
     expect(reported).toEqual([[7, MERGED]]);
     expect(scripts[0]).toContain("abc123-t1a2.git");
     expect(scripts[0]).toContain("Throng-Attempt: t1a2");
+  });
+
+  it("starts its trusted container at lite, whatever the project's Sandbox size", async () => {
+    const { sizes } = await follow(true);
+    expect(sizes).toEqual(["lite"]);
   });
 
   it("runs and reports nothing when its claim is refused", async () => {

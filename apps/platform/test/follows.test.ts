@@ -98,11 +98,15 @@ async function setup({ landing = true } = {}) {
     repos.setRef(ORIGIN, "refs/tasks/t1", head);
     return { head, following: store.recordTaskBranchPush(PROJECT, cat, { task: 1, head }) };
   };
-  /** The author pushes a new commit to their fork through the proxy. */
-  const push = (ref: AttemptInput) => {
+  /**
+   * The author pushes a new commit to their fork through the proxy, on its head or, forced, on
+   * `parents`.
+   */
+  const push = async (ref: AttemptInput, parents?: string[]) => {
     const before = attempt(ref).scoring.sha ?? base.hash;
-    const after = repos.commit(fork(ref), { files: { "README.md": `push ${++n}\n` } }).hash;
+    const after = repos.commit(fork(ref), { files: { "README.md": `push ${++n}\n` }, parents }).hash;
     store.recordPush(PROJECT, author(ref), { ...ref, updates: [{ ref: "refs/heads/main", before, after }] });
+    await store.followIfDropped(PROJECT, author(ref), { ...ref, head: after });
     return after;
   };
   /** The latest Follow Workflow started for an attempt. */
@@ -279,7 +283,7 @@ describe("a conflict", () => {
     expect(journal().at(-1)).toMatchObject({ kind: "needsUpdate", attempt: 1, detail: { taskBranch: head } });
 
     // The author merges the task branch and pushes; a follow checks the push and finds it current.
-    push(t1a1);
+    await push(t1a1);
     await drain();
     expect(followWorkflow.created.filter((c) => c.params.attempt === 1)).toHaveLength(2);
     expect(started(t1a1)?.params.taskHead).toBe(head);
@@ -293,11 +297,81 @@ describe("a conflict", () => {
     moveTaskBranch();
     await drain();
     await follow(t1a1, (before) => ({ kind: "conflict", head: before }));
-    push(t1a1);
+    await push(t1a1);
     await drain();
     await follow(t1a1, (before) => ({ kind: "conflict", head: before }));
     expect(attempt(t1a1).needs_update).toBeTruthy();
   });
+});
+
+describe("an author's push that drops the task branch", () => {
+  it("follows the newer task head when the task branch moves while the push is checked", async () => {
+    const { repos, base, drain, t1a1, moveTaskBranch, push, started } = await setup();
+    moveTaskBranch();
+    // While the check reads the fork, the task branch moves again, and its push queues a follow.
+    let newer: string | undefined;
+    const readCommit = repos.readCommit.bind(repos);
+    repos.readCommit = async (name, hash) => {
+      if (newer === undefined && name === fork(t1a1)) newer = moveTaskBranch().head;
+      return readCommit(name, hash);
+    };
+    await push(t1a1, [base.hash]);
+    await drain();
+    expect(newer).toBeDefined();
+    expect(started(t1a1)?.params.taskHead).toBe(newer);
+  });
+
+  it("reads only the new commits of a push on a head known to contain the task head", async () => {
+    const { repos, drain, t1a1, moveTaskBranch, push, follow, merged, followWorkflow } = await setup();
+    const { head } = moveTaskBranch();
+    await drain();
+    await follow(t1a1, merged(t1a1, head));
+    for (let i = 0; i < 30; i++) await push(t1a1);
+    const before = repos.calls.length;
+    await push(t1a1);
+    await drain();
+    expect(repos.calls.slice(before).filter((c) => c.method === "readCommit").length).toBeLessThanOrEqual(3);
+    expect(followWorkflow.created.filter((c) => c.params.attempt === 1)).toHaveLength(1);
+  });
+
+  it("queues no follow when the push's history is too long to walk", async () => {
+    const { repos, base, drain, t1a1, moveTaskBranch, push, follow, merged, followWorkflow } = await setup();
+    const { head } = moveTaskBranch();
+    await drain();
+    await follow(t1a1, merged(t1a1, head));
+    let tip = base.hash;
+    for (let i = 0; i < 2100; i++) {
+      tip = repos.commit(fork(t1a1), { files: { "README.md": `long ${i}\n` }, parents: [tip] }).hash;
+    }
+    await push(t1a1, [tip]);
+    await drain();
+    expect(followWorkflow.created.filter((c) => c.params.attempt === 1)).toHaveLength(1);
+  });
+
+  it.each(["fork", "origin"] as const)(
+    "queues no follow while the %s can't be read, and checks the next push",
+    async (side) => {
+      const { repos, base, drain, t1a1, moveTaskBranch, push, follow, merged, followWorkflow } = await setup();
+      const { head } = moveTaskBranch();
+      await drain();
+      await follow(t1a1, merged(t1a1, head));
+      const readCommit = repos.readCommit.bind(repos);
+      let down = true;
+      repos.readCommit = async (name, hash) => {
+        if (down && name === (side === "fork" ? fork(t1a1) : ORIGIN)) throw new Error("unavailable");
+        return readCommit(name, hash);
+      };
+      const follows = () => followWorkflow.created.filter((c) => c.params.attempt === 1).length;
+      await push(t1a1, [base.hash]);
+      await drain();
+      expect(follows()).toBe(1);
+
+      down = false;
+      await push(t1a1, [base.hash]);
+      await drain();
+      expect(follows()).toBe(2);
+    },
+  );
 });
 
 /** `setup` with t1a1 selected: its merge request is pending until its head's run passes, then queued. */
@@ -380,7 +454,7 @@ describe("a merge request's source", () => {
 
   it("leaves a needsReview merge request in needsReview", async () => {
     const { drain, t1a1, mr, moveTaskBranch, follow, merged, push } = await selected();
-    push(t1a1);
+    await push(t1a1);
     expect(mr().state).toBe("needsReview");
     const { head } = moveTaskBranch();
     await drain();

@@ -108,6 +108,14 @@ _Avoid_: Review policy
 A selection where eligible users each back one candidate attempt and the most-backed attempt wins.
 _Avoid_: Poll, ballot
 
+**Candidate**:
+An attempt in a vote, pinned to the head it was passing at when it joined; a push to it withdraws it, and it can be added again once its new head passes.
+_Avoid_: Nominee, entry
+
+**Ballot**:
+A user's one choice in a vote, for a candidate at its pinned head; their aliases share it, and casting again replaces it.
+_Avoid_: Vote (when meaning one user's choice)
+
 **Scoring**:
 The whole run that produces an attempt's gate and score.
 _Avoid_: CI, pipeline

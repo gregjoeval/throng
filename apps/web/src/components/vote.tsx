@@ -8,7 +8,7 @@ import type { ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { addVoteCandidate, castVote, closeVote, meQuery, openVote, taskKey } from "@/lib/api";
+import { addVoteCandidate, castVote, closeVote, meQuery, openVote, rescore, taskKey } from "@/lib/api";
 import type { ProjectRef } from "@/lib/api";
 import { isPassing } from "@/lib/arena";
 import type { ArenaAttempt, TaskArena } from "@/lib/arena";
@@ -65,12 +65,15 @@ export function VoteBanner({
 }
 
 /**
- * A candidate's tally, or why it doesn't count now, and how it reads. A candidate being scored isn't
- * struck through: a follow of the task branch moved it to a merge not scored yet, and its ballots
- * count again once that passes.
+ * A candidate's tally, or why it doesn't count now, and how it reads. One whose head has no result
+ * yet (being scored, or its scoring errored) isn't struck through: its ballots count again once that
+ * head passes.
  */
 function tally(candidate: Vote["candidates"][number]): { text: string; style: string } {
   if (candidate.beingScored) return { text: "being scored", style: "text-muted-foreground" };
+  if (candidate.erroredRun !== null) {
+    return { text: `scoring errored (run ${candidate.erroredRun})`, style: "text-muted-foreground" };
+  }
   if (candidate.withdrawn) return { text: "withdrawn", style: "text-muted-foreground line-through" };
   return { text: plural(candidate.votes, "vote", "votes"), style: "" };
 }
@@ -159,24 +162,39 @@ function OpenVote({
 }
 
 /**
+ * Why the vote can't close yet, or null when it can: the platform refuses while a candidate's head has
+ * no result, being scored or with its scoring errored.
+ */
+function closeBlocked(vote: Vote): string | null {
+  const scoring = vote.candidates.filter((c) => c.beingScored).map((c) => c.attempt);
+  if (scoring.length > 0) {
+    const which = scoring.length === 1 ? `${scoring[0]} is` : `${scoring.join(", ")} are`;
+    return `${which} being scored; close the vote once scoring finishes.`;
+  }
+  const errored = vote.candidates.filter((c) => c.erroredRun !== null).map((c) => `${c.attempt}'s`);
+  if (errored.length > 0) {
+    return `${errored.join(", ")} scoring errored; rescore ${errored.length === 1 ? "it" : "them"}, then close the vote.`;
+  }
+  return null;
+}
+
+/**
  * Close vote, asking inline first: it names the attempt the vote selects and what that closes, or on
- * a tie asks which of the tied attempts to select. Disabled, saying why, while a candidate is being
- * scored: the platform refuses to close the vote until its scoring finishes.
+ * a tie asks which of the tied attempts to select. Disabled, saying why, while `closeBlocked`.
  */
 function CloseVote({ projectRef, task, vote, active }: InTask & { vote: Vote; active: number }) {
   const [confirming, setConfirming] = useState(false);
   const close = useVoteMutation({ projectRef, task }, (attempt: string | undefined) =>
     closeVote(projectRef, task, attempt),
   );
-  const scoring = vote.candidates.filter((c) => c.beingScored).map((c) => c.attempt);
-  if (scoring.length > 0) {
-    const which = scoring.length === 1 ? `${scoring[0]} is` : `${scoring.join(", ")} are`;
+  const blocked = closeBlocked(vote);
+  if (blocked !== null) {
     return (
       <span className="flex flex-wrap items-center gap-2">
         <Button size="sm" variant="outline" className="w-fit" disabled>
           Close vote
         </Button>
-        <span className="text-muted-foreground">{which} being scored; close the vote once scoring finishes.</span>
+        <span className="text-muted-foreground">{blocked}</span>
       </span>
     );
   }
@@ -222,9 +240,11 @@ function CloseVote({ projectRef, task, vote, active }: InTask & { vote: Vote; ac
 
 /**
  * What the open vote offers on each attempt's lane and card: Vote for a standing candidate (Your vote
- * once you backed it) when you may vote for it, or Add to vote for a passing attempt that isn't a
- * candidate when you may manage the vote (`manage`). Undefined when there is nothing to offer, and
- * null instead of the function when no vote is open.
+ * once you backed it) when you may vote for it; Rescore for a candidate whose scoring errored when
+ * you may manage the vote (`manage`) or wrote the attempt, as the platform allows; or Add to vote for
+ * a passing attempt that isn't a candidate (or was withdrawn) when you may manage the vote. Nothing
+ * for a candidate being scored. Undefined when there is nothing to offer, and null instead of the
+ * function when no vote is open.
  */
 export function useVoteActions(
   { projectRef, task }: InTask,
@@ -234,12 +254,18 @@ export function useVoteActions(
   const me = useQuery(meQuery);
   if (vote === null) return null;
   return (attempt) => {
-    const candidate = vote.candidates.find((c) => c.attempt === attempt.ref && !c.withdrawn);
-    if (candidate === undefined) {
+    const candidate = vote.candidates.find((c) => c.attempt === attempt.ref);
+    const isAuthor = me.isSuccess && me.data.user.id === attempt.author.id;
+    if (candidate !== undefined && candidate.erroredRun !== null) {
+      if (!manage && !isAuthor) return undefined;
+      return <Rescore projectRef={projectRef} task={task} attempt={attempt.ref} />;
+    }
+    if (candidate?.beingScored === true) return undefined;
+    if (candidate === undefined || candidate.withdrawn) {
       if (!manage || !isPassing(attempt)) return undefined;
       return <AddCandidate projectRef={projectRef} task={task} attempt={attempt.ref} />;
     }
-    if (!me.isSuccess || me.data.user.id === attempt.author.id || !mayVote(vote.eligible, me.data.alias)) {
+    if (!me.isSuccess || isAuthor || !mayVote(vote.eligible, me.data.alias)) {
       return undefined;
     }
     if (ballotsClosed(vote)) return undefined;
@@ -273,6 +299,19 @@ function AddCandidate({ projectRef, task, attempt }: InTask & { attempt: string 
         Add to vote
       </Button>
       <MutationError mutation={add} />
+    </span>
+  );
+}
+
+/** Rescore for a candidate whose scoring errored: it counts again, with its ballots, once its head passes. */
+function Rescore({ projectRef, task, attempt }: InTask & { attempt: string }) {
+  const again = useVoteMutation({ projectRef, task }, () => rescore(projectRef, attempt));
+  return (
+    <span className="flex flex-wrap items-center gap-2">
+      <Button size="sm" variant="outline" disabled={again.isPending} onClick={() => again.mutate(undefined)}>
+        Rescore
+      </Button>
+      <MutationError mutation={again} />
     </span>
   );
 }

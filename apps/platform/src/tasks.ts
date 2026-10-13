@@ -192,6 +192,7 @@ export interface Vote {
     votes: number;
     withdrawn: boolean;
     beingScored: boolean;
+    erroredRun: number | null;
   }[];
   myBallot: { attempt: string; head: string; alias: string | null; at: string } | null;
 }
@@ -858,6 +859,7 @@ function publicVote(v: VoteDetail, users: Map<string, string>): Vote {
       votes: c.votes,
       withdrawn: c.withdrawn,
       beingScored: c.being_scored,
+      erroredRun: c.errored_run,
     })),
     myBallot:
       ballot === null ? null : { attempt: ref(ballot.attempt), head: ballot.head, alias: ballot.alias, at: ballot.at },

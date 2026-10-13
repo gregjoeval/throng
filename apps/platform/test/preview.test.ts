@@ -1,27 +1,31 @@
 import { describe, expect, it } from "vitest";
-import { MAX_LABEL, previewGrant, previewName, previewPathAllowed } from "../src/preview.ts";
+import { MAX_LABEL, previewAllows, previewGrant, previewName } from "../src/preview.ts";
 
 const grant = { accountId: "acct", workerName: "fixture" };
 
-describe("previewPathAllowed", () => {
-  it("allows the previewed Worker and the subdomain lookup", () => {
-    expect(previewPathAllowed("/client/v4/accounts/acct/workers/scripts/fixture", grant)).toBeTruthy();
-    expect(previewPathAllowed("/client/v4/accounts/acct/workers/workers/fixture/previews", grant)).toBeTruthy();
-    expect(previewPathAllowed("/client/v4/accounts/acct/workers/subdomain", grant)).toBeTruthy();
+describe("previewAllows", () => {
+  const workers = "/client/v4/accounts/acct/workers";
+
+  it("allows the previewed Worker and the subdomain lookup, with any method but DELETE", () => {
+    for (const method of ["GET", "PUT", "POST", "PATCH"]) {
+      expect(previewAllows(method, `${workers}/scripts/fixture`, grant)).toBeTruthy();
+      expect(previewAllows(method, `${workers}/workers/fixture/previews`, grant)).toBeTruthy();
+      expect(previewAllows(method, `${workers}/subdomain`, grant)).toBeTruthy();
+    }
+  });
+
+  it("refuses every DELETE, so an attempt can't delete its project's Worker or any part of it", () => {
+    for (const path of ["scripts/fixture", "scripts/fixture/secrets/x", "workers/fixture/previews", "subdomain"]) {
+      expect({ path, allowed: previewAllows("DELETE", `${workers}/${path}`, grant) }).toEqual({ path, allowed: false });
+    }
   });
 
   it("refuses other Workers, other accounts, and everything else", () => {
-    expect(previewPathAllowed("/client/v4/accounts/acct/workers/scripts/throng", grant)).toBeFalsy();
-    expect(previewPathAllowed("/client/v4/accounts/acct/workers/scripts/fixture-other", grant)).toBeFalsy();
-    expect(previewPathAllowed("/client/v4/accounts/other/workers/scripts/fixture", grant)).toBeFalsy();
-    expect(previewPathAllowed("/client/v4/user/tokens", grant)).toBeFalsy();
-    expect(previewPathAllowed("/client/v4/accounts/acct/r2/buckets", grant)).toBeFalsy();
-  });
-});
-
-describe("previewGrant", () => {
-  it("names the project's own Worker, p<projectId>", () => {
-    expect(previewGrant("acct", "abc123")).toEqual({ accountId: "acct", workerName: "pabc123" });
+    expect(previewAllows("PUT", `${workers}/scripts/throng`, grant)).toBeFalsy();
+    expect(previewAllows("PUT", `${workers}/scripts/fixture-other`, grant)).toBeFalsy();
+    expect(previewAllows("PUT", "/client/v4/accounts/other/workers/scripts/fixture", grant)).toBeFalsy();
+    expect(previewAllows("GET", "/client/v4/user/tokens", grant)).toBeFalsy();
+    expect(previewAllows("GET", "/client/v4/accounts/acct/r2/buckets", grant)).toBeFalsy();
   });
 });
 

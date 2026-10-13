@@ -11,8 +11,13 @@ export function workersApiPath(accountId: string): string {
   return `/client/v4/accounts/${accountId}/workers`;
 }
 
-/** Only the Worker being previewed (and the account's workers.dev subdomain lookup). */
-export function previewPathAllowed(path: string, { accountId, workerName }: PreviewGrant): boolean {
+/**
+ * Only the Worker being previewed (and the account's workers.dev subdomain lookup), and never a
+ * `DELETE`: a Preview never deletes anything, and one attempt's build mustn't delete its project's
+ * Worker, which holds every other attempt's Preview too.
+ */
+export function previewAllows(method: string, path: string, { accountId, workerName }: PreviewGrant): boolean {
+  if (method === "DELETE") return false;
   const workers = `${workersApiPath(accountId)}/`;
   if (!path.startsWith(workers)) return false;
   const rest = path.slice(workers.length);

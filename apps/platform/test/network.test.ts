@@ -6,6 +6,7 @@ import type { OutboundAccess } from "../src/network.ts";
 import { previewGrant } from "../src/preview.ts";
 
 const registry = (path: string) => new URL(`https://registry.npmjs.org${path}`);
+const api = (path: string) => new URL(`https://api.cloudflare.com/client/v4/accounts/acct/workers/${path}`);
 
 describe("registryAllows", () => {
   it("lets installs read package metadata and tarballs", () => {
@@ -65,6 +66,19 @@ describe("outboundDecision", () => {
     expect(outboundDecision("PUT", script, access())).toEqual({ action: "deny" });
   });
 
+  it("refuses every DELETE to the Cloudflare API, even on the previewed Worker", () => {
+    const preview = { accountId: "acct", workerName: "pabc123" };
+    for (const path of ["scripts/pabc123", "workers/pabc123/previews", "workers/pabc123", "subdomain"]) {
+      expect({ path, decision: outboundDecision("DELETE", api(path), access({ preview })) }).toEqual({
+        path,
+        decision: { action: "deny" },
+      });
+      for (const method of ["GET", "PUT", "POST"]) {
+        expect(outboundDecision(method, api(path), access({ preview }))).toEqual({ action: "preview-token" });
+      }
+    }
+  });
+
   it("refuses plain HTTP and unknown hosts", () => {
     expect(outboundDecision("GET", new URL("http://registry.npmjs.org/x"), access({ npmRegistry: true }))).toEqual({
       action: "deny",
@@ -101,8 +115,7 @@ describe("network.allow", () => {
     const listed = ["registry.npmjs.org", "api.cloudflare.com", "acct.artifacts.cloudflare.net"];
     const open = access({ allow: listed, npmRegistry: true });
     expect(outboundDecision("PUT", registry("/is-number"), open)).toEqual({ action: "deny" });
-    const api = new URL("https://api.cloudflare.com/client/v4/accounts/acct/workers/scripts/fixture");
-    expect(outboundDecision("GET", api, open)).toEqual({ action: "deny" });
+    expect(outboundDecision("GET", api("scripts/fixture"), open)).toEqual({ action: "deny" });
     const other = new URL("https://acct.artifacts.cloudflare.net/git/ns/other.git/info/refs?service=git-upload-pack");
     expect(outboundDecision("GET", other, open)).toEqual({ action: "deny" });
   });
@@ -123,7 +136,6 @@ const repoGrant = (repo: string, level: GitGrant["access"], token: string): GitG
   access: level,
 });
 const pushTo = (repo: string) => new URL(`https://acct.artifacts.cloudflare.net/git/ns/${repo}.git/git-receive-pack`);
-const api = (path: string) => new URL(`https://api.cloudflare.com/client/v4/accounts/acct/workers/${path}`);
 
 describe("roleAccess", () => {
   const grants: RunGrants = {

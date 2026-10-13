@@ -100,6 +100,7 @@ describe("the vote banner", () => {
   it("offers the task's creator to open a vote under the vote policy, with an optional deadline", async () => {
     const { user, asked } = await arenaWith([passing(1), passing(2)], { selection: VOTE_BY_ANYONE });
     expect(banner()).toHaveTextContent("Selection is by vote, among anyone.");
+    expect(screen.queryByRole("button", { name: "Select" })).toBeNull();
     await user.click(within(banner()).getByRole("button", { name: "Open vote" }));
     await user.type(within(banner()).getByLabelText("Deadline (optional)"), "2026-10-20T09:30");
     await user.click(within(banner()).getByRole("button", { name: "Open the vote" }));
@@ -156,7 +157,31 @@ describe("the vote banner", () => {
   });
 });
 
+describe("the vote in the single-attempt view", () => {
+  it("replaces Merge with the banner and Vote under the vote policy", async () => {
+    const voting = { selection: VOTE_BY_ANYONE, vote: openVote([0]) };
+    server.use(
+      serveCompare(() => []),
+      ...serveArena(task(1), [passing(1)], [], {}, voting),
+    );
+    await renderApp("/ada/alpha/tasks/t1");
+    const view = await screen.findByTestId("single-attempt-view");
+    expect(within(view).queryByRole("button", { name: "Merge" })).toBeNull();
+    expect(within(view).getByRole("region", { name: "Vote" })).toHaveTextContent("Vote open");
+    expect(within(view).getByRole("button", { name: "Vote" })).toBeInTheDocument();
+  });
+});
+
 describe("voting", () => {
+  it("stops offering Vote once the deadline passes, and says ballots closed", async () => {
+    await arenaWith([passing(1), passing(2)], {
+      selection: VOTE_BY_ANYONE,
+      vote: openVote([1, 0], { deadline: "2020-01-01T00:00:00.000Z" }),
+    });
+    expect(banner()).toHaveTextContent("Ballots closed");
+    expect(screen.queryByRole("button", { name: "Vote" })).toBeNull();
+  });
+
   it("casts a ballot from a lane or a rail card, and hides Select while the vote is open", async () => {
     const { user, asked } = await arenaWith([passing(1), passing(2), passing(3)], {
       selection: VOTE_BY_ANYONE,
@@ -183,10 +208,10 @@ describe("voting", () => {
     expect(within(card("t1a3")).queryByRole("button", { name: "Vote" })).toBeNull();
   });
 
-  it("offers no Vote when only agents may vote", async () => {
+  it("offers no Vote when only aliases may vote", async () => {
     await arenaWith([passing(1), passing(2)], {
-      selection: { policy: "vote", eligible: "agents" },
-      vote: openVote([0, 0], { eligible: "agents" }),
+      selection: { policy: "vote", eligible: "aliases" },
+      vote: openVote([0, 0], { eligible: "aliases" }),
     });
     expect(screen.queryByRole("button", { name: "Vote" })).toBeNull();
   });

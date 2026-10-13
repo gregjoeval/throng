@@ -22,6 +22,9 @@ interface InTask {
   task: string;
 }
 
+/** Whether the vote's deadline has passed: it takes no more ballots, though it stays open until closed. */
+const ballotsClosed = (vote: Vote) => vote.deadline !== null && Date.parse(vote.deadline) <= Date.now();
+
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 const sentence = (text: string) => `${text.charAt(0).toUpperCase()}${text.slice(1)}`;
 
@@ -69,7 +72,7 @@ function NoVote({ projectRef, task, selection, manage }: InTask & { selection: S
   const open = useVoteMutation({ projectRef, task }, (at: string) =>
     openVote(projectRef, task, at === "" ? undefined : new Date(at).toISOString()),
   );
-  const among = selection.policy === "vote" ? ELIGIBLE_VOTERS[selection.eligible] : "";
+  const among = ELIGIBLE_VOTERS[selection.eligible ?? "anyone"];
   return (
     <>
       <p>
@@ -122,7 +125,9 @@ function OpenVote({
         <span className="font-medium">Vote open</span>
         <span className="text-muted-foreground">{sentence(ELIGIBLE_VOTERS[vote.eligible])} may vote.</span>
         {vote.deadline === null ? null : (
-          <span className="text-muted-foreground">Ballots close {new Date(vote.deadline).toLocaleString()}.</span>
+          <span className="text-muted-foreground">
+            {ballotsClosed(vote) ? "Ballots closed" : "Ballots close"} {new Date(vote.deadline).toLocaleString()}.
+          </span>
         )}
       </p>
       <ul aria-label="Tallies" className="flex flex-wrap gap-2">
@@ -213,7 +218,7 @@ export function useVoteActions(
     if (!me.isSuccess || me.data.user.id === attempt.author.id || !mayVote(vote.eligible, me.data.alias)) {
       return undefined;
     }
-    if (vote.deadline !== null && Date.parse(vote.deadline) <= Date.now()) return undefined;
+    if (ballotsClosed(vote)) return undefined;
     const mine = vote.myBallot?.attempt === candidate.attempt && vote.myBallot.head === candidate.head;
     return <CastVote projectRef={projectRef} task={task} attempt={attempt.ref} mine={mine} />;
   };

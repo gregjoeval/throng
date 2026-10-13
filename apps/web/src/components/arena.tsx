@@ -81,9 +81,11 @@ function ArenaLayout({
   const manage = useMaySelect(projectRef, useQuery(taskQuery(projectRef, task)).data);
   const select = useSelect(projectRef, task, active.length);
   const voteActions = useVoteActions({ projectRef, task }, vote, manage);
-  // While a vote is open, closing it selects: each attempt offers the vote's actions instead of Select.
-  const actions = (attempt: ArenaAttempt): ReactNode =>
-    voteActions === null ? select?.(attempt.ref) : voteActions(attempt);
+  // Under the vote policy, closing a vote selects: each attempt offers the open vote's actions, never Select.
+  const actions = (attempt: ArenaAttempt): ReactNode => {
+    if (voteActions !== null) return voteActions(attempt);
+    return selection.policy === "vote" ? undefined : select?.(attempt.ref);
+  };
   return (
     <div data-testid="arena" className="grid gap-4 lg:grid-cols-[16rem_minmax(0,1fr)] lg:items-start">
       <Rail

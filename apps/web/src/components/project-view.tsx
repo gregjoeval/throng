@@ -12,7 +12,7 @@ import type { BrowseLocation, ProjectLocation } from "@/lib/paths";
 import { cn } from "@/lib/utils";
 
 /** The header tab each view sits under. */
-const SECTIONS: Record<ProjectLocation["view"], "code" | "commits" | "tasks" | "settings"> = {
+const SECTIONS: Record<ProjectLocation["view"], "code" | "commits" | "tasks" | "runs" | "settings"> = {
   home: "code",
   tree: "code",
   blob: "code",
@@ -21,6 +21,8 @@ const SECTIONS: Record<ProjectLocation["view"], "code" | "commits" | "tasks" | "
   commit: "commits",
   tasks: "tasks",
   task: "tasks",
+  runs: "runs",
+  run: "runs",
   settings: "settings",
 };
 
@@ -53,6 +55,9 @@ export function ProjectView({ location, children }: { location: ProjectLocation;
           </Tab>
           <Tab to={buildPath({ view: "tasks", owner, project: location.project })} active={section === "tasks"}>
             Tasks
+          </Tab>
+          <Tab to={buildPath({ view: "runs", owner, project: location.project })} active={section === "runs"}>
+            Runs
           </Tab>
           {isOwner && (
             <Tab to={buildPath({ view: "settings", owner, project: location.project })} active={section === "settings"}>

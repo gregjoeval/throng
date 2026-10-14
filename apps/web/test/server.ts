@@ -1,8 +1,9 @@
 import type { InferResponseType } from "hono/client";
 import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
-import type { client, FileDiff } from "@/lib/api";
+import type { client, FileDiff, RunWithOutcome } from "@/lib/api";
 import type { ArenaAttempt, Metric, TaskArena } from "@/lib/arena";
+import type { RunStep } from "@/lib/runs";
 import type { Attempt, ListedTask } from "@/lib/tasks";
 
 /** `GET /api/me` for a human signed in through Access, typed from the platform's routes. */
@@ -179,6 +180,51 @@ export function result(fields: Partial<Result> = {}): Result {
     logs: [],
     run: 1,
     finishedAt: me.user.createdAt,
+    ...fields,
+  };
+}
+
+/** A step of a run's outcome: a project check that passed in 0.9 s, unless `fields` say otherwise. */
+export function step(name: string, fields: Partial<RunStep> = {}): RunStep {
+  return {
+    name,
+    kind: "check",
+    source: "project",
+    group: null,
+    after: [],
+    outcome: "passed",
+    durationMs: 900,
+    notes: [],
+    log: name,
+    ...fields,
+  };
+}
+
+/**
+ * Run `id` on t1a1 at `sha` as `GET …/runs/{runId}` gives it: done, its gate passed, by `ada`, with
+ * `result()`'s metrics and `steps` (a `test` check unless given others).
+ */
+export function runDetail(id: number, sha: string, fields: Partial<RunWithOutcome> = {}): RunWithOutcome {
+  const { base, config, gate, metrics } = result();
+  return {
+    id,
+    line: "t1a1",
+    pipeline: "default",
+    sha,
+    trigger: "push",
+    status: "done",
+    trusted: true,
+    requestedBy: { id: me.user.id, handle: me.user.handle },
+    alias: null,
+    createdAt: me.user.createdAt,
+    startedAt: me.user.createdAt,
+    finishedAt: "2026-10-10T12:01:05.000Z",
+    superseded: false,
+    gate: "passed",
+    cancellable: false,
+    error: null,
+    outcome: { base, config, gate, metrics, steps: [step("test")] },
+    result: { base, config, gate, checks: [check("test", "passed")], metrics, logs: ["test"] },
     ...fields,
   };
 }

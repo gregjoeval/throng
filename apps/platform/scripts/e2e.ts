@@ -134,6 +134,20 @@ interface Metric {
   note?: string;
 }
 
+/** A run as `GET …/runs` lists it, as far as the scenarios read it (see `src/api.ts`'s `Run`). */
+interface ListedRun {
+  id: number;
+  line: string;
+  pipeline: string;
+  status: string;
+  gate: "passed" | "failed" | null;
+}
+
+/** A run's outcome as `GET …/runs/{runId}` gives it, as far as the scenarios read it. */
+interface RunOutcome {
+  outcome: { steps: { name: string; kind: string; outcome: string; log: string | null }[] } | null;
+}
+
 /** What a run reports, as far as the scenarios read it (see `src/results.ts`). */
 interface Run {
   id: number;
@@ -506,6 +520,15 @@ async function needsreview(): Promise<void> {
     slowLog.includes(`== throng ==\n${sandboxNote(DEFAULT_SANDBOX_SIZE)}\n`),
     `slow's log doesn't note the ${DEFAULT_SANDBOX_SIZE} Sandbox: ${slowLog.slice(-200)}`,
   );
+  // The project's runs list it on the attempt's line, and its page has the check as a step with that log.
+  const { runs } = await throng<{ runs: ListedRun[] }>(p, "GET", `/runs?line=${a1}&status=done`);
+  assert(
+    runs.some((r) => r.id === scoring.result.run && r.line === a1 && r.pipeline === "default" && r.gate === "passed"),
+    `${a1}'s done runs don't list run ${scoring.result.run}: ${JSON.stringify(runs)}`,
+  );
+  const detail = await throng<ListedRun & RunOutcome>(p, "GET", `/runs/${scoring.result.run}`);
+  const slow = detail.outcome?.steps.find((s) => s.name === "slow");
+  assert(slow?.kind === "check" && slow.log === "slow", `run ${detail.id}'s steps: ${JSON.stringify(detail.outcome)}`);
 
   await throng(p, "POST", `/tasks/${t1}/selection`, { attempt: a1 });
   const inQueue = await mergeRequestUntil(p, t1, (mr) => mr.state === "queued" || mr.state === "landing");

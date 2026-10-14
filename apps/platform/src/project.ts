@@ -6,6 +6,7 @@ import { LANDING_ROLES, sandboxName, SCORING_ROLES } from "./grants";
 import type { SandboxRole } from "./grants";
 import type { LandingOutcome } from "./landing";
 import type { ScoringOutcome, ScoringRequest, StoredRun } from "./scoring";
+import { keyringFrom } from "./secrets";
 import type { TaskDefinitions } from "./task-definitions";
 import { parseAttemptRef } from "./task-refs";
 import { runTaskMethod, TaskStore } from "./task-store";
@@ -61,6 +62,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
       scoring: { workflow: env.SCORING, teardown: teardown(SCORING_ROLES) },
       landing: { workflow: env.LANDING, teardown: teardown(LANDING_ROLES) },
       follow: { workflow: env.FOLLOW },
+      keyring: keyringFrom(env.SECRETS_KEYRING),
     });
   }
 

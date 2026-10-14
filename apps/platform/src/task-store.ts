@@ -45,6 +45,8 @@ import type {
   ScoringTrigger,
   StoredRun,
 } from "./scoring.ts";
+import { keyringFrom, Secrets } from "./secrets.ts";
+import type { Keyring, SecretChange, SecretSummary } from "./secrets.ts";
 import { NO_TASK_DEFINITIONS, taskDefinitionsFrom } from "./task-definitions.ts";
 import type { TaskDefinitions, TaskDefinitionsInput } from "./task-definitions.ts";
 import { attemptRef, reservedTask, taskBranchRef, taskRef } from "./task-refs.ts";
@@ -191,6 +193,9 @@ export type TaskEvent =
   | "voteCast"
   | "candidateAdded"
   | "voteClosed";
+
+/** Journal events for the project itself. */
+type ProjectEvent = "secretSet" | "secretDeleted";
 
 /** The slice of SQLite the store needs: Durable Object storage in production, `node:sqlite` in tests. */
 export interface Sql {
@@ -477,6 +482,8 @@ export interface TaskStoreDeps {
   landing?: LandingRunner | null | undefined;
   /** Starts Follow Workflows, which merge a moved task branch into active attempts; without one, follows stay queued. */
   follow?: FollowRunner | null | undefined;
+  /** Seals secrets' values: `SECRETS_KEYRING`'s. Without one, setting a secret fails. */
+  keyring?: Keyring | undefined;
 }
 
 /**
@@ -507,8 +514,18 @@ export class TaskStore {
   readonly #follow: FollowRunner | null;
   /** Requests waiting on an attempt to change. */
   readonly #waiters = new Waiters();
+  /** The project's secrets, which never reach the projection. */
+  readonly #secrets: Secrets;
 
-  constructor({ sql, repos, now = () => new Date(), scoring = null, landing = null, follow = null }: TaskStoreDeps) {
+  constructor({
+    sql,
+    repos,
+    now = () => new Date(),
+    scoring = null,
+    landing = null,
+    follow = null,
+    keyring = keyringFrom(undefined),
+  }: TaskStoreDeps) {
     this.#sql = sql;
     this.#repos = repos;
     this.#now = now;
@@ -521,6 +538,7 @@ export class TaskStore {
     this.follows = new Follows({ sql, now, taskHead: (task) => this.#taskHead(task) });
     this.verdicts = new Verdicts({ sql });
     this.votes = new Votes({ sql });
+    this.#secrets = new Secrets({ sql, keyring, now });
     this.scoring = new ScoringQueue({
       sql,
       runner: scoring,
@@ -1807,6 +1825,38 @@ export class TaskStore {
     return this.mergeRequests.queue();
   }
 
+  // --- secrets ---------------------------------------------------------------------------------
+  //
+  // Maintainers, aliases included, read secrets' names and pipelines. Only the owner, acting as
+  // themselves, sets, replaces, allows or deletes them, so an agent steered by untrusted text can't
+  // grant one. Every change is journaled with its name and pipelines, never its value.
+
+  /** The project's secrets, by name, without their values. */
+  listSecrets(project: ProjectContext, actor: Actor): SecretSummary[] {
+    mayMaintain(project, actor);
+    return this.#secrets.list();
+  }
+
+  /** Sets a secret's value, its pipelines, or both. */
+  async putSecret(
+    project: ProjectContext,
+    actor: Actor,
+    input: SecretChange & { name: string },
+  ): Promise<SecretSummary> {
+    mayGrant(project, actor);
+    const { name, ...change } = input;
+    const secret = await this.#secrets.put(project.id, name, change);
+    this.#record(actor, "secretSet", { name, pipelines: secret.pipelines });
+    return secret;
+  }
+
+  /** Deletes a secret. */
+  deleteSecret(project: ProjectContext, actor: Actor, input: { name: string }): void {
+    mayGrant(project, actor);
+    const secret = this.#secrets.delete(input.name);
+    this.#record(actor, "secretDeleted", { name: secret.name, pipelines: secret.pipelines });
+  }
+
   // --- votes -----------------------------------------------------------------------------------
   //
   // Under the `vote` selection policy, a task's creator can make its selection by vote. Opening one
@@ -2918,6 +2968,17 @@ export class TaskStore {
     extra: Record<string, unknown> = {},
   ): void {
     const detail = { ref: attempt === null ? taskRef(task) : attemptRef(task, attempt), ...extra };
+    this.#record(actor, kind, detail, task, attempt);
+  }
+
+  /** Writes one journal entry, of a task or attempt when it names one. */
+  #record(
+    actor: Actor | null,
+    kind: TaskEvent | MergeRequestEvent | ProjectEvent | "mainAdvanced",
+    detail: Record<string, unknown>,
+    task: number | null = null,
+    attempt: number | null = null,
+  ): void {
     this.#sql.exec(
       "INSERT INTO journal (at, kind, detail, user_id, alias, task, attempt) VALUES (?, ?, ?, ?, ?, ?, ?)",
       this.#now().getTime(),
@@ -2977,6 +3038,9 @@ export const TASK_METHODS = [
   "getMergeRequest",
   "dequeueLogKey",
   "mergeQueue",
+  "listSecrets",
+  "putSecret",
+  "deleteSecret",
   "scoreNow",
   "rescore",
   "runLogKey",
@@ -3111,6 +3175,18 @@ function toAttempt(row: AttemptRow): Omit<StoredAttempt, "scoring" | "merge_requ
 
 function mayOwn(project: ProjectContext, actor: Actor): void {
   if (actor.user.id !== project.owner) throw new ServiceError("forbidden", "only the project owner may");
+}
+
+/** The project's maintainers, as themselves or under an alias: for now, only its owner. */
+function mayMaintain(project: ProjectContext, actor: Actor): void {
+  if (actor.user.id !== project.owner) throw new ServiceError("forbidden", "only the project's maintainers may");
+}
+
+/** The project owner acting as themselves, never under an alias: who may grant a secret. */
+function mayGrant(project: ProjectContext, actor: Actor): void {
+  if (actor.user.id !== project.owner || actor.alias !== null) {
+    throw new ServiceError("forbidden", "only the project owner, acting as themselves, may");
+  }
 }
 
 /** The attempt's author, or one of their aliases, holds its claim. */

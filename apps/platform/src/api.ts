@@ -63,6 +63,7 @@ import { MAX_PROJECT_HANDLE, PROJECT_HANDLE, projectService } from "./projects.t
 import type { Repos } from "./repos.ts";
 import { CHECK_OUTCOMES, GATES } from "./results.ts";
 import { ATTEMPT_SCORING_STATUSES, RUN_STATUSES, SCORING_TRIGGERS } from "./scoring.ts";
+import { secretsRoutes } from "./secrets-api.ts";
 import { ATTEMPT_STATES, TASK_STATES } from "./task-store.ts";
 import type { TaskBackend } from "./tasks.ts";
 import { DEFAULT_TOKEN_TTL_SECONDS, MAX_TOKEN_TTL_SECONDS, tokenService } from "./tokens.ts";
@@ -2032,7 +2033,8 @@ export function apiRoutes(options: ApiOptions = {}) {
       "/",
       browseRoutes({ auth: browser, repos: reposFor, tasks: backendFor, diffCache: options.diffCache ?? workersCache }),
     )
-    .route("/", dequeueRoutes({ auth: browser, repos: reposFor, tasks: backendFor, logs: logsFor }));
+    .route("/", dequeueRoutes({ auth: browser, repos: reposFor, tasks: backendFor, logs: logsFor }))
+    .route("/", secretsRoutes({ auth: browser, repos: reposFor, tasks: backendFor }));
 
   api.doc31("/openapi.json", { openapi: "3.1.0", info: { title: "Throng API", version: "0.0.0" } });
 

@@ -4,9 +4,13 @@ import type { FollowRunner } from "../../src/follows.ts";
 import type { LandingRunner } from "../../src/landing.ts";
 import type { Repos } from "../../src/repos.ts";
 import type { ScoringRunner } from "../../src/scoring.ts";
+import { keyringFrom } from "../../src/secrets.ts";
 import { runTaskMethod, TaskStore } from "../../src/task-store.ts";
 import type { Sql } from "../../src/task-store.ts";
 import type { TaskBackend } from "../../src/tasks.ts";
+
+/** The keyring every test backend seals secrets under: one key, `test`. */
+export const TEST_KEYRING = keyringFrom(JSON.stringify({ current: "test", keys: { test: btoa("k".repeat(32)) } }));
 
 /** `Sql` over in-memory SQLite, standing in for a Durable Object's storage. */
 export function testSql(): Sql & { db: DatabaseSync } {
@@ -52,7 +56,15 @@ export function testTaskBackends(
     if (found === undefined) {
       const sql = testSql();
       found = {
-        store: new TaskStore({ sql, repos, scoring, landing, follow, ...(now === undefined ? {} : { now }) }),
+        store: new TaskStore({
+          sql,
+          repos,
+          scoring,
+          landing,
+          follow,
+          keyring: TEST_KEYRING,
+          ...(now === undefined ? {} : { now }),
+        }),
         sql,
       };
       stores.set(projectId, found);

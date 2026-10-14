@@ -271,6 +271,11 @@ export interface Waiting {
    */
   base: string | null;
   secrets: string[];
+  /**
+   * Why a run of the owner's push waits: a task check it runs that someone else wrote, and who. Null
+   * when it waits because its head isn't the owner's.
+   */
+  taskCheck: { name: string; writtenBy: UserRef } | null;
 }
 
 /** A run with how it ended: its outcome (and the slice scoring reads) once `done`, its error once `errored`. */
@@ -416,7 +421,7 @@ export function taskService({ db, repos, backend, origin }: TaskServiceDeps) {
     const [users, bases] = await Promise.all([
       handles(
         db,
-        list.map((r) => r.user_id),
+        list.flatMap((r) => [r.user_id, r.task_check?.writer ?? null]),
       ),
       Promise.all(list.map((r) => waitingBase(repos, ctx.id, r))),
     ]);
@@ -1031,17 +1036,22 @@ function publicRun(run: StoredRun, users: Map<string, string>, base: string | nu
     superseded: run.superseded,
     gate: run.outcome?.gate ?? null,
     cancellable: cancellable(run),
-    waiting: waitingFor(run, base),
+    waiting: waitingFor(run, users, base),
   };
 }
 
-/** What starting a run waiting for the owner means: the head it runs, the attempt that's on, and the secrets it holds. */
-function waitingFor(run: StoredRun, base: string | null): Run["waiting"] {
+/**
+ * What starting a run waiting for the owner means: the head it runs, the attempt that's on, the
+ * secrets it holds, and the task check that made it wait, if one did.
+ */
+function waitingFor(run: StoredRun, users: Map<string, string>, base: string | null): Run["waiting"] {
   if (run.status !== "waiting") return null;
   const head = run.sha ?? run.merge_head;
   if (head === null) return null;
   const attempt = isAttemptRef(run.line) ? run.line : run.merge_attempt;
-  return { head, attempt, base, secrets: run.secrets ?? [] };
+  const check = run.task_check;
+  const taskCheck = check === null ? null : { name: check.name, writtenBy: userRef(check.writer, users) };
+  return { head, attempt, base, secrets: run.secrets ?? [], taskCheck };
 }
 
 /**

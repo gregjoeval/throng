@@ -34,7 +34,8 @@
 // of the owner's push writes a hash of it, and the stored log shows the mask, never the value; nothing deploys),
 // waiting (a second user's attempt naming a `default` secret waits for the owner and holds no slot; Start with a
 // stale sha, the owner's token under an alias and the second user's are refused; the owner's Start runs it with
-// the secret; through `/api`),
+// the secret; the owner's own push to a task whose check the second user wrote waits too, naming that check;
+// through `/api`),
 // caches (an attempt lands; the trusted `main` run of it saves a cache, which the next attempt's run restores,
 // a hit in its setup's notes, and saves nothing; through `/api`),
 // pipeline (two setups and three checks, one waiting for the others with `after` in a group `main`
@@ -165,7 +166,13 @@ interface ListedRun {
 interface WaitingRun extends ListedRun {
   trusted: boolean;
   startedAt: string | null;
-  waiting: { head: string; attempt: string | null; base: string | null; secrets: string[] } | null;
+  waiting: {
+    head: string;
+    attempt: string | null;
+    base: string | null;
+    secrets: string[];
+    taskCheck: { name: string; writtenBy: { handle: string } } | null;
+  } | null;
 }
 
 /** A run's outcome as `GET …/runs/{runId}` gives it, as far as the scenarios read it. */
@@ -1222,7 +1229,8 @@ console.log("base64 " + Buffer.from(value).toString("base64"));
  * A second user's attempt runs a check naming a secret allowed in `default`: its run is untrusted, so it
  * waits for the owner and holds no slot. Start with a stale sha is refused, as is the owner's token
  * under an alias and the second user's; the owner's Start at the run's head runs it with the secret,
- * and the check prints a hash of it.
+ * and the check prints a hash of it. Then the owner's own push to a task the second user gave a check
+ * waits too, naming that check.
  */
 async function waiting(): Promise<void> {
   const timeline = new Timeline();
@@ -1284,6 +1292,23 @@ console.log("sha256 " + createHash("sha256").update(process.env.E2E_SECRET ?? ""
   assert(result.result.gate === "passed", `expected the started run to pass: ${JSON.stringify(result.result.checks)}`);
   const log = await throngText(p, `/runs/${held.id}/logs/secret`, "text/plain");
   assert(log.includes(`sha256 ${hash}`), `expected the started run's check to have held the secret:\n${log}`);
+
+  // The owner's own push to a task whose check the second user wrote: that check could read what a
+  // setup left behind, so the run isn't trusted, and waits, saying why.
+  const [t2, t2a1] = ["t2", "t2a1"];
+  await throng(theirs, "POST", "/tasks", { title: "Their check", checks: [{ name: "lint", command: "true" }] });
+  await createAttempts(p, t2, [t2a1], timeline);
+  const own = await editAndPush(p, t2a1, "src/greeting.js", (s) => s.replace('"hello, a1"', '"hello, t2"'), "t2a1");
+  await throng(p, "POST", `/attempts/${t2a1}/open`);
+  const foreign = await poll(`${t2a1}'s run waiting for the owner`, async () => {
+    const { runs } = await throng<{ runs: WaitingRun[] }>(p, "GET", `/runs?line=${t2a1}&status=waiting`);
+    return runs.find((r) => r.sha === own) ?? null;
+  });
+  assert(
+    !foreign.trusted && foreign.waiting?.taskCheck?.name === "lint",
+    `expected the owner's push running their task check to wait, naming it: ${JSON.stringify(foreign)}`,
+  );
+  timeline.mark(`run ${foreign.id} waiting on ${t2}'s check by ${foreign.waiting.taskCheck.writtenBy.handle}`);
   await finish(p.project, p.work, timeline);
 }
 

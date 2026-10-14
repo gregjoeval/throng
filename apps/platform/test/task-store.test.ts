@@ -115,6 +115,7 @@ describe("tasks", () => {
       closed_by: null,
       attempt_limit: null,
       definitions: { checks: [], metrics: [] },
+      check_writers: [],
       selection: null,
     });
     expect(t2).toMatchObject({ number: 2, body: "**md**", attempt_limit: 2 });

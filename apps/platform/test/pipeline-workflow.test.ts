@@ -370,7 +370,7 @@ async function pipeline(behaviour: Behaviour = {}) {
     },
     PROJECT: {
       getByName: () => ({
-        definitionsOf: async () => ({ checks: [], metrics: [] }),
+        runDefinitions: async () => ({ checks: [], metrics: [] }),
         pipelinePlanned: async (_run: number, containers: string[], secrets: NamedSecrets[]) => {
           planned = containers;
           named = secrets;

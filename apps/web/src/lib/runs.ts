@@ -78,6 +78,12 @@ export function lineHref(projectRef: ProjectRef, run: Pick<Run, "line" | "sha">)
 /** What starting a run waiting for the owner means: the head it runs, the attempt that's on, and the secrets it holds. */
 export type Waiting = NonNullable<Run["waiting"]>;
 
+/** Why a run of the owner's push waits, when a task check someone else wrote is why; null otherwise. */
+export function waitingReason(waiting: Waiting): string | null {
+  const check = waiting.taskCheck;
+  return check === null ? null : `Task check ${check.name} was written by ${check.writtenBy.handle}`;
+}
+
 /**
  * Where a waiting run's diff is: everything Start would run, not just its head's last commit, so no
  * change hides in an earlier one. An attempt's or task branch's head is compared from its base (where

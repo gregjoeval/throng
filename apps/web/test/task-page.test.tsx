@@ -192,7 +192,7 @@ describe("the task page body", () => {
         status: "waiting",
         gate: null,
         ...(line === "main" ? { sha: null, pipeline: "main" as const, trigger: "merge" as const } : {}),
-        waiting: { head: SHA, attempt: on, base: line === "main" ? null : BASE, secrets: ["DEPLOY"] },
+        waiting: { head: SHA, attempt: on, base: line === "main" ? null : BASE, secrets: ["DEPLOY"], taskCheck: null },
       });
       return run;
     };
@@ -248,7 +248,7 @@ describe("the task page body", () => {
         } = runDetail(7, SHA, {
           line: "t1a1",
           status: "waiting",
-          waiting: { head: SHA, attempt: "t1a1", base: BASE, secrets: ["DEPLOY"] },
+          waiting: { head: SHA, attempt: "t1a1", base: BASE, secrets: ["DEPLOY"], taskCheck: null },
         });
         return HttpResponse.json({ runs: [run], next: null });
       }),

@@ -572,6 +572,17 @@ const RunSchema = z
               "when they share no history.",
           }),
         secrets: z.array(SecretNameSchema).openapi({ description: "The secrets it would hold once started, by name." }),
+        taskCheck: z
+          .object({
+            name: z.string().openapi({ example: "lint" }),
+            writtenBy: UserRefSchema,
+          })
+          .nullable()
+          .openapi({
+            description:
+              "Why a run of code the owner pushed waits: a task check it runs that someone other than the owner " +
+              "wrote, and who. Null when it waits because its head isn't the owner's.",
+          }),
       })
       .nullable()
       .openapi({

@@ -54,8 +54,8 @@ import type {
 } from "./scripts";
 import { keyringFrom, maskedDeep, masking, openSealed } from "./secrets";
 import type { Keyring, SecretRefusal } from "./secrets";
-import { NO_TASK_DEFINITIONS, withTask } from "./task-definitions";
-import { attemptRef, parseAttemptRef } from "./task-refs";
+import { withTask } from "./task-definitions";
+import { attemptRef } from "./task-refs";
 import { userHandles } from "./users";
 import { runInSandbox, STEP_RETRIES, storeLogs } from "./workflows";
 import type { ScriptOptions } from "./workflows";
@@ -240,9 +240,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
     let merge: LandingMerge | null = null;
     if (landing === null) {
       // Named apart from the steps it replaced, whose recorded outputs had other shapes.
-      ({ config, size } = await step.do("pipeline config", oneMinute, () =>
-        this.#config(params.project, params.line, main),
-      ));
+      ({ config, size } = await step.do("pipeline config", oneMinute, () => this.#config(params, main)));
       // A task's definitions never change `network.allow`, so the run's config gives `main`'s.
       allow = networkAllow(config);
       const found = await step.do("base", oneMinute, () =>
@@ -321,16 +319,16 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
   /**
    * The run's config, its layers merged once: the project's config at `main` (the run's pinned commit
    * of it), then what the task defines over it. A clash between them makes it invalid. The e2e routes'
-   * attempts have no task row, so they get the project's alone. The Sandbox size is the project's own,
-   * which a task's definitions never change, even when they clash.
+   * attempts have no task row, so they get the project's alone. Reading the task's checks takes the
+   * run's trust if someone other than the owner wrote one (`TaskStore.runDefinitions`). The Sandbox
+   * size is the project's own, which a task's definitions never change, even when they clash.
    */
-  async #config(projectId: string, line: string, main: string): Promise<{ config: ConfigResult; size: SandboxSize }> {
-    const task = parseAttemptRef(line)?.task;
+  async #config(params: RunParams, main: string): Promise<{ config: ConfigResult; size: SandboxSize }> {
     const [project, definitions] = await Promise.all([
-      loadConfig(reposFor(this.env), projectId, main),
-      task === undefined ? NO_TASK_DEFINITIONS : this.env.PROJECT.getByName(projectId).definitionsOf(task),
+      loadConfig(reposFor(this.env), params.project, main),
+      this.env.PROJECT.getByName(params.project).runDefinitions(params.run),
     ]);
-    const config = pipelineConfig(withTask(project, definitions), pipelineFor(line));
+    const config = pipelineConfig(withTask(project, definitions), pipelineFor(params.line));
     return { config, size: sandboxSize(project) };
   }
 

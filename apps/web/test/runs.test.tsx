@@ -362,7 +362,7 @@ function waitingRun(id: number, fields: Partial<RunWithOutcome> = {}): Run {
     finishedAt: null,
     gate: null,
     cancellable: true,
-    waiting: { head: SHA, attempt: "t2a1", base: BASE, secrets: ["DEPLOY", "PREVIEW"] },
+    waiting: { head: SHA, attempt: "t2a1", base: BASE, secrets: ["DEPLOY", "PREVIEW"], taskCheck: null },
     ...fields,
   });
 }
@@ -418,7 +418,7 @@ describe("runs waiting for you", () => {
       pipeline: "main",
       trigger: "merge",
       sha: null,
-      waiting: { head: SHA, attempt: "t2a1", base: null, secrets: ["DEPLOY"] },
+      waiting: { head: SHA, attempt: "t2a1", base: null, secrets: ["DEPLOY"], taskCheck: null },
     });
     server.use(...serveWaiting([landing]));
     await renderApp("/ada/alpha");
@@ -429,6 +429,22 @@ describe("runs waiting for you", () => {
       `/ada/alpha/compare/main...${SHA}?attempt=t2a1`,
     );
     expect(within(waiting).getByRole("button", { name: "Start run 9" })).toBeInTheDocument();
+  });
+
+  it("says when a task check someone else wrote is why a run of the owner's push waits", async () => {
+    const run = waitingRun(8, {
+      waiting: {
+        head: SHA,
+        attempt: "t2a1",
+        base: BASE,
+        secrets: ["DEPLOY"],
+        taskCheck: { name: "lint", writtenBy: { id: "u2", handle: "bob" } },
+      },
+    });
+    server.use(...serveWaiting([run]));
+    await renderApp("/ada/alpha/runs");
+    const waiting = within(await section("Waiting for you")).getByRole("listitem", { name: "Run 8" });
+    expect(waiting).toHaveTextContent("Secrets: DEPLOYTask check lint was written by bob");
   });
 
   it("lists every one waiting, past the first page", async () => {
@@ -462,7 +478,7 @@ describe("runs waiting for you", () => {
 
   it("shows why Start was refused", async () => {
     const stale = waitingRun(8, {
-      waiting: { head: "b".repeat(40), attempt: "t2a1", base: BASE, secrets: ["DEPLOY"] },
+      waiting: { head: "b".repeat(40), attempt: "t2a1", base: BASE, secrets: ["DEPLOY"], taskCheck: null },
     });
     server.use(...serveWaiting([stale]));
     const { user } = await renderApp("/ada/alpha/runs");

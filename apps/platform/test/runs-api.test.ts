@@ -103,6 +103,7 @@ async function setup() {
     stopped,
     repos,
     projectId,
+    adaId: me.user.id,
     base: "/projects/greg/throng",
   };
 }
@@ -231,10 +232,29 @@ describe("POST /projects/{owner}/{project}/runs/{runId}/start", () => {
     expect(res.body).toMatchObject({
       status: "waiting",
       cancellable: true,
-      waiting: { head: sha, attempt: "t1a1", base: null, secrets: ["DEPLOY"] },
+      waiting: { head: sha, attempt: "t1a1", base: null, secrets: ["DEPLOY"], taskCheck: null },
     });
     const listed = await t.call("GET", `${t.base}/runs?status=waiting`, t.ada);
-    expect(listed.body["runs"][0]["waiting"]).toEqual({ head: sha, attempt: "t1a1", base: null, secrets: ["DEPLOY"] });
+    expect(listed.body["runs"][0]["waiting"]).toEqual({
+      head: sha,
+      attempt: "t1a1",
+      base: null,
+      secrets: ["DEPLOY"],
+      taskCheck: null,
+    });
+  });
+
+  it("says why a run of the owner's push waits: a task check someone else wrote, and who", async () => {
+    const t = await setup();
+    const id = t.run("t1a1");
+    t.queue().distrust(id, { name: "lint", writer: t.adaId });
+    await t.queue().drain();
+    expect(t.queue().wait(defined(t.queue().getRun(id)), ["DEPLOY"])).toBeTruthy();
+    const res = await t.call("GET", `${t.base}/runs/${id}`, t.greg);
+    expect(res.body).toMatchObject({
+      trusted: false,
+      waiting: { secrets: ["DEPLOY"], taskCheck: { name: "lint", writtenBy: { id: t.adaId, handle: "ada" } } },
+    });
   });
 
   it("gives a waiting run's base, so the owner reviews every commit Start would run, not just the head", async () => {
@@ -247,7 +267,7 @@ describe("POST /projects/{owner}/{project}/runs/{runId}/start", () => {
     const head = t.repos.commit(fork, { files: { "a.txt": "3\n" } }).hash;
     const { id } = await waitingRun(t, head);
     const res = await t.call("GET", `${t.base}/runs/${id}`, t.ada);
-    expect(res.body["waiting"]).toEqual({ head, attempt: "t1a1", base: main, secrets: ["DEPLOY"] });
+    expect(res.body["waiting"]).toEqual({ head, attempt: "t1a1", base: main, secrets: ["DEPLOY"], taskCheck: null });
   });
 
   it("starts it for the owner at the head they name: queued again, trusted, triggered `start`", async () => {

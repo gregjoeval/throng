@@ -55,8 +55,8 @@ import type {
 } from "./scoring.ts";
 import { keyringFrom, Secrets } from "./secrets.ts";
 import type { Keyring, SecretChange, SecretSummary } from "./secrets.ts";
-import { NO_TASK_DEFINITIONS, taskDefinitionsFrom } from "./task-definitions.ts";
-import type { TaskDefinitions, TaskDefinitionsInput } from "./task-definitions.ts";
+import { checkWriters, NO_TASK_DEFINITIONS, taskDefinitionsFrom } from "./task-definitions.ts";
+import type { CheckWriter, TaskDefinitions, TaskDefinitionsInput } from "./task-definitions.ts";
 import { attemptRef, parseAttemptRef, reservedTask, taskBranchRef, taskRef } from "./task-refs.ts";
 import type { Actor } from "./tokens.ts";
 import { Verdicts } from "./verdicts.ts";
@@ -114,6 +114,11 @@ export interface StoredTask {
   attempt_limit: number | null;
   /** What the task defines over the project's config. */
   definitions: TaskDefinitions;
+  /**
+   * Who wrote each of its checks, in their order. A check saved before writers were is taken as its
+   * creator's and not the owner's.
+   */
+  check_writers: CheckWriter[];
   /** Overrides the project's selection policy; null to use the project's. */
   selection: SelectionPolicy | null;
 }
@@ -346,6 +351,8 @@ interface TaskRow {
   selection: string | null;
   /** The head its task branch's last recorded push left, or null when it has none. */
   task_head: string | null;
+  /** `CheckWriter[]` as JSON: who wrote each of its checks; null for a task saved before writers were. */
+  check_writers: string | null;
 }
 
 /** A push-to-create between forking and creating its attempt. */
@@ -460,7 +467,7 @@ const ATTEMPT_COLUMNS = [
  * Columns added to tasks after their table was made: what a task defines over the project's config,
  * its selection policy and the head of its task branch.
  */
-const TASK_COLUMNS = ["definitions TEXT", "selection TEXT", "task_head TEXT"];
+const TASK_COLUMNS = ["definitions TEXT", "selection TEXT", "task_head TEXT", "check_writers TEXT"];
 
 /**
  * Creates the store's tables, adds the journal's and attempts' newer columns to tables that predate
@@ -608,8 +615,9 @@ export class TaskStore {
     return this.#sql.transaction(() => {
       const number = this.#next("tasks");
       this.#sql.exec(
-        `INSERT INTO tasks (number, title, body, creator, state, created_at, attempt_limit, definitions, selection)
-         VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?)`,
+        `INSERT INTO tasks (number, title, body, creator, state, created_at, attempt_limit, definitions, selection,
+           check_writers)
+         VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)`,
         number,
         input.title,
         input.body ?? "",
@@ -618,6 +626,7 @@ export class TaskStore {
         input.attemptLimit ?? null,
         storedDefinitions({ checks: input.checks ?? [], metrics: input.metrics ?? [] }),
         storedSelection(input.selection ?? null),
+        JSON.stringify(checkWriters(input.checks ?? [], [], [], checkEditor(project, actor))),
       );
       this.#journal(actor, "created", number, null);
       return this.#task(number);
@@ -635,6 +644,29 @@ export class TaskStore {
   definitionsOf(task: number): TaskDefinitions {
     const [row] = this.#sql.exec<TaskRow>("SELECT * FROM tasks WHERE number = ?", task);
     return row === undefined ? NO_TASK_DEFINITIONS : toTask(row).definitions;
+  }
+
+  /**
+   * For run `id`'s Workflow, as it reads its config: what its line's task defines over the project's
+   * config (`definitionsOf`). A run of the owner's push that would run a task check someone else
+   * wrote stops being trusted here, recording which check and who wrote it, as the check runs from
+   * the setups' snapshot and could read what they left behind. A run the owner started stays trusted
+   * whoever wrote its task's checks: Start was the owner's review.
+   */
+  runDefinitions(id: number): TaskDefinitions {
+    return this.#sql.transaction(() => {
+      const run = this.scoring.getRun(id);
+      if (run === null) throw new Error(`no run ${id}`);
+      const number = parseAttemptRef(run.line)?.task;
+      const [row] = number === undefined ? [] : this.#sql.exec<TaskRow>("SELECT * FROM tasks WHERE number = ?", number);
+      if (row === undefined) return NO_TASK_DEFINITIONS;
+      const task = toTask(row);
+      const foreign = task.check_writers.find((writer) => !writer.owner);
+      if (run.trusted && run.trigger !== "start" && foreign !== undefined) {
+        this.scoring.distrust(id, { name: foreign.name, writer: foreign.user });
+      }
+      return task.definitions;
+    });
   }
 
   /** The project's tasks by number. Obsolete tasks are left out unless `state` asks for them. */
@@ -684,8 +716,13 @@ export class TaskStore {
     const selection = storedSelection(input.selection === undefined ? current.selection : input.selection);
     const reselecting = selection !== storedSelection(current.selection);
     if (reselecting) this.#maySetSelection(project, actor);
-    const definitions = storedDefinitions(
-      config === null ? current.definitions : editedDefinitions(input, current.definitions, config),
+    const edited = config === null ? current.definitions : editedDefinitions(input, current.definitions, config);
+    const definitions = storedDefinitions(edited);
+    const writers = checkWriters(
+      edited.checks,
+      current.definitions.checks,
+      current.check_writers,
+      checkEditor(project, actor),
     );
     const redefining = definitions !== storedDefinitions(current.definitions);
     // A rescore could withdraw a candidate, and a new policy could end the vote's say.
@@ -693,12 +730,14 @@ export class TaskStore {
       throw invalidState(`${taskRef(current.number)} has an open vote; close it first`);
     }
     this.#sql.exec(
-      "UPDATE tasks SET title = ?, body = ?, attempt_limit = ?, definitions = ?, selection = ? WHERE number = ?",
+      `UPDATE tasks SET title = ?, body = ?, attempt_limit = ?, definitions = ?, selection = ?, check_writers = ?
+       WHERE number = ?`,
       input.title ?? current.title,
       input.body ?? current.body,
       input.attemptLimit === undefined ? current.attempt_limit : input.attemptLimit,
       definitions,
       selection,
+      JSON.stringify(writers),
       current.number,
     );
     if (redefining) {
@@ -3551,6 +3590,7 @@ function attemptCounter(task: number): string {
 }
 
 function toTask(row: TaskRow): StoredTask {
+  const definitions = row.definitions === null ? NO_TASK_DEFINITIONS : upgradeDefinitions(row.definitions);
   return {
     number: row.number,
     title: row.title,
@@ -3561,7 +3601,11 @@ function toTask(row: TaskRow): StoredTask {
     closed_at: row.closed_at,
     closed_by: row.closed_by,
     attempt_limit: row.attempt_limit,
-    definitions: row.definitions === null ? NO_TASK_DEFINITIONS : upgradeDefinitions(row.definitions),
+    definitions,
+    check_writers:
+      row.check_writers === null
+        ? definitions.checks.map((check) => ({ name: check.name, user: row.creator, owner: false }))
+        : (JSON.parse(row.check_writers) as CheckWriter[]),
     selection: row.selection === null ? null : (JSON.parse(row.selection) as SelectionPolicy),
   };
 }
@@ -3676,6 +3720,11 @@ function mayGrant(project: ProjectContext, actor: Actor): void {
 /** Whether `actor`'s push is the owner's, as themselves or under an alias: a run of what they pushed is trusted. */
 function isOwnersPush(project: ProjectContext, actor: Actor): boolean {
   return actor.user.id === project.owner;
+}
+
+/** Who writes the task checks `actor` sets: the owner when it's them, as for a push (`isOwnersPush`). */
+function checkEditor(project: ProjectContext, actor: Actor): Omit<CheckWriter, "name"> {
+  return { user: actor.user.id, owner: isOwnersPush(project, actor) };
 }
 
 /** The attempt's author, or one of their aliases, holds its claim. */

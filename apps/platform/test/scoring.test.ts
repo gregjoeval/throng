@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { DEFAULT_CHECK_TIMEOUT_MS } from "../src/config.ts";
+import type { CheckConfig } from "../src/config.ts";
 import { ServiceError } from "../src/errors.ts";
 import type { CheckResult, LegacyResult, ScoringResult } from "../src/results.ts";
 import { runReport, SCORING_CAP } from "../src/scoring.ts";
@@ -92,7 +94,7 @@ function setup() {
   /** A task by ada with one draft attempt by ada. */
   const draft = async (): Promise<AttemptInput> => at(await drafts(), 0);
 
-  return { repos, base, store, workflow, tornDown, journal, runs, commit, pushed, drafts, draft };
+  return { repos, base, sql, store, workflow, tornDown, journal, runs, commit, pushed, drafts, draft };
 }
 
 async function code(promise: Promise<unknown>): Promise<string> {
@@ -1065,6 +1067,116 @@ describe("starting a waiting run", () => {
     );
     await withSecret(t);
     expect((await t.store.startRun(PROJECT, owner, { run: run.id, sha })).status).toBe("queued");
+  });
+});
+
+/** A task's check, as a task saved through the API stores it. */
+const LINT: CheckConfig = {
+  name: "lint",
+  command: "npm run lint",
+  timeoutMs: DEFAULT_CHECK_TIMEOUT_MS,
+  after: [],
+  secrets: [],
+  group: null,
+  caches: [],
+  source: "task",
+};
+
+/**
+ * An open attempt the owner pushed, on a task `creator` made with check `lint`, while `main`'s config
+ * names DEPLOY; its run is running, and has read its task's checks as its Workflow does.
+ */
+async function ownersPushOn(t: ReturnType<typeof setup>, creator: Actor) {
+  t.repos.commit(ORIGIN, { files: { ".throng/config.yml": DEPLOY_CONFIG } });
+  await withSecret(t);
+  const task = t.store.createTask(PROJECT, creator, { title: "Fix it", checks: [LINT] });
+  const [made] = await t.store.createAttempts(PROJECT, owner, { task: task.number, count: 1 });
+  const ref = { task: defined(made).task, number: defined(made).number };
+  t.pushed(ref, t.commit(ref, "work\n"), owner);
+  await t.store.openAttempt(PROJECT, owner, ref);
+  await t.store.scoring.drain();
+  const run = at(t.runs(ref), 0);
+  expect(t.store.runDefinitions(run.id).checks).toEqual([LINT]);
+  return { ref, task: task.number, run: defined(t.store.scoring.getRun(run.id)) };
+}
+
+describe("trust and a task's checks", () => {
+  it("trusts a run of the owner's push whose task checks the owner wrote, as themselves or under an alias", async () => {
+    for (const creator of [owner, actor("owner001", "claude")]) {
+      const t = setup();
+      const { run } = await ownersPushOn(t, creator);
+      expect(run).toMatchObject({ trusted: true, task_check: null });
+      expect(t.store.pipelinePlanned(run.id, [], DEPLOYS)).toEqual({ kind: "start" });
+    }
+  });
+
+  it("doesn't trust a run of the owner's push that runs a task check someone else wrote", async () => {
+    const t = setup();
+    const { run } = await ownersPushOn(t, ada);
+    expect(run).toMatchObject({ trusted: false, task_check: { name: "lint", writer: ada.user.id } });
+    // It holds no secret and saves no cache: naming a secret, it waits for the owner.
+    expect(() => t.store.pipelineSecrets(run.id, ["DEPLOY"])).toThrow(/may hold no secrets/u);
+    expect(t.store.pipelineCaches(run.id, [{ name: "pnpm", keyHash: "k1" }])).toMatchObject([{ save: null }]);
+    expect(t.store.pipelinePlanned(run.id, [], DEPLOYS)).toEqual({ kind: "waiting" });
+    expect(t.store.scoring.getRun(run.id)).toMatchObject({ status: "waiting", secrets: ["DEPLOY"] });
+  });
+
+  it("runs as normal, untrusted, a run of the owner's push naming no secret that runs someone else's task check", async () => {
+    const t = setup();
+    const { run } = await ownersPushOn(t, ada);
+    expect(t.store.pipelinePlanned(run.id, [], [])).toEqual({ kind: "start" });
+    expect(t.store.scoring.getRun(run.id)).toMatchObject({ status: "running", trusted: false });
+  });
+
+  it("trusts a run the owner started, whoever wrote its task's checks", async () => {
+    const t = setup();
+    const { run } = await ownersPushOn(t, ada);
+    t.store.pipelinePlanned(run.id, [], DEPLOYS);
+    await t.store.startRun(PROJECT, owner, { run: run.id, sha: defined(run.sha) });
+    await t.store.scoring.drain();
+    expect(t.store.runDefinitions(run.id).checks).toEqual([LINT]);
+    expect(t.store.scoring.getRun(run.id)).toMatchObject({ status: "running", trusted: true, trigger: "start" });
+    expect(t.store.pipelinePlanned(run.id, [], DEPLOYS)).toEqual({ kind: "start" });
+    expect(t.store.pipelineSecrets(run.id, ["DEPLOY"])).toMatchObject({ sealed: [{ name: "DEPLOY" }] });
+  });
+
+  it("takes a check from before writers were recorded as its task's creator's", async () => {
+    const t = setup();
+    t.repos.commit(ORIGIN, { files: { ".throng/config.yml": DEPLOY_CONFIG } });
+    const task = t.store.createTask(PROJECT, owner, { title: "Fix it", checks: [LINT] });
+    t.sql.exec("UPDATE tasks SET check_writers = NULL WHERE number = ?", task.number);
+    expect(t.store.getTask(PROJECT, owner, { task: task.number }).check_writers).toEqual([
+      { name: "lint", user: owner.user.id, owner: false },
+    ]);
+  });
+
+  it("records who wrote each check: an edit that leaves one unchanged keeps its writer", async () => {
+    const t = setup();
+    const task = t.store.createTask(PROJECT, ada, { title: "Fix it", checks: [LINT] }).number;
+    const writers = () => t.store.getTask(PROJECT, owner, { task }).check_writers;
+    const adas = { name: "lint", user: ada.user.id, owner: false };
+    expect(writers()).toEqual([adas]);
+
+    await t.store.editTask(PROJECT, owner, { task, title: "Fix it now" });
+    await t.store.editTask(PROJECT, owner, { task, checks: [{ name: "lint", command: "npm run lint" }] });
+    expect(writers()).toEqual([adas]);
+
+    const ownersAlias = actor("owner001", "claude");
+    await t.store.editTask(PROJECT, ownersAlias, {
+      task,
+      checks: [{ name: "lint", command: "npm run lint -- --fix" }],
+    });
+    const owners = { name: "lint", user: owner.user.id, owner: true };
+    expect(writers()).toEqual([owners]);
+
+    await t.store.editTask(PROJECT, ada, {
+      task,
+      checks: [
+        { name: "lint", command: "npm run lint -- --fix" },
+        { name: "types", command: "npm run typecheck" },
+      ],
+    });
+    expect(writers()).toEqual([owners, { name: "types", user: ada.user.id, owner: false }]);
   });
 });
 

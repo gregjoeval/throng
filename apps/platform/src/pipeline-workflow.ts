@@ -129,12 +129,15 @@ interface CheckStage extends Omit<CheckRun, "setupsRerun" | "exit"> {
  * lands). Each copies its logs to R2 within its step, while it still runs, then stops. When the run
  * ends, or a newer head cancels it, every planned container is destroyed and the snapshot released.
  *
- * Setups and checks name secrets. The plan names them to the project, which refuses the run when one
- * has no value or isn't allowed in its pipeline, and hands an untrusted run that names any to the
- * owner (it waits, and this Workflow ends having started nothing). In a trusted run, the step that
- * starts a container loads the secrets it holds, as the settings are then, and opens them there:
- * the setup container holds every setup's, a check's container its own (and the setups' when it
- * re-runs them). Params, plans and step results carry names only, and what a container held is
+ * Setups, checks and `main`'s post-gate steps name secrets; `main`'s own reach only its post-gate
+ * steps. The plan names them to the project, which refuses the run when one has no value or isn't
+ * allowed in its pipeline, and hands an untrusted run that names any to the owner (it waits, and
+ * this Workflow ends having started nothing). In a trusted run, the step that starts a container
+ * loads the secrets it holds, as the settings are then, and opens them there: the setup container
+ * holds every setup's, a check's container its own (and the setups' when it re-runs them). A
+ * post-gate step's are loaded in the step that runs its command, never retried, and go to that
+ * command alone; the step readying its container holds only the setups' when it re-runs them.
+ * Params, plans and step results carry names only, and what a container held is
  * masked in its logs, metric values and errors. Whatever a setup writes to disk, a secret included,
  * is in the snapshot the checks start from, which Cloudflare keeps until 30 days after its last
  * restore.
@@ -741,6 +744,10 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
           },
           () => this.#stepReady(context, snapshot, postGate),
         );
+        if ("error" in ready) {
+          ran.set(postGate.name, { exit: null, durationMs: 0, logged: false, notes: [], error: ready.error });
+          break;
+        }
         const notes = [
           ...(ready.setupsRerun && plan.setup.length > 0 ? [STEP_SETUPS_RERUN(snapshot)] : []),
           ...ready.cacheNotes,
@@ -751,10 +758,10 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
             retries: { limit: 0, delay: "1 second" },
             timeout: POST_GATE_STEP_TIMEOUT_MS + 2 * STEP_SLACK_MS + cacheTransfersMs(postGate.caches, 1),
           },
-          () => this.#stepRun(context, postGate, notes),
+          () => this.#stepRun(context, postGate, ready.setupsRerun, notes),
         );
         ran.set(postGate.name, run);
-        if (run.exit !== 0) break;
+        if (run.exit !== 0 || run.error !== undefined) break;
       }
     }
     return withPostGateSteps(scored, plan.steps, ran);
@@ -794,75 +801,108 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
 
   /**
    * Readies a post-gate step's container: restored from the snapshot, or with the setups re-run, and
-   * with the caches it uses restored. Says how restoring them went.
+   * with the caches it uses restored. Says how restoring them went. Re-running the setups, it holds
+   * the setups' secrets for them, as a check's container does, and fails the step, naming one gone
+   * or no longer allowed; the step's own secrets wait for its command.
    */
   async #stepReady(
     context: RunContext,
     snapshot: SandboxSnapshot | null,
     postGate: StepConfig,
-  ): Promise<StepReady & { cacheNotes: string[] }> {
+  ): Promise<(StepReady & { cacheNotes: string[] }) | { error: string }> {
     const { instanceId, params, plan, size, network } = context;
     const name = pipelineSandboxName(instanceId, { kind: "step", name: postGate.name });
+    let held = NOTHING_HELD;
     let cacheNotes: string[] = [];
-    const run = await runInSandbox(
-      this.env,
-      instanceId,
-      { project: params.project, line: params.line },
-      "pipeline",
-      (g) => stepReadyScript(g.lineRead.remote, params.sha ?? "", plan.setup, postGate),
-      {
-        network,
-        size,
-        sandbox: name,
-        env: runContext(params),
-        snapshot,
-        timeoutMs: setupTimeoutMs(plan) + STEP_SLACK_MS,
-        prepare: async (start, fromSnapshot) => {
-          cacheNotes = await this.#prepareCaches(context, name, postGate.caches, start, fromSnapshot);
+    try {
+      const run = await runInSandbox(
+        this.env,
+        instanceId,
+        { project: params.project, line: params.line },
+        "pipeline",
+        (g) => stepReadyScript(g.lineRead.remote, params.sha ?? "", plan.setup, postGate),
+        {
+          network,
+          size,
+          sandbox: name,
+          env: async (fromSnapshot) => {
+            const holding = await this.#hold(params, fromSnapshot ? [] : setupSecrets(plan));
+            if ("error" in holding) throw new SecretUnavailable(holding.error);
+            held = holding;
+            return { ...runContext(params), ...holding.env };
+          },
+          snapshot,
+          timeoutMs: setupTimeoutMs(plan) + STEP_SLACK_MS,
+          prepare: async (start, fromSnapshot) => {
+            cacheNotes = await this.#prepareCaches(context, name, postGate.caches, start, fromSnapshot);
+          },
         },
-      },
-    );
-    const result = parseResult<StepReady>(run.stdout);
-    if (result === null) {
-      throw new Error(`step ${postGate.name} wasn't readied (exit ${run.exitCode}): ${run.stderr.slice(-2000)}`);
+      );
+      const result = parseResult<StepReady>(run.stdout);
+      if (result === null) {
+        throw new Error(`step ${postGate.name} wasn't readied (exit ${run.exitCode}): ${run.stderr.slice(-2000)}`);
+      }
+      return { ...result, cacheNotes: cacheNotes.map(held.mask) };
+    } catch (error) {
+      if (!(error instanceof SecretUnavailable)) throw maskedError(error, held.mask);
+      await this.env.SANDBOX.getByName(name).destroy();
+      return { error: error.message };
     }
-    return { ...result, cacheNotes };
   }
 
   /**
    * Runs a post-gate step's command once in the container its ready step left, then stores its log and
    * stops the container. A container that was lost meanwhile is never started again: the command
-   * doesn't run, and the step throws, ending the run `errored`.
+   * doesn't run, and the step throws, ending the run `errored`. In a trusted run the command holds
+   * the secrets the step names, its pipeline's among them, loaded here as it starts, so they reach
+   * this command alone; one that's gone or no longer allowed fails the step, naming it, before the
+   * command starts. What it held, and the setups' secrets when its container re-ran them into its
+   * log, are masked in its log and any error.
    */
-  async #stepRun(context: RunContext, postGate: StepConfig, notes: string[]): Promise<PostGateRun> {
-    const { instanceId, params, size } = context;
+  async #stepRun(
+    context: RunContext,
+    postGate: StepConfig,
+    setupsRerun: boolean,
+    notes: string[],
+  ): Promise<PostGateRun> {
+    const { instanceId, params, plan, size } = context;
     const name = pipelineSandboxName(instanceId, { kind: "step", name: postGate.name });
     const sandbox = this.env.SANDBOX.getByName(name);
-    // Running already, the container keeps the access it started with; one that has to start gets none.
-    const run = await sandbox.run(stepScript(postGate, POST_GATE_STEP_TIMEOUT_MS), {
-      access: { grants: [], ...NO_NETWORK },
-      size,
-      timeoutMs: POST_GATE_STEP_TIMEOUT_MS + STEP_SLACK_MS,
-      env: runContext(params),
-    });
-    const result = parseResult<StepRun>(run.stdout);
-    if (result === null) {
-      throw new Error(`step ${postGate.name} gave no result (exit ${run.exitCode}): ${run.stderr.slice(-2000)}`);
+    const held = await this.#hold(params, [...postGate.secrets, ...(setupsRerun ? setupSecrets(plan) : [])]);
+    if ("error" in held) {
+      await sandbox.destroy();
+      return { exit: null, durationMs: 0, logged: false, notes, error: held.error };
     }
-    // Saving a cache is only ever a note, so it never fails this step, which isn't retried.
-    const saved =
-      result.exit === 0 ? await this.#saveCaches(context, name, savedBy(context, name, postGate.caches)) : [];
-    const noted = [...notes, ...saved];
-    const log = stepLogName(postGate.name);
-    const logs = await storeLogs(this.env, {
-      sandbox: name,
-      names: [log],
-      key: (stored) => logKey({ project: params.project, line: params.line, run: params.run }, stored),
-      size,
-      notes: new Map([[log, noted]]),
-    });
-    await sandbox.destroy();
-    return { ...result, logged: logs.includes(log), notes: noted };
+    try {
+      // Running already, the container keeps the access it started with; one that has to start gets none.
+      const run = await sandbox.run(stepScript(postGate, POST_GATE_STEP_TIMEOUT_MS), {
+        access: { grants: [], ...NO_NETWORK },
+        size,
+        timeoutMs: POST_GATE_STEP_TIMEOUT_MS + STEP_SLACK_MS,
+        env: { ...runContext(params), ...pick(held.env, postGate.secrets) },
+      });
+      const result = parseResult<StepRun>(run.stdout);
+      if (result === null) {
+        throw new Error(`step ${postGate.name} gave no result (exit ${run.exitCode}): ${run.stderr.slice(-2000)}`);
+      }
+      // Saving a cache is only ever a note, so it never fails this step, which isn't retried.
+      const saved =
+        result.exit === 0 ? await this.#saveCaches(context, name, savedBy(context, name, postGate.caches)) : [];
+      const noted = [...notes, ...saved.map(held.mask)];
+      const log = stepLogName(postGate.name);
+      const logs = await storeLogs(this.env, {
+        sandbox: name,
+        names: [log],
+        key: (stored) => logKey({ project: params.project, line: params.line, run: params.run }, stored),
+        size,
+        notes: new Map([[log, noted]]),
+        mask: held.mask,
+      });
+      await sandbox.destroy();
+      return { ...result, logged: logs.includes(log), notes: noted };
+    } catch (error) {
+      throw maskedError(error, held.mask);
+    }
   }
 
   /**
@@ -906,6 +946,11 @@ function secretlessSetup(plan: Pick<ScorePlan, "setup">, refused: SecretRefusal)
     snapshot: null,
     logs: [],
   };
+}
+
+/** The variables of `env` named `names`. */
+function pick(env: Record<string, string>, names: readonly string[]): Record<string, string> {
+  return Object.fromEntries(Object.entries(env).filter(([name]) => names.includes(name)));
 }
 
 /** Every secret the setups name, each once: what the setup container holds. */

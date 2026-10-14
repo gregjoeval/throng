@@ -95,14 +95,19 @@ describe("setting a secret", () => {
       files: {
         ".throng/config.yml":
           "setup:\n  - { name: deps, command: npm ci, secrets: [NPM_TOKEN] }\n" +
-          "checks:\n  - { name: preview, command: npm run preview, secrets: [DEPLOY_TOKEN] }\n",
+          "checks:\n  - { name: preview, command: npm run preview, secrets: [DEPLOY_TOKEN] }\n" +
+          "pipelines:\n  main:\n    secrets: [PROD_TOKEN]\n" +
+          "    steps:\n      - { name: deploy, command: npm run deploy }\n",
       },
     });
     await call("PUT", `${SECRETS}/DEPLOY_TOKEN`, greg, { value: VALUE, pipelines: ["default"] });
+    await call("PUT", `${SECRETS}/PROD_TOKEN`, greg, { value: VALUE, pipelines: ["main"] });
     const listed = await call("GET", SECRETS, gregClaude);
     expect(listed.body["uses"]).toEqual([
       { name: "DEPLOY_TOKEN", steps: ["check preview"], hasValue: true, notAllowedIn: ["main"] },
       { name: "NPM_TOKEN", steps: ["setup deps"], hasValue: false, notAllowedIn: [] },
+      // A post-gate step runs only in main, so main is the one place it must be allowed.
+      { name: "PROD_TOKEN", steps: ["step deploy"], hasValue: true, notAllowedIn: [] },
     ]);
   });
 

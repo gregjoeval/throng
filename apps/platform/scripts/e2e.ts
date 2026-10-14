@@ -34,6 +34,10 @@
 // of the owner's push writes a hash of it, and the stored log shows the mask, never the value; nothing deploys),
 // caches (an attempt lands; the trusted `main` run of it saves a cache, which the next attempt's run restores,
 // a hit in its setup's notes, and saves nothing; through `/api`),
+// pipeline (two setups and three checks, one waiting for the others with `after` in a group `main`
+// doesn't run; the owner sets a secret allowed in `main` and lands an attempt; the `main` run merges,
+// runs the setups and `main`'s checks, lands, then a post-gate step naming the secret writes a hash of
+// it, and its stored log shows the mask; through `/api`),
 // refs (attempt archive refs: pushable, listed, kept across pushes to main, and copied by
 // the Worker).
 //
@@ -299,6 +303,7 @@ const scenarios: Record<string, () => Promise<void>> = {
   coalesce,
   secrets,
   caches,
+  pipeline,
   intrusion,
   deps,
   refs,
@@ -1271,6 +1276,103 @@ checks:
   const stamped = await throngText(p, `/runs/${second.result.run}/logs/stamped`, "text/plain");
   assert(stamped.startsWith(`main/${mainRun.id}\n`), `expected main's stamp in the attempt's check:\n${stamped}`);
   await finish(p.project, p.work, timeline);
+}
+
+/**
+ * A pipeline with two setups and three checks: `test` waits for `lint` with `after`, both in the
+ * `verify` group that `main` runs, and `extra` in a group it doesn't. The owner sets a secret allowed
+ * only in `main`, and a post-gate step of `main` names it. An attempt is opened, selected and landed
+ * by the owner. Its `default` run ran `test` after `lint`; the landing's `main` run merges, runs the
+ * setups and `verify`'s checks only, lands, then runs the step, which writes a hash of the secret to
+ * its log, where the value shows only as the mask. The landed sha is `main`'s.
+ */
+async function pipeline(): Promise<void> {
+  const timeline = new Timeline();
+  const value = `e2e-secret-${randomBytes(12).toString("hex")}`;
+  const hash = createHash("sha256").update(value).digest("hex");
+  const p = await setUpRealProject(timeline, {
+    "scripts/secret.js": `import { createHash } from "node:crypto";
+const value = process.env.E2E_SECRET ?? "";
+if (process.env.THRONG_PIPELINE !== "main") throw new Error("not main's pipeline");
+console.log("sha256 " + createHash("sha256").update(value).digest("hex"));
+console.log("value " + value);
+`,
+    ".throng/config.yml": `setup:
+  - { name: tools, command: node --version }
+  - { name: deps, command: npm --version }
+checks:
+  - { name: lint, command: "sleep 5; echo ended $(date +%s%3N)", group: verify }
+  - { name: test, command: "echo started $(date +%s%3N)", group: verify, after: lint }
+  - { name: extra, command: "true", group: extra }
+pipelines:
+  main:
+    groups: [verify]
+    steps:
+      - { name: deploy, command: node scripts/secret.js, secrets: [E2E_SECRET] }
+`,
+  });
+  await throng(p, "PUT", "/secrets/E2E_SECRET", { value, pipelines: ["main"] });
+  timeline.mark("secret set");
+
+  const [t1, a1] = ["t1", "t1a1"];
+  await createTask(p, t1, "Deploy a change");
+  await createAttempts(p, t1, [a1], timeline);
+  const head = await editAndPush(p, a1, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
+  await throng(p, "POST", `/attempts/${a1}/open`);
+  const attempt = await scoredHead(p, a1, head);
+  assert(attempt.result.gate === "passed", `expected the attempt to pass: ${JSON.stringify(attempt.result.checks)}`);
+  const logOf = (id: number, log: string) => throngText(p, `/runs/${id}/logs/${log}`, "text/plain");
+  const ended = loggedTime(await logOf(attempt.result.run, "lint"), "ended");
+  const started = loggedTime(await logOf(attempt.result.run, "test"), "started");
+  assert(started >= ended, `expected test to start after lint ended: ${started} < ${ended}`);
+  const attemptRun = await throng<ListedRun & RunOutcome>(p, "GET", `/runs/${attempt.result.run}`);
+  const attemptSteps = attemptRun.outcome?.steps ?? [];
+  assert(
+    attemptSteps.find((s) => s.name === "extra")?.outcome === "passed",
+    `expected the attempt to run every check, extra included: ${JSON.stringify(attemptSteps.map((s) => s.name))}`,
+  );
+
+  await throng(p, "POST", `/tasks/${t1}/selection`, { attempt: a1 });
+  const landed = await mergedSha(p, t1);
+  timeline.mark("t1 landed");
+  const mainRun = await poll("main's run of the landing", async () => {
+    const { runs } = await throng<{ runs: ListedRun[] }>(p, "GET", "/runs?line=main&status=done");
+    return runs.find((r) => r.sha === landed) ?? null;
+  });
+  const detail = await throng<ListedRun & RunOutcome>(p, "GET", `/runs/${mainRun.id}`);
+  const steps = detail.outcome?.steps.map((s) => [s.name, s.kind, s.outcome]) ?? [];
+  assert(
+    isDeepStrictEqual(steps, [
+      ["_diff", "check", "passed"],
+      ["merge", "step", "passed"],
+      ["tools", "setup", "passed"],
+      ["deps", "setup", "passed"],
+      ["lint", "check", "passed"],
+      ["test", "check", "passed"],
+      ["land", "step", "passed"],
+      ["deploy", "step", "passed"],
+    ]),
+    `unexpected main run steps ${JSON.stringify(steps)}`,
+  );
+  const deployLog = detail.outcome?.steps.find((s) => s.name === "deploy")?.log ?? null;
+  assert(deployLog !== null, "expected the post-gate step to store its log");
+  const log = await logOf(mainRun.id, deployLog);
+  assert(log.includes(`sha256 ${hash}`), `expected the post-gate step to have held the secret:\n${log}`);
+  assert(log.includes("value ***\n") && !log.includes(value), `expected the log to show only the mask:\n${log}`);
+
+  assert(
+    detail.outcome?.landed !== "conflict" && detail.outcome?.landed?.sha === landed,
+    `expected the run to have landed ${landed}: ${JSON.stringify(detail.outcome?.landed)}`,
+  );
+  await fetchMain(p);
+  const onMain = (await git(p.work, "rev-parse", "FETCH_HEAD")).trim();
+  assert(onMain === landed, `expected main at the landed sha ${landed}, got ${onMain}`);
+  await finish(p.project, p.work, timeline);
+}
+
+/** The time a check logged on a line `<word> <ms>`; NaN when it logged none. */
+function loggedTime(log: string, word: string): number {
+  return Number(new RegExp(`^${word} (\\d+)$`, "mu").exec(log)?.[1] ?? Number.NaN);
 }
 
 /** Two quick pushes to one attempt: the first run is cancelled; only the newest sha is scored. */

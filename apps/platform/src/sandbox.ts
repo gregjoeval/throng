@@ -7,6 +7,13 @@ const INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000;
 /** How long a script may run when its caller gives no timeout. */
 const COMMAND_TIMEOUT_MS = 5 * 60 * 1000;
 const CA_PATH = "/etc/cloudflare/certs/cloudflare-containers-ca.crt";
+/**
+ * The prefix `wrangler dev` gives the images it builds locally. Snapshots are a deployed Containers
+ * feature only, so a local run takes none and every check's container runs the setups itself.
+ */
+const LOCAL_IMAGE_PREFIX = "cloudflare-dev/";
+/** Where a container keeps the snapshot it took, until its run releases it. */
+const SNAPSHOT_KEY = "snapshot";
 
 // HTTPS interception re-signs traffic with the Containers CA, and exec() does not inherit the
 // environment from start(), so every command gets this.
@@ -23,13 +30,29 @@ const EXEC_ENV = {
   GIT_COMMITTER_EMAIL: "throng@localhost",
 };
 
-export interface RunOptions {
+/** How a container starts: what it may reach and its instance type, both fixed once it runs. */
+export interface StartOptions {
   /** What the container may reach; fixed when it starts. */
   access: OutboundAccess;
   /** The instance type the container starts at; a container already running keeps its own. */
   size: SandboxSize;
+}
+
+export interface RunOptions extends StartOptions {
   /** How long the script may run before it is stopped. */
   timeoutMs?: number;
+  /** Variables the script gets on top of the container's own, such as a pipeline run's `THRONG_*`. */
+  env?: Record<string, string>;
+}
+
+/**
+ * A snapshot of a container's whole filesystem, taken once its setups ran. Snapshots have no delete
+ * yet: Cloudflare keeps one until 30 days after it was taken or last restored.
+ */
+export interface SandboxSnapshot {
+  id: string;
+  /** In bytes. */
+  size: number;
 }
 
 export interface RunResult {
@@ -76,28 +99,38 @@ function withBearer(request: Request, token: string): Request {
   return new Request(request, { headers });
 }
 
-/** One container per role of a run, named by the run's Workflow instance id and the role. */
+/**
+ * One container of a run, named by the run's Workflow instance id and what it runs (`grants.ts`).
+ */
 export class RunSandbox extends DurableObject<Env> {
   readonly #container: Container;
   readonly #exports: RunSandboxState["exports"];
+  readonly #kv: SyncKvStorage;
 
   constructor(ctx: RunSandboxState, env: Env) {
     super(ctx, env);
     if (ctx.container === undefined) throw new Error("The container binding is not configured");
     this.#container = ctx.container;
     this.#exports = ctx.exports;
+    this.#kv = ctx.storage.kv;
   }
 
-  /** Runs a bash script in /workspace, starting the container (with its grants and size) if needed. */
-  async run(script: string, { access, size, timeoutMs = COMMAND_TIMEOUT_MS }: RunOptions): Promise<RunResult> {
-    const startMs = await this.#ensureStarted(access, size, timeoutMs);
+  /**
+   * Runs a bash script in /workspace, starting the container (with its grants and size) from the
+   * image if it isn't running.
+   */
+  async run(
+    script: string,
+    { access, size, timeoutMs = COMMAND_TIMEOUT_MS, env = {} }: RunOptions,
+  ): Promise<RunResult> {
+    const startMs = this.#container.running ? 0 : await this.#start({ access, size }, timeoutMs, null);
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), timeoutMs);
     const began = Date.now();
     try {
       const process = await this.#container.exec(["bash", "-c", script], {
         cwd: "/workspace",
-        env: EXEC_ENV,
+        env: { ...env, ...EXEC_ENV },
         signal: abort.signal,
       });
       const output = await process.output();
@@ -114,21 +147,65 @@ export class RunSandbox extends DurableObject<Env> {
     }
   }
 
+  /**
+   * Starts the container from `snapshot` rather than the image, for a script that `run` runs next
+   * (with a `timeoutMs` no longer than this one's). False when it didn't come up, with the container
+   * stopped again, so a caller can retry or run from the image instead. A container already running
+   * is left as it is.
+   */
+  async restore(snapshot: SandboxSnapshot, options: StartOptions, timeoutMs = COMMAND_TIMEOUT_MS): Promise<boolean> {
+    if (this.#container.running) return true;
+    try {
+      await this.#start(options, timeoutMs, snapshot);
+      return true;
+    } catch (error) {
+      console.warn({ event: "sandbox.restore_failed", snapshot: snapshot.id, error: String(error) });
+      await this.destroy().catch(() => {});
+      return false;
+    }
+  }
+
+  /**
+   * Snapshots the running container's whole filesystem, for other containers to start from, and
+   * keeps it until `releaseSnapshot`. Null under `wrangler dev`, which takes no snapshots. Throws if
+   * the container isn't running, or the snapshot fails.
+   */
+  async snapshot(): Promise<SandboxSnapshot | null> {
+    if (this.#container.images.sandbox?.startsWith(LOCAL_IMAGE_PREFIX) ?? false) return null;
+    const { id, size } = await this.#container.snapshotContainer({});
+    const snapshot = { id, size };
+    this.#kv.put(SNAPSHOT_KEY, snapshot);
+    return snapshot;
+  }
+
+  /**
+   * Lets go of the snapshot this container took, once its run is done with it, whether it finished
+   * or was cancelled; nothing when it took none. Containers can't delete a snapshot yet, so this
+   * records that it's no longer used, and Cloudflare deletes it 30 days after it was taken or last
+   * restored. Every run releases its snapshot here, so deleting it is one change once Containers can.
+   */
+  releaseSnapshot(): void {
+    const snapshot = this.#kv.get<SandboxSnapshot>(SNAPSHOT_KEY);
+    if (snapshot === undefined) return;
+    console.log({ event: "sandbox.snapshot_expires", snapshot: snapshot.id, size: snapshot.size });
+    this.#kv.delete(SNAPSHOT_KEY);
+  }
+
   async destroy(): Promise<void> {
     if (this.#container.running) await this.#container.destroy();
   }
 
-  async #ensureStarted(access: OutboundAccess, size: SandboxSize, timeoutMs: number): Promise<number> {
-    if (this.#container.running) return 0;
-    const image = this.#container.images.sandbox;
-    if (image === undefined) throw new Error("The sandbox image is not configured");
+  /** Starts the container from the image, or from `snapshot`, and returns how long that took. */
+  async #start({ access, size }: StartOptions, timeoutMs: number, snapshot: SandboxSnapshot | null): Promise<number> {
     const began = Date.now();
-    this.#container.start({
-      image,
-      instance: size,
-      // Only intercepted HTTPS leaves the container.
-      enableInternet: false,
-    });
+    // Only intercepted HTTPS leaves the container.
+    if (snapshot === null) {
+      const image = this.#container.images.sandbox;
+      if (image === undefined) throw new Error("The sandbox image is not configured");
+      this.#container.start({ image, instance: size, enableInternet: false });
+    } else {
+      this.#container.start({ containerSnapshot: { id: snapshot.id }, instance: size, enableInternet: false });
+    }
     const auth = this.#exports.OutboundAuth({ props: access });
     for (const host of interceptedHosts(access)) {
       await this.#container.interceptOutboundHttps(host, auth);

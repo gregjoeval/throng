@@ -88,18 +88,29 @@ export function pipelineFor(line: string): Pipeline {
   return line === MAIN_LINE ? "main" : "default";
 }
 
-/** What a Scoring Workflow is started with. */
-export interface ScoringParams {
+/** What a Pipeline Workflow is started with. */
+export interface PipelineParams {
   project: string;
-  /** The attempt, `t42a3`, which is also the run's line. */
-  attempt: string;
+  /** The line the run runs on: `t42a3` for an attempt. */
+  line: string;
   sha: string;
   /** The run's id, which its report back names. */
   run: number;
 }
 
-/** What a run's Workflow reports when it ends: its result, or the error that ended it. */
+/** What a run's Workflow reports when it ends: its outcome, or the error that ended it. */
+export type RunReport = { status: "done"; outcome: RunOutcome } | { status: "errored"; error: string };
+
+/**
+ * What a Scoring Workflow reported, before each step's outcome was a run's: an attempt's scoring
+ * result. Reports in this shape are still taken, from a run whose Workflow ran the old code.
+ */
 export type ScoringOutcome = { status: "done"; result: ScoringResult } | { status: "errored"; error: string };
+
+/** A report in the old shape as a run's report. */
+export function runReport(outcome: ScoringOutcome): RunReport {
+  return outcome.status === "done" ? { status: "done", outcome: runOutcome(outcome.result) } : outcome;
+}
 
 /** An attempt's scoring status: its current head's latest run that wasn't cancelled, or `none`. */
 export const ATTEMPT_SCORING_STATUSES = ["none", "queued", "running", "done", "errored"] as const satisfies readonly (
@@ -117,15 +128,18 @@ export interface AttemptScoring {
 }
 
 /** The part of a Workflow binding the queue uses; tests pass a fake. */
-export interface ScoringWorkflow {
-  create: (options: { id: string; params: ScoringParams }) => Promise<unknown>;
+export interface PipelineWorkflowBinding {
+  create: (options: { id: string; params: PipelineParams }) => Promise<unknown>;
   get: (id: string) => Promise<{ terminate: () => Promise<void> }>;
 }
 
 export interface ScoringRunner {
-  workflow: ScoringWorkflow;
-  /** Destroys a run's Sandboxes once its Workflow is stopped. */
-  teardown: (instanceId: string) => Promise<void>;
+  workflow: PipelineWorkflowBinding;
+  /**
+   * Destroys a run's Sandboxes once its Workflow is stopped, and lets go of its snapshot:
+   * `containers` are the ones its plan named, none when it was stopped before it planned.
+   */
+  teardown: (instanceId: string, containers: readonly string[]) => Promise<void>;
 }
 
 /** A pipeline run, as the project stores it. */
@@ -176,6 +190,8 @@ interface RunRow extends Omit<
   superseded: number;
   legacy_logs: number;
   torn_down: number;
+  /** The containers the run's plan named (JSON), once its Workflow planned them. */
+  containers: string | null;
 }
 
 export interface ScoringRequestInput {
@@ -227,6 +243,8 @@ const SCHEMA = [
   sha TEXT NOT NULL
 )`,
 ];
+/** Columns `pipeline_runs` gained after its first version, which a table that old lacks. */
+const PIPELINE_RUN_COLUMNS = ["containers TEXT"];
 /** Columns `scoring_runs` gained after its first version, which a table that old lacks. */
 const SCORING_RUN_COLUMNS = ["result TEXT", "error TEXT", "superseded INTEGER NOT NULL DEFAULT 0"];
 /** `scoring_runs` columns named before an actor's alias was called an alias. */
@@ -285,6 +303,7 @@ export class ScoringQueue {
     this.#now = now;
     this.#reserved = reserved;
     for (const statement of SCHEMA) sql.exec(statement);
+    addColumns(sql, "pipeline_runs", PIPELINE_RUN_COLUMNS);
     migrateScoringRuns(sql);
   }
 
@@ -438,15 +457,13 @@ export class ScoringQueue {
     const runner = this.#runner;
 
     const stopping = this.#sql.transaction(() => {
-      const rows = this.#sql
-        .exec<RunRow>(
-          "SELECT * FROM pipeline_runs WHERE status = 'cancelled' AND started_at IS NOT NULL AND torn_down = 0",
-        )
-        .map(toRun);
+      const rows = this.#sql.exec<RunRow>(
+        "SELECT * FROM pipeline_runs WHERE status = 'cancelled' AND started_at IS NOT NULL AND torn_down = 0",
+      );
       for (const run of rows) this.#sql.exec("UPDATE pipeline_runs SET torn_down = 1 WHERE id = ?", run.id);
       return rows;
     });
-    await Promise.all(stopping.map((run) => this.#stop(runner, run)));
+    await Promise.all(stopping.map((row) => this.#stop(runner, row)));
 
     const starting = this.#sql.transaction(() => {
       const free = SCORING_CAP - this.running() - this.#reserved();
@@ -474,12 +491,20 @@ export class ScoringQueue {
   }
 
   /**
-   * Records how a running run ended, from its Workflow's report: a `done` run keeps its result as its
-   * outcome's steps and journals `scored` with the gate and a summary, an `errored` one its error. A
-   * report for a run that is no longer running (superseded by a newer head, or cancelled) is
-   * discarded. Returns whether it was recorded.
+   * Records the containers a running run's Workflow planned, before it starts any, so stopping it
+   * destroys each one.
    */
-  finish(id: number, outcome: ScoringOutcome): boolean {
+  planned(id: number, containers: readonly string[]): void {
+    this.#sql.exec("UPDATE pipeline_runs SET containers = ? WHERE id = ?", JSON.stringify(containers), id);
+  }
+
+  /**
+   * Records how a running run ended, from its Workflow's report: a `done` run keeps its outcome and
+   * journals `scored` with the gate and a summary, an `errored` one its error. A report for a run
+   * that is no longer running (superseded by a newer head, or cancelled) is discarded. Returns
+   * whether it was recorded.
+   */
+  finish(id: number, report: RunReport): boolean {
     return this.#sql.transaction(() => {
       const run = this.getRun(id);
       if (run === null) return false;
@@ -488,22 +513,22 @@ export class ScoringQueue {
         return false;
       }
       const at = this.#ms();
-      if (outcome.status === "done") {
+      if (report.status === "done") {
         this.#sql.exec(
           "UPDATE pipeline_runs SET status = 'done', outcome = ?, finished_at = ? WHERE id = ?",
-          JSON.stringify(runOutcome(outcome.result)),
+          JSON.stringify(report.outcome),
           at,
           id,
         );
-        this.#journal("scored", run, { gate: outcome.result.gate, summary: summarize(outcome.result) });
+        this.#journal("scored", run, { gate: report.outcome.gate, summary: summarize(scoringResult(report.outcome)) });
       } else {
         this.#sql.exec(
           "UPDATE pipeline_runs SET status = 'errored', error = ?, finished_at = ? WHERE id = ?",
-          outcome.error,
+          report.error,
           at,
           id,
         );
-        this.#journal("scoringErrored", run, { error: outcome.error });
+        this.#journal("scoringErrored", run, { error: report.error });
       }
       return true;
     });
@@ -541,7 +566,7 @@ export class ScoringQueue {
   }
 
   async #start(runner: ScoringRunner, run: StoredRun): Promise<void> {
-    const params: ScoringParams = { project: run.project, attempt: run.line, sha: run.sha, run: run.id };
+    const params: PipelineParams = { project: run.project, line: run.line, sha: run.sha, run: run.id };
     try {
       await runner.workflow.create({ id: run.instance_id, params });
     } catch (error) {
@@ -555,18 +580,20 @@ export class ScoringQueue {
       return;
     }
     // A newer head may have cancelled the run while its Workflow was being created.
-    const now = this.getRun(run.id);
+    const [now] = this.#sql.exec<RunRow>("SELECT * FROM pipeline_runs WHERE id = ?", run.id);
     if (now?.status === "cancelled") {
       this.#sql.exec("UPDATE pipeline_runs SET torn_down = 1 WHERE id = ?", run.id);
       await this.#stop(runner, now);
     }
   }
 
-  async #stop(runner: ScoringRunner, run: StoredRun): Promise<void> {
+  /** Terminates a cancelled run's Workflow, then destroys the containers it planned and lets go of its snapshot. */
+  async #stop(runner: ScoringRunner, run: RunRow): Promise<void> {
     try {
       const instance = await runner.workflow.get(run.instance_id);
       await instance.terminate();
-      await runner.teardown(run.instance_id);
+      const containers = run.containers === null ? [] : (JSON.parse(run.containers) as string[]);
+      await runner.teardown(run.instance_id, containers);
     } catch (error) {
       // The run may already have finished; its report is discarded either way.
       console.warn({ event: "scoring.stop_failed", instance_id: run.instance_id, error: String(error) });
@@ -599,7 +626,7 @@ export class ScoringQueue {
 }
 
 function toRun(row: RunRow): StoredRun {
-  const { torn_down: _tornDown, ...run } = row;
+  const { torn_down: _tornDown, containers: _containers, ...run } = row;
   const outcome = row.outcome === null ? null : storedOutcome(row.outcome);
   return {
     ...run,

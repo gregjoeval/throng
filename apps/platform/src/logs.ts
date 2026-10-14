@@ -105,8 +105,8 @@ tail -c ${keep} "$f"
 `;
 }
 
-/** The logs a score plan may write, in run order: each setup step, then each check. */
-export function logNames(plan: { setup: string[]; checks: { name: string }[] }): string[] {
+/** The logs a plan may write, in run order: each setup, then each check. */
+export function logNames(plan: { setup: readonly unknown[]; checks: { name: string }[] }): string[] {
   return [...plan.setup.map((_, i) => setupLogName(i + 1)), ...plan.checks.map((check) => check.name)];
 }
 

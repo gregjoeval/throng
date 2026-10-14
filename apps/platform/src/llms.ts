@@ -112,8 +112,11 @@ human, since no tool can. Only the owner can cancel a run, through the UI or RES
 
 ## The Sandbox
 
-Setup and the checks run in a container whose size the project's \`.throng/config.yml\`
-sets, as in \`sandbox: {size: standard-2}\`. The sizes are ${oneOf(SANDBOX_SIZES.map(describeSize))}.
+The setups run in order in one container; each check then runs in its own container, started from a
+snapshot of the setups' work, in parallel, except that a check waits for the checks its \`after\` names
+and is skipped unless they all passed. Each container gets \`THRONG_PROJECT\`, \`THRONG_PIPELINE\`,
+\`THRONG_LINE\`, \`THRONG_SHA\` and \`THRONG_RUN\`, and starts at the size the project's
+\`.throng/config.yml\` sets, as in \`sandbox: {size: standard-2}\`. The sizes are ${oneOf(SANDBOX_SIZES.map(describeSize))}.
 The default is ${DEFAULT_SANDBOX_SIZE}. Like the rest of the config, it is read from the origin's \`main\`: an
 attempt that changes it still runs at \`main\`'s size, and the change applies once it lands. Each stored log
 notes the size it ran at under \`== throng ==\`, so a check killed for memory shows how much it had.

@@ -1,12 +1,14 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parseConfig } from "../src/config.ts";
-import { buildResult, MAX_OUTPUT_BYTES, scorePlan } from "../src/results.ts";
-import type { PlannedMetric, RawScore, ScorePlan } from "../src/results.ts";
-import { parseResult, scoreScript } from "../src/scripts.ts";
+import type { ConfigResult, SetupConfig } from "../src/config.ts";
+import { buildResult, checkOrder, MAX_OUTPUT_BYTES, scorePlan } from "../src/results.ts";
+import type { PlannedCheck, PlannedMetric, RawScore } from "../src/results.ts";
+import { checkScript, parseResult, RERUN_SETUP_FAILED_EXIT, setupScript } from "../src/scripts.ts";
+import type { CheckRun, SetupResult } from "../src/scripts.ts";
 import { NO_TASK_DEFINITIONS, taskDefinitionsFrom, withTask } from "../src/task-definitions.ts";
 import { at } from "./support/defined.ts";
 
@@ -60,14 +62,16 @@ beforeEach(() => {
 
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
-const plan = (overrides: Partial<ScorePlan> = {}): ScorePlan => ({ setup: [], checks: [], allow: [], ...overrides });
-const check = (name: string, command: string, timeoutMs = 60_000, metrics: PlannedMetric[] = []) => ({
+const check = (name: string, command: string, timeoutMs = 60_000, metrics: PlannedMetric[] = []): PlannedCheck => ({
   name,
   command,
   timeoutMs,
+  after: [],
   metrics,
 });
+const setup = (...commands: string[]): SetupConfig[] => commands.map((command, i) => ({ name: `s${i + 1}`, command }));
 const number = (name: string, from: string): PlannedMetric => ({ name, from, rule: { type: "number" } });
+const cat = (path: string) => execFileSync("cat", [path], { encoding: "utf8" });
 
 /** Pushes an attempt to the fork on top of the origin's main (adds 2 lines, deletes 2) and returns its head. */
 function attemptHead(): string {
@@ -77,14 +81,49 @@ function attemptHead(): string {
   return head;
 }
 
-describe("scoreScript", () => {
-  it("records the base it's given and the diff size from it, and runs nothing without a plan", () => {
+/** Runs one check in `sandbox`: one the setup container's snapshot started (it holds `setup.done`), or a fresh one. */
+function runCheck(sandbox: string, head: string, setups: SetupConfig[], planned: PlannedCheck): CheckRun {
+  return runScript<CheckRun>(checkScript(fork, head, setups, planned), sandbox);
+}
+
+/**
+ * Runs a config's plan as a pipeline run's containers would: the setups in one directory, then each
+ * check in a copy of it (a snapshot's restore), skipping a check whose waits didn't all pass.
+ */
+function runPipeline(config: ConfigResult, base: string | null, head: string): RawScore {
+  const plan = scorePlan(config);
+  const setupDir = mkdtempSync(join(root, "setup-"));
+  const ran = runScript<SetupResult>(setupScript(fork, { sha: head, base }, plan.setup), setupDir);
+  const failed = ran.setups.findIndex((s) => s.exit !== 0);
+  const exits = new Map<string, number>();
+  for (const planned of checkOrder(plan.checks)) {
+    if (failed !== -1 || planned.after.some((name) => exits.get(name) !== 0)) continue;
+    const restored = mkdtempSync(join(root, "check-"));
+    cpSync(setupDir, restored, { recursive: true });
+    exits.set(planned.name, runCheck(restored, head, plan.setup, planned).exit);
+  }
+  return {
+    base: ran.base,
+    shortstat: ran.shortstat,
+    builtinMs: ran.builtinMs,
+    setupFailed: failed === -1 ? null : failed + 1,
+    checks: plan.checks.map((planned) => {
+      const exit = exits.get(planned.name);
+      return exit === undefined ? { exit: null, durationMs: 0, metrics: {} } : { exit, durationMs: 1, metrics: {} };
+    }),
+  };
+}
+
+describe("setupScript", () => {
+  it("records the base it's given and the diff size from it, and runs nothing without setups", () => {
     const base = git(origin, "rev-parse", "main");
     const head = attemptHead();
-    const raw = runScript<RawScore>(scoreScript(fork, { sha: head, base }, plan()));
-    expect(raw).toMatchObject({ base, setupFailed: null, checks: [] });
-    expect(raw.shortstat.trim()).toBe("2 files changed, 2 insertions(+), 2 deletions(-)");
-    expect(raw.builtinMs).toBeGreaterThanOrEqual(0);
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    const ran = runScript<SetupResult>(setupScript(fork, { sha: head, base }, []), sandbox);
+    expect(ran).toMatchObject({ base, setups: [] });
+    expect(ran.shortstat.trim()).toBe("2 files changed, 2 insertions(+), 2 deletions(-)");
+    expect(ran.builtinMs).toBeGreaterThanOrEqual(0);
+    expect(cat(join(sandbox, "setup.done"))).toBe("");
   });
 
   it("diffs against the empty tree when the attempt has no base", () => {
@@ -92,95 +131,125 @@ describe("scoreScript", () => {
     git(work, "rm", "-rqf", ".");
     const head = commit("only.txt", "x\ny\n", "unrelated");
     git(work, "push", "-q", fork, "lone:main", "--force");
-    const raw = runScript<RawScore>(scoreScript(fork, { sha: head, base: null }, plan()));
-    expect(raw.base).toBeNull();
-    expect(raw.shortstat.trim()).toBe("1 file changed, 2 insertions(+)");
+    const ran = runScript<SetupResult>(setupScript(fork, { sha: head, base: null }, []));
+    expect(ran.base).toBeNull();
+    expect(ran.shortstat.trim()).toBe("1 file changed, 2 insertions(+)");
   });
 
-  it("runs every check in order, after a failure too, with a fresh $THRONG_OUTPUT directory each, reading a failed check's output too", () => {
+  it("runs each setup in order, logging each, and gets the run's variables", () => {
     const head = attemptHead();
-    const empty = `test -z "$(ls -A "$THRONG_OUTPUT")"`;
-    const checks = [
-      check("first", `${empty} && echo '{"n": 1}' > "$THRONG_OUTPUT/r.json" && echo first >> ../order`, 60_000, [
-        number("n", "first.r.n"),
-      ]),
-      check("broken", `echo broken >> ../order; echo '{"failed": 2}' > "$THRONG_OUTPUT/r.json"; exit 3`, 60_000, [
-        number("failed", "broken.r.failed"),
-      ]),
-      check("last", `${empty} && echo last >> ../order && test -f b.txt`),
-    ];
     const sandbox = mkdtempSync(join(root, "sandbox-"));
-    const raw = runScript<RawScore>(scoreScript(fork, { sha: head, base: null }, plan({ checks })), sandbox);
-    expect(raw.checks.map((c) => [c.exit, c.metrics])).toEqual([
-      [0, { n: { value: 1 } }],
-      [3, { failed: { value: 2 } }],
-      [0, {}],
-    ]);
-    expect(execFileSync("cat", [join(sandbox, "order")], { encoding: "utf8" })).toBe("first\nbroken\nlast\n");
-    expect(execFileSync("cat", [join(sandbox, "logs/broken.log")], { encoding: "utf8" })).toBe("");
-  });
-
-  it("skips every check after a failed setup command, and names the command", () => {
-    const head = attemptHead();
-    const setup = ["true", "echo nope >&2; false", "touch ../never"];
-    const sandbox = mkdtempSync(join(root, "sandbox-"));
-    const raw = runScript<RawScore>(
-      scoreScript(
-        fork,
-        { sha: head, base: null },
-        plan({ setup, checks: [check("test", "true", 60_000, [number("n", "test.r.n")])] }),
-      ),
+    const ran = runScript<SetupResult>(
+      setupScript(fork, { sha: head, base: null }, setup("echo one >> ../order", "echo two >> ../order; echo logged")),
       sandbox,
     );
-    expect(raw).toMatchObject({ setupFailed: 2, checks: [{ exit: null, metrics: {} }] });
-    expect(execFileSync("cat", [join(sandbox, "logs/setup.2.log")], { encoding: "utf8" })).toBe("nope\n");
+    expect(ran.setups.map((s) => s.exit)).toEqual([0, 0]);
+    expect(cat(join(sandbox, "order"))).toBe("one\ntwo\n");
+    expect(cat(join(sandbox, "logs/setup.2.log"))).toBe("logged\n");
+  });
+
+  it("stops at the first setup that fails, and leaves no mark for the checks", () => {
+    const head = attemptHead();
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    const ran = runScript<SetupResult>(
+      setupScript(fork, { sha: head, base: null }, setup("true", "echo nope >&2; false", "touch ../never")),
+      sandbox,
+    );
+    expect(ran.setups.map((s) => s.exit)).toEqual([0, 1, null]);
+    expect(cat(join(sandbox, "logs/setup.2.log"))).toBe("nope\n");
     expect(() => execFileSync("test", ["-e", join(sandbox, "never")])).toThrow();
-  });
-
-  it("stops a check at its timeout", () => {
-    const head = attemptHead();
-    const raw = runScript<RawScore>(
-      scoreScript(fork, { sha: head, base: null }, plan({ checks: [check("slow", "sleep 20", 1000)] })),
-    );
-    expect(raw.checks[0]).toMatchObject({ exit: 124 });
-    expect(at(raw.checks, 0).durationMs).toBeGreaterThanOrEqual(1000);
-    expect(at(raw.checks, 0).durationMs).toBeLessThan(10_000);
-  });
-
-  it("quotes commands so a check can't break out of the script", () => {
-    const head = attemptHead();
-    const raw = runScript<RawScore>(
-      scoreScript(
-        fork,
-        { sha: head, base: null },
-        plan({ checks: [check("quotes", `echo "it's" '$HOME' "$(echo ok)" > ../quoted`)] }),
-      ),
-    );
-    expect(at(raw.checks, 0).exit).toBe(0);
+    expect(() => execFileSync("test", ["-e", join(sandbox, "setup.done")])).toThrow();
   });
 
   it("is idempotent: rerunning in the same directory gives the same result", () => {
     const head = attemptHead();
     const sandbox = mkdtempSync(join(root, "sandbox-"));
-    const script = scoreScript(
-      fork,
-      { sha: head, base: null },
-      plan({
-        checks: [
-          check("test", `test ! -e "$THRONG_OUTPUT/r.json" && echo '{"n": 1}' > "$THRONG_OUTPUT/r.json"`, 60_000, [
-            number("n", "test.r.n"),
-          ]),
-        ],
-      }),
+    const script = setupScript(fork, { sha: head, base: null }, setup("test ! -e built && touch built"));
+    const first = runScript<SetupResult>(script, sandbox);
+    const second = runScript<SetupResult>(script, sandbox);
+    expect(first.setups.map((s) => s.exit)).toEqual([0]);
+    expect(second.setups.map((s) => s.exit)).toEqual([0]);
+  });
+});
+
+describe("checkScript", () => {
+  it("runs the check in the setups' tree when it starts from their snapshot, without running them again", () => {
+    const head = attemptHead();
+    const setups = setup("echo ran >> ../setups && touch built");
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    runScript<SetupResult>(setupScript(fork, { sha: head, base: null }, setups), sandbox);
+    const ran = runCheck(sandbox, head, setups, check("test", "test -f built && test -f b.txt"));
+    expect(ran).toMatchObject({ exit: 0, setupsRerun: false });
+    expect(cat(join(sandbox, "setups"))).toBe("ran\n");
+  });
+
+  it("fetches the head and runs the setups itself in a fresh container, their output at the top of its log", () => {
+    const head = attemptHead();
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    const ran = runCheck(
+      sandbox,
+      head,
+      setup("echo installing && touch built"),
+      check("test", "test -f built && echo ok"),
     );
-    const first = runScript<RawScore>(script, sandbox);
-    const second = runScript<RawScore>(script, sandbox);
-    expect(first.checks[0]).toMatchObject({ exit: 0, metrics: { n: { value: 1 } } });
-    expect({ ...second, builtinMs: 0, checks: second.checks.map((c) => ({ ...c, durationMs: 0 })) }).toEqual({
-      ...first,
-      builtinMs: 0,
-      checks: first.checks.map((c) => ({ ...c, durationMs: 0 })),
-    });
+    expect(ran).toMatchObject({ exit: 0, setupsRerun: true });
+    expect(cat(join(sandbox, "logs/test.log"))).toBe("== throng: setup s1 ==\ninstalling\nok\n");
+  });
+
+  it("fails as infrastructure when a setup that passed fails again in its own container", () => {
+    const head = attemptHead();
+    expect(() =>
+      execFileSync("bash", ["-c", checkScript(fork, head, setup("false"), check("test", "true"))], {
+        cwd: mkdtempSync(join(root, "sandbox-")),
+        env: ENV,
+      }),
+    ).toThrow(expect.objectContaining({ status: RERUN_SETUP_FAILED_EXIT }));
+  });
+
+  it("gives the check an empty $THRONG_OUTPUT and reads a failed check's metrics too", () => {
+    const head = attemptHead();
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    const empty = `test -z "$(ls -A "$THRONG_OUTPUT")"`;
+    const ran = runCheck(
+      sandbox,
+      head,
+      [],
+      check("broken", `${empty} && echo '{"failed": 2}' > "$THRONG_OUTPUT/r.json"; exit 3`, 60_000, [
+        number("failed", "broken.r.failed"),
+      ]),
+    );
+    expect(ran).toMatchObject({ exit: 3, metrics: { failed: { value: 2 } } });
+  });
+
+  it("stops a check at its timeout", () => {
+    const head = attemptHead();
+    const ran = runCheck(mkdtempSync(join(root, "sandbox-")), head, [], check("slow", "sleep 20", 1000));
+    expect(ran.exit).toBe(124);
+    expect(ran.durationMs).toBeGreaterThanOrEqual(1000);
+    expect(ran.durationMs).toBeLessThan(10_000);
+  });
+
+  it("quotes commands so a check can't break out of the script", () => {
+    const head = attemptHead();
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    const ran = runCheck(sandbox, head, [], check("quotes", `echo "it's" '$HOME' "$(echo ok)" > ../quoted`));
+    expect(ran.exit).toBe(0);
+    expect(cat(join(sandbox, "quoted"))).toBe("it's $HOME ok\n");
+  });
+
+  it("is idempotent: rerunning in the same container gives the same result", () => {
+    const head = attemptHead();
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    const planned = check(
+      "test",
+      `test ! -e "$THRONG_OUTPUT/r.json" && echo '{"n": 1}' > "$THRONG_OUTPUT/r.json"`,
+      60_000,
+      [number("n", "test.r.n")],
+    );
+    const first = runCheck(sandbox, head, setup("touch built"), planned);
+    const second = runCheck(sandbox, head, setup("touch built"), planned);
+    expect(first).toMatchObject({ exit: 0, metrics: { n: { value: 1 } } });
+    expect(second).toMatchObject({ exit: 0, metrics: { n: { value: 1 } } });
   });
 
   it("turns a project's config into a scored result end to end, reading two files from one check", () => {
@@ -201,10 +270,16 @@ metrics:
   - { name: first-duration, from: test.report.testResults.0.duration, type: number, order: asc }
   - { name: lint-errors, from: lint.lint.errors, type: number, order: asc }
 `);
-    const raw = runScript<RawScore>(
-      scoreScript(fork, { sha: head, base: git(origin, "rev-parse", "main") }, scorePlan(config)),
+    const plan = scorePlan(config);
+    const raw = runPipeline(config, git(origin, "rev-parse", "main"), head);
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    const metrics = Object.fromEntries(
+      plan.checks.map((planned) => [planned.name, runCheck(sandbox, head, [], planned).metrics]),
     );
-    const result = buildResult(config, raw);
+    const result = buildResult(config, {
+      ...raw,
+      checks: raw.checks.map((ran, i) => ({ ...ran, metrics: metrics[at(plan.checks, i).name] ?? {} })),
+    });
     expect(result).toMatchObject({
       config: { kind: "valid" },
       gate: "passed",
@@ -225,27 +300,20 @@ metrics:
     });
   });
 
-  it("runs a task's checks after the project's, after its setup, and gates on them", () => {
+  it("runs a task's checks beside the project's, after its setups, waiting as they say, and gates on them", () => {
     const head = attemptHead();
     const project = parseConfig(`setup:
-  - echo ready > ../setup-ran
+  - { name: ready, command: echo ready > ../setup-ran }
 checks:
   - name: test
-    command: >-
-      echo '{"lines": 40}' > "$THRONG_OUTPUT/report.json"
+    command: echo test >> ../order
 `);
     const task = taskDefinitionsFrom(
       {
         checks: [
-          {
-            name: "smoke",
-            command: `test -f ../setup-ran && echo '{"ok": false}' > "$THRONG_OUTPUT/smoke.json"`,
-          },
+          { name: "smoke", command: "test -f ../setup-ran", after: "test" },
           { name: "e2e", command: "exit 1" },
-        ],
-        metrics: [
-          { name: "lines", from: "test.report.lines", type: "number" },
-          { name: "smoked", from: "smoke.smoke.ok", type: "boolean" },
+          { name: "deploy", command: "true", after: ["smoke", "e2e"] },
         ],
       },
       NO_TASK_DEFINITIONS,
@@ -253,23 +321,15 @@ checks:
     );
     if ("error" in task) throw new Error(task.error);
     const config = withTask(project, task.definitions);
-    const raw = runScript<RawScore>(
-      scoreScript(fork, { sha: head, base: git(origin, "rev-parse", "main") }, scorePlan(config)),
-    );
-    expect(buildResult(config, raw)).toMatchObject({
+    expect(buildResult(config, runPipeline(config, null, head))).toMatchObject({
       gate: "failed",
       checks: [
         { name: "_diff" },
         { name: "test", source: "project", outcome: "passed" },
         { name: "smoke", source: "task", outcome: "passed" },
         { name: "e2e", source: "task", outcome: "failed" },
+        { name: "deploy", source: "task", outcome: "skipped", notes: ["skipped: waits for e2e, which failed"] },
       ],
-      metrics: {
-        smoke: { source: "task", value: "passed" },
-        e2e: { source: "task", value: "failed" },
-        lines: { source: "task", value: 40 },
-        smoked: { source: "task", value: false },
-      },
     });
   });
 
@@ -292,10 +352,8 @@ checks:
       `head -c ${MAX_OUTPUT_BYTES + 1} /dev/zero > "$THRONG_OUTPUT/big.json"`,
       `touch "$THRONG_OUTPUT/notes.txt"`,
     ].join(" && ");
-    const raw = runScript<RawScore>(
-      scoreScript(fork, { sha: head, base: null }, plan({ checks: [check("test", command, 60_000, metrics)] })),
-    );
-    expect(at(raw.checks, 0).metrics).toEqual({
+    const ran = runCheck(mkdtempSync(join(root, "sandbox-")), head, [], check("test", command, 60_000, metrics));
+    expect(ran.metrics).toEqual({
       "missing-file": { value: null, note: "test.nope: no nope.json in $THRONG_OUTPUT; files there: bad, big, out" },
       "missing-key": { value: null, note: "test.out.totals: no key totals; keys there: total, runs, label" },
       "missing-index": { value: null, note: "test.out.runs.3: no index 3 in an array; indexes there: 0 to 0" },
@@ -322,10 +380,8 @@ checks:
       { name: "n", from: "test.out.n", rule: { type: "string" } },
     ];
     const command = `echo '${JSON.stringify(json)}' > "$THRONG_OUTPUT/out.json"`;
-    const raw = runScript<RawScore>(
-      scoreScript(fork, { sha: head, base: null }, plan({ checks: [check("test", command, 60_000, metrics)] })),
-    );
-    expect(at(raw.checks, 0).metrics).toEqual({
+    const ran = runCheck(mkdtempSync(join(root, "sandbox-")), head, [], check("test", command, 60_000, metrics));
+    expect(ran.metrics).toEqual({
       ok: { value: true },
       flaky: { value: null, note: "test.out.flaky: expected a boolean, got a string" },
       grade: { value: "b" },

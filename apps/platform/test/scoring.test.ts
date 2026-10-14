@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { ServiceError } from "../src/errors.ts";
 import type { CheckResult, LegacyResult, ScoringResult } from "../src/results.ts";
-import { SCORING_CAP } from "../src/scoring.ts";
-import type { ScoringOutcome, ScoringParams, ScoringRequest, ScoringWorkflow, StoredRun } from "../src/scoring.ts";
+import { runReport, SCORING_CAP } from "../src/scoring.ts";
+import type { PipelineParams, PipelineWorkflowBinding, RunReport, ScoringRequest, StoredRun } from "../src/scoring.ts";
 import { attemptRef } from "../src/task-refs.ts";
 import { TaskStore } from "../src/task-store.ts";
 import type { AttemptInput, ProjectContext } from "../src/task-store.ts";
@@ -25,12 +25,12 @@ const bob = actor("bob00001");
 const cat = actor("cat00001");
 
 /** A Workflow binding that records what it was asked to do. */
-class FakeWorkflow implements ScoringWorkflow {
-  readonly created: { id: string; params: ScoringParams }[] = [];
+class FakeWorkflow implements PipelineWorkflowBinding {
+  readonly created: { id: string; params: PipelineParams }[] = [];
   readonly terminated: string[] = [];
   failNext = false;
 
-  async create(options: { id: string; params: ScoringParams }): Promise<unknown> {
+  async create(options: { id: string; params: PipelineParams }): Promise<unknown> {
     if (this.failNext) {
       this.failNext = false;
       throw new Error("workflow service unavailable");
@@ -50,12 +50,12 @@ function setup() {
   const base = repos.commit(ORIGIN, { files: { "README.md": "hi\n" }, message: "init" });
   const sql = testSql();
   const workflow = new FakeWorkflow();
-  const tornDown: string[] = [];
+  const tornDown: [string, readonly string[]][] = [];
   const store = new TaskStore({
     sql,
     repos,
     now: () => new Date("2026-10-10T12:00:00.000Z"),
-    scoring: { workflow, teardown: async (id) => void tornDown.push(id) },
+    scoring: { workflow, teardown: async (id, containers) => void tornDown.push([id, containers]) },
   });
   const journal = () =>
     (sql.db.prepare("SELECT kind, detail FROM journal ORDER BY id").all() as { kind: string; detail: string }[]).map(
@@ -105,11 +105,9 @@ function result(overrides: Partial<ScoringResult> = {}): ScoringResult {
   };
 }
 
-const done = (overrides: Partial<ScoringResult> = {}): ScoringOutcome => ({
-  status: "done",
-  result: result(overrides),
-});
-const errored = (): ScoringOutcome => ({ status: "errored", error: "sandbox lost" });
+const done = (overrides: Partial<ScoringResult> = {}): RunReport =>
+  runReport({ status: "done", result: result(overrides) });
+const errored = (): RunReport => ({ status: "errored", error: "sandbox lost" });
 
 function queued(request: ScoringRequest | null): ScoringRequest & { queued: true } {
   expect(request?.queued).toBeTruthy();
@@ -130,7 +128,7 @@ describe("scoring triggers", () => {
     expect(workflow.created).toEqual([
       {
         id: `abc123-t1a1-${base.hash.slice(0, 12)}-1`,
-        params: { project: "abc123", attempt: "t1a1", sha: base.hash, run: 1 },
+        params: { project: "abc123", line: "t1a1", sha: base.hash, run: 1 },
       },
     ]);
   });
@@ -263,12 +261,15 @@ describe("the scoring queue", () => {
     await store.openAttempt(PROJECT, ada, ref);
     await store.scoring.drain();
     const running = at(runs(ref), 0);
+    // Its Workflow planned its containers before starting any.
+    const containers = [`${running.instance_id}/setup`, `${running.instance_id}/check:test`];
+    store.scoring.planned(running.id, containers);
 
     const head = commit(ref, "newer\n");
     pushed(ref, head);
     await store.scoring.drain();
     expect(workflow.terminated).toEqual([running.instance_id]);
-    expect(tornDown).toEqual([running.instance_id]);
+    expect(tornDown).toEqual([[running.instance_id, containers]]);
     expect(runs(ref).map((r) => [r.sha, r.status])).toEqual([
       [running.sha, "cancelled"],
       [head, "running"],
@@ -287,12 +288,12 @@ describe("the scoring queue", () => {
     const refs = await drafts(SCORING_CAP + 2);
     for (const ref of refs) await store.openAttempt(PROJECT, ada, ref);
     await store.scoring.drain();
-    expect(workflow.created.map((c) => c.params.attempt)).toEqual(["t1a1", "t1a2", "t1a3"]);
+    expect(workflow.created.map((c) => c.params.line)).toEqual(["t1a1", "t1a2", "t1a3"]);
     expect(refs.map((r) => at(runs(r), 0).status)).toEqual(["running", "running", "running", "queued", "queued"]);
 
     expect(store.scoring.finish(at(runs(at(refs, 1)), 0).id, done())).toBeTruthy();
     await store.scoring.drain();
-    expect(workflow.created.map((c) => c.params.attempt)).toEqual(["t1a1", "t1a2", "t1a3", "t1a4"]);
+    expect(workflow.created.map((c) => c.params.line)).toEqual(["t1a1", "t1a2", "t1a3", "t1a4"]);
     expect(journal().find((e) => e.kind === "scored")).toMatchObject({
       ref: "t1a2",
       gate: "passed",
@@ -796,7 +797,7 @@ describe("line-keyed runs", () => {
       },
     ];
     const failed = result({ config: { kind: "valid" }, gate: "failed", checks, logs: ["setup.1", "setup.2"] });
-    store.scoring.finish(at(runs(ref), 0).id, { status: "done", result: failed });
+    store.scoring.finish(at(runs(ref), 0).id, runReport({ status: "done", result: failed }));
 
     const run = at(runs(ref), 0);
     expect(run.outcome?.steps.map((s) => [s.name, s.kind, s.outcome, s.log])).toEqual([
@@ -818,7 +819,7 @@ describe("line-keyed runs", () => {
     store.scoring.request({ project: PROJECT.id, line: "t1a1", sha, trigger: "rescore", actor: ada });
     await store.openAttempt(PROJECT, ada, defined(two));
     await store.scoring.drain();
-    expect(workflow.created.map((c) => c.params.attempt)).toEqual(["t1a1", "t1a2"]);
+    expect(workflow.created.map((c) => c.params.line)).toEqual(["t1a1", "t1a2"]);
     expect(runs(defined(one))).toMatchObject([
       { line: "t1a1", status: "running" },
       { line: "t1a1", status: "queued" },

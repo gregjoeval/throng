@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import { ServiceError } from "../src/errors.ts";
 import type { LandingOutcome, LandingParams, LandingWorkflowBinding } from "../src/landing.ts";
 import type { ScoringResult } from "../src/results.ts";
-import type { ScoringParams, ScoringWorkflow } from "../src/scoring.ts";
+import type { PipelineParams, PipelineWorkflowBinding } from "../src/scoring.ts";
 import { TaskStore } from "../src/task-store.ts";
 import type { AttemptInput, ProjectContext } from "../src/task-store.ts";
 import type { Actor } from "../src/tokens.ts";
@@ -52,7 +52,7 @@ async function setup() {
   void repos.create("abc123-main", { defaultBranch: "main" });
   const base = repos.commit("abc123-main", { files: { "README.md": "hi\n" }, message: "init" });
   let clock = Date.parse("2026-10-10T12:00:00.000Z");
-  const scoringWorkflow = new FakeWorkflows<ScoringParams>();
+  const scoringWorkflow = new FakeWorkflows<PipelineParams>();
   const landingWorkflow = new FakeWorkflows<LandingParams>();
   const tornDown: string[] = [];
   const sql = testSql();
@@ -60,7 +60,7 @@ async function setup() {
     sql,
     repos,
     now: () => new Date((clock += 1000)),
-    scoring: { workflow: scoringWorkflow satisfies ScoringWorkflow, teardown: async () => {} },
+    scoring: { workflow: scoringWorkflow satisfies PipelineWorkflowBinding, teardown: async () => {} },
     landing: {
       workflow: landingWorkflow satisfies LandingWorkflowBinding,
       teardown: async (id) => void tornDown.push(id),

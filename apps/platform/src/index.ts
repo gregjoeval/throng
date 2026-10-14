@@ -8,7 +8,7 @@ import type { GitProxyOptions } from "./git-proxy";
 
 export { ProjectCoordinator } from "./project";
 export { RunSandbox, OutboundAuth } from "./sandbox";
-export { ScoringWorkflow } from "./workflows";
+export { PipelineWorkflow } from "./pipeline-workflow";
 export { LandingWorkflow } from "./landing-workflow";
 export { FollowWorkflow } from "./follow-workflow";
 

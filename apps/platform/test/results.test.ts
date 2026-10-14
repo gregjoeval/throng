@@ -27,7 +27,7 @@ function raw(overrides: Partial<RawScore> = {}): RawScore {
 }
 
 const CONFIG = parseConfig(`setup:
-  - npm ci
+  - { name: deps, command: npm ci }
 checks:
   - name: test
     command: npm test
@@ -98,18 +98,20 @@ describe("parseShortstat", () => {
 describe("scorePlan", () => {
   it("runs the config's setup and checks, each with the metrics it feeds, and nothing without a valid config", () => {
     expect(scorePlan(CONFIG)).toEqual({
-      setup: ["npm ci"],
+      setup: [{ name: "deps", command: "npm ci" }],
       checks: [
         {
           name: "test",
           command: "npm test",
           timeoutMs: 120_000,
+          after: [],
           metrics: [{ name: "coverage", from: "test.coverage-summary.total.lines.pct", rule: { type: "number" } }],
         },
         {
           name: "bundle",
           command: "npm run size",
           timeoutMs: 600_000,
+          after: [],
           metrics: [{ name: "bundle_kb", from: "bundle.size.kb", rule: { type: "number" } }],
         },
       ],
@@ -293,7 +295,7 @@ describe("buildResult", () => {
     expect(result.gate).toBe("failed");
   });
 
-  it("skips every check after a failed setup, saying which command failed, and nulls its metrics", () => {
+  it("skips every check after a failed setup, naming it, and nulls its metrics", () => {
     const result = buildResult(
       CONFIG,
       raw({
@@ -306,21 +308,22 @@ describe("buildResult", () => {
     );
     expect(result.gate).toBe("failed");
     expect(result.checks.slice(1, 3).map((c) => [c.outcome, c.notes])).toEqual([
-      ["skipped", ["skipped: setup command 1 failed"]],
-      ["skipped", ["skipped: setup command 1 failed"]],
+      ["skipped", ["skipped: setup deps failed"]],
+      ["skipped", ["skipped: setup deps failed"]],
     ]);
     expect(result.metrics.coverage).toMatchObject({
       value: null,
-      note: "test: test was skipped: setup command 1 failed",
+      note: "test: test was skipped: setup deps failed",
     });
   });
 
   it("fails the gate on a failed setup, even with no checks", () => {
-    expect(buildResult(parseConfig("setup: [npm ci]\n"), raw({ setupFailed: 1 })).gate).toBe("failed");
-    expect(buildResult(parseConfig("setup: [npm ci]\n"), raw()).gate).toBe("passed");
+    const config = parseConfig("setup: [{ name: deps, command: npm ci }]\n");
+    expect(buildResult(config, raw({ setupFailed: 1 })).gate).toBe("failed");
+    expect(buildResult(config, raw()).gate).toBe("passed");
   });
 
-  it("skips a check the score script reported no exit for, saying so on it and its metrics", () => {
+  it("skips a check the run reported no exit for, saying so on it and its metrics", () => {
     const result = buildResult(
       CONFIG,
       raw({
@@ -332,12 +335,37 @@ describe("buildResult", () => {
     );
     expect(result.checks[1]).toMatchObject({
       outcome: "skipped",
-      notes: ["skipped: the score script didn't report it"],
+      notes: ["skipped: the run didn't report it"],
     });
     expect(result.metrics.coverage).toMatchObject({
       value: null,
-      note: "test: test was skipped: the score script didn't report it",
+      note: "test: test was skipped: the run didn't report it",
     });
+  });
+
+  it("skips a check whose wait didn't pass, naming the check it waited for and how it ended", () => {
+    const config = parseConfig(
+      "checks:\n  - { name: a, command: x }\n  - { name: b, command: x }\n" +
+        "  - { name: c, command: x, after: [a, b] }\n  - { name: d, command: x, after: c }\n" +
+        "metrics:\n  - { name: n, from: d.out.n, type: number }\n",
+    );
+    const result = buildResult(
+      config,
+      raw({
+        checks: [
+          { exit: 0, durationMs: 1, metrics: {} },
+          { exit: 124, durationMs: 600_000, metrics: {} },
+          { exit: null, durationMs: 0, metrics: {} },
+          { exit: null, durationMs: 0, metrics: {} },
+        ],
+      }),
+    );
+    expect(result.checks.slice(3).map((c) => [c.name, c.outcome, c.notes])).toEqual([
+      ["c", "skipped", ["skipped: waits for b, which timed out"]],
+      ["d", "skipped", ["skipped: waits for c, which was skipped"]],
+    ]);
+    expect(result.metrics.n).toMatchObject({ value: null, note: "d: d was skipped: waits for c, which was skipped" });
+    expect(result.gate).toBe("failed");
   });
 
   it("gives a null the score script sent without a note one naming its from", () => {

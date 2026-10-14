@@ -27,7 +27,8 @@
     },
   ],
   "workflows": [
-    { "name": "throng-scoring", "binding": "SCORING", "class_name": "ScoringWorkflow" },
+    // Keeps the name `ScoringWorkflow` ran under, so a run that started on its code resumes on this.
+    { "name": "throng-scoring", "binding": "PIPELINE", "class_name": "PipelineWorkflow" },
     { "name": "throng-landing", "binding": "LANDING", "class_name": "LandingWorkflow" },
     { "name": "throng-follow", "binding": "FOLLOW", "class_name": "FollowWorkflow" },
   ],
@@ -77,7 +78,7 @@
       ],
       // Workflow names are account-wide, so they can't reuse production's.
       "workflows": [
-        { "name": "throng-ci-scoring", "binding": "SCORING", "class_name": "ScoringWorkflow" },
+        { "name": "throng-ci-scoring", "binding": "PIPELINE", "class_name": "PipelineWorkflow" },
         { "name": "throng-ci-landing", "binding": "LANDING", "class_name": "LandingWorkflow" },
         { "name": "throng-ci-follow", "binding": "FOLLOW", "class_name": "FollowWorkflow" },
       ],

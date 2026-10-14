@@ -1,128 +1,23 @@
-import { WorkflowEntrypoint } from "cloudflare:workers";
-import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
+// What every Workflow that runs a Sandbox shares: minting a container's grants in the step that
+// starts it, running a script in it, and copying its logs to R2.
+
 import { reposFor } from "./artifacts";
-import { attemptBase } from "./base";
-import { loadConfig, networkAllow, sandboxSize } from "./config";
 import type { ConfigResult, SandboxSize } from "./config";
-import { GRANT_SOURCES, ROLE_GRANTS, sandboxName, SCORING_ROLES, TRUSTED_SIZE } from "./grants";
+import { GRANT_SOURCES, ROLE_GRANTS, sandboxName, TRUSTED_SIZE } from "./grants";
 import type { RepoCodeRole, RoleGrants, RunGrants, SandboxRole } from "./grants";
-import { LOG_CONTENT_TYPE, logKey, logNames, MISSING_LOG_EXIT, readLogScript, sandboxNote, withNotes } from "./logs";
+import { LOG_CONTENT_TYPE, MISSING_LOG_EXIT, readLogScript, sandboxNote, withNotes } from "./logs";
 import { NO_NETWORK, roleAccess } from "./network";
 import type { NetworkAccess } from "./network";
-import { loadRegistries } from "./npmrc";
-import { forkRepo, originMainRef, originRepo } from "./repos";
-import { buildResult, scorePlan, scoreTimeoutMs } from "./results";
-import type { RawScore, ScorePlan, ScoringResult } from "./results";
-import type { RunResult } from "./sandbox";
-import type { ScoringOutcome, ScoringParams } from "./scoring";
-import { parseResult, scoreScript } from "./scripts";
-import { NO_TASK_DEFINITIONS, withTask } from "./task-definitions";
-import { parseAttemptRef } from "./task-refs";
+import { forkRepo, originRepo } from "./repos";
+import { scorePlan, scoreTimeoutMs } from "./results";
+import type { ScorePlan } from "./results";
+import type { RunResult, SandboxSnapshot } from "./sandbox";
 
 const TOKEN_TTL_SECONDS = 30 * 60;
 /** Each step's retries after its first try, for infrastructure errors; then the run ends `errored`. */
 export const STEP_RETRIES = { limit: 2, delay: "5 seconds", backoff: "constant" } as const;
 /** What a container may reach while its logs are read: nothing. It is already running by then. */
 const NO_ACCESS = { grants: [], ...NO_NETWORK };
-/**
- * One scoring run: scores an attempt's head in a Sandbox and reports the result to the project's
- * Durable Object. The config and the `.npmrc` registry hosts are read from one commit of the origin's
- * `main`, so an attempt can't change its own checks or widen its own network access, and the two always
- * agree. The container that runs repo code holds read grants only (see `grants.ts`).
- *
- * Each setup step's and check's log is copied to R2 (`logs.ts`) within the step that
- * wrote it, while its container still runs, so the result names the logs that were stored.
- */
-export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
-  override async run(event: Readonly<WorkflowEvent<ScoringParams>>, step: WorkflowStep): Promise<ScoringOutcome> {
-    const params = event.payload;
-    const instanceId = event.instanceId;
-
-    let outcome: ScoringOutcome;
-    try {
-      // Pinned once, so the config and the `.npmrc` are read from the same commit even if `main` moves.
-      const main = await step.do("main", { retries: STEP_RETRIES, timeout: "1 minute" }, () =>
-        originMainRef(reposFor(this.env), params.project),
-      );
-      // Named apart from the `config` step it replaced, whose recorded output had another shape.
-      const { config, size } = await step.do("config and size", { retries: STEP_RETRIES, timeout: "1 minute" }, () =>
-        this.#config(params, main),
-      );
-      const registries = await step.do("registries", { retries: STEP_RETRIES, timeout: "1 minute" }, () =>
-        loadRegistries(reposFor(this.env), params.project, main),
-      );
-      // A task's definitions never change `network.allow`, so the run's config gives `main`'s.
-      const settings = runSettings(config, { size, network: { registries, allow: networkAllow(config) } });
-      const base = await step.do("base", { retries: STEP_RETRIES, timeout: "1 minute" }, () =>
-        attemptBase(reposFor(this.env), params.project, { attempt: params.attempt, head: params.sha }),
-      );
-      const result = await step.do("score", { retries: STEP_RETRIES, timeout: settings.timeoutMs }, () =>
-        this.#score(instanceId, params, base?.sha ?? null, settings),
-      );
-      outcome = { status: "done", result };
-    } catch (error) {
-      outcome = { status: "errored", error: String(error).slice(0, 4000) };
-    }
-
-    await step.do("teardown", async () => {
-      await Promise.all(
-        SCORING_ROLES.map((role) => this.env.SANDBOX.getByName(sandboxName(instanceId, role)).destroy()),
-      );
-    });
-    await step.do("report", async () => {
-      const project = this.env.PROJECT.getByName(params.project);
-      await project.scoringFinished(params.run, outcome);
-    });
-    return outcome;
-  }
-
-  /**
-   * The run's config, its layers merged once: the project's config at `main` (the run's pinned commit
-   * of it), then what the task defines over it. A clash between them makes it invalid. The e2e routes'
-   * attempts have no task row, so they get the project's alone. The Sandbox size is the project's own,
-   * which a task's definitions never change, even when they clash.
-   */
-  async #config(params: ScoringParams, main: string): Promise<{ config: ConfigResult; size: SandboxSize }> {
-    const task = parseAttemptRef(params.attempt)?.task;
-    const [project, definitions] = await Promise.all([
-      loadConfig(reposFor(this.env), params.project, main),
-      task === undefined ? NO_TASK_DEFINITIONS : this.env.PROJECT.getByName(params.project).definitionsOf(task),
-    ]);
-    return { config: withTask(project, definitions), size: sandboxSize(project) };
-  }
-
-  /** Runs the score script in the run's own container, stores its logs and builds its result. */
-  async #score(
-    instanceId: string,
-    params: ScoringParams,
-    base: string | null,
-    { config, plan, timeoutMs, size, network }: RunSettings,
-  ): Promise<ScoringResult> {
-    const run = await runInSandbox(
-      this.env,
-      instanceId,
-      params,
-      "score",
-      (g) => scoreScript(g.forkRead.remote, { sha: params.sha, base }, plan),
-      { network, timeoutMs, size },
-    );
-    const raw = parseResult<RawScore>(run.stdout);
-    if (raw === null) {
-      throw new Error(`score script gave no result (exit ${run.exitCode}): ${run.stderr.slice(-2000)}`);
-    }
-    const result = buildResult(config, raw);
-    const notes = new Map(result.checks.map((check) => [check.name, check.notes]));
-    const logs = await storeLogs(this.env, {
-      sandbox: sandboxName(instanceId, "score"),
-      names: logNames(plan),
-      key: (log) => logKey({ project: params.project, line: params.attempt, run: params.run }, log),
-      size,
-      notes,
-    });
-    return { ...result, logs };
-  }
-}
-
 /** The repos a run's grants are for: the project's origin and one attempt's fork (`t42a3`). */
 export interface RunRepos {
   project: string;
@@ -139,8 +34,8 @@ export interface MainSettings {
 }
 
 /**
- * What a scoring run or a retest takes from its config: the config itself, the plan it runs and the
- * step's timeout, with `main`'s settings.
+ * What a retest takes from its config: the config itself, the plan it runs and the step's timeout,
+ * with `main`'s settings.
  */
 export interface RunSettings extends MainSettings {
   config: ConfigResult;
@@ -163,6 +58,15 @@ export interface ScriptOptions<R extends SandboxRole> {
   size: R extends RepoCodeRole ? SandboxSize : typeof TRUSTED_SIZE;
   network?: NetworkAccess;
   timeoutMs?: number;
+  /** The container's Sandbox name, when the role has more than one in a run; `<instance>/<role>` by default. */
+  sandbox?: string;
+  /** Variables the script gets, such as a pipeline run's `THRONG_*`. */
+  env?: Record<string, string>;
+  /**
+   * A snapshot to start the container from rather than the image. A failed restore is retried once;
+   * after that the container starts from the image, and the script finds the snapshot's work missing.
+   */
+  snapshot?: SandboxSnapshot | null;
 }
 
 /**
@@ -176,18 +80,33 @@ export async function runInSandbox<R extends SandboxRole>(
   repos: RunRepos,
   role: R,
   script: (grants: RoleGrants<R>) => string,
-  { size, network = NO_NETWORK, timeoutMs }: ScriptOptions<R>,
+  {
+    size,
+    network = NO_NETWORK,
+    timeoutMs,
+    sandbox: name = sandboxName(instanceId, role),
+    env: vars,
+    snapshot = null,
+  }: ScriptOptions<R>,
 ): Promise<RunResult> {
   const grants = (await mintGrants(env, repos, ROLE_GRANTS[role])) as RoleGrants<R>;
-  const sandbox = env.SANDBOX.getByName(sandboxName(instanceId, role));
+  const sandbox = env.SANDBOX.getByName(name);
+  // The trusted land container never reaches the registry.
+  const access = roleAccess(role, grants, network);
+  if (snapshot !== null) {
+    const restored =
+      (await sandbox.restore(snapshot, { access, size }, timeoutMs)) ||
+      (await sandbox.restore(snapshot, { access, size }, timeoutMs));
+    if (!restored) console.warn({ event: "sandbox.restore_gave_up", sandbox: name, snapshot: snapshot.id });
+  }
   const result = await sandbox.run(script(grants), {
-    // The trusted land container never reaches the registry.
-    access: roleAccess(role, grants, network),
+    access,
     size,
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    ...(vars === undefined ? {} : { env: vars }),
   });
   if (result.exitCode >= 10) {
-    throw new Error(`${role} script exited ${result.exitCode}: ${result.stderr.slice(-2000)}`);
+    throw new Error(`${name} script exited ${result.exitCode}: ${result.stderr.slice(-2000)}`);
   }
   return result;
 }

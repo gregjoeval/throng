@@ -29,6 +29,7 @@ const taskCheck = (check: Partial<CheckConfig> = {}): CheckConfig => ({
   name: "smoke",
   command: "./smoke.sh",
   timeoutMs: 60_000,
+  after: [],
   source: "task",
   ...check,
 });
@@ -79,7 +80,7 @@ describe("a run's config with its task's definitions", () => {
   });
 
   it("runs a task's checks after the project's, under its setup and network, with source task", () => {
-    const project = parseConfig(`setup: [pnpm install]
+    const project = parseConfig(`setup: [{ name: deps, command: pnpm install }]
 network: { allow: [api.example.com] }
 checks:
   - { name: test, command: npm test, timeout: 2m }
@@ -97,7 +98,7 @@ checks:
       ],
     });
     const plan = scorePlan(config);
-    expect(plan.setup).toEqual(["pnpm install"]);
+    expect(plan.setup).toEqual([{ name: "deps", command: "pnpm install" }]);
     expect(plan.allow).toEqual(["api.example.com"]);
     expect(plan.checks.map((check) => [check.name, check.metrics.map((metric) => metric.name)])).toEqual([
       ["test", []],
@@ -146,6 +147,43 @@ checks:
       error: [
         "task checks[0].name: test is also a check's name in .throng/config.yml",
         "task checks[1].name: coverage is also a metric's name in .throng/config.yml",
+      ].join("\n"),
+    });
+  });
+
+  it("lets a task's check wait for a project check, or another of the task's", () => {
+    const config = withTask(PROJECT, {
+      checks: [taskCheck({ name: "smoke", after: ["test"] }), taskCheck({ name: "e2e", after: ["smoke"] })],
+      metrics: [],
+    });
+    expect(scorePlan(config).checks.map((check) => [check.name, check.after])).toEqual([
+      ["test", []],
+      ["smoke", ["test"]],
+      ["e2e", ["smoke"]],
+    ]);
+  });
+
+  it("is invalid when a task's check waits for a setup, an unknown check, itself or in a circle", () => {
+    const project = parseConfig("setup: [{ name: deps, command: npm ci }]\nchecks: [{ name: test, command: x }]\n");
+    const invalid = withTask(project, {
+      checks: [
+        taskCheck({ name: "a", after: ["deps"] }),
+        taskCheck({ name: "b", after: ["nope"] }),
+        taskCheck({ name: "c", after: ["c"] }),
+        taskCheck({ name: "d", after: ["e"] }),
+        taskCheck({ name: "e", after: ["d"] }),
+        taskCheck({ name: "deps" }),
+      ],
+      metrics: [],
+    });
+    expect(invalid).toEqual({
+      kind: "invalid",
+      error: [
+        "task checks[5].name: deps is also a setup's name in .throng/config.yml",
+        "task checks[0].after: deps is a setup; every check already waits for every setup, so after only names checks",
+        "task checks[1].after: no check is named nope",
+        "task checks[2].after: a check can't wait for itself",
+        "task checks[3].after: after makes a circle: d → e → d",
       ].join("\n"),
     });
   });

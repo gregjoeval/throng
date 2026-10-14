@@ -35,9 +35,10 @@ import { forkRepo, originRepo } from "./repos.ts";
 import type { Repos } from "./repos.ts";
 import { GATES } from "./results.ts";
 import type { Gate } from "./results.ts";
-import { cancellable, runSettled, SCORING_CAP, ScoringQueue } from "./scoring.ts";
+import { cancellable, runReport, runSettled, SCORING_CAP, ScoringQueue } from "./scoring.ts";
 import type {
   AttemptScoring,
+  RunReport,
   RunsPage,
   RunsQuery,
   ScoringOutcome,
@@ -2156,13 +2157,13 @@ export class TaskStore {
   }
 
   /**
-   * Records how a scoring run ended (see `ScoringQueue.finish`), then checks whether the merge
+   * Records how a pipeline run ended (see `ScoringQueue.finish`), then checks whether the merge
    * request its attempt is the source of can enter the queue. Returns whether the run was recorded.
    */
-  scoringFinished(run: number, outcome: ScoringOutcome): boolean {
+  pipelineFinished(run: number, report: RunReport): boolean {
     try {
       return this.#sql.transaction(() => {
-        if (!this.scoring.finish(run, outcome)) return false;
+        if (!this.scoring.finish(run, report)) return false;
         const attempt = parseAttemptRef(this.scoring.getRun(run)?.line ?? "");
         if (attempt === null) return true;
         const mr = this.mergeRequests.open(attempt.task);
@@ -2172,6 +2173,10 @@ export class TaskStore {
     } finally {
       this.wakeWaiters();
     }
+  }
+  /** Records how a run ended from a report in the shape a Scoring Workflow gave (see `pipelineFinished`). */
+  scoringFinished(run: number, outcome: ScoringOutcome): boolean {
+    return this.pipelineFinished(run, runReport(outcome));
   }
 
   /**
@@ -3172,12 +3177,13 @@ function toTask(row: TaskRow): StoredTask {
 
 /**
  * A task's stored definitions, as JSON, in the current shape. Checks stored while a check could be
- * optional carry `required`, which is dropped: every check that runs must pass.
+ * optional carry `required`, which is dropped: every check that runs must pass. Checks stored before
+ * a check could wait for others have no `after`, and wait for none.
  */
 function upgradeDefinitions(json: string): TaskDefinitions {
   const stored = { ...NO_TASK_DEFINITIONS, ...(JSON.parse(json) as Partial<TaskDefinitions>) };
-  const checks = (stored.checks as (CheckConfig & { required?: boolean })[]).map(
-    ({ required: _required, ...check }) => check,
+  const checks = (stored.checks as (Omit<CheckConfig, "after"> & { after?: string[]; required?: boolean })[]).map(
+    ({ required: _required, after = [], ...check }): CheckConfig => ({ ...check, after }),
   );
   return { ...stored, checks };
 }

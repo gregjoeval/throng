@@ -23,7 +23,7 @@ const EMPTY: Config = {
 
 const FULL = `
 setup:
-  - pnpm install --frozen-lockfile
+  - { name: deps, command: pnpm install --frozen-lockfile }
 network:
   allow:
     - api.github.com
@@ -35,6 +35,7 @@ checks:
   - name: bundle
     command: pnpm build && node scripts/size.js
     timeout: 90s
+    after: test
 metrics:
   - { name: coverage, from: test.coverage-summary.total.lines.pct, type: number, unit: "%" }
   - { name: bundle_kb, from: bundle.size.files.0.kb, type: number, unit: KB, order: asc }
@@ -77,19 +78,21 @@ describe("parseConfig", () => {
     expect(parseConfig(FULL)).toEqual({
       kind: "valid",
       config: {
-        setup: ["pnpm install --frozen-lockfile"],
+        setup: [{ name: "deps", command: "pnpm install --frozen-lockfile" }],
         network: { allow: ["api.github.com", "registry.example.org"] },
         checks: [
           {
             name: "test",
             command: "pnpm test",
             timeoutMs: 10 * 60_000,
+            after: [],
             source: "project",
           },
           {
             name: "bundle",
             command: "pnpm build && node scripts/size.js",
             timeoutMs: 90_000,
+            after: ["test"],
             source: "project",
           },
         ],
@@ -166,6 +169,7 @@ describe("parseConfig", () => {
             name: "lint",
             command: "pnpm lint",
             timeoutMs: DEFAULT_CHECK_TIMEOUT_MS,
+            after: [],
             source: "project",
           },
         ],
@@ -220,9 +224,41 @@ describe("parseConfig", () => {
       /^metrics\[0\]\.target: target is reserved/u,
     ],
     ["a null metric target", metric(`name: x, ${FROM}, type: number, target:`), /target is reserved/u],
-    ["setup that isn't a list", "setup: pnpm install\n", /^setup: /u],
-    ["an empty setup command", 'setup: [""]\n', /^setup\[0\]: must not be empty$/u],
-    ["a non-string setup command", "setup: [1]\n", /^setup\[0\]: must be a string$/u],
+    ["setup that isn't a list", "setup: pnpm install\n", /^setup: setup must be a list of setups$/u],
+    [
+      "a setup that's only a command",
+      "setup: [pnpm install]\n",
+      /^setup\[0\]: a setup must be a mapping with a name and a command, like \{ name: deps, command: npm ci \}$/u,
+    ],
+    ["a setup without a name", "setup: [{ command: npm ci }]\n", /^setup\[0\]\.name: /u],
+    ["a setup without a command", "setup: [{ name: deps }]\n", /^setup\[0\]\.command: /u],
+    ["an empty setup command", 'setup: [{ name: deps, command: "" }]\n', /^setup\[0\]\.command: must not be empty$/u],
+    ["a non-string setup command", "setup: [{ name: deps, command: 1 }]\n", /^setup\[0\]\.command: must be a string$/u],
+    [
+      "a setup name starting with _",
+      "setup: [{ name: _deps, command: npm ci }]\n",
+      /^setup\[0\]\.name: setup name must not start with _/u,
+    ],
+    [
+      "after on a setup",
+      "setup: [{ name: deps, command: npm ci, after: gen }]\n",
+      /^setup\[0\]\.after: only checks take after; setups run in order$/u,
+    ],
+    [
+      "an unknown setup key",
+      "setup: [{ name: deps, command: npm ci, timeout: 2m }]\n",
+      /^setup\[0\]\.timeout: unknown key$/u,
+    ],
+    [
+      "a duplicate setup name",
+      "setup: [{ name: deps, command: a }, { name: deps, command: b }]\n",
+      /^setup\[1\]\.name: duplicate setup name deps$/u,
+    ],
+    [
+      "a check named like a setup",
+      "setup: [{ name: deps, command: a }]\nchecks: [{ name: deps, command: b }]\n",
+      /^checks\[0\]\.name: check name deps is also a setup's name$/u,
+    ],
     [
       "a host with a scheme",
       "network: { allow: [https://api.github.com] }\n",
@@ -267,6 +303,29 @@ describe("parseConfig", () => {
       /^checks\[0\]\.needs: needs is gone: a check names the checks it waits for with after$/u,
     ],
     ["a numeric timeout", check("timeout: 600"), /^checks\[0\]\.timeout: /u],
+    // after
+    [
+      "after naming a setup",
+      `setup: [{ name: deps, command: npm ci }]\n${check("after: deps")}`,
+      /^checks\[0\]\.after: deps is a setup; every check already waits for every setup, so after only names checks$/u,
+    ],
+    ["after naming an unknown check", check("after: [smoke]"), /^checks\[0\]\.after: no check is named smoke$/u],
+    ["a check waiting for itself", check("after: test"), /^checks\[0\]\.after: a check can't wait for itself$/u],
+    [
+      "after making a circle",
+      "checks:\n  - { name: a, command: x, after: b }\n  - { name: b, command: x, after: [c] }\n  - { name: c, command: x, after: a }\n",
+      /^checks\[0\]\.after: after makes a circle: a → b → c → a$/u,
+    ],
+    [
+      "after that isn't a name or a list",
+      check("after: { a: 1 }"),
+      /^checks\[0\]\.after: after must be a check's name or a list of them$/u,
+    ],
+    [
+      "after listing a non-name",
+      check("after: [1]"),
+      /^checks\[0\]\.after: after must be a check's name or a list of them$/u,
+    ],
     [
       "a duplicate check name",
       "checks: [{ name: t, command: a }, { name: t, command: b }]\n",
@@ -431,6 +490,28 @@ describe("parseConfig", () => {
     ]);
   });
 
+  it("reads after as one check or a list of them", () => {
+    const result = parseConfig(
+      "checks:\n  - { name: a, command: x }\n  - { name: b, command: x, after: a }\n  - { name: c, command: x, after: [a, b] }\n",
+    );
+    expect(result.kind === "valid" ? result.config.checks.map((c) => c.after) : []).toEqual([[], ["a"], ["a", "b"]]);
+  });
+
+  it("rejects a project check waiting for a task's check, which only some attempts have", () => {
+    // The project's config never sees a task's checks, so a name only a task defines is unknown to it.
+    expect(parseConfig("checks:\n  - { name: test, command: x, after: smoke }\n")).toEqual({
+      kind: "invalid",
+      error: "checks[0].after: no check is named smoke",
+    });
+  });
+
+  it("reports a circle once, however many checks lead into it", () => {
+    const result = parseConfig(
+      "checks:\n  - { name: a, command: x, after: b }\n  - { name: b, command: x, after: a }\n  - { name: c, command: x, after: [a, b] }\n",
+    );
+    expect(result).toEqual({ kind: "invalid", error: "checks[0].after: after makes a circle: a → b → a" });
+  });
+
   it("rejects a config larger than the cap", () => {
     const text = `# ${"x".repeat(MAX_CONFIG_BYTES)}\n`;
     expect(parseConfig(text)).toEqual({
@@ -461,8 +542,8 @@ checks:
       config: {
         ...EMPTY,
         checks: [
-          { name: "unit", command: "pnpm test", timeoutMs: 120_000, source: "project" },
-          { name: "e2e", command: "pnpm e2e", timeoutMs: 300_000, source: "project" },
+          { name: "unit", command: "pnpm test", timeoutMs: 120_000, after: [], source: "project" },
+          { name: "e2e", command: "pnpm e2e", timeoutMs: 300_000, after: [], source: "project" },
         ],
       },
     });

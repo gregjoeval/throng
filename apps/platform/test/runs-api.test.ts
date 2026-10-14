@@ -6,7 +6,7 @@ import type { AccessVerifier } from "../src/access.ts";
 import { apiRoutes } from "../src/api.ts";
 import type { ScoringResult } from "../src/results.ts";
 import { runOutcome } from "../src/run-outcome.ts";
-import { pipelineFor } from "../src/scoring.ts";
+import { pipelineFor, runReport } from "../src/scoring.ts";
 import type { ScoringTrigger } from "../src/scoring.ts";
 import type { User } from "../src/users.ts";
 import { FakeRepos } from "./fake-repos.ts";
@@ -85,7 +85,7 @@ async function setup() {
   /** Starts queued runs, then ends run `id` with `result`. */
   const finish = async (id: number, result: ScoringResult = RESULT) => {
     await queue().drain();
-    expect(queue().finish(id, { status: "done", result })).toBeTruthy();
+    expect(queue().finish(id, runReport({ status: "done", result }))).toBeTruthy();
   };
   const setStatus = (id: number, status: string) =>
     sql(projectId).exec("UPDATE pipeline_runs SET status = ? WHERE id = ?", status, id);

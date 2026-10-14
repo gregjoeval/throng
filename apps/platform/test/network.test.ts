@@ -197,7 +197,7 @@ describe("roleAccess", () => {
   };
   it("opens network.allow and the registry only to containers that run repository code", () => {
     const allow = ["api.github.com"];
-    expect(roleAccess("score", grants, { allow, registries: [] })).toMatchObject({
+    expect(roleAccess("pipeline", grants, { allow, registries: [] })).toMatchObject({
       registries: NPM,
       allow,
     });
@@ -209,7 +209,7 @@ describe("roleAccess", () => {
 
   it("adds the origin's .npmrc registries to the npm registry, only for containers that run repository code", () => {
     const registries = ["npm.acme.dev", "registry.npmjs.org"];
-    for (const role of ["score", "check"] as const) {
+    for (const role of ["pipeline", "check"] as const) {
       expect({
         role,
         registries: roleAccess(role, grants, { allow: [], registries }).registries,
@@ -234,7 +234,7 @@ describe("roleAccess", () => {
       allow: ["npm.acme.dev", "registry.npmjs.org", "api.github.com"],
       registries: ["npm.acme.dev"],
     };
-    const given = roleAccess("score", grants, network);
+    const given = roleAccess("pipeline", grants, network);
     for (const host of ["npm.acme.dev", "registry.npmjs.org"]) {
       expect({ host, decision: outboundDecision("GET", new URL(`https://${host}/x`), given) }).toEqual({
         host,

@@ -2,9 +2,10 @@
 // "Run storage"). Runs store it; an attempt's scoring reads a slice of it, the `ScoringResult` that
 // lanes, the arena and votes have always read.
 
-import type { Source } from "./config.ts";
-import { DIFF_CHECK } from "./results.ts";
-import type { CheckOutcome, ScoringResult } from "./results.ts";
+import type { ConfigResult, Source } from "./config.ts";
+import { setupLogName } from "./logs.ts";
+import { buildResult, DIFF_CHECK, checkOutcome as ranOutcome, SETUP_TIMEOUT_MS } from "./results.ts";
+import type { CheckOutcome, RawScore, ScoringResult } from "./results.ts";
 
 export const STEP_KINDS = ["setup", "check", "step"] as const;
 export type StepKind = (typeof STEP_KINDS)[number];
@@ -14,7 +15,7 @@ export type StepOutcome = (typeof STEP_OUTCOMES)[number];
 
 /** One setup, check or post-gate step of a run. */
 export interface RunStep {
-  /** `setup.<n>`, a check's name, or a post-gate step's. */
+  /** A setup's, check's or post-gate step's name; `setup.<n>` for a setup from before setups had names. */
   name: string;
   kind: StepKind;
   source: Source;
@@ -93,6 +94,62 @@ export function runOutcome(result: ScoringResult): RunOutcome {
     ...checks.filter((check) => check.name !== DIFF_CHECK),
   ];
   return { base, config, gate, steps, metrics };
+}
+
+/** How one setup went: its exit code, null when an earlier setup failed and it never ran, and how long it took. */
+export interface SetupRun {
+  exit: number | null;
+  durationMs: number;
+}
+
+/**
+ * A pipeline run's outcome from the config it ran under and what its containers reported: `_diff`,
+ * each setup, then each check with the checks it waited for. `raw.setupFailed` names the first setup
+ * that failed; `logs` are the names of the logs the run stored, and `notes` what the run noted about
+ * each check besides why it was skipped.
+ */
+export function pipelineOutcome(
+  config: ConfigResult,
+  raw: RawScore,
+  setups: SetupRun[],
+  logs: string[],
+  notes: ReadonlyMap<string, string[]> = new Map(),
+): RunOutcome {
+  const result = buildResult(config, raw);
+  const configured = config.kind === "valid" ? config.config : null;
+  const failed = raw.setupFailed === null ? null : (configured?.setup[raw.setupFailed - 1]?.name ?? null);
+  const setupSteps = (configured?.setup ?? []).map(({ name }, i): RunStep => {
+    const ran = setups[i] ?? { exit: null, durationMs: 0 };
+    const log = setupLogName(i + 1);
+    return {
+      name,
+      kind: "setup",
+      source: "project",
+      group: null,
+      outcome: STEP_OUTCOME[ranOutcome(ran.exit, ran.durationMs, SETUP_TIMEOUT_MS)],
+      durationMs: ran.durationMs,
+      notes: ran.exit === null && failed !== null ? [`skipped: setup ${failed} failed`] : [],
+      log: logs.includes(log) ? log : null,
+    };
+  });
+  const after = new Map(configured?.checks.map((check) => [check.name, check.after]));
+  const checks = result.checks.map((check): RunStep => ({
+    name: check.name,
+    kind: "check",
+    source: check.source,
+    group: null,
+    ...(check.source === "platform" ? {} : { after: after.get(check.name) ?? [] }),
+    outcome: STEP_OUTCOME[check.outcome],
+    durationMs: check.durationMs,
+    notes: [...check.notes, ...(notes.get(check.name) ?? [])],
+    log: logs.includes(check.name) ? check.name : null,
+  }));
+  const steps = [
+    ...checks.filter((check) => check.name === DIFF_CHECK),
+    ...setupSteps,
+    ...checks.filter((check) => check.name !== DIFF_CHECK),
+  ];
+  return { base: result.base, config: result.config, gate: result.gate, steps, metrics: result.metrics };
 }
 
 /**

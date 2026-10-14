@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { ServiceError } from "../src/errors.ts";
 import type { DequeueCause } from "../src/merge-requests.ts";
 import type { Gate, ScoringResult } from "../src/results.ts";
-import type { ScoringOutcome, ScoringParams, ScoringWorkflow } from "../src/scoring.ts";
+import type { PipelineParams, PipelineWorkflowBinding, ScoringOutcome } from "../src/scoring.ts";
 import { TaskStore } from "../src/task-store.ts";
 import type { AttemptInput, ProjectContext } from "../src/task-store.ts";
 import type { Actor } from "../src/tokens.ts";
@@ -24,8 +24,8 @@ const catAlias = actor("cat00001", "claude");
 const ada = actor("ada00001");
 const bob = actor("bob00001");
 
-class FakeWorkflow implements ScoringWorkflow {
-  async create(_options: { id: string; params: ScoringParams }): Promise<unknown> {
+class FakeWorkflow implements PipelineWorkflowBinding {
+  async create(_options: { id: string; params: PipelineParams }): Promise<unknown> {
     return {};
   }
   async get(_id: string): Promise<{ terminate: () => Promise<void> }> {

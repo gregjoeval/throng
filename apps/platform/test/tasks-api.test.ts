@@ -279,7 +279,7 @@ describe("task checks", () => {
     const { call, ada, bob, base } = await withConfig();
     const created = await call("POST", `${base}/tasks`, ada, { title: "a", checks: [SMOKE], metrics: [SMOKED] });
     expect(created.status).toBe(201);
-    const smoke = { name: "smoke", command: "./smoke.sh", timeoutMs: 120_000, source: "task" };
+    const smoke = { name: "smoke", command: "./smoke.sh", timeoutMs: 120_000, after: [], source: "task" };
     expect(created.body["checks"]).toEqual([smoke]);
     expect(created.body["metrics"]).toEqual([{ ...SMOKED, order: "desc", source: "task" }]);
     expect((await call("GET", `${base}/tasks/t1`, bob)).body["checks"]).toEqual([smoke]);

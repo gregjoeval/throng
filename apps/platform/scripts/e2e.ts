@@ -26,8 +26,9 @@
 // preview URL to $THRONG_OUTPUT and a `url` metric reads it; nothing deploys), coalesce (two quick
 // pushes; the first run is cancelled and only the newest sha is scored), intrusion (an attempt's checks
 // try to push to the origin and call the Cloudflare API, which `network.allow` doesn't list; both
-// fail), deps (setup installs an npm dependency from the
-// registry), refs (attempt archive refs: pushable, listed, kept across pushes to main, and copied by
+// fail), deps (a named setup installs an npm dependency from the registry; each check runs in its
+// own container started from the setup's snapshot, one waits for the other with `after`, and each
+// gets the run's THRONG_* variables), refs (attempt archive refs: pushable, listed, kept across pushes to main, and copied by
 // the Worker).
 //
 // The D1 projection, me: a task and an attempt reach the e2e user's `/api/me/tasks` and
@@ -1091,6 +1092,7 @@ writeFileSync(process.env.THRONG_OUTPUT + "/out.json", JSON.stringify({ url: ${J
 `,
     ".throng/config.yml": `${TEST_CHECK}  - name: preview
     command: node scripts/preview.js
+    after: test
 metrics:
   - { name: preview_url, from: preview.out.url, type: string, format: url }
 `,
@@ -1194,13 +1196,25 @@ test("cannot reach the Cloudflare API", async () => {
   await finish(project, work, timeline);
 }
 
-/** An attempt adds an npm dependency: setup installs it from the registry and the checks use it. */
+/**
+ * An attempt adds an npm dependency: a named setup installs it from the registry, and the checks,
+ * each in its own container started from the setup's snapshot, use it without installing it again.
+ * `context` waits for `test` with `after`, and checks the run's THRONG_* variables reached it.
+ */
 async function deps(): Promise<void> {
   const timeline = new Timeline();
   const { project, work } = await setUpProject(timeline, {
+    "scripts/context.js": `const want = ["THRONG_PROJECT", "THRONG_PIPELINE", "THRONG_LINE", "THRONG_SHA", "THRONG_RUN"];
+const missing = want.filter((name) => !process.env[name]);
+if (missing.length > 0) throw new Error("missing " + missing.join(", "));
+if (process.env.THRONG_PIPELINE !== "default" || process.env.THRONG_LINE !== "t1a1") throw new Error("wrong run context");
+`,
     ".throng/config.yml": `setup:
-  - npm ci --ignore-scripts --no-audit --no-fund
-${TEST_CHECK}`,
+  - { name: deps, command: npm ci --ignore-scripts --no-audit --no-fund }
+${TEST_CHECK}  - name: context
+    command: test -d node_modules/is-number && node scripts/context.js
+    after: test
+`,
   });
   const fork = await createAttempt(project, "t1a1", timeline);
 
@@ -1235,6 +1249,11 @@ test("the dependency is installed", () => {
   assert(
     result.gate === "passed",
     `expected the dependency to install and the tests to pass: ${JSON.stringify(result.checks)}`,
+  );
+  assert(
+    JSON.stringify(result.checks.map((c) => [c.name, c.outcome])) ===
+      '[["_diff","passed"],["test","passed"],["context","passed"]]',
+    `expected context to run after test, with the run's context: ${JSON.stringify(result.checks)}`,
   );
   await finish(project, work, timeline);
 }

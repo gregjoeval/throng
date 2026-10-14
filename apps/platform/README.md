@@ -51,15 +51,35 @@ Clients differ in the details: some omit `type` or call it `streamable-http`, an
 
 Every run on a project, on every line, is in the project Durable Object's `pipeline_runs` table, migrated scoring runs included. `GET /api/projects/{owner}/{project}/runs` lists them newest first, with each one's line, pipeline, trigger, head, status, gate and who triggered it. `line` filters to one line, `main`, or `tasks` (every line but `main`); `status` to one status (`waiting` lists the runs waiting for the owner). Pages are cursor-paged by run id: a page's `next` is the next page's `cursor`, so a run queued meanwhile never shifts one. `GET …/runs/{runId}` adds the run's outcome: its steps in run order, each with its kind, group, `after`, outcome, duration, notes and log name, and its metrics. `POST …/runs/{runId}/cancel` is the owner's, aliases included, and only while the run is `cancellable`: queued, waiting, or running on any line but `main`, which may be deploying. The MCP tools `list_runs`, `get_run`, `get_log` (by run and step) and `wait_for_run` read the same; `wait_for_run` holds until the run is done or waiting, with the same per-user cap as `wait_for_attempt`. There is no MCP tool to cancel or start a run.
 
+### How a run runs
+
+`PipelineWorkflow` (`src/pipeline-workflow.ts`) runs an attempt line's `default` pipeline in fixed stages, under the config and `.npmrc` it reads from one commit of the origin's `main`:
+
+```yaml
+setup: # in order, in one container; a failed setup stops the run
+  - { name: deps, command: npm ci }
+checks: # in parallel, each in its own container; every one that runs must pass
+  - { name: lint, command: npm run lint }
+  - { name: test, command: npm test }
+  - { name: build, command: npm run build, after: [lint, test] } # one check or a list
+```
+
+1. **Setups.** One container, `<instance>/setup`, fetches the head, records the diff from the attempt's base (`_diff`), and runs the setups in order. When they all pass it is snapshotted (`snapshotContainer`), its logs are stored, and it stops.
+2. **Checks.** Each check runs in its own container, `<instance>/check:<name>`, started from that snapshot, all in parallel, except that a check waits until every check it names in `after` has passed. A check whose wait didn't pass is `skipped`, saying which check it waited for. A failed restore is retried once; then the container starts from the image and runs the setups again first, noting it on the check. There are no snapshots under `wrangler dev`, so there every check's container runs the setups itself.
+
+`after` names checks only: naming a setup, an unknown check or the check itself, or making a circle, is a config error. A task's checks take `after` too, and may wait for the project's checks; a project's check can't wait for a task's, which only some attempts have. Setups, checks and metrics share one set of names.
+
+Every container gets one read grant on the attempt's fork and no write grant, reaches only `main`'s `network.allow` and `.npmrc` registries, and gets `THRONG_PROJECT`, `THRONG_PIPELINE`, `THRONG_LINE`, `THRONG_SHA` and `THRONG_RUN`. Before starting any, the Workflow tells the project Durable Object every container its plan may start. When the run ends, or a newer head cancels it (the Workflow is terminated), every one of them is destroyed and the snapshot released. Containers can't delete a snapshot yet: Cloudflare deletes it 30 days after it was taken or last restored. Each step's outcome, duration, notes and log go to the Durable Object as the run's outcome, from which scoring takes the attempt's score and verdict.
+
 ## Scoring logs
 
-Each scoring run copies the log of every `setup` command and check to the `LOGS` R2 bucket at `logs/<projectId>/<line>/<runId>/<name>.log` (`src/logs.ts`); runs from before runs were keyed on their line keep theirs at `logs/<projectId>/<t42a3>/<sha>/<runId>/<name>.log` until they expire. A setup command's log is named `setup.<n>` and a check's is its name; check names can't contain a dot, so they never collide. Logs over 5 MB keep their head and tail with a `[throng: truncated …]` marker between them. The run's result lists the logs it stored, and `GET /api/projects/{owner}/{project}/runs/{runId}/logs/{step}` streams one as text, or answers `notFound` once it's missing or expired.
+Each pipeline run copies the log of every setup and check to the `LOGS` R2 bucket at `logs/<projectId>/<line>/<runId>/<name>.log` (`src/logs.ts`); runs from before runs were keyed on their line keep theirs at `logs/<projectId>/<t42a3>/<sha>/<runId>/<name>.log` until they expire. The nth setup's log is named `setup.<n>` and a check's is its name; check names can't contain a dot, so they never collide. Logs over 5 MB keep their head and tail with a `[throng: truncated …]` marker between them. The run's result lists the logs it stored, and `GET /api/projects/{owner}/{project}/runs/{runId}/logs/{step}` streams one as text, or answers `notFound` once it's missing or expired.
 
 There's one bucket per environment: `throng-logs`, and `throng-ci-logs` for `ci`. Logs are deleted after 30 days by an R2 lifecycle rule. Wrangler's config can't declare lifecycle rules, so they live in `r2-lifecycle.json`, which CI applies before each deploy (see the setup below).
 
 ## Sandbox size
 
-Each role of a run gets its own container (`src/grants.ts`). The ones that run the repository's code, `score` and `check`, start at the size the project's `.throng/config.yml` sets:
+Each role of a run gets its own containers (`src/grants.ts`). The ones that run the repository's code, a pipeline run's and the landing's `check`, start at the size the project's `.throng/config.yml` sets:
 
 ```yaml
 sandbox:
@@ -90,7 +110,7 @@ A config with the old `preview:` section is invalid. `api.cloudflare.com` is a h
 
 ## Network access
 
-A container has no internet (`enableInternet: false`). Only HTTPS on the default port to the hosts its access lists leaves it, through the `OutboundAuth` proxy (`src/network.ts`); the access is fixed when the container starts. Beyond its git grants, the containers that run repository code (`score` and the landing's `check`) may reach:
+A container has no internet (`enableInternet: false`). Only HTTPS on the default port to the hosts its access lists leaves it, through the `OutboundAuth` proxy (`src/network.ts`); the access is fixed when the container starts. Beyond its git grants, the containers that run repository code (a pipeline run's and the landing's `check`) may reach:
 
 - **Registries**, for installs: `registry.npmjs.org` and every `registry=` and `@scope:registry=` host in the `.npmrc` on the origin's `main`, if it's an `https:` URL on the default port with a DNS hostname (no IP literal, trailing dot or single label such as `localhost`). Other lines, auth lines included, are ignored. Registries take `GET` and `HEAD` only, so nothing can publish or log in.
 - **`network.allow`** in `.throng/config.yml`: any method.
@@ -175,4 +195,4 @@ To run `arena` from your machine, install Chromium once with `pnpm --filter @thr
 THRONG_URL=https://throng-ci.<subdomain>.workers.dev E2E_TOKEN=... THRONG_WEB_URL=http://localhost:5173 pnpm e2e arena
 ```
 
-The first run creates the `throng-ci` Worker, its Workflow (`throng-ci-scoring`) and its container. `pnpm e2e cleanup` needs `THRONG_URL`, `E2E_TOKEN` and an explicit `E2E_PROJECT_PREFIX`, so it can also clear up after a local run.
+The first run creates the `throng-ci` Worker, its Workflows (pipeline runs keep the name `throng-ci-scoring`) and its container. `pnpm e2e cleanup` needs `THRONG_URL`, `E2E_TOKEN` and an explicit `E2E_PROJECT_PREFIX`, so it can also clear up after a local run.

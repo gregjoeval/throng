@@ -3,7 +3,7 @@
 // gate live here so they're tested without a container.
 
 import { DEFAULT_CHECK_TIMEOUT_MS, networkAllow } from "./config.ts";
-import type { CheckConfig, ConfigResult, MetricConfig, MetricOrder, Source } from "./config.ts";
+import type { CheckConfig, Config, ConfigResult, MetricConfig, MetricOrder, SetupConfig, Source } from "./config.ts";
 import { parseFrom, typedValue } from "./metric-values.ts";
 import type { MetricFormat, MetricRule, MetricValue } from "./metric-values.ts";
 
@@ -75,13 +75,22 @@ export interface ScoringResult {
 }
 
 /**
- * What the score script runs, and the hosts it may reach beyond the npm registry. Each check carries
- * the metrics read from its output, which the script reads as soon as the check exits.
+ * What a run runs, and the hosts it may reach beyond the npm registry. Each check carries the checks
+ * it waits for and the metrics read from its output, which are read as soon as the check exits.
  */
 export interface ScorePlan {
-  setup: string[];
-  checks: { name: string; command: string; timeoutMs: number; metrics: PlannedMetric[] }[];
+  setup: SetupConfig[];
+  checks: PlannedCheck[];
   allow: string[];
+}
+
+/** A check as a run runs it. */
+export interface PlannedCheck {
+  name: string;
+  command: string;
+  timeoutMs: number;
+  after: string[];
+  metrics: PlannedMetric[];
 }
 
 /** A metric as the score script reads it: where from, and the rule its value must fit. */
@@ -98,7 +107,7 @@ export interface RawScore {
   shortstat: string;
   /** How long finding the base and diffing took. */
   builtinMs: number;
-  /** The 1-based `setup` command that failed, or null when setup succeeded. */
+  /** The 1-based setup that failed, or null when every setup passed. */
   setupFailed: number | null;
   /**
    * One per planned check, in order; `exit` is null for a check that didn't run. `metrics` holds the
@@ -122,10 +131,11 @@ export function scorePlan(config: ConfigResult): ScorePlan {
   if (config.kind !== "valid") return { setup: [], checks: [], allow: [] };
   return {
     setup: config.config.setup,
-    checks: config.config.checks.map(({ name, command, timeoutMs }) => ({
+    checks: config.config.checks.map(({ name, command, timeoutMs, after }) => ({
       name,
       command,
       timeoutMs,
+      after,
       metrics: metricsFrom(name, config.config.metrics).map((metric) => ({
         name: metric.name,
         from: metric.from,
@@ -136,10 +146,42 @@ export function scorePlan(config: ConfigResult): ScorePlan {
   };
 }
 
-/** How long the whole score script may take: every setup command and check at its timeout, plus slack. */
+/** Room a step that runs commands gets beyond their timeouts: starting, fetching and storing logs. */
+export const STEP_SLACK_MS = 5 * 60 * 1000;
+
+/** How long running every setup may take: each at its timeout. */
+export function setupTimeoutMs(plan: Pick<ScorePlan, "setup">): number {
+  return plan.setup.length * SETUP_TIMEOUT_MS;
+}
+
+/** How long a script that runs the whole plan in one container may take: every setup and check at its timeout, plus slack. */
 export function scoreTimeoutMs(plan: ScorePlan): number {
   const checks = plan.checks.reduce((sum, check) => sum + check.timeoutMs, 0);
-  return plan.setup.length * SETUP_TIMEOUT_MS + checks + 5 * 60 * 1000;
+  return setupTimeoutMs(plan) + checks + STEP_SLACK_MS;
+}
+
+/**
+ * The plan's checks in an order that runs each after the checks it waits for, otherwise in plan
+ * order. A valid config's `after`s make no circle; a check in one would come last.
+ */
+export function checkOrder<C extends Pick<PlannedCheck, "name" | "after">>(checks: readonly C[]): C[] {
+  const byName = new Map(checks.map((check) => [check.name, check]));
+  const ordered: C[] = [];
+  const placed = new Set<string>();
+  const visiting = new Set<string>();
+  const place = (check: C): void => {
+    if (placed.has(check.name) || visiting.has(check.name)) return;
+    visiting.add(check.name);
+    for (const waited of check.after) {
+      const dep = byName.get(waited);
+      if (dep !== undefined) place(dep);
+    }
+    visiting.delete(check.name);
+    placed.add(check.name);
+    ordered.push(check);
+  };
+  for (const check of checks) place(check);
+  return ordered;
 }
 
 /**
@@ -271,6 +313,27 @@ const ENDED: Record<Exclude<CheckOutcome, "passed" | "skipped">, string> = {
   errored: "errored",
 };
 
+/** How a skipped check's note says a check it waits for ended. */
+const WAITED_ENDED: Record<Exclude<CheckOutcome, "passed">, string> = { ...ENDED, skipped: "was skipped" };
+
+/**
+ * Why a check that never ran was skipped: a setup failed, a check it waits for didn't pass, or, when
+ * neither, nothing reported it.
+ */
+function skipNote(
+  check: CheckConfig,
+  failedSetup: SetupConfig | null,
+  outcomes: ReadonlyMap<string, CheckOutcome>,
+): string {
+  if (failedSetup !== null) return `skipped: setup ${failedSetup.name} failed`;
+  for (const waited of check.after) {
+    const outcome = outcomes.get(waited);
+    if (outcome !== undefined && outcome !== "passed")
+      return `skipped: waits for ${waited}, which ${WAITED_ENDED[outcome]}`;
+  }
+  return "skipped: the run didn't report it";
+}
+
 /**
  * A config check from its run: its outcome and notes, and the metrics read from its output. A check
  * that didn't pass reports no metrics: each is null, saying why.
@@ -279,14 +342,12 @@ function configScored(
   check: CheckConfig,
   metrics: MetricConfig[],
   ran: RawScore["checks"][number] | undefined,
-  setupFailed: number | null,
+  skipped: string,
 ): ScoredCheck {
   const outcome = checkOutcome(ran?.exit ?? null, ran?.durationMs ?? 0, check.timeoutMs);
-  // The score script records an exit for every check it runs, and runs them all unless setup fails.
-  const skipNote = `skipped: ${setupFailed === null ? "the score script didn't report it" : `setup command ${setupFailed} failed`}`;
   const metricValue = (metric: MetricConfig): MetricValue => {
     if (outcome === "passed") return checkedValue(metric, ran?.metrics[metric.name]);
-    const why = outcome === "skipped" ? `was ${skipNote}` : ENDED[outcome];
+    const why = outcome === "skipped" ? `was ${skipped}` : ENDED[outcome];
     return { value: null, note: `${check.name}: ${check.name} ${why}` };
   };
   return {
@@ -295,7 +356,7 @@ function configScored(
       source: check.source,
       outcome,
       durationMs: ran?.durationMs ?? 0,
-      notes: outcome === "skipped" ? [skipNote] : [],
+      notes: outcome === "skipped" ? [skipped] : [],
     },
     metrics: Object.fromEntries(
       metricsFrom(check.name, metrics).map((metric): [string, MetricResult] => [
@@ -307,22 +368,31 @@ function configScored(
 }
 
 /**
- * The run's result from the config it was scored under and the score script's raw output: `_diff`,
- * then the config's checks. Its `logs` are empty: the run stores its logs, with each check's notes,
- * once the result is built.
+ * The run's result from the config it ran under and the raw output of its scripts: `_diff`, then the
+ * config's checks. Its `logs` are empty: the run stores its logs, with each check's notes, once the
+ * result is built.
  */
 export function buildResult(config: ConfigResult, raw: RawScore): ScoringResult {
-  const checks =
-    config.kind === "valid"
-      ? config.config.checks.map((check, i) =>
-          configScored(check, config.config.metrics, raw.checks[i], raw.setupFailed),
-        )
-      : [];
+  const checks = config.kind === "valid" ? configChecks(config.config, raw) : [];
   const gate = config.kind === "invalid" || raw.setupFailed !== null ? "failed" : gateFor(checks.map((s) => s.check));
   const scored = [diffScored(parseShortstat(raw.shortstat), raw.builtinMs), ...checks];
   const configSummary =
     config.kind === "invalid" ? { kind: "invalid" as const, error: config.error } : { kind: config.kind };
   return { base: raw.base, config: configSummary, gate, ...flatten(scored), logs: [] };
+}
+
+/** Each of the config's checks, scored from its run, a check that never ran saying why. */
+function configChecks(config: Config, raw: RawScore): ScoredCheck[] {
+  const failedSetup = raw.setupFailed === null ? null : (config.setup[raw.setupFailed - 1] ?? null);
+  const outcomes = new Map(
+    config.checks.map((check, i) => {
+      const ran = raw.checks[i];
+      return [check.name, checkOutcome(ran?.exit ?? null, ran?.durationMs ?? 0, check.timeoutMs)];
+    }),
+  );
+  return config.checks.map((check, i) =>
+    configScored(check, config.metrics, raw.checks[i], skipNote(check, failedSetup, outcomes)),
+  );
 }
 
 /** The checks, and every metric by name: each check's outcome metric, then its own metrics. */

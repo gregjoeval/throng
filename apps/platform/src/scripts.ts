@@ -1,14 +1,16 @@
 // Bash run inside a run's Sandbox. Each script is idempotent, so a retried Workflow step can rerun it
-// on a fresh container. The last stdout line is the result: `THRONG_RESULT <json>`.
+// on the same container or a fresh one. The last stdout line is the result: `THRONG_RESULT <json>`.
 
 import { CONFIG_PATH, MAX_CONFIG_BYTES } from "./config.ts";
+import type { SetupConfig } from "./config.ts";
 import { CONFLICT_CAPS, MERGE_LABELS } from "./conflicts.ts";
 import type { ConflictCaps, Remerge } from "./conflicts.ts";
 import { THRONG_COMMITTER } from "./landing.ts";
 import { setupLogName } from "./logs.ts";
 import { METRIC_VALUES_SOURCE, metricValue, parseFrom } from "./metric-values.ts";
-import { MAX_OUTPUT_BYTES, SETUP_TIMEOUT_MS } from "./results.ts";
-import type { PlannedMetric, ScorePlan } from "./results.ts";
+import type { MetricValue } from "./metric-values.ts";
+import { checkOrder, MAX_OUTPUT_BYTES, SETUP_TIMEOUT_MS } from "./results.ts";
+import type { PlannedCheck, PlannedMetric, ScorePlan } from "./results.ts";
 import { taskBranchRef } from "./task-refs.ts";
 
 export const RESULT_PREFIX = "THRONG_RESULT ";
@@ -23,60 +25,173 @@ set -uo pipefail
 result() { printf '${RESULT_PREFIX}%s\\n' "$1"; exit 0; }
 `;
 
+/** The file a setup container leaves once every setup passed, so a container restored from its snapshot skips them. */
+const SETUP_DONE = "setup.done";
+
+/** Exit code: a setup that passed in the setup container failed when re-run in a check's container. */
+export const RERUN_SETUP_FAILED_EXIT = 17;
+
 /**
- * Scores the attempt's head `sha`: fetches it from the fork and records the diff size from `base`, the
- * attempt's base as `attemptBase` derived it (an ancestor of the head, so the fork has it), or from
- * the empty tree when it has none. Then it runs the plan (see `runPlan`). The result is a `RawScore`;
- * `buildResult` turns it into the run's result.
+ * Bash that fetches the head `sha` from the fork into `tree` and checks it out, in a clean
+ * `/workspace` with `logs` and `out` beside it. Needs `PRELUDE`.
  */
-export function scoreScript(
+function checkoutTree(forkRemote: string, sha: string): string {
+  return `rm -rf tree logs out ${SETUP_DONE} && mkdir logs out && git init -q tree && cd tree
+git fetch -q ${quote(forkRemote)} '+refs/heads/*:refs/remotes/fork/*' || exit 10
+git checkout -q --detach ${quote(sha)} || exit 11`;
+}
+
+/** What the setup container reports: the diff from the base, and how each setup went. */
+export interface SetupResult {
+  base: string | null;
+  /** `git diff --shortstat` from the base (or the empty tree) to the head. */
+  shortstat: string;
+  /** How long finding the base and diffing took. */
+  builtinMs: number;
+  /** One per setup, in order; `exit` is null for a setup that didn't run because an earlier one failed. */
+  setups: { exit: number | null; durationMs: number }[];
+}
+
+/**
+ * A pipeline run's setup container: fetches the head `sha` from the fork and records the diff size
+ * from `base`, the attempt's base as `attemptBase` derived it (an ancestor of the head, so the fork
+ * has it), or from the empty tree when it has none. Then it runs each setup in order under `timeout`,
+ * each logging to `logs/<setup.n>.log`, and stops at the first that fails. When every one passed it
+ * leaves `setup.done`, so the snapshot taken of it next carries both the setups' work and the mark.
+ */
+export function setupScript(
   forkRemote: string,
   { sha, base }: { sha: string; base: string | null },
-  plan: ScorePlan,
+  setups: readonly SetupConfig[],
 ): string {
+  const steps = setups
+    .map(
+      ({ command }, i) => `t0=$(now)
+timeout -k 10s ${seconds(SETUP_TIMEOUT_MS)} bash -c ${quote(command)} < /dev/null > ../logs/${setupLogName(i + 1)}.log 2>&1
+code=$?
+printf '%s %s\\n' "$code" "$(( $(now) - t0 ))" > ../out/${setupLogName(i + 1)}.status
+[ "$code" = 0 ] || setup_failed=1`,
+    )
+    .map((step) => `if [ -z "$setup_failed" ]; then\n${step}\nfi`)
+    .join("\n");
   return `${PRELUDE}
-rm -rf score logs out && mkdir logs out && out="$PWD/out" && git init -q score && cd score
-git fetch -q ${quote(forkRemote)} '+refs/heads/*:refs/remotes/fork/*' || exit 10
-git checkout -q --detach ${quote(sha)} || exit 11
+${checkoutTree(forkRemote, sha)}
 now() { date +%s%3N; }
 t0=$(now)
 base=${quote(base ?? "")}
 shortstat=$(git diff --shortstat "\${base:-$(git hash-object -t tree /dev/null)}" HEAD) || exit 15
 builtin_ms=$(( $(now) - t0 ))
-${runPlan(plan)}
+setup_failed=""
+${steps}
+[ -z "$setup_failed" ] && touch ../${SETUP_DONE}
+node - "$base" "$shortstat" "$builtin_ms" ${setups.length} <<'NODE' || exit 16
+const fs = require("fs");
+const [base, shortstat, builtinMs, count] = process.argv.slice(2);
+const setups = [];
+for (let i = 1; i <= Number(count); i++) {
+  const path = "../out/setup." + i + ".status";
+  if (!fs.existsSync(path)) {
+    setups.push({ exit: null, durationMs: 0 });
+    continue;
+  }
+  const [exit, durationMs] = fs.readFileSync(path, "utf8").trim().split(" ").map(Number);
+  setups.push({ exit, durationMs });
+}
+process.stdout.write("${RESULT_PREFIX}" + JSON.stringify({ base: base || null, shortstat, builtinMs: Number(builtinMs), setups }) + "\\n");
+NODE
+`;
+}
+
+/** What a check's container reports: the check's run, as `RawScore` holds it, and whether it re-ran the setups. */
+export interface CheckRun {
+  exit: number;
+  durationMs: number;
+  metrics: Record<string, MetricValue>;
+  /** True when the container didn't hold the setups' work (no snapshot, or it couldn't be restored) and ran them itself. */
+  setupsRerun: boolean;
+}
+
+/**
+ * A pipeline run's container for one check. Restored from the setup container's snapshot it finds
+ * `setup.done` and goes straight to the check; otherwise (no snapshot, or one that couldn't be
+ * restored) it fetches the head and runs the setups itself first, their output at the top of the
+ * check's log. A setup that fails here passed in the setup container, so it's an infrastructure
+ * failure (`RERUN_SETUP_FAILED_EXIT`). The check runs under `timeout` with `$THRONG_OUTPUT` pointing
+ * at an empty directory of its own, logging to `logs/<name>.log`, and as soon as it exits, whatever
+ * its outcome, `readValues` reads its metrics from that directory.
+ */
+export function checkScript(
+  forkRemote: string,
+  sha: string,
+  setups: readonly SetupConfig[],
+  check: Pick<PlannedCheck, "name" | "command" | "timeoutMs" | "metrics">,
+): string {
+  const log = `../logs/${check.name}.log`;
+  const output = `"$PWD/../out/${check.name}"`;
+  const rerun = setups
+    .map(
+      ({ name, command }) => `printf '== throng: setup %s ==\\n' ${quote(name)} >> ${log}
+timeout -k 10s ${seconds(SETUP_TIMEOUT_MS)} bash -c ${quote(command)} < /dev/null >> ${log} 2>&1 || exit ${RERUN_SETUP_FAILED_EXIT}`,
+    )
+    .join("\n");
+  return `${PRELUDE}
+now() { date +%s%3N; }
+setups_rerun=false
+if [ ! -f ${SETUP_DONE} ]; then
+  setups_rerun=true
+  ${checkoutTree(forkRemote, sha).replaceAll("\n", "\n  ")}
+${rerun}
+  touch ../${SETUP_DONE}
+else
+  rm -rf out/${check.name} logs/${check.name}.log && cd tree
+fi
+rm -rf ${output} && mkdir -p ${output}
+t0=$(now)
+THRONG_OUTPUT=${output} timeout -k 10s ${seconds(check.timeoutMs)} bash -c ${quote(check.command)} < /dev/null >> ${log} 2>&1
+code=$?
+duration=$(( $(now) - t0 ))
+${check.metrics.length === 0 ? "printf '{}' > ../out/values.json" : readValues(output, check.metrics, "../out/values.json")}
+result "{\\"exit\\":$code,\\"durationMs\\":$duration,\\"setupsRerun\\":$setups_rerun,\\"metrics\\":$(cat ../out/values.json)}"
 `;
 }
 
 /**
- * Bash that runs each `setup` command and then every check in order, in the checked-out tree, each
- * under `timeout` with `$THRONG_OUTPUT` pointing at an empty directory of its own. A failed setup
- * command skips every check; a failed check doesn't stop the next. As soon as a check exits, whatever
- * its outcome, `readValues` reads the values of its metrics from that directory. Each step's output
- * goes to `../logs/<name>.log`, named by `logNames`. It ends with a `RawScore` result made from
- * `$base`, `$shortstat` and `$builtin_ms`, and needs `$out` and `now`.
+ * Bash that runs each setup and then every check, one at a time, in the checked-out tree, each under
+ * `timeout` with `$THRONG_OUTPUT` pointing at an empty directory of its own. A failed setup skips
+ * every check; a check runs only once every check it waits for passed, and a failed check doesn't
+ * stop the others. As soon as a check exits, whatever its outcome, `readValues` reads the values of
+ * its metrics from that directory. Each step's output goes to `../logs/<name>.log`, named by
+ * `logNames`. It ends with a `RawScore` result made from `$base`, `$shortstat` and `$builtin_ms`,
+ * and needs `$out` and `now`.
  */
 function runPlan(plan: ScorePlan): string {
   const setup = plan.setup
     .map(
       (
-        command,
+        { command },
         i,
       ) => `if [ -z "$setup_failed" ] && ! timeout -k 10s ${seconds(SETUP_TIMEOUT_MS)} bash -c ${quote(command)} < /dev/null > ../logs/${setupLogName(i + 1)}.log 2>&1; then
   setup_failed=${i + 1}
 fi`,
     )
     .join("\n");
-  const checks = plan.checks
-    .map(
-      (check, i) => `if [ -z "$setup_failed" ]; then
+  const index = new Map(plan.checks.map((check, i) => [check.name, i]));
+  const checks = checkOrder(plan.checks)
+    .map((check) => {
+      const i = index.get(check.name) ?? 0;
+      // A check waits for every check it names to have exited 0.
+      const waits = check.after
+        .map((name) => ` && [ "$(cut -d ' ' -f 1 "$out/${index.get(name) ?? 0}.status" 2> /dev/null)" = 0 ]`)
+        .join("");
+      return `if [ -z "$setup_failed" ]${waits}; then
   mkdir "$out/${i}.output"
   t0=$(now)
   THRONG_OUTPUT="$out/${i}.output" timeout -k 10s ${seconds(check.timeoutMs)} bash -c ${quote(check.command)} < /dev/null > ../logs/${check.name}.log 2>&1
   code=$?
   printf '%s %s\\n' "$code" "$(( $(now) - t0 ))" > "$out/${i}.status"
 ${check.metrics.length === 0 ? "" : readValues(`"$out/${i}.output"`, check.metrics, `"$out/${i}.values"`)}
-fi`,
-    )
+fi`;
+    })
     .join("\n");
   return `setup_failed=""
 ${setup}

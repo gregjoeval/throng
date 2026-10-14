@@ -7,6 +7,7 @@ import { parseConfig } from "../src/config.ts";
 import type { FollowParams } from "../src/follows.ts";
 import { buildResult } from "../src/results.ts";
 import type { LegacyResult, ScoringResult } from "../src/results.ts";
+import { runReport } from "../src/scoring.ts";
 import type { ScoringOutcome } from "../src/scoring.ts";
 import type { User } from "../src/users.ts";
 import { FakeRepos } from "./fake-repos.ts";
@@ -112,7 +113,7 @@ async function setup() {
   /** Starts queued runs, then reports how run `id` ended. */
   const finish = async (id: number, outcome: ScoringOutcome) => {
     await scoring().drain();
-    expect(scoring().finish(id, outcome)).toBeTruthy();
+    expect(scoring().finish(id, runReport(outcome))).toBeTruthy();
   };
 
   /** Marks ada's attempt needs update: the task branch moves and its follow conflicts. */

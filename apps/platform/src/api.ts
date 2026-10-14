@@ -216,11 +216,24 @@ const ConfigCheckSchema = z
       .int()
       .max(MAX_CHECK_TIMEOUT_MS)
       .openapi({ description: "Defaults to 10 minutes.", example: 600_000 }),
+    after: z.array(ConfigNameSchema).openapi({
+      description: "The checks it waits for: it runs only once each of them passed, and is skipped otherwise.",
+      example: ["typecheck"],
+    }),
     source: ConfigLayerSchema,
   })
   .openapi("Check", {
     description:
       "A check the config declares: a command whose exit code is its outcome. Every check that runs must pass.",
+  });
+
+const ConfigSetupSchema = z
+  .object({
+    name: ConfigNameSchema.openapi({ example: "deps" }),
+    command: z.string().openapi({ example: "pnpm install --frozen-lockfile" }),
+  })
+  .openapi("Setup", {
+    description: "A setup the config declares: a command run before every check. A failed setup stops the run.",
   });
 
 const VoteEligibilitySchema = z.enum(VOTE_ELIGIBILITIES).openapi({
@@ -797,11 +810,13 @@ const RunLogPathSchema = RunPathSchema.extend({
 
 const ConfigSchema = z
   .object({
-    setup: z.array(z.string()).openapi({ description: "Commands run once, in order, before the checks." }),
+    setup: z.array(ConfigSetupSchema).openapi({ description: "Run once, in order, before the checks." }),
     network: z.object({
       allow: z.array(z.string()).openapi({ description: "Extra HTTPS hosts checks may reach, lowercased." }),
     }),
-    checks: z.array(ConfigCheckSchema).openapi({ description: "Run in order." }),
+    checks: z
+      .array(ConfigCheckSchema)
+      .openapi({ description: "Run in parallel once the setups passed, each once the checks it waits for passed." }),
     metrics: z.array(MetricSchema).openapi({ description: "Read from the checks' output files, in order." }),
     attempts: z.object({
       limit: z.number().int().nullable().openapi({ description: "Null to use the default cap on active attempts." }),

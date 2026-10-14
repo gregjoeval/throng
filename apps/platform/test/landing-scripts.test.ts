@@ -73,7 +73,19 @@ function checked(head: string): { head: string; main: string; tree: string } {
   return { head, main: result.main, tree: parseMergeTree(result.output).tree };
 }
 
-const plan = (checks: ScorePlan["checks"], setup: string[] = []): ScorePlan => ({ setup, checks, allow: [] });
+const plan = (checks: ScorePlan["checks"], setup: string[] = []): ScorePlan => ({
+  setup: setup.map((command, i) => ({ name: `setup${i + 1}`, command })),
+  checks,
+  allow: [],
+});
+
+const check = (name: string, command: string, after: string[] = []) => ({
+  name,
+  command,
+  timeoutMs: 60_000,
+  after,
+  metrics: [],
+});
 
 const landing = (merge: { head: string; main: string; tree: string }) => ({
   ...merge,
@@ -214,6 +226,7 @@ describe("retestScript", () => {
               name: "both",
               command: "test -f b.txt && test -f c.txt && test -f built",
               timeoutMs: 60_000,
+              after: [],
               metrics: [],
             },
           ],
@@ -224,6 +237,24 @@ describe("retestScript", () => {
     expect(raw).toMatchObject({ setupFailed: null, checks: [{ exit: 0 }] });
   });
 
+  it("runs a check only once the checks it waits for passed", () => {
+    const { head } = diverged();
+    const raw = run<RawScore>(
+      retestScript(
+        origin,
+        fork,
+        checked(head),
+        plan([
+          check("after-build", "test -f built", ["build"]),
+          check("after-broken", "true", ["broken"]),
+          check("build", "touch built"),
+          check("broken", "exit 1"),
+        ]),
+      ),
+    );
+    expect(raw.checks.map((c) => c.exit)).toEqual([0, null, 0, 1]);
+  });
+
   it("reports a failing check", () => {
     const { head } = diverged();
     const raw = run<RawScore>(
@@ -231,7 +262,7 @@ describe("retestScript", () => {
         origin,
         fork,
         checked(head),
-        plan([{ name: "no-c", command: "test ! -f c.txt", timeoutMs: 60_000, metrics: [] }]),
+        plan([{ name: "no-c", command: "test ! -f c.txt", timeoutMs: 60_000, after: [], metrics: [] }]),
       ),
     );
     expect(raw.checks).toMatchObject([{ exit: 1 }]);

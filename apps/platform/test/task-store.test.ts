@@ -967,7 +967,7 @@ describe("migrate", () => {
     ).toThrow(/UNIQUE/u);
   });
 
-  it("reads task checks and results stored when a check could be optional without required", () => {
+  it("reads task checks and results stored when a check could be optional without required, and waiting for none", () => {
     const sql = testSql();
     const repos = new FakeRepos();
     expect(new TaskStore({ sql, repos })).toBeDefined();
@@ -999,7 +999,7 @@ describe("migrate", () => {
     );
     const store = new TaskStore({ sql, repos });
     expect(store.getTask(PROJECT, ada, { task: 1 }).definitions.checks).toEqual([
-      { name: "smoke", command: "./smoke.sh", timeoutMs: 1000, source: "task" },
+      { name: "smoke", command: "./smoke.sh", timeoutMs: 1000, after: [], source: "task" },
     ]);
     expect(store.getScoringRun(PROJECT, ada, { run: 1 }).result?.checks).toEqual([
       { name: "smoke", source: "task", outcome: "failed", durationMs: 1, notes: [] },

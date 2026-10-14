@@ -1,5 +1,6 @@
-// RunSandbox against a fake container: which size a container starts at. `cloudflare:workers` is
-// stubbed; the container records what it was asked.
+// RunSandbox against a fake container: which size and source a container starts at, what each
+// script gets, and its snapshots. `cloudflare:workers` is stubbed; the container records what it was
+// asked.
 
 import { describe, expect, it, vi } from "vitest";
 import type { SandboxSize } from "../src/config.ts";
@@ -7,34 +8,66 @@ import { importWorkerModule } from "./support/worker-module.ts";
 
 vi.mock("cloudflare:workers", () => import("./support/cloudflare-workers.ts"));
 
-const { RunSandbox } = await importWorkerModule<{
-  RunSandbox: new (
-    ctx: unknown,
-    env: unknown,
-  ) => { run: (script: string, options: unknown) => Promise<{ exitCode: number; startMs: number }> };
-}>("sandbox");
+interface SandboxSnapshot {
+  id: string;
+  size: number;
+}
+
+interface Sandbox {
+  run: (script: string, options: unknown) => Promise<{ exitCode: number; startMs: number }>;
+  restore: (snapshot: SandboxSnapshot, options: unknown) => Promise<boolean>;
+  snapshot: () => Promise<SandboxSnapshot | null>;
+  releaseSnapshot: () => void;
+}
+
+const { RunSandbox } = await importWorkerModule<{ RunSandbox: new (ctx: unknown, env: unknown) => Sandbox }>("sandbox");
 
 const NO_ACCESS = { grants: [], registries: [], allow: [] };
+const SNAPSHOT = { id: "snap-1", size: 400_000_000 };
 
-/** A RunSandbox over a fake container, and the options each `start` was given. */
-function sandbox() {
+/**
+ * A RunSandbox over a fake container, the options each `start` was given and each `exec`'s env.
+ * `failStarts` starts fail before the container comes up.
+ */
+function sandbox({ image = "registry.cloudflare.com/acct/throng:abc", failStarts = 0 } = {}) {
   const starts: Record<string, unknown>[] = [];
+  const envs: Record<string, string>[] = [];
+  let failing = failStarts;
   const container = {
     running: false,
-    images: { sandbox: "sandbox:latest" },
+    images: { sandbox: image },
     start(options: Record<string, unknown>) {
       starts.push(options);
       container.running = true;
     },
+    destroy: async () => {
+      container.running = false;
+    },
     interceptOutboundHttps: async () => {},
     setInactivityTimeout: async () => {},
-    exec: async () => ({
-      exitCode: Promise.resolve(0),
-      output: async () => ({ exitCode: 0, stdout: new Uint8Array(), stderr: new Uint8Array() }),
-    }),
+    snapshotContainer: async () => ({ id: "snap-1", size: 400_000_000, name: "" }),
+    exec: async (_cmd: string[], options?: { env?: Record<string, string> }) => {
+      if (options?.env === undefined && failing > 0) {
+        failing -= 1;
+        throw new Error("Network connection lost");
+      }
+      if (options?.env !== undefined) envs.push(options.env);
+      return {
+        exitCode: Promise.resolve(0),
+        output: async () => ({ exitCode: 0, stdout: new Uint8Array(), stderr: new Uint8Array() }),
+      };
+    },
   };
-  const ctx = { container, exports: { OutboundAuth: () => ({}) } };
-  return { sandbox: new RunSandbox(ctx, {}), starts, container };
+  const kv = new Map<string, unknown>();
+  const storage = {
+    kv: {
+      get: (key: string) => kv.get(key),
+      put: (key: string, value: unknown) => kv.set(key, value),
+      delete: (key: string) => kv.delete(key),
+    },
+  };
+  const ctx = { container, exports: { OutboundAuth: () => ({}) }, storage };
+  return { sandbox: new RunSandbox(ctx, {}), starts, envs, container, kv };
 }
 
 describe("RunSandbox", () => {
@@ -55,5 +88,52 @@ describe("RunSandbox", () => {
     container.running = false;
     await box.run("true", { access: NO_ACCESS, size: "standard-3" });
     expect(starts.map((s) => s["instance"])).toEqual(["standard-1", "standard-3"]);
+  });
+
+  it("gives a script its variables under the container's own, which it can't override", async () => {
+    const { sandbox: box, envs } = sandbox();
+    await box.run("true", {
+      access: NO_ACCESS,
+      size: "lite",
+      env: { THRONG_RUN: "7", GIT_TERMINAL_PROMPT: "1" },
+    });
+    expect(envs).toEqual([expect.objectContaining({ THRONG_RUN: "7", GIT_TERMINAL_PROMPT: "0" })]);
+  });
+
+  it("restores a container from a snapshot, and the script runs in it without another start", async () => {
+    const { sandbox: box, starts } = sandbox();
+    expect(await box.restore(SNAPSHOT, { access: NO_ACCESS, size: "standard-2" })).toBeTruthy();
+    await box.run("true", { access: NO_ACCESS, size: "standard-2" });
+    expect(starts).toEqual([{ containerSnapshot: { id: "snap-1" }, instance: "standard-2", enableInternet: false }]);
+  });
+
+  it("stops a container whose restore failed, so the next try starts it afresh", async () => {
+    const { sandbox: box, starts, container } = sandbox({ failStarts: 1 });
+    expect(await box.restore(SNAPSHOT, { access: NO_ACCESS, size: "standard-1" })).toBeFalsy();
+    expect(container.running).toBeFalsy();
+    expect(await box.restore(SNAPSHOT, { access: NO_ACCESS, size: "standard-1" })).toBeTruthy();
+    expect(starts).toHaveLength(2);
+  });
+
+  it("keeps its snapshot until it's released, once, with no snapshot API to delete it", async () => {
+    const { sandbox: box, kv } = sandbox();
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    await box.run("true", { access: NO_ACCESS, size: "lite" });
+    await box.snapshot();
+    expect(kv.get("snapshot")).toEqual(SNAPSHOT);
+    box.releaseSnapshot();
+    box.releaseSnapshot();
+    expect(kv.has("snapshot")).toBeFalsy();
+    expect(log.mock.calls).toEqual([[{ event: "sandbox.snapshot_expires", snapshot: "snap-1", size: 400_000_000 }]]);
+    log.mockRestore();
+  });
+
+  it("snapshots a deployed container, and none under wrangler dev", async () => {
+    const deployed = sandbox();
+    await deployed.sandbox.run("true", { access: NO_ACCESS, size: "lite" });
+    expect(await deployed.sandbox.snapshot()).toEqual(SNAPSHOT);
+    const local = sandbox({ image: "cloudflare-dev/runsandbox-sandbox-0123abcd:build" });
+    await local.sandbox.run("true", { access: NO_ACCESS, size: "lite" });
+    expect(await local.sandbox.snapshot()).toBeNull();
   });
 });

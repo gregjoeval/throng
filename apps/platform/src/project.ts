@@ -2,10 +2,11 @@ import { DurableObject } from "cloudflare:workers";
 import { reposFor } from "./artifacts";
 import { camelKeys } from "./casing";
 import type { FollowOutcome } from "./follows";
-import { LANDING_ROLES, sandboxName, SCORING_ROLES } from "./grants";
+import { LANDING_ROLES, sandboxName } from "./grants";
 import type { SandboxRole } from "./grants";
 import type { LandingOutcome } from "./landing";
-import type { ScoringOutcome, ScoringRequest, StoredRun } from "./scoring";
+import { teardownPipeline } from "./pipeline-workflow";
+import type { RunReport, ScoringOutcome, ScoringRequest, StoredRun } from "./scoring";
 import { keyringFrom } from "./secrets";
 import type { TaskDefinitions } from "./task-definitions";
 import { attemptRef, parseAttemptRef } from "./task-refs";
@@ -59,7 +60,10 @@ export class ProjectCoordinator extends DurableObject<Env> {
     this.#tasks = new TaskStore({
       sql,
       repos: reposFor(env),
-      scoring: { workflow: env.SCORING, teardown: teardown(SCORING_ROLES) },
+      scoring: {
+        workflow: env.PIPELINE,
+        teardown: (instanceId, containers) => teardownPipeline(env.SANDBOX, instanceId, containers),
+      },
       landing: { workflow: env.LANDING, teardown: teardown(LANDING_ROLES) },
       follow: { workflow: env.FOLLOW },
       keyring: keyringFrom(env.SECRETS_KEYRING),
@@ -96,12 +100,29 @@ export class ProjectCoordinator extends DurableObject<Env> {
     return this.#tasks.scoring.getRun(id);
   }
 
-  /** Called by a run's Scoring Workflow when it starts: what the task defines over the project's config. */
+  /** Called by a run's Pipeline Workflow when it starts: what the task defines over the project's config. */
   definitionsOf(task: number): TaskDefinitions {
     return this.#tasks.definitionsOf(task);
   }
 
-  /** Called by a run's Scoring Workflow when it ends. Reports from a superseded or cancelled run are discarded. */
+  /**
+   * Called by a run's Pipeline Workflow before it starts any container: the containers its plan may
+   * start, so cancelling it destroys them all.
+   */
+  pipelinePlanned(run: number, containers: string[]): void {
+    this.#tasks.scoring.planned(run, containers);
+  }
+
+  /** Called by a run's Pipeline Workflow when it ends. Reports from a superseded or cancelled run are discarded. */
+  async pipelineFinished(run: number, report: RunReport): Promise<void> {
+    this.#tasks.pipelineFinished(run, report);
+    await this.#drain(this.#tasks.scoring.getRun(run)?.project);
+  }
+
+  /**
+   * Called by a run's Workflow that started under the Scoring Workflow's code and reports in its
+   * shape. Kept while such a run may still report.
+   */
   async scoringFinished(run: number, outcome: ScoringOutcome): Promise<void> {
     this.#tasks.scoringFinished(run, outcome);
     await this.#drain(this.#tasks.scoring.getRun(run)?.project);

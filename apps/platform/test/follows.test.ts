@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import type { FollowOutcome, FollowParams } from "../src/follows.ts";
 import type { LandingParams } from "../src/landing.ts";
 import type { ScoringResult } from "../src/results.ts";
-import type { ScoringParams } from "../src/scoring.ts";
+import type { PipelineParams } from "../src/scoring.ts";
 import { TaskStore } from "../src/task-store.ts";
 import type { AttemptInput, ProjectContext } from "../src/task-store.ts";
 import type { Actor } from "../src/tokens.ts";
@@ -60,7 +60,7 @@ async function setup({ landing = true } = {}) {
   const base = repos.commit(ORIGIN, { files: { "README.md": "hi\n" }, message: "init" });
   const sql = testSql();
   let clock = Date.parse("2026-10-10T12:00:00.000Z");
-  const scoringWorkflow = new FakeWorkflows<ScoringParams>();
+  const scoringWorkflow = new FakeWorkflows<PipelineParams>();
   const landingWorkflow = new FakeWorkflows<LandingParams>();
   const followWorkflow = new FakeWorkflows<FollowParams>();
   const store = new TaskStore({

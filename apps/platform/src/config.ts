@@ -1,4 +1,4 @@
-// A project's `.throng/config.yml`: its setup, checks, metrics, attempt cap and Sandbox size. `parseConfig`
+// A project's `.throng/config.yml`: its setups, checks, metrics, attempt cap and Sandbox size. `parseConfig`
 // is pure, so the API's validate endpoint, the attempt cap and scoring all read a config the same
 // way. `loadConfig` always reads it from the origin's `main`, so an attempt can't change its own
 // checks.
@@ -80,19 +80,27 @@ export type MetricConfig = {
   | { type: "enum"; values: string[] }
 );
 
+/** A setup: a named command run before every check, in order with the others. */
+export interface SetupConfig {
+  name: string;
+  command: string;
+}
+
 export interface CheckConfig {
   name: string;
   command: string;
   timeoutMs: number;
+  /** The checks it waits for: it runs only once each of them passed. */
+  after: string[];
   source: ConfigLayer;
 }
 
 export interface Config {
-  /** Commands run once, in order, before the checks. */
-  setup: string[];
+  /** Run once, in order, before the checks; a failed one stops the run. */
+  setup: SetupConfig[];
   /** Extra HTTPS hosts checks may reach, lowercased. */
   network: { allow: string[] };
-  /** Run in order. */
+  /** Run in parallel once the setups passed, each once the checks it waits for passed. */
   checks: CheckConfig[];
   /** Read from the checks' output files, in order. */
   metrics: MetricConfig[];
@@ -100,7 +108,7 @@ export interface Config {
   attempts: { limit: number | null };
   /** Who makes each task's selection, unless a task overrides it. */
   selection: SelectionPolicy;
-  /** The size of the containers that run the repository's code: `score` and `check`. */
+  /** The size of the containers that run the repository's code: setups, checks and retests. */
   sandbox: { size: SandboxSize };
 }
 
@@ -188,9 +196,10 @@ export function checkMetricFields(metric: z.infer<typeof MetricSchema>, at: numb
   });
 }
 
-/** A layer's checks and metrics, as far as the name rules read them. */
+/** A layer's setups, checks and metrics, as far as the name rules read them. A task's layer has no setups. */
 export interface NamedLayer {
-  checks: readonly { name: string }[];
+  setup?: readonly { name: string }[];
+  checks: readonly { name: string; after: readonly string[] }[];
   metrics: readonly { name: string; from: string }[];
 }
 
@@ -201,26 +210,48 @@ export interface NameProblem {
 }
 
 /**
- * Each name rule a layer's checks and metrics break, in order. A check's outcome is a metric named
- * after it, so checks and metrics share one namespace: a name may be used once, and a metric may read
- * only a check that exists. `project` is the config a task's layer goes over: its names are taken,
- * and its checks may be read. It is null for the project's config itself.
+ * Each name rule a layer's setups, checks and metrics break, in order. Setups and checks share one
+ * namespace, and so do checks and metrics, as a check's outcome is a metric named after it: a name may
+ * be used once, and a metric may read only a check that exists. A check's `after` names only checks,
+ * never itself, a setup (every check already waits for every setup) or a circle. `project` is the
+ * config a task's layer goes over: its names are taken, and its checks may be read and waited for. It
+ * is null for the project's config itself, whose checks can't name a task's.
  */
 export function nameProblems(layer: NamedLayer, project: NamedLayer | null): NameProblem[] {
+  const projectSetups = new Set(project?.setup?.map((setup) => setup.name));
   const projectChecks = new Set(project?.checks.map((check) => check.name));
   const projectMetrics = new Set(project?.metrics.map((metric) => metric.name));
   const taken = (used: string): string | null => {
+    if (projectSetups.has(used)) return `${used} is also a setup's name in ${CONFIG_PATH}`;
     if (projectChecks.has(used)) return `${used} is also a check's name in ${CONFIG_PATH}`;
     if (projectMetrics.has(used)) return `${used} is also a metric's name in ${CONFIG_PATH}`;
     return null;
   };
   const problems: NameProblem[] = [];
+  const setups = new Set<string>();
+  layer.setup?.forEach((setup, i) => {
+    if (setups.has(setup.name))
+      problems.push({ path: ["setup", i, "name"], message: `duplicate setup name ${setup.name}` });
+    setups.add(setup.name);
+  });
   const checks = new Set<string>();
   layer.checks.forEach((check, i) => {
-    const message = taken(check.name) ?? (checks.has(check.name) ? `duplicate check name ${check.name}` : null);
+    let message = taken(check.name);
+    if (message === null && setups.has(check.name)) message = `check name ${check.name} is also a setup's name`;
+    else if (message === null && checks.has(check.name)) message = `duplicate check name ${check.name}`;
     if (message !== null) problems.push({ path: ["checks", i, "name"], message });
     checks.add(check.name);
   });
+  layer.checks.forEach((check, i) => {
+    for (const waited of check.after) {
+      const message = afterProblem(check.name, waited, {
+        setups: (other) => setups.has(other) || projectSetups.has(other),
+        checks: (other) => checks.has(other) || projectChecks.has(other),
+      });
+      if (message !== null) problems.push({ path: ["checks", i, "after"], message });
+    }
+  });
+  problems.push(...circles(layer.checks));
   const metrics = new Set<string>();
   layer.metrics.forEach((metric, i) => {
     let message = taken(metric.name);
@@ -233,6 +264,44 @@ export function nameProblems(layer: NamedLayer, project: NamedLayer | null): Nam
       problems.push({ path: ["metrics", i, "from"], message: `no check is named ${check}` });
     }
   });
+  return problems;
+}
+
+/** What's wrong with check `check` waiting for `waited`, given which names are setups and checks; null when nothing. */
+function afterProblem(
+  check: string,
+  waited: string,
+  names: { setups: (name: string) => boolean; checks: (name: string) => boolean },
+): string | null {
+  if (waited === check) return "a check can't wait for itself";
+  if (names.setups(waited))
+    return `${waited} is a setup; every check already waits for every setup, so after only names checks`;
+  return names.checks(waited) ? null : `no check is named ${waited}`;
+}
+
+/**
+ * Each circle the layer's `after`s make, once, at the check it was found from: `a → b → a`. A
+ * layer's checks wait only for its own or for the project's, and the project's never wait for a
+ * task's, so every circle lies within one layer.
+ */
+function circles(checks: NamedLayer["checks"]): NameProblem[] {
+  const index = new Map(checks.map((check, i) => [check.name, i]));
+  const state = new Map<string, "visiting" | "done">();
+  const problems: NameProblem[] = [];
+  const visit = (check: string, trail: string[]): void => {
+    if (state.get(check) === "done") return;
+    if (state.get(check) === "visiting") {
+      const circle = [...trail.slice(trail.indexOf(check)), check].join(" → ");
+      problems.push({ path: ["checks", index.get(check) ?? 0, "after"], message: `after makes a circle: ${circle}` });
+      return;
+    }
+    state.set(check, "visiting");
+    for (const waited of checks[index.get(check) ?? 0]?.after ?? []) {
+      if (waited !== check && index.has(waited)) visit(waited, [...trail, check]);
+    }
+    state.set(check, "done");
+  };
+  for (const check of checks) visit(check.name, []);
   return problems;
 }
 
@@ -259,12 +328,13 @@ export function metricConfig(metric: z.infer<typeof MetricSchema>, source: Confi
   }
 }
 
-/** A parsed check as stored, as the layer `source` defined it: with a 10m timeout by default. */
+/** A parsed check as stored, as the layer `source` defined it: with a 10m timeout and nothing to wait for by default. */
 export function checkConfig(check: z.infer<typeof CheckSchema>, source: ConfigLayer): CheckConfig {
   return {
     name: check.name,
     command: check.command,
     timeoutMs: check.timeout ?? DEFAULT_CHECK_TIMEOUT_MS,
+    after: check.after,
     source,
   };
 }
@@ -279,6 +349,24 @@ const TimeoutSchema = z
   .refine((ms) => ms > 0, "timeout must be positive")
   .refine((ms) => ms <= MAX_CHECK_TIMEOUT_MS, "timeout must be at most 30m");
 
+/** The checks a check waits for: one name or a list of them, as a list; none by default. */
+const AfterSchema = z
+  .union([z.string(), z.array(z.string({ error: "must be a check's name" }))], {
+    error: "after must be a check's name or a list of them",
+  })
+  .optional()
+  .transform((after) => (after === undefined ? [] : [after].flat()));
+
+/** A setup: a name and a command, run in order before every check. */
+const SetupSchema = z.strictObject(
+  {
+    name: name("setup name"),
+    command,
+    after: z.never({ error: "only checks take after; setups run in order" }).optional(),
+  },
+  { error: "a setup must be a mapping with a name and a command, like { name: deps, command: npm ci }" },
+);
+
 export const CheckSchema = z.strictObject({
   name: name("check name"),
   command,
@@ -288,6 +376,7 @@ export const CheckSchema = z.strictObject({
     })
     .optional(),
   needs: z.never({ error: "needs is gone: a check names the checks it waits for with after" }).optional(),
+  after: AfterSchema,
   timeout: TimeoutSchema.optional(),
   metrics: z
     .never({
@@ -326,7 +415,7 @@ const ConfigSchema = z
     {
       /** Where a config keeps the anchors it reuses; Throng reads nothing in it. */
       definitions: z.unknown().optional(),
-      setup: z.array(command, { error: "setup must be a list of commands" }).optional(),
+      setup: z.array(SetupSchema, { error: "setup must be a list of setups" }).optional(),
       network: z
         .strictObject({
           allow: z
@@ -367,7 +456,7 @@ const ConfigSchema = z
     { error: "the config must be a mapping" },
   )
   .superRefine((config, ctx) => {
-    const layer = { checks: config.checks ?? [], metrics: config.metrics ?? [] };
+    const layer = { setup: config.setup ?? [], checks: config.checks ?? [], metrics: config.metrics ?? [] };
     for (const problem of nameProblems(layer, null)) ctx.addIssue({ code: "custom", ...problem });
     layer.metrics.forEach((metric, i) => checkMetricFields(metric, i, ctx));
   });
@@ -401,7 +490,7 @@ export function parseConfig(text: string | null): ConfigResult {
   return {
     kind: "valid",
     config: {
-      setup: config.setup ?? [],
+      setup: (config.setup ?? []).map((setup) => ({ name: setup.name, command: setup.command })),
       network: { allow: config.network?.allow ?? [] },
       checks: (config.checks ?? []).map((check) => checkConfig(check, "project")),
       metrics: (config.metrics ?? []).map((metric) => metricConfig(metric, "project")),

@@ -1,5 +1,6 @@
-# How Throng scores an attempt at itself (see apps/platform/README.md, "How a run runs"). Only the web
-# app is checked: the platform's tests and e2e are left to CI, so a run stays short.
+# How Throng scores an attempt at itself (see apps/platform/README.md, "How a run runs"). Lint and
+# format cover the repo, but only the web app is typechecked and tested: the platform's tests and e2e
+# are left to CI, so a run stays short.
 caches:
   # pnpm needs its metadata cache too: a store alone fails `pnpm install --offline` with ERR_PNPM_NO_OFFLINE_META.
   pnpm: { path: [~/.local/share/pnpm/store, ~/.cache/pnpm], key: pnpm-lock.yaml }

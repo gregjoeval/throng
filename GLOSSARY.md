@@ -84,6 +84,10 @@ _Avoid_: Workflow, CI, job
 One execution of a pipeline for one pushed head.
 _Avoid_: Build, job, run (on its own)
 
+**Line**:
+What a project's pipeline runs follow as it moves: an attempt's fork, a task's task branch, or `origin/main`. Each pipeline run belongs to one line, and a newer head on a line replaces the runs still waiting on it.
+_Avoid_: Branch, ref, stream
+
 **Step**:
 One command in a pipeline. Every setup and every check is a step; a step that is neither runs only once its pipeline run's gate passes, and produces no metrics.
 _Avoid_: Job, stage, action

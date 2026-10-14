@@ -430,7 +430,7 @@ describe("rescoring on a task edit", () => {
     await store.editTask(PROJECT, ada, { task: 1, checks: [smoke], metrics: [lines("smoke.report.lines")] });
     await store.scoring.drain();
     store.scoring.finish(at(runs(open), -1).id, done());
-    await store.editTask(PROJECT, ada, { task: 1, checks: [{ ...smoke, required: false }] });
+    await store.editTask(PROJECT, ada, { task: 1, checks: [{ ...smoke, timeout: "5m" }] });
 
     expect(runs(open).map((r) => r.trigger)).toEqual(["open", "rescore", "rescore"]);
     expect(await code(store.editTask(PROJECT, ada, { task: 1, checks: [] }))).toBe("invalidRequest");
@@ -521,10 +521,10 @@ describe("results", () => {
     await store.openAttempt(PROJECT, ada, ref);
     await store.scoring.drain();
     const checks: CheckResult[] = [
-      { name: "_diff", source: "platform", required: false, outcome: "passed", durationMs: 2, notes: [] },
-      { name: "test", source: "project", required: true, outcome: "passed", durationMs: 9, notes: [] },
-      { name: "lint", source: "project", required: false, outcome: "failed", durationMs: 1, notes: [] },
-      { name: "_preview", source: "platform", required: false, outcome: "skipped", durationMs: 0, notes: [] },
+      { name: "_diff", source: "platform", outcome: "passed", durationMs: 2, notes: [] },
+      { name: "test", source: "project", outcome: "passed", durationMs: 9, notes: [] },
+      { name: "lint", source: "project", outcome: "failed", durationMs: 1, notes: [] },
+      { name: "_preview", source: "platform", outcome: "skipped", durationMs: 0, notes: [] },
     ];
     expect(store.scoring.finish(at(runs(ref), 0).id, done({ config: { kind: "valid" }, checks }))).toBeTruthy();
 

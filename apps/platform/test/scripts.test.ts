@@ -196,8 +196,7 @@ describe("scoreScript", () => {
       echo '${JSON.stringify(coverage)}' > "$THRONG_OUTPUT/coverage-summary.json"
   - name: lint
     command: >-
-      echo '{"errors": 3}' > "$THRONG_OUTPUT/lint.json"; exit 1
-    required: false
+      echo '{"errors": 3}' > "$THRONG_OUTPUT/lint.json"
 metrics:
   - { name: tests, from: test.report.numTotalTests, type: number }
   - { name: coverage, from: test.coverage-summary.total.lines.pct, type: number, unit: "%" }
@@ -213,8 +212,8 @@ metrics:
       gate: "passed",
       checks: [
         { name: "_diff", outcome: "passed" },
-        { name: "test", required: true, outcome: "passed" },
-        { name: "lint", required: false, outcome: "failed" },
+        { name: "test", outcome: "passed" },
+        { name: "lint", outcome: "passed" },
         { name: "_preview", outcome: "skipped" },
       ],
       metrics: {
@@ -229,7 +228,7 @@ metrics:
     });
   });
 
-  it("runs a task's checks after the project's, after its setup, and gates on a required one", () => {
+  it("runs a task's checks after the project's, after its setup, and gates on them", () => {
     const head = attemptHead();
     const project = parseConfig(`setup:
   - echo ready > ../setup-ran
@@ -243,8 +242,9 @@ checks:
         checks: [
           {
             name: "smoke",
-            command: `test -f ../setup-ran && echo '{"ok": false}' > "$THRONG_OUTPUT/smoke.json"; exit 1`,
+            command: `test -f ../setup-ran && echo '{"ok": false}' > "$THRONG_OUTPUT/smoke.json"`,
           },
+          { name: "e2e", command: "exit 1" },
         ],
         metrics: [
           { name: "lines", from: "test.report.lines", type: "number" },
@@ -264,11 +264,13 @@ checks:
       checks: [
         { name: "_diff" },
         { name: "test", source: "project", outcome: "passed" },
-        { name: "smoke", source: "task", required: true, outcome: "failed" },
+        { name: "smoke", source: "task", outcome: "passed" },
+        { name: "e2e", source: "task", outcome: "failed" },
         { name: "_preview", outcome: "skipped" },
       ],
       metrics: {
-        smoke: { source: "task", value: "failed" },
+        smoke: { source: "task", value: "passed" },
+        e2e: { source: "task", value: "failed" },
         lines: { source: "task", value: 40 },
         smoked: { source: "task", value: false },
       },

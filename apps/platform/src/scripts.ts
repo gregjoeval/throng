@@ -333,7 +333,7 @@ result "{\\"main\\":\\"$main\\",\\"clean\\":$clean,\\"base\\":$base,\\"output\\"
 /**
  * Landing step 2, untrusted (read grants only): reproduces the merged tree with
  * `git merge --no-ff --no-commit` of the approved head onto the recorded `main`, then runs the
- * plan (setup and the required checks) on it like scoring does, ending with a `RawScore`. A merge
+ * plan (setup and every check) on it like scoring does, ending with a `RawScore`. A merge
  * that doesn't give the recorded tree is an infrastructure failure.
  */
 export function retestScript(originRemote: string, forkRemote: string, merge: MergePlan, plan: ScorePlan): string {

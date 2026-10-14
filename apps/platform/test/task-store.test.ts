@@ -960,6 +960,38 @@ describe("migrate", () => {
     ).toThrow(/UNIQUE/u);
   });
 
+  it("reads task checks and results stored when a check could be optional without required", () => {
+    const sql = testSql();
+    const repos = new FakeRepos();
+    expect(new TaskStore({ sql, repos })).toBeDefined();
+    const smoke = { name: "smoke", command: "./smoke.sh", required: false, timeoutMs: 1000, source: "task" };
+    sql.exec(
+      `INSERT INTO tasks (number, title, body, creator, state, created_at, definitions)
+       VALUES (1, 't', '', 'ada', 'open', '2026-10-10T12:00:00.000Z', ?)`,
+      JSON.stringify({ checks: [smoke], metrics: [] }),
+    );
+    const result = {
+      base: null,
+      config: { kind: "valid" },
+      gate: "passed",
+      checks: [{ name: "smoke", source: "task", required: false, outcome: "failed", durationMs: 1, notes: [] }],
+      metrics: {},
+      logs: [],
+    };
+    sql.exec(
+      `INSERT INTO scoring_runs (project, task, attempt, sha, trigger, status, instance_id, created_at, result)
+       VALUES ('abc123', 1, 1, 'a', 'push', 'done', 'i', 0, ?)`,
+      JSON.stringify(result),
+    );
+    const store = new TaskStore({ sql, repos });
+    expect(store.getTask(PROJECT, ada, { task: 1 }).definitions.checks).toEqual([
+      { name: "smoke", command: "./smoke.sh", timeoutMs: 1000, source: "task" },
+    ]);
+    expect(store.getScoringRun(PROJECT, ada, { run: 1 }).result?.checks).toEqual([
+      { name: "smoke", source: "task", outcome: "failed", durationMs: 1, notes: [] },
+    ]);
+  });
+
   it("drops the spike's push inbox tables", () => {
     const sql = testSql();
     sql.exec("CREATE TABLE deliveries (repo TEXT, sha TEXT, at INTEGER, PRIMARY KEY (repo, sha))");

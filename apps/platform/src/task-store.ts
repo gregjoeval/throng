@@ -2807,10 +2807,11 @@ export class TaskStore {
       // and so does one whose plan found its merged tree's config names some (it began to run).
       const held = this.#heldLanding(mr);
       const heldAtPlan = held !== null && held.started_at !== null;
-      if (main === null || heldAtPlan ? held !== null : main.names.length > 0) {
-        if (held === null && main !== null) {
-          this.scoring.holdLanding({ ...this.#landingRequest(main.project, mr), secrets: main.names });
-        }
+      if (main === null || heldAtPlan) {
+        // What `main` names is unknown, or its merged tree's config already said: the hold stands.
+        if (held !== null) return mr;
+      } else if (main.names.length > 0) {
+        if (held === null) this.scoring.holdLanding({ ...this.#landingRequest(main.project, mr), secrets: main.names });
         return mr;
       }
       if (held !== null) this.scoring.cancel(held, "main names no secret any more");

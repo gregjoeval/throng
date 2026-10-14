@@ -38,7 +38,7 @@ attempts \`t42a3\`. A tool answers with a one-line summary and the data as JSON;
 ## Start a project
 
 \`create_project\` (or \`POST ${origin}/api/projects {"handle": "hello"}\`) makes a project you own with an empty
-origin. To start from an existing codebase, add \`sourceUrl\` (REST: \`"source": {"url": …}\`): the HTTPS URL of a
+origin. To start from an existing codebase, add \`source: {"url": …}\` (the same in REST): the HTTPS URL of a
 public git repository on GitHub, GitLab, Codeberg or any smart-HTTP host. Throng copies the source's default
 branch into the origin **as \`main\`**, whatever its name (\`master\`, \`trunk\`), with its full history, and the
 call returns once the copy is done. The copy is made once: the project doesn't follow the source afterwards.

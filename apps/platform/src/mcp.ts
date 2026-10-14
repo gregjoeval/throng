@@ -218,18 +218,12 @@ function mcpServer(
 
   tool(
     "create_project",
-    "Create a project owned by the token's user. With `sourceUrl`, the HTTPS URL of a public git repository, " +
+    "Create a project owned by the token's user. With `source.url`, the HTTPS URL of a public git repository, " +
       "its default branch is copied once into the project's `main`, whatever its name, with full history; " +
       "the call returns when the copy is done.",
-    z.object({
-      handle: CreateProjectSchema.shape.handle,
-      sourceUrl: CreateProjectSchema.shape.source.unwrap().shape.url.optional(),
-    }),
-    async ({ handle, sourceUrl }) => {
-      const created = await projects(env).create(actor, {
-        handle,
-        ...(sourceUrl === undefined ? {} : { source: { url: sourceUrl } }),
-      });
+    CreateProjectSchema,
+    async (input) => {
+      const created = await projects(env).create(actor, input);
       const ref = `${created.owner.handle}/${created.handle}`;
       return answer(created.source === null ? `created ${ref}` : `created ${ref}, imported from ${created.source}`, {
         project: created,

@@ -216,6 +216,23 @@ describe("projectService.create with a source", () => {
     ]);
   });
 
+  it("imports and keeps the URL a same-host redirect ends at", async () => {
+    const { db, repos, previewWorkers, greg, tip } = await importSetup("main");
+    const moved = `${SOURCE}.git`;
+    repos.serveSource(moved, "upstream", "main");
+    const fetch: typeof globalThis.fetch = async (input, init) =>
+      String(input).startsWith("https://github.com/octocat/Old")
+        ? new Response(null, { status: 301, headers: { Location: `${moved}/info/refs?service=git-upload-pack` } })
+        : repos.sourceFetch(input, init);
+    const service = projectService({ db, repos, previewWorkers, fetch, newId: ids("aaaaaa") });
+    const project = await service.create(greg, { handle: "hello", source: { url: "https://github.com/octocat/Old" } });
+    expect(project.source).toBe(moved);
+    expect(repos.calls.filter((c) => c.method === "import")).toEqual([
+      { method: "import", args: ["aaaaaa-main", { url: moved, branch: "main" }] },
+    ]);
+    expect(repos.ref("aaaaaa-main", "refs/heads/main")).toBe(tip.hash);
+  });
+
   it("deletes a staging repo left over under the drawn id instead of drawing another", async () => {
     const { repos, greg, service, tip } = await importSetup("master");
     await repos.create("aaaaaa-import");

@@ -10,6 +10,8 @@ import { artifactsErrorCode } from "./repos.ts";
 /** The longest source URL a project may name. */
 export const MAX_SOURCE_URL = 2048;
 
+/** The most redirects the probe follows, each to the same host over https. */
+const MAX_REDIRECTS = 3;
 /** How long the source's host has to answer the probe for its default branch. */
 const PROBE_TIMEOUT_MS = 15_000;
 /**
@@ -17,6 +19,7 @@ const PROBE_TIMEOUT_MS = 15_000;
  * which is at most one pkt-line long. A big repo's advertisement runs to megabytes past that.
  */
 const MAX_PROBE_BYTES = 70 * 1024;
+const INFO_REFS = "/info/refs";
 const ADVERTISEMENT_TYPE = "application/x-git-upload-pack-advertisement";
 
 /** A source URL `checkSourceUrl` accepted, normalized (`new URL(…).href`). */
@@ -36,25 +39,27 @@ export function checkSourceUrl(url: string): SourceUrl {
 }
 
 /**
- * The source's default branch, read anonymously from its upload-pack advertisement (`symref=HEAD:…`)
- * before anything is created. Throws `notFound` when the host wants credentials or has no such repo
- * (GitHub answers both with 401), `invalidRequest` when the URL serves no git repository or doesn't
- * say which branch is the default, and `unavailable` when the host can't be reached.
+ * The source's URL and default branch, read anonymously from its upload-pack advertisement
+ * (`symref=HEAD:…`) before anything is created. A redirect (a renamed repo, say) is followed only
+ * while it stays on the same host over https and passes `checkSourceUrl`, at most `MAX_REDIRECTS`
+ * times, and the URL it ends at is the one returned, to import. Throws `notFound` when the host wants
+ * credentials, has no such repo (GitHub answers both with 401) or redirects anywhere else,
+ * `invalidRequest` when the URL serves no git repository or doesn't say which branch is the default,
+ * and `unavailable` when the host can't be reached.
  */
-export async function sourceDefaultBranch(fetcher: typeof fetch, url: SourceUrl): Promise<string> {
-  let response: Response;
-  try {
-    response = await fetcher(advertisementUrl(url), {
-      headers: { "User-Agent": "throng" },
-      // A redirect isn't followed, so the probe only ever asks the host `checkSourceUrl` accepted.
-      redirect: "manual",
-      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
-    });
-  } catch {
-    throw unreachable(url);
+export async function resolveSource(
+  fetcher: typeof fetch,
+  source: SourceUrl,
+): Promise<{ url: SourceUrl; branch: string }> {
+  let url = source;
+  let response = await probe(fetcher, url);
+  for (let hops = 0; isRedirect(response.status); hops++) {
+    const next = hops < MAX_REDIRECTS ? redirectTarget(url, response.headers.get("Location")) : null;
+    if (next === null) throw redirectsElsewhere(source);
+    url = next;
+    response = await probe(fetcher, url);
   }
-  // A redirect is how some hosts send an anonymous client to sign in to a private repo.
-  if (response.status === 401 || response.status === 404 || isRedirect(response.status)) throw notFound(url);
+  if (response.status === 401 || response.status === 404) throw notFound(url);
   if (!response.ok) throw unreachable(url);
   if (mediaType(response.headers.get("Content-Type")) !== ADVERTISEMENT_TYPE || response.body === null) {
     throw notGit(url);
@@ -67,7 +72,38 @@ export async function sourceDefaultBranch(fetcher: typeof fetch, url: SourceUrl)
     throw error;
   }
   if (branch === null) throw new ServiceError("invalidRequest", `${url} doesn't name its default branch`);
-  return branch;
+  return { url, branch };
+}
+
+/** One request for `url`'s advertisement, its redirects left to the caller. */
+async function probe(fetcher: typeof fetch, url: SourceUrl): Promise<Response> {
+  try {
+    return await fetcher(advertisementUrl(url), {
+      headers: { "User-Agent": "throng" },
+      redirect: "manual",
+      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+    });
+  } catch {
+    throw unreachable(url);
+  }
+}
+
+/**
+ * The repo a redirect of `url`'s advertisement points at, when it is another advertisement
+ * (`…/info/refs`) on the same host that `checkSourceUrl` accepts; null for anywhere else.
+ */
+function redirectTarget(url: SourceUrl, location: string | null): SourceUrl | null {
+  if (location === null) return null;
+  let target: URL;
+  try {
+    target = new URL(location, advertisementUrl(url));
+  } catch {
+    return null;
+  }
+  if (!target.pathname.endsWith(INFO_REFS)) return null;
+  const repo = parseSourceUrl(`${target.origin}${target.pathname.slice(0, -INFO_REFS.length)}`);
+  if (typeof repo === "string" || repo.host !== new URL(url).host) return null;
+  return repo.href as SourceUrl;
 }
 
 function isRedirect(status: number): boolean {
@@ -82,7 +118,7 @@ function mediaType(contentType: string | null): string | undefined {
 /** Where a smart-HTTP host advertises a repo's refs: the repo URL, ending `.git`, then `info/refs`. */
 function advertisementUrl(url: string): string {
   const repo = url.replace(/\/+$/u, "");
-  return `${repo.endsWith(".git") ? repo : `${repo}.git`}/info/refs?service=git-upload-pack`;
+  return `${repo.endsWith(".git") ? repo : `${repo}.git`}${INFO_REFS}?service=git-upload-pack`;
 }
 
 /** The first `max` bytes of `body` (fewer if it ends first); the rest is never read. */
@@ -131,6 +167,13 @@ export function importError(error: unknown, url: string): unknown {
 
 function notFound(url: string): ServiceError {
   return new ServiceError("notFound", `${url} was not found, or is private: only public repositories can be imported`);
+}
+
+function redirectsElsewhere(url: string): ServiceError {
+  return new ServiceError(
+    "notFound",
+    `${url} redirects elsewhere: use the repository's current https URL on its own host`,
+  );
 }
 
 function notGit(url: string): ServiceError {

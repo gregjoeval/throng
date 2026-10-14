@@ -251,12 +251,15 @@ describe("/mcp", () => {
     expect(empty.summary).toBe("created ada/empty");
     expect(empty.data["project"]).toMatchObject({ handle: "empty", owner: { handle: "ada" }, source: null });
 
-    const imported = await call(claude, "create_project", { handle: "imported", sourceUrl: url });
+    const imported = await call(claude, "create_project", { handle: "imported", source: { url } });
     expect(imported.summary).toBe(`created ada/imported, imported from ${url}`);
     const id = (imported.data["project"] as Json)["id"] as string;
     expect(repos.ref(`${id}-main`, "refs/heads/main")).toBe(head.hash);
 
-    const refused = await call(claude, "create_project", { handle: "nope", sourceUrl: "https://codeberg.org/o/gone" });
+    const refused = await call(claude, "create_project", {
+      handle: "nope",
+      source: { url: "https://codeberg.org/o/gone" },
+    });
     expect(refused.isError).toBeTruthy();
     expect(refused.summary).toMatch(/^notFound: .*only public repositories can be imported/u);
   });

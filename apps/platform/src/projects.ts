@@ -5,7 +5,7 @@
 // REST API and later MCP share it.
 
 import { ServiceError } from "./errors.ts";
-import { checkSourceUrl, importError, sourceDefaultBranch } from "./import-source.ts";
+import { checkSourceUrl, importError, resolveSource } from "./import-source.ts";
 import type { SourceUrl } from "./import-source.ts";
 import type { PreviewWorkers } from "./preview-workers.ts";
 import { artifactsErrorCode, originRepo, stagingRepo } from "./repos.ts";
@@ -122,11 +122,13 @@ export function projectService({
     async create(actor: Actor, input: { handle: string; source?: { url: string } | undefined }): Promise<Project> {
       const owner = actor.user;
       if (!isProjectHandle(input.handle)) throw new ServiceError("invalidRequest", `invalid project handle`);
-      const url = input.source === undefined ? null : checkSourceUrl(input.source.url);
+      const checked = input.source === undefined ? null : checkSourceUrl(input.source.url);
       if ((await resolveProject(db, owner.handle, input.handle)) !== null) throw duplicate(owner.handle, input.handle);
 
       // Before anything is created, so a private or missing source fails with nothing to undo.
-      const source = url === null ? null : { url, branch: await sourceDefaultBranch(fetcher, url) };
+      const source = checked === null ? null : await resolveSource(fetcher, checked);
+      // Where the source's redirects, if any, ended: what is imported and kept.
+      const url = source?.url ?? null;
       const id = await createOrigin(db, repos, newId, source);
       let row: ProjectRow | null;
       // Only a Worker this call made is rolled back: one already there may be another environment's.

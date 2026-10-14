@@ -84,6 +84,7 @@ describe("the D1 projection of tasks and attempts", () => {
       id: PROJECT.id,
       handle: "throng",
       owner: { id: owner.user.id, handle: owner.user.handle },
+      source: null,
       createdAt: expect.any(String),
     };
     expect(await listings.tasks(ada, {})).toEqual([

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  advertisedHead,
   commandList,
   concat,
   flushPkt,
@@ -194,5 +195,66 @@ describe("updatedRefs", () => {
   it("claims nothing when unpacking failed or the report is garbled", () => {
     expect(updatedRefs(report("unpack index-pack failed\n", "ok refs/heads/main\n"), false)).toEqual([]);
     expect(updatedRefs(new TextEncoder().encode("zzzzok refs/heads/main"), false)).toEqual([]);
+  });
+});
+
+/** An upload-pack advertisement, as `GET info/refs?service=git-upload-pack` answers: header, flush, refs, flush. */
+function advertisement(...refs: string[]): Uint8Array {
+  return concat([
+    pktLine("# service=git-upload-pack\n"),
+    flushPkt(),
+    ...refs.map((r) => pktLine(`${r}\n`)),
+    flushPkt(),
+  ]);
+}
+
+describe("advertisedHead", () => {
+  it("reads the branch HEAD points at from the first ref's capabilities", () => {
+    const main = advertisement(
+      `${A} HEAD\0multi_ack side-band-64k symref=HEAD:refs/heads/main agent=git/2.47.0`,
+      `${A} refs/heads/main`,
+    );
+    expect(advertisedHead(main)).toBe("main");
+  });
+
+  it("reads a branch other than main, whatever its name", () => {
+    for (const branch of ["master", "trunk", "release/1.x"]) {
+      const bytes = advertisement(
+        `${A} HEAD\0symref=HEAD:refs/heads/${branch} agent=github`,
+        `${A} refs/heads/${branch}`,
+      );
+      expect(advertisedHead(bytes), branch).toBe(branch);
+    }
+  });
+
+  it("is null when the advertisement names no symref for HEAD", () => {
+    expect(advertisedHead(advertisement(`${A} refs/heads/main\0multi_ack agent=git/1.8`))).toBeNull();
+    expect(advertisedHead(advertisement(`${A} HEAD\0symref=refs/x:refs/heads/main`))).toBeNull();
+    expect(advertisedHead(concat([pktLine("# service=git-upload-pack\n"), flushPkt(), flushPkt()]))).toBeNull();
+  });
+
+  it("reads an empty repo's advertisement, whose only line is capabilities^{}", () => {
+    const empty = advertisement(`${ZERO} capabilities^{}\0symref=HEAD:refs/heads/trunk agent=git/2.47.0`);
+    expect(advertisedHead(empty)).toBe("trunk");
+  });
+
+  it("throws on bytes that aren't an upload-pack advertisement", () => {
+    for (const bytes of [
+      new TextEncoder().encode("<!doctype html><title>Sign in</title>"),
+      concat([pktLine("# service=git-receive-pack\n"), flushPkt()]),
+      new Uint8Array(0),
+    ]) {
+      expect(() => advertisedHead(bytes)).toThrow(ProtocolError);
+    }
+  });
+
+  it("reads only as far as the first ref, so a cut-off advertisement still answers", () => {
+    const full = advertisement(`${A} HEAD\0symref=HEAD:refs/heads/master`, `${A} refs/heads/master`);
+    const first = concat([
+      pktLine("# service=git-upload-pack\n"),
+      flushPkt(),
+      pktLine(`${A} HEAD\0symref=HEAD:refs/heads/master\n`),
+    ]);
+    expect(advertisedHead(full.subarray(0, first.length + 7))).toBe("master");
   });
 });

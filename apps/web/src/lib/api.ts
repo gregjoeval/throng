@@ -98,9 +98,13 @@ export const commitDiffQuery = (projectRef: ProjectRef, sha: string, attempt?: s
   },
 });
 
-/** Creates a project owned by the signed-in user. Rejects with hono's `DetailedError` on failure. */
-export async function createProject(handle: string) {
-  return parseResponse(client.api.projects.$post({ json: { handle } }));
+/**
+ * Creates a project owned by the signed-in user, importing `sourceUrl` into its `main` when given.
+ * Rejects with hono's `DetailedError` on failure.
+ */
+export async function createProject({ handle, sourceUrl }: { handle: string; sourceUrl?: string }) {
+  const source = sourceUrl === undefined ? {} : { source: { url: sourceUrl } };
+  return parseResponse(client.api.projects.$post({ json: { handle, ...source } }));
 }
 
 // A project's tasks and attempts. Every key starts `["project", "owner/project"]`, then names the

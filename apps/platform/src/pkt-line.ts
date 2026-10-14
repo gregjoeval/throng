@@ -235,6 +235,36 @@ export function renameRefs(report: PushReport, rename: (ref: string) => string):
   return { ...report, lines };
 }
 
+const UPLOAD_PACK_SERVICE = "# service=git-upload-pack";
+const HEAD_SYMREF = "symref=HEAD:refs/heads/";
+
+/**
+ * The branch HEAD points at in a smart-HTTP upload-pack advertisement (`GET
+ * info/refs?service=git-upload-pack`), read from the `symref` capability on its first ref line; null
+ * when it names none. Reads no further than that line, so the rest of a long advertisement may be
+ * missing. Throws `ProtocolError` on anything that isn't such an advertisement.
+ */
+export function advertisedHead(advertisement: Uint8Array): string | null {
+  const service = pktLines(advertisement).next();
+  if (service.done === true || decoder.decode(service.value).replace(/\n$/u, "") !== UPLOAD_PACK_SERVICE) {
+    throw new ProtocolError("not an upload-pack advertisement");
+  }
+  // The service line, then the flush that ends its section.
+  const flushAt = 4 + service.value.length;
+  if (decoder.decode(advertisement.subarray(flushAt, flushAt + FLUSH.length)) !== FLUSH) {
+    throw new ProtocolError("no flush after the service line");
+  }
+  const first = pktLines(advertisement.subarray(flushAt + FLUSH.length)).next();
+  if (first.done === true) return null;
+  const text = decoder.decode(first.value).replace(/\n$/u, "");
+  const nul = text.indexOf("\0");
+  const capability = text
+    .slice(nul + 1)
+    .split(" ")
+    .find((c) => c.startsWith(HEAD_SYMREF));
+  return nul === -1 || capability === undefined ? null : capability.slice(HEAD_SYMREF.length);
+}
+
 /** The data of one side-band, concatenated, from a sequence of side-band packets. */
 function band(bytes: Uint8Array, wanted: number): Uint8Array {
   const parts: Uint8Array[] = [];

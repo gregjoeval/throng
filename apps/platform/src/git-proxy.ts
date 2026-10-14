@@ -33,7 +33,7 @@ import {
 } from "./pkt-line.ts";
 import type { PushReport, PushRequest, RefUpdate } from "./pkt-line.ts";
 import { resolveProject } from "./projects.ts";
-import { forkRepo, originRepo } from "./repos.ts";
+import { artifactsErrorCode, forkRepo, originRepo } from "./repos.ts";
 import type { Repos, TokenScope } from "./repos.ts";
 import { headAttemptRef } from "./scoring.ts";
 import type { ScoringRequest } from "./scoring.ts";
@@ -145,7 +145,7 @@ export function gitRoutes(options: GitProxyOptions) {
       const prefix = pushed === null ? null : { bytes: pushed.consumed, length: contentLength(c) };
       upstream = await forward(c, target, scope, prefix, { repos, tokens, fetch: upstreamFetch });
     } catch (error) {
-      if ((error as { code?: unknown }).code === "NOT_FOUND") return text(404, `No repository at ${c.req.path}`);
+      if (artifactsErrorCode(error) === "NOT_FOUND") return text(404, `No repository at ${c.req.path}`);
       throw error;
     }
     if (upstream.status === 401 || upstream.status === 403 || (upstream.status >= 300 && upstream.status < 400)) {

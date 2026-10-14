@@ -16,9 +16,13 @@ import { createProject, projectsQuery } from "@/lib/api";
 import { apiError } from "@/lib/errors";
 import { buildPath } from "@/lib/paths";
 
-/** Creates a project owned by the signed-in user, then opens it. */
+/**
+ * Creates a project owned by the signed-in user, empty or imported from a public git URL, then opens
+ * it. An import runs inside the request, so the button says so until it's done.
+ */
 export function CreateProjectDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const [handle, setHandle] = useState("");
+  const [sourceUrl, setSourceUrl] = useState("");
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const create = useMutation({
@@ -27,11 +31,15 @@ export function CreateProjectDialog({ open, onOpenChange }: { open: boolean; onO
       await queryClient.invalidateQueries({ queryKey: projectsQuery.queryKey });
       onOpenChange(false);
       setHandle("");
+      setSourceUrl("");
       create.reset();
       await navigate({ href: buildPath({ view: "home", owner: project.owner.handle, project: project.handle }) });
     },
   });
   const error = create.isError ? apiError(create.error).message : null;
+  const source = sourceUrl.trim();
+  let submit = "Create";
+  if (create.isPending) submit = source === "" ? "Creating…" : "Importing…";
 
   return (
     <Dialog
@@ -46,7 +54,7 @@ export function CreateProjectDialog({ open, onOpenChange }: { open: boolean; onO
           className="grid gap-4"
           onSubmit={(event) => {
             event.preventDefault();
-            create.mutate(handle.trim());
+            create.mutate({ handle: handle.trim(), ...(source === "" ? {} : { sourceUrl: source }) });
           }}
         >
           <DialogHeader>
@@ -63,18 +71,32 @@ export function CreateProjectDialog({ open, onOpenChange }: { open: boolean; onO
               autoComplete="off"
               placeholder="my-project"
               aria-invalid={error !== null}
-              aria-describedby={error === null ? undefined : "project-handle-error"}
+              aria-describedby={error === null ? undefined : "project-create-error"}
               onChange={(event) => setHandle(event.target.value)}
             />
-            {error === null ? null : (
-              <p id="project-handle-error" role="alert" className="text-sm text-destructive">
-                {error}
-              </p>
-            )}
           </div>
+          <div className="grid gap-2">
+            <Label htmlFor="project-source">Import from a public git URL (optional)</Label>
+            <Input
+              id="project-source"
+              value={sourceUrl}
+              autoComplete="off"
+              placeholder="https://github.com/owner/repo"
+              aria-describedby="project-source-hint"
+              onChange={(event) => setSourceUrl(event.target.value)}
+            />
+            <p id="project-source-hint" className="text-sm text-muted-foreground">
+              Its default branch is copied once into <code>main</code>, with its full history.
+            </p>
+          </div>
+          {error === null ? null : (
+            <p id="project-create-error" role="alert" className="text-sm text-destructive">
+              {error}
+            </p>
+          )}
           <DialogFooter>
             <Button type="submit" disabled={handle.trim() === "" || create.isPending}>
-              {create.isPending ? "Creating…" : "Create"}
+              {submit}
             </Button>
           </DialogFooter>
         </form>

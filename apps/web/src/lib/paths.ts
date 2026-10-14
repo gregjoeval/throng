@@ -20,12 +20,15 @@ export function projectRefOf({ owner, project }: InProject): InProject {
  * One place in a project. A `ref` is `main`, an attempt (`t42a3`) or a full sha; `attempt` is the
  * `?attempt=` hint that tells the platform which fork to look up a sha in. `path` has no leading or
  * trailing slash, and is `""` for the root directory. `offset` is the commit log's page: how many
- * commits to skip, absent for the first page.
+ * commits to skip, absent for the first page. The runs list's `line` and `status` filter it, and its
+ * `cursor` is the run id a page starts below.
  */
 export type ProjectLocation =
   | (InProject & { view: "home" })
   | (InProject & { view: "tasks" })
   | (InProject & { view: "settings" })
+  | (InProject & { view: "runs" } & RunsSearch)
+  | (InProject & { view: "run"; run: number })
   | (InProject & { view: "task"; task: string })
   | (InProject & { view: "tree" | "blob" | "raw"; ref: string; path: string; attempt?: string })
   | (InProject & { view: "commits"; ref: string; attempt?: string; offset?: number })
@@ -54,6 +57,18 @@ export function buildPath(location: ProjectLocation): string {
     }
     case "settings": {
       return `${base}/settings`;
+    }
+    case "runs": {
+      const { line, status, cursor } = location;
+      const query = new URLSearchParams({
+        ...(line === undefined ? {} : { line }),
+        ...(status === undefined ? {} : { status }),
+        ...(cursor === undefined ? {} : { cursor: String(cursor) }),
+      }).toString();
+      return query === "" ? `${base}/runs` : `${base}/runs?${query}`;
+    }
+    case "run": {
+      return `${base}/runs/${location.run}`;
     }
     case "task": {
       return `${base}/tasks/${segment(location.task)}`;
@@ -98,7 +113,14 @@ export function parsePath(href: string): ProjectLocation | null {
   const hint = attemptHint(attempt ?? undefined);
   if (view === undefined) return { owner, project, view: "home" };
   if ((view === "tasks" || view === "settings") && ref === undefined) return { owner, project, view };
+  if (view === "runs" && ref === undefined) {
+    return { owner, project, view, ...runsSearch(Object.fromEntries(url.searchParams)) };
+  }
   if (!ref) return null;
+  if (view === "runs" && rest.length === 0) {
+    const run = runId(ref);
+    return run === null ? null : { owner, project, view: "run", run };
+  }
   if (view === "tasks" && rest.length === 0) return { owner, project, view: "task", task: ref };
   if (view === "commit" && rest.length === 0) return { owner, project, view, sha: ref, ...hint };
   if (view === "commits" && rest.length === 0) {
@@ -126,6 +148,30 @@ export function attemptSearch(search: Record<string, unknown>): { attempt?: stri
 export function commitsSearch(search: Record<string, unknown>): { attempt?: string; offset?: number } {
   const offset = Number(search["offset"]);
   return { ...attemptSearch(search), ...(Number.isSafeInteger(offset) && offset > 0 ? { offset } : {}) };
+}
+
+/** The runs list's filters and page, as its URL carries them: each only when set. */
+export interface RunsSearch {
+  /** `main`, `tasks` (every line but `main`), or one line; every line when absent. */
+  line?: string | undefined;
+  status?: string | undefined;
+  cursor?: number | undefined;
+}
+
+/** The runs list's search params: `?line=`, `?status=` and `?cursor=`, each kept only when well-formed. */
+export function runsSearch(search: Record<string, unknown>): RunsSearch {
+  const { line, status } = search;
+  const cursor = runId(String(search["cursor"]));
+  return {
+    ...(typeof line === "string" && line !== "" ? { line } : {}),
+    ...(typeof status === "string" && status !== "" ? { status } : {}),
+    ...(cursor === null ? {} : { cursor }),
+  };
+}
+
+/** A run id from a URL: a positive integer, or null. */
+function runId(value: string): number | null {
+  return /^[1-9]\d{0,14}$/u.test(value) ? Number(value) : null;
 }
 
 const MARKDOWN = /\.(?:md|markdown|mdown|mkd)$/iu;

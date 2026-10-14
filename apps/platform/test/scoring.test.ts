@@ -724,6 +724,12 @@ describe("line-keyed runs", () => {
     ]);
     expect(at(store.scoring.listRuns("t1a2"), 0).outcome?.steps.map((s) => s.name)).toEqual(["_diff", "test"]);
     expect(store.scoring.statusFor("t1a2")).toEqual({ status: "running", sha: "b" });
+    // The project's runs list shows them beside any other line's.
+    const page = store.listRuns(PROJECT, ada, { line: "tasks", limit: 10 });
+    expect(page.runs.map((r) => [r.id, r.line, r.outcome?.gate ?? null])).toEqual([
+      [7, "t1a2", null],
+      [4, "t1a2", "passed"],
+    ]);
     const next = store.scoring.request({ project: PROJECT.id, line: "t1a2", sha: "c", trigger: "push", actor: ada });
     expect(next.run.id).toBe(8);
     const tables = sql.exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table'").map((t) => t.name);

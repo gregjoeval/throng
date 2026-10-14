@@ -19,6 +19,16 @@ export interface LoopAttempt {
   changed?: boolean;
 }
 
+/** What the loop reads of a run as `list_runs`, `get_run` and `wait_for_run` return it (`src/api.ts`'s `Run`). */
+interface LoopRun {
+  id: number;
+  sha: string;
+  status: string;
+  gate: string | null;
+  outcome?: { gate: string } | null;
+  settled?: boolean;
+}
+
 interface LoopMergeRequest {
   state: string;
   mergeSha: string | null;
@@ -149,6 +159,16 @@ export async function agentLoop(options: AgentLoopOptions): Promise<AgentLoopRes
     `${first.ref}'s scoring of ${head}: ${JSON.stringify(scored.scoring)}`,
   );
   log(`${first.ref}: scored, gate passed`);
+
+  // The same run, from the project's runs: listed on the attempt's line, settled, and done step by step.
+  const listed = (await creator("list_runs", { project, line: first.ref }))["runs"] as LoopRun[];
+  const run = listed.find((r) => r.sha === head && r.status === "done");
+  assert(run !== undefined, `${first.ref}'s runs don't include a done run of ${head}: ${JSON.stringify(listed)}`);
+  const waited = (await creator("wait_for_run", { project, run: run.id, wait }))["run"] as LoopRun;
+  assert(waited.settled === true && waited.gate === "passed", `run ${run.id} after a wait: ${JSON.stringify(waited)}`);
+  const detail = (await creator("get_run", { project, run: run.id }))["run"] as LoopRun;
+  assert(detail.outcome?.gate === "passed", `run ${run.id}'s outcome: ${JSON.stringify(detail)}`);
+  log(`${first.ref}: run ${run.id} listed, settled and read`);
 
   const verdict = (
     await reviewer("post_verdict", { project, attempt: first.ref, recommendation: "merge", body: "Looks right." })

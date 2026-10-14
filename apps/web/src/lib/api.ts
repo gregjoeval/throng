@@ -388,18 +388,67 @@ export async function postVerdict(
   return parseResponse(attemptApi.verdicts.$post({ param: { ...projectRef, a: attempt }, json: verdict }));
 }
 
+/** How often a run that hasn't settled, and the runs list, are refetched while visible, in milliseconds. */
+export const RUN_POLL_MS = 3000;
+
+/** The runs list's filters and page: one line, `main` or `tasks`, a status, and the cursor a page starts at. */
+export interface RunsFilter {
+  line?: string | undefined;
+  status?: string | undefined;
+  cursor?: number | undefined;
+}
+
+/** A page of the project's runs, newest first, polled. */
+export const runsQuery = (projectRef: ProjectRef, { line, status, cursor }: RunsFilter) => ({
+  ...apiQuery([...projectKey(projectRef), "runs", { line, status, cursor }], (init) =>
+    projectApi.runs.$get(
+      {
+        param: projectRef,
+        query: {
+          ...(line === undefined ? {} : { line }),
+          ...(status === undefined ? {} : { status: status as Run["status"] }),
+          ...(cursor === undefined ? {} : { cursor: String(cursor) }),
+        },
+      },
+      { init },
+    ),
+  ),
+  refetchInterval: RUN_POLL_MS,
+});
+
+export type Run = InferResponseType<typeof projectApi.runs.$get, 200>["runs"][number];
+
+/** The key of one run: invalidate it after changing the run. */
+export const runKey = (projectRef: ProjectRef, run: number) => [...projectKey(projectRef), "run", run] as const;
+
+/** One run with its outcome, polled until it is done, cancelled or errored. */
+export const runQuery = (projectRef: ProjectRef, run: number) => ({
+  ...apiQuery([...runKey(projectRef, run), "detail"], (init) =>
+    projectApi.runs[":runId"].$get({ param: { ...projectRef, runId: String(run) } }, { init }),
+  ),
+  refetchInterval: (query: { state: { data?: { status: Run["status"] } | undefined } }) =>
+    ["done", "cancelled", "errored"].includes(query.state.data?.status ?? "") ? false : RUN_POLL_MS,
+});
+
+export type RunWithOutcome = InferResponseType<(typeof projectApi.runs)[":runId"]["$get"], 200>;
+
+/** Cancels a run; only the project owner may. Rejects with hono's `DetailedError` on failure. */
+export async function cancelRun(projectRef: ProjectRef, run: number) {
+  return parseResponse(projectApi.runs[":runId"].cancel.$post({ param: { ...projectRef, runId: String(run) } }));
+}
+
 /**
- * One log of a scoring run, streamed: the text read so far, growing as chunks arrive. A stored log
+ * One step's log of a run, streamed: the text read so far, growing as chunks arrive. A stored log
  * never changes, so it's never refetched.
  */
-export const runLogQuery = (projectRef: ProjectRef, run: number, name: string) =>
+export const runLogQuery = (projectRef: ProjectRef, run: number, step: string) =>
   queryOptions({
-    queryKey: [...projectKey(projectRef), "run", run, "log", name] as const,
+    queryKey: [...runKey(projectRef, run), "log", step] as const,
     staleTime: Number.POSITIVE_INFINITY,
     queryFn: streamedQuery({
       streamFn: async function* ({ signal }) {
-        const res = await projectApi.runs[":runId"].logs[":name"].$get(
-          { param: { ...projectRef, runId: String(run), name } },
+        const res = await projectApi.runs[":runId"].logs[":step"].$get(
+          { param: { ...projectRef, runId: String(run), step } },
           { init: { signal } },
         );
         if (!res.ok || res.body === null) throw await PlatformError.from(res);

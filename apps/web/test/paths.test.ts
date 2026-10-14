@@ -11,6 +11,13 @@ describe("buildPath and parsePath", () => {
     [{ ...at, view: "tasks" }, "/greg/throng/tasks"],
     [{ ...at, view: "settings" }, "/greg/throng/settings"],
     [{ ...at, view: "task", task: "t42" }, "/greg/throng/tasks/t42"],
+    [{ ...at, view: "runs" }, "/greg/throng/runs"],
+    [
+      { ...at, view: "runs", line: "main", status: "waiting", cursor: 40 },
+      "/greg/throng/runs?line=main&status=waiting&cursor=40",
+    ],
+    [{ ...at, view: "runs", line: "t42a3" }, "/greg/throng/runs?line=t42a3"],
+    [{ ...at, view: "run", run: 7 }, "/greg/throng/runs/7"],
     [{ ...at, view: "tree", ref: "main", path: "" }, "/greg/throng/tree/main"],
     [{ ...at, view: "tree", ref: "t42a3", path: "src/lib" }, "/greg/throng/tree/t42a3/src/lib"],
     [{ ...at, view: "blob", ref: "main", path: "docs/my notes.md" }, "/greg/throng/blob/main/docs/my%20notes.md"],
@@ -52,6 +59,9 @@ describe("buildPath and parsePath", () => {
       "/greg",
       "/greg/throng/tree",
       "/greg/throng/settings/main",
+      "/greg/throng/runs/0",
+      "/greg/throng/runs/x",
+      "/greg/throng/runs/7/logs",
       "/greg/throng/commits/main/extra",
       "/greg/throng/commit/abc/extra",
       "/greg/throng/blob/main/a//b",
@@ -70,6 +80,13 @@ describe("buildPath and parsePath", () => {
       });
     }
     expect(buildPath({ ...at, view: "commits", ref: "main", offset: 0 })).toBe("/greg/throng/commits/main");
+  });
+
+  it("drops a runs list cursor that isn't a positive integer, and empty filters", () => {
+    for (const cursor of ["0", "-5", "1.5", "x", ""]) {
+      expect(parsePath(`/greg/throng/runs?cursor=${cursor}&line=&status=`), cursor).toEqual({ ...at, view: "runs" });
+    }
+    expect(buildPath({ ...at, view: "runs", line: undefined, status: "done" })).toBe("/greg/throng/runs?status=done");
   });
 
   it("treats a path's stray slashes as separators", () => {

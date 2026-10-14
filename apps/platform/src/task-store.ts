@@ -35,9 +35,11 @@ import { forkRepo, originRepo } from "./repos.ts";
 import type { Repos } from "./repos.ts";
 import { GATES } from "./results.ts";
 import type { Gate } from "./results.ts";
-import { SCORING_CAP, ScoringQueue } from "./scoring.ts";
+import { cancellable, runSettled, SCORING_CAP, ScoringQueue } from "./scoring.ts";
 import type {
   AttemptScoring,
+  RunsPage,
+  RunsQuery,
   ScoringOutcome,
   ScoringRequest,
   ScoringRunner,
@@ -915,6 +917,41 @@ export class TaskStore {
     const run = this.scoring.getRun(input.run);
     if (run === null) throw new ServiceError("notFound", `no run ${input.run}`);
     return run;
+  }
+
+  /** A page of the project's runs on every line, newest first. Anyone signed in may read them. */
+  listRuns(_project: ProjectContext, _actor: Actor, input: RunsQuery): RunsPage {
+    return this.scoring.listPage(input);
+  }
+
+  /**
+   * Holds until the run is waiting for the owner or has ended, or `wait` seconds pass, then answers
+   * with the run and whether it settled. A settled run answers at once; past the actor's user's cap
+   * on waiting requests, an unsettled one answers at once, unsettled.
+   */
+  async waitForRun(
+    project: ProjectContext,
+    actor: Actor,
+    input: { run: number; wait: number },
+  ): Promise<StoredRun & { settled: boolean }> {
+    const settled = () => runSettled(this.getScoringRun(project, actor, input));
+    if (!settled()) await this.#waiters.wait(actor.user.id, settled, input.wait * 1000);
+    return { ...this.getScoringRun(project, actor, input), settled: settled() };
+  }
+
+  /**
+   * Cancels a queued, waiting or running run; the next drain stops one that had started. Only the
+   * project owner may, and never a running `main` run, which may be deploying.
+   */
+  cancelRun(project: ProjectContext, actor: Actor, input: { run: number }): StoredRun {
+    mayOwn(project, actor);
+    return this.#sql.transaction(() => {
+      const run = this.getScoringRun(project, actor, input);
+      if (!cancellable(run))
+        throw new ServiceError("invalidState", `run ${run.id} is ${run.status}; it can't be cancelled`);
+      this.scoring.cancel(run, "cancelled by the owner");
+      return this.getScoringRun(project, actor, input);
+    });
   }
 
   /**
@@ -3019,6 +3056,9 @@ export const TASK_METHODS = [
   "taskArena",
   "listScoringRuns",
   "getScoringRun",
+  "listRuns",
+  "waitForRun",
+  "cancelRun",
   "attemptForBranch",
   "editAttempt",
   "openAttempt",

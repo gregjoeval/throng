@@ -12,6 +12,7 @@ import { SelectionPolicySchema } from "./config.ts";
 import { DIFF_FLAGS, FILE_STATUSES } from "./diff.ts";
 import type { DiffCache } from "./diff.ts";
 import type { Repos } from "./repos.ts";
+import { DEFAULT_RUNS_PAGE, isLineFilter, MAX_RUNS_PAGE, RUN_STATUSES } from "./scoring.ts";
 import { taskService } from "./tasks.ts";
 import type { TaskBackend } from "./tasks.ts";
 import { MAX_VERDICT_BODY, VERDICT_RECOMMENDATIONS } from "./verdicts.ts";
@@ -293,3 +294,31 @@ export const PageSchema = {
   limit: z.number().int(),
   next: z.number().int().nullable().openapi({ description: "The next page's offset; null on the last page." }),
 };
+
+/** `GET …/runs`' filters and cursor; `list_runs` takes the same. */
+export const RunsQuerySchema = z.object({
+  line: z
+    .string()
+    .refine(isLineFilter, { error: "line must be `main`, `tasks`, a task (`t42`) or an attempt (`t42a3`)" })
+    .optional()
+    .openapi({
+      description:
+        "Only this line's runs: `main`, a task's task branch (`t42`) or an attempt (`t42a3`); `tasks` for every " +
+        "line but `main`. Every line when absent.",
+      example: "main",
+    }),
+  status: z.enum(RUN_STATUSES).optional().openapi({ description: "Only runs with this status.", example: "waiting" }),
+  cursor: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .optional()
+    .openapi({ description: "Where a page starts: the `next` of the page before it. Absent for the first page." }),
+  limit: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(MAX_RUNS_PAGE)
+    .default(DEFAULT_RUNS_PAGE)
+    .openapi({ description: `Runs per page: ${DEFAULT_RUNS_PAGE} by default, at most ${MAX_RUNS_PAGE}.` }),
+});

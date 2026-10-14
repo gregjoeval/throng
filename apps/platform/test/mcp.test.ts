@@ -43,6 +43,9 @@ const TOOLS = [
   "wait_for_attempt",
   "score_now",
   "rescore",
+  "list_runs",
+  "get_run",
+  "wait_for_run",
   "get_log",
   "post_verdict",
   "list_verdicts",
@@ -584,12 +587,71 @@ describe("/mcp", () => {
     const log = `${"a".repeat(MAX_LOG_SLICE_BYTES)}${"b".repeat(100)}`;
     logs.objects.set(`logs/${projectId}/t1a1/${run}/test.log`, log);
 
-    const tail = await call(ada, "get_log", { project, run, name: "test" });
+    const tail = await call(ada, "get_log", { project, run, step: "test" });
     expect(tail.data).toMatchObject({ size: log.length, offset: 100, hint: expect.any(String) });
     expect(tail.data["text"]).toBe(log.slice(100));
-    const head = await call(ada, "get_log", { project, run, name: "test", offset: 0 });
+    const head = await call(ada, "get_log", { project, run, step: "test", offset: 0 });
     expect(head.data["text"]).toBe(log.slice(0, MAX_LOG_SLICE_BYTES));
-    expect((await call(ada, "get_log", { project, run, name: "lint" })).summary).toMatch(/^notFound: /u);
+    expect((await call(ada, "get_log", { project, run, step: "lint" })).summary).toMatch(/^notFound: /u);
+  });
+
+  it("lists the project's runs, filtered and paged, and gets one with its steps", async () => {
+    const { ada, project, projectId, store } = await withProject();
+    await call(ada, "start_attempts", { project, task: "t1", count: 2 });
+    const first = (await call(ada, "score_now", { project, attempt: "t1a1" })).data["run"]["id"] as number;
+    const second = (await call(ada, "score_now", { project, attempt: "t1a2" })).data["run"]["id"] as number;
+    await store(projectId).scoring.drain();
+    store(projectId).scoringFinished(first, { status: "done", result: { ...PASSED, logs: ["setup.1"] } });
+
+    const all = await call(ada, "list_runs", { project });
+    expect(all.summary).toBe("2 runs");
+    expect(all.data).toMatchObject({
+      runs: [
+        { id: second, line: "t1a2" },
+        { id: first, line: "t1a1" },
+      ],
+      next: null,
+    });
+    const paged = await call(ada, "list_runs", { project, line: "tasks", limit: 1 });
+    expect(paged.summary).toBe(`1 runs; more from cursor ${second}`);
+    const rest = await call(ada, "list_runs", { project, cursor: second });
+    expect(rest.data["runs"].map((r: Json) => r["id"])).toEqual([first]);
+    expect((await call(ada, "list_runs", { project, status: "running" })).data["runs"]).toMatchObject([{ id: second }]);
+    expect((await call(ada, "list_runs", { project, line: "feature" })).isError).toBeTruthy();
+
+    const run = await call(ada, "get_run", { project, run: first });
+    expect(run.summary).toBe(`run ${first} on t1a1 is done, gate passed`);
+    expect(run.data["run"]["outcome"]["steps"]).toMatchObject([{ name: "setup.1", kind: "setup", log: "setup.1" }]);
+    expect((await call(ada, "get_run", { project, run: 99 })).summary).toMatch(/^notFound: /u);
+  });
+
+  it("waits for a run until it is done, and answers at once for one waiting for the owner", async () => {
+    const { ada, project, projectId, store, sql } = await withProject();
+    await call(ada, "start_attempts", { project, task: "t1", count: 2 });
+    const run = (await call(ada, "score_now", { project, attempt: "t1a1" })).data["run"]["id"] as number;
+    await store(projectId).scoring.drain();
+
+    const waiting = call(ada, "wait_for_run", { project, run, wait: 5 });
+    await new Promise((r) => setTimeout(r, 20));
+    store(projectId).scoringFinished(run, { status: "done", result: PASSED });
+    const done = await waiting;
+    expect(done.summary).toBe(`run ${run} on t1a1 is done, gate passed`);
+    expect(done.data["run"]).toMatchObject({ id: run, status: "done", settled: true });
+
+    const held = (await call(ada, "score_now", { project, attempt: "t1a2" })).data["run"]["id"] as number;
+    sql(projectId).exec("UPDATE pipeline_runs SET status = 'waiting' WHERE id = ?", held);
+    const owner = await call(ada, "wait_for_run", { project, run: held, wait: 5 });
+    expect(owner.summary).toBe(`run ${held} on t1a2 is waiting: it needs the project owner to start it`);
+    expect(owner.data["run"]).toMatchObject({ status: "waiting", settled: true });
+  });
+
+  it("answers an unsettled wait when its time runs out", async () => {
+    const { ada, project } = await withProject();
+    await call(ada, "start_attempts", { project, task: "t1" });
+    const run = (await call(ada, "score_now", { project, attempt: "t1a1" })).data["run"]["id"] as number;
+    const answered = await call(ada, "wait_for_run", { project, run, wait: 1 });
+    expect(answered.summary).toBe(`run ${run} is still queued`);
+    expect(answered.data["run"]).toMatchObject({ status: "queued", settled: false });
   });
 
   it("reads a migrated run's log under its old key, or under its line if it stored it after the migration", async () => {
@@ -602,9 +664,9 @@ describe("/mcp", () => {
     logs.objects.set(`logs/${projectId}/t1a1/${sha}/${run}/test.log`, "old\n");
     logs.objects.set(`logs/${projectId}/t1a1/${run}/setup.1.log`, "new\n");
 
-    expect((await call(ada, "get_log", { project, run, name: "test" })).data["text"]).toBe("old\n");
-    expect((await call(ada, "get_log", { project, run, name: "setup.1" })).data["text"]).toBe("new\n");
-    expect((await call(ada, "get_log", { project, run, name: "lint" })).summary).toMatch(/^notFound: /u);
+    expect((await call(ada, "get_log", { project, run, step: "test" })).data["text"]).toBe("old\n");
+    expect((await call(ada, "get_log", { project, run, step: "setup.1" })).data["text"]).toBe("new\n");
+    expect((await call(ada, "get_log", { project, run, step: "lint" })).summary).toMatch(/^notFound: /u);
   });
 
   it("lists secrets' names and pipelines to the owner's aliases, never their values", async () => {

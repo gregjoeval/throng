@@ -12,11 +12,14 @@ import { attemptRemote } from "./git-remotes.ts";
 import type { ProjectPath } from "./git-remotes.ts";
 import type { ErroredDetails, FailedChecksDetails } from "./landing.ts";
 import type { Dequeue, DequeueReason, StoredMergeRequest } from "./merge-requests.ts";
+import type { Pipeline } from "./pipelines.ts";
 import { resolveProject } from "./projects.ts";
 import { forkRepo, originRepo } from "./repos.ts";
 import type { Repos } from "./repos.ts";
 import type { Gate, ScoringResult } from "./results.ts";
-import type { AttemptScoring, ScoringRequest, StoredRun } from "./scoring.ts";
+import type { RunOutcome, RunStep } from "./run-outcome.ts";
+import { cancellable, runSettled } from "./scoring.ts";
+import type { AttemptScoring, RunsQuery, ScoringRequest, StoredRun } from "./scoring.ts";
 import type { SecretChange, SecretSummary } from "./secrets.ts";
 import { NO_TASK_DEFINITIONS, taskDefinitionsFrom, withTask } from "./task-definitions.ts";
 import type { TaskDefinitions, TaskDefinitionsInput } from "./task-definitions.ts";
@@ -227,28 +230,53 @@ export interface MergeQueueEntry {
   state: StoredMergeRequest["state"];
 }
 
-/** A scoring run as the API shows it. */
-export interface ScoringRun {
+/** A pipeline run as the API lists it. */
+export interface Run {
   id: number;
-  /** The attempt it scores, `t42a3`. */
-  ref: string;
+  /** The line it runs on: `t42a3`, `t42` or `main`. */
+  line: string;
+  pipeline: Pipeline;
   sha: string;
   trigger: StoredRun["trigger"];
   status: StoredRun["status"];
+  /** Whether it may hold the secrets its pipeline allows. */
+  trusted: boolean;
   /** Who asked for it, or null when no user did. */
   requestedBy: UserRef | null;
   alias: string | null;
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
+  /** Whether its head is no longer its line's current head. */
+  superseded: boolean;
+  /** Its gate once `done`, else null. */
+  gate: Gate | null;
+  /** Whether the project owner may cancel it now. */
+  cancellable: boolean;
 }
 
-/** A scoring run with how it ended: its result once `done`, its error once `errored`. */
-export interface RunDetail extends ScoringRun {
-  /** Whether its head is no longer the attempt's current head. */
-  superseded: boolean;
+/** A run with how it ended: its outcome (and the slice scoring reads) once `done`, its error once `errored`. */
+export interface RunDetail extends Run {
   error: string | null;
+  outcome: PublicRunOutcome | null;
   result: ScoringResult | null;
+}
+
+/** A run's outcome as the API shows it: each step says which checks it waited for. */
+export interface PublicRunOutcome extends Omit<RunOutcome, "steps"> {
+  steps: (RunStep & { after: string[] })[];
+}
+
+/** A page of a project's runs, newest first, with the cursor of the next. */
+export interface RunsList {
+  runs: Run[];
+  /** The next page's `cursor`; null on the last page. */
+  next: number | null;
+}
+
+/** A run after a wait, and whether it is done or waiting for the owner. */
+export interface WaitedRun extends RunDetail {
+  settled: boolean;
 }
 
 /** An attempt's current result: the latest `done` run for its current head, with the run it came from. */
@@ -290,7 +318,7 @@ export interface TaskArena {
 export interface ScoringAnswer {
   queued: boolean;
   reason: string | null;
-  run: ScoringRun;
+  run: Run;
 }
 
 type TaskPath = ProjectPath & { task: string };
@@ -573,9 +601,42 @@ export function taskService({ db, repos, backend, origin }: TaskServiceDeps) {
       return runs.map((r) => runDetail(r, users));
     },
 
-    /** One of the project's scoring runs. Any signed-in user may read it. */
+    /** One of the project's runs, with its outcome. Any signed-in user may read it. */
     async getScoringRun(actor: Actor, input: ProjectPath & { run: number }): Promise<RunDetail> {
       const run = await invoke("getScoringRun", await project(input), actor, { run: input.run });
+      return runDetail(run, await handles(db, [run.user_id]));
+    },
+
+    /** A page of the project's runs on every line, newest first. Any signed-in user may read them. */
+    async listRuns(
+      actor: Actor,
+      input: ProjectPath & Omit<RunsQuery, "before"> & { cursor?: number | undefined },
+    ): Promise<RunsList> {
+      const { line, status, cursor, limit } = input;
+      const page = await invoke("listRuns", await project(input), actor, { line, status, before: cursor, limit });
+      return { runs: await publicRuns(db, page.runs), next: page.next };
+    },
+
+    /**
+     * Holds until the run is done (or ended otherwise) or waits for the owner, or `wait` seconds
+     * pass, then answers with the run and whether it settled. A deploy drops waits in flight: one
+     * dropped answers with the run as it is now.
+     */
+    async waitForRun(actor: Actor, input: ProjectPath & { run: number; wait: number }): Promise<WaitedRun> {
+      const ctx = await project(input);
+      try {
+        const { settled, ...run } = await invoke("waitForRun", ctx, actor, { run: input.run, wait: input.wait });
+        return { ...runDetail(run, await handles(db, [run.user_id])), settled };
+      } catch (error) {
+        if (!droppedByReset(error)) throw error;
+        const run = await invoke("getScoringRun", ctx, actor, { run: input.run });
+        return { ...runDetail(run, await handles(db, [run.user_id])), settled: runSettled(run) };
+      }
+    },
+
+    /** Cancels a run that can be cancelled. Only the project owner may. */
+    async cancelRun(actor: Actor, input: ProjectPath & { run: number }): Promise<RunDetail> {
+      const run = await invoke("cancelRun", await project(input), actor, { run: input.run });
       return runDetail(run, await handles(db, [run.user_id]));
     },
 
@@ -894,23 +955,41 @@ function publicScoring(request: ScoringRequest, users: Map<string, string>): Sco
   };
 }
 
-function publicRun(run: StoredRun, users: Map<string, string>): ScoringRun {
+function publicRun(run: StoredRun, users: Map<string, string>): Run {
   return {
     id: run.id,
-    ref: run.line,
+    line: run.line,
+    pipeline: run.pipeline,
     sha: run.sha,
     trigger: run.trigger,
     status: run.status,
+    trusted: run.trusted,
     requestedBy: run.user_id === null ? null : userRef(run.user_id, users),
     alias: run.alias,
     createdAt: new Date(run.created_at).toISOString(),
     startedAt: iso(run.started_at),
     finishedAt: iso(run.finished_at),
+    superseded: run.superseded,
+    gate: run.outcome?.gate ?? null,
+    cancellable: cancellable(run),
   };
 }
 
 function runDetail(run: StoredRun, users: Map<string, string>): RunDetail {
-  return { ...publicRun(run, users), superseded: run.superseded, error: run.error, result: run.result };
+  const outcome =
+    run.outcome === null
+      ? null
+      : { ...run.outcome, steps: run.outcome.steps.map((step) => ({ ...step, after: step.after ?? [] })) };
+  return { ...publicRun(run, users), error: run.error, outcome, result: run.result };
+}
+
+/** Runs as the API lists them, with the users who asked for them. */
+async function publicRuns(db: Database, runs: StoredRun[]): Promise<Run[]> {
+  const users = await handles(
+    db,
+    runs.map((r) => r.user_id),
+  );
+  return runs.map((r) => publicRun(r, users));
 }
 
 /** An attempt's scoring status for polling, with its current result once its head has one. */

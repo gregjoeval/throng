@@ -9,7 +9,8 @@
 import { archiveRef } from "./archive.ts";
 import { containsCommit, taskBranchHead } from "./base.ts";
 import { CacheIndex } from "./cache-index.ts";
-import { cacheObjectKey, restoreScopes, saveScope } from "./caches.ts";
+import { CacheStore } from "./cache-store.ts";
+import type { CacheObjects } from "./cache-store.ts";
 import type { CacheEntry, CacheKey, CacheLookup } from "./caches.ts";
 import { migrateValues, normaliseLandingOutcome } from "./casing.ts";
 import { addColumns, renameColumns } from "./columns.ts";
@@ -513,14 +514,6 @@ export interface TaskStoreDeps {
   cacheObjects?: CacheObjects | null | undefined;
 }
 
-/** The part of the `CACHES` R2 bucket eviction uses; tests pass a fake. */
-export interface CacheObjects {
-  delete: (keys: string[]) => Promise<void>;
-}
-
-/** Most keys one R2 `delete` takes. */
-const MAX_DELETE_KEYS = 1000;
-
 /**
  * The task and attempt state machine for one project. Every method takes the project, the actor
  * and an input, checks the actor may act, and throws `ServiceError`s for the API to report.
@@ -552,7 +545,8 @@ export class TaskStore {
   readonly #secrets: Secrets;
   /** The project's cache entries, indexed. */
   readonly caches: CacheIndex;
-  readonly #cacheObjects: CacheObjects | null;
+  /** What runs may do with the project's caches, and their eviction. */
+  readonly #cacheStore: CacheStore;
 
   constructor({
     sql,
@@ -568,7 +562,6 @@ export class TaskStore {
     this.#repos = repos;
     this.#now = now;
     this.#lands = lands;
-    this.#cacheObjects = cacheObjects;
     this.#follow = follow;
     migrate(sql);
     migrateProjection(sql, now());
@@ -578,6 +571,12 @@ export class TaskStore {
     this.votes = new Votes({ sql });
     this.#secrets = new Secrets({ sql, keyring, now });
     this.caches = new CacheIndex({ sql, now });
+    this.#cacheStore = new CacheStore({
+      sql,
+      index: this.caches,
+      objects: cacheObjects,
+      run: (id) => this.scoring.getRun(id),
+    });
     this.scoring = new ScoringQueue({
       sql,
       runner: scoring,
@@ -2079,18 +2078,7 @@ export class TaskStore {
    * own line's only when it's trusted, isn't an attempt's, and missed.
    */
   pipelineCaches(id: number, keys: readonly CacheKey[]): CacheLookup[] {
-    const run = this.scoring.getRun(id);
-    if (run === null) throw new Error(`no run ${id}`);
-    const scopes = restoreScopes(run.line);
-    const own = saveScope(run.line);
-    return this.#sql.transaction(() =>
-      keys.map((key): CacheLookup => {
-        const restore = this.caches.find(scopes, key.name, key.keyHash);
-        if (restore !== null || own === null) return { ...key, restore, save: null };
-        if (!run.trusted) return { ...key, restore, save: null, unsaved: "this run isn't trusted" };
-        return { ...key, restore, save: own };
-      }),
-    );
+    return this.#cacheStore.lookup(id, keys);
   }
 
   /**
@@ -2099,10 +2087,7 @@ export class TaskStore {
    * an entry already there or another run's save of it, as entries are immutable.
    */
   pipelineCacheSaving(id: number, entry: Pick<CacheEntry, "scope" | "name" | "keyHash">): boolean {
-    return (
-      this.#maySaveCache(id, entry) &&
-      this.caches.reserve(entry, id, (holder) => this.scoring.getRun(holder)?.status === "running")
-    );
+    return this.#cacheStore.saving(id, entry);
   }
 
   /**
@@ -2110,29 +2095,17 @@ export class TaskStore {
    * False when it isn't recorded: an entry for its key was saved first, or the run may not save there.
    */
   pipelineCacheSaved(id: number, entry: Pick<CacheEntry, "scope" | "name" | "keyHash" | "size">): boolean {
-    return this.#maySaveCache(id, entry) && this.caches.record(entry, id);
+    return this.#cacheStore.saved(id, entry);
   }
 
   /** For a run's Workflow whose save of an entry it reserved failed: lets the key go for a later run. */
   pipelineCacheUnsaved(id: number, entry: Pick<CacheEntry, "scope" | "name" | "keyHash">): void {
-    this.caches.release(entry, id);
-  }
-
-  #maySaveCache(id: number, entry: Pick<CacheEntry, "scope">): boolean {
-    const run = this.scoring.getRun(id);
-    return run?.status === "running" && run.trusted && saveScope(run.line) === entry.scope;
+    this.#cacheStore.unsaved(id, entry);
   }
 
   /** Deletes the objects of every evictable cache entry, then their rows; one that fails to delete stays for the next try. */
   async evictCaches(project: string): Promise<void> {
-    if (this.#cacheObjects === null) return;
-    const entries = this.caches.evictable();
-    for (let i = 0; i < entries.length; i += MAX_DELETE_KEYS) {
-      const batch = entries.slice(i, i + MAX_DELETE_KEYS);
-      await this.#cacheObjects.delete(batch.map((entry) => cacheObjectKey(project, entry)));
-      this.caches.remove(batch);
-      for (const entry of batch) console.log({ event: "cache.evicted", project, ...entry });
-    }
+    await this.#cacheStore.evict(project);
   }
 
   // --- votes -----------------------------------------------------------------------------------

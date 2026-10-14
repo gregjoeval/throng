@@ -31,11 +31,9 @@ network:
 checks:
   - name: test
     command: pnpm test
-    required: true
     timeout: 10m
   - name: bundle
     command: pnpm build && node scripts/size.js
-    required: false
     timeout: 90s
 metrics:
   - { name: coverage, from: test.coverage-summary.total.lines.pct, type: number, unit: "%" }
@@ -85,14 +83,12 @@ describe("parseConfig", () => {
           {
             name: "test",
             command: "pnpm test",
-            required: true,
             timeoutMs: 10 * 60_000,
             source: "project",
           },
           {
             name: "bundle",
             command: "pnpm build && node scripts/size.js",
-            required: false,
             timeoutMs: 90_000,
             source: "project",
           },
@@ -159,7 +155,7 @@ describe("parseConfig", () => {
     expect(parseConfig(text)).toMatchObject({ kind: "valid", config: { sandbox: { size: "standard-1" } } });
   });
 
-  it("defaults a check to required and a 10m timeout", () => {
+  it("defaults a check to a 10m timeout", () => {
     const result = parseConfig("checks:\n  - name: lint\n    command: pnpm lint\n");
     expect(result).toEqual({
       kind: "valid",
@@ -169,7 +165,6 @@ describe("parseConfig", () => {
           {
             name: "lint",
             command: "pnpm lint",
-            required: true,
             timeoutMs: DEFAULT_CHECK_TIMEOUT_MS,
             source: "project",
           },
@@ -261,7 +256,16 @@ describe("parseConfig", () => {
       check("metrics: [{ name: coverage, order: desc }]"),
       /^checks\[0\]\.metrics: a check no longer declares metrics; .*top-level metrics list.*from: <check>\.<file>\.<path>.*\$THRONG_OUTPUT/u,
     ],
-    ["a non-boolean required", check("required: yes"), /^checks\[0\]\.required: required must be true or false$/u],
+    [
+      "required on a check",
+      check("required: false"),
+      /^checks\[0\]\.required: required is gone: every check that runs must pass; to report without blocking, exit 0 and write a metric$/u,
+    ],
+    [
+      "needs on a check",
+      check("needs: [lint]"),
+      /^checks\[0\]\.needs: needs is gone: a check names the checks it waits for with after$/u,
+    ],
     ["a numeric timeout", check("timeout: 600"), /^checks\[0\]\.timeout: /u],
     [
       "a duplicate check name",
@@ -438,6 +442,39 @@ describe("parseConfig", () => {
   it("rejects YAML alias bombs", () => {
     const text =
       'a: &a ["x","x","x","x","x","x","x","x","x"]\nb: &b [*a,*a,*a,*a,*a,*a,*a,*a,*a]\nc: &c [*b,*b,*b,*b,*b,*b,*b,*b,*b]\nd: [*c,*c,*c,*c,*c,*c,*c,*c,*c]\n';
+    expect(parseConfig(text)).toMatchObject({ kind: "invalid", error: expect.stringMatching(/^yaml: /u) });
+  });
+
+  it("reuses blocks anchored under definitions, merging mappings with <<, and ignores definitions", () => {
+    const text = `definitions:
+  quick: &quick { timeout: 2m }
+  test: &test pnpm test
+checks:
+  - { <<: *quick, name: unit, command: *test }
+  - <<: *quick
+    name: e2e
+    command: pnpm e2e
+    timeout: 5m
+`;
+    expect(parseConfig(text)).toEqual({
+      kind: "valid",
+      config: {
+        ...EMPTY,
+        checks: [
+          { name: "unit", command: "pnpm test", timeoutMs: 120_000, source: "project" },
+          { name: "e2e", command: "pnpm e2e", timeoutMs: 300_000, source: "project" },
+        ],
+      },
+    });
+  });
+
+  it("rejects a merge key that would bring in too many aliases", () => {
+    const text = `definitions:
+  a: &a { x: 1 }
+  b: &b [*a, *a, *a, *a, *a, *a, *a, *a, *a, *a]
+  c: &c [*b, *b, *b, *b, *b, *b, *b, *b, *b, *b]
+  d: [*c, *c, *c, *c, *c, *c, *c, *c, *c, *c]
+`;
     expect(parseConfig(text)).toMatchObject({ kind: "invalid", error: expect.stringMatching(/^yaml: /u) });
   });
 });

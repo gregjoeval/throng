@@ -37,7 +37,7 @@ const { ScoringWorkflow } = await importWorkerModule<{
 const params: ScoringParams = { project: "abc123", attempt: "t1a1", sha: "a".repeat(40), run: 7 };
 
 /** A task definition whose check clashes with `main`'s, making the run's merged config invalid. */
-const CLASHING = { checks: [{ name: "test", command: "npm test", required: true, timeoutMs: 1000, source: "task" }] };
+const CLASHING = { checks: [{ name: "test", command: "npm test", timeoutMs: 1000, source: "task" }] };
 
 /**
  * Scores a head whose one check passes, under `main`'s config and the

@@ -18,13 +18,13 @@ import {
   task,
 } from "./server";
 
-/** t1a1, passing, scored by run 7 with a required `test` and an optional `lint`, both logged. */
+/** t1a1, passing, scored by run 7 with `test` and `lint`, both logged. */
 const scored = (fields: Partial<ArenaAttempt> = {}) =>
   arenaAttempt(1, 1, {
     status: "done",
     result: result({
       run: 7,
-      checks: [check("test", true, "passed", 1200), check("lint", false, "failed", 300)],
+      checks: [check("test", "passed", 1200), check("lint", "passed", 300)],
       logs: ["setup.1", "test", "lint"],
     }),
     ...fields,
@@ -103,8 +103,8 @@ describe("an attempt's details", () => {
     server.use(serveLogs({ test: ["running 3 tests\n", "ok 3\n"] }));
     const { user, sheet } = await openDetails([scored(), arenaAttempt(1, 2)]);
     const checks = within(sheet).getByRole("table", { name: "Checks" });
-    expect(within(checks).getByRole("row", { name: /test/u })).toHaveTextContent("testRequiredPassed1.2 s");
-    expect(within(checks).getByRole("row", { name: /lint/u })).toHaveTextContent("lintOptionalFailed0.3 s");
+    expect(within(checks).getByRole("row", { name: /test/u })).toHaveTextContent("testPassed1.2 s");
+    expect(within(checks).getByRole("row", { name: /lint/u })).toHaveTextContent("lintPassed0.3 s");
     await user.click(within(sheet).getByRole("button", { name: "test log" }));
     const log = await within(sheet).findByRole("log", { name: "test" });
     expect(await within(sheet).findByText(/ok 3/u)).toBe(log);

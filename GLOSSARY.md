@@ -221,5 +221,5 @@ A fork whose head has been saved as a hidden ref in the origin (`refs/attempts/t
 _Avoid_: Backed up, stashed
 
 **Secret**:
-A value a project's owner stores for its pipelines, such as a deploy token, with the pipelines it may be used in. A step gets only the secrets it or its pipeline names, the owner allows in that pipeline, and only in a pipeline run of code from a maintainer or started by one.
+A value a project's owner stores for its pipelines, such as a deploy token, with the pipelines it may be used in. A step gets only the secrets it or its pipeline names, the owner allows in that pipeline, and only in a pipeline run of code from a maintainer, or one the owner starts acting as themselves.
 _Avoid_: Credential, env var, grant

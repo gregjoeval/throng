@@ -3057,12 +3057,21 @@ function toTask(row: TaskRow): StoredTask {
     closed_at: row.closed_at,
     closed_by: row.closed_by,
     attempt_limit: row.attempt_limit,
-    definitions:
-      row.definitions === null
-        ? NO_TASK_DEFINITIONS
-        : { ...NO_TASK_DEFINITIONS, ...(JSON.parse(row.definitions) as Partial<TaskDefinitions>) },
+    definitions: row.definitions === null ? NO_TASK_DEFINITIONS : upgradeDefinitions(row.definitions),
     selection: row.selection === null ? null : (JSON.parse(row.selection) as SelectionPolicy),
   };
+}
+
+/**
+ * A task's stored definitions, as JSON, in the current shape. Checks stored while a check could be
+ * optional carry `required`, which is dropped: every check that runs must pass.
+ */
+function upgradeDefinitions(json: string): TaskDefinitions {
+  const stored = { ...NO_TASK_DEFINITIONS, ...(JSON.parse(json) as Partial<TaskDefinitions>) };
+  const checks = (stored.checks as (CheckConfig & { required?: boolean })[]).map(
+    ({ required: _required, ...check }) => check,
+  );
+  return { ...stored, checks };
 }
 
 /** A task's selection policy as stored: null to use the project's. */

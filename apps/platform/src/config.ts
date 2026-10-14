@@ -83,8 +83,6 @@ export type MetricConfig = {
 export interface CheckConfig {
   name: string;
   command: string;
-  /** Whether the gate needs it to pass. */
-  required: boolean;
   timeoutMs: number;
   source: ConfigLayer;
 }
@@ -122,6 +120,8 @@ const ORDERS: Record<(typeof ORDER_ALIASES)[number], MetricOrder> = {
   desc: "desc",
 };
 const DURATION = /^(\d+)(s|m|h)$/u;
+/** Most aliases a config may resolve, so a few anchors can't expand into a huge document. */
+const MAX_ALIASES = 100;
 const UNIT_MS = { s: 1000, m: 60 * 1000, h: 60 * 60 * 1000 } as const;
 
 const name = (what: string) =>
@@ -259,12 +259,11 @@ export function metricConfig(metric: z.infer<typeof MetricSchema>, source: Confi
   }
 }
 
-/** A parsed check as stored, as the layer `source` defined it: required, with a 10m timeout, by default. */
+/** A parsed check as stored, as the layer `source` defined it: with a 10m timeout by default. */
 export function checkConfig(check: z.infer<typeof CheckSchema>, source: ConfigLayer): CheckConfig {
   return {
     name: check.name,
     command: check.command,
-    required: check.required ?? true,
     timeoutMs: check.timeout ?? DEFAULT_CHECK_TIMEOUT_MS,
     source,
   };
@@ -283,7 +282,12 @@ const TimeoutSchema = z
 export const CheckSchema = z.strictObject({
   name: name("check name"),
   command,
-  required: z.boolean({ error: "required must be true or false" }).optional(),
+  required: z
+    .never({
+      error: "required is gone: every check that runs must pass; to report without blocking, exit 0 and write a metric",
+    })
+    .optional(),
+  needs: z.never({ error: "needs is gone: a check names the checks it waits for with after" }).optional(),
   timeout: TimeoutSchema.optional(),
   metrics: z
     .never({
@@ -320,6 +324,8 @@ export const SelectionPolicySchema = z
 const ConfigSchema = z
   .strictObject(
     {
+      /** Where a config keeps the anchors it reuses; Throng reads nothing in it. */
+      definitions: z.unknown().optional(),
       setup: z.array(command, { error: "setup must be a list of commands" }).optional(),
       network: z
         .strictObject({
@@ -368,20 +374,22 @@ const ConfigSchema = z
 
 /**
  * Parses a config file's text, or null when there's no file. An empty file is a valid config with
- * every default. YAML errors, schema errors and unknown keys all make it `invalid`.
+ * every default. YAML errors, schema errors and unknown keys all make it `invalid`. A config may reuse
+ * blocks through anchors, aliases and `<<` merge keys, resolving at most `MAX_ALIASES` aliases; it
+ * keeps its anchors under a top-level `definitions:`, which is otherwise ignored.
  */
 export function parseConfig(text: string | null): ConfigResult {
   if (text === null) return { kind: "none" };
   if (new TextEncoder().encode(text).length > MAX_CONFIG_BYTES) {
     return { kind: "invalid", error: `the config is larger than ${MAX_CONFIG_BYTES} bytes` };
   }
-  const doc = parseDocument(text);
+  const doc = parseDocument(text, { merge: true });
   if (doc.errors.length > 0) {
     return { kind: "invalid", error: doc.errors.map((e) => `yaml: ${e.message}`).join("\n") };
   }
   let value: unknown;
   try {
-    value = doc.toJS({ maxAliasCount: 100 });
+    value = doc.toJS({ maxAliasCount: MAX_ALIASES });
   } catch (error) {
     return { kind: "invalid", error: `yaml: ${error instanceof Error ? error.message : String(error)}` };
   }

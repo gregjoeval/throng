@@ -21,7 +21,7 @@
 // `e2e-browser.ts`): two scored attempts load as lanes against their base, by file lines up their
 // files, and selecting one there lands its merge request and closes the task.
 //
-// Scoring scenarios, through the e2e routes (`/e2e/*`): metrics (a check writes two JSON files into $THRONG_OUTPUT and fails; metrics are read from both), taskmetrics (a task adds a metric over a project check, scored with source task; a clash main later adds makes the next run invalid; through `/api`), taskchecks (a task adds a metric over a project check and a required check of its own; the gate follows the task check; making the check optional rescores the open attempts; through `/api`), failing (a required check fails the gate),
+// Scoring scenarios, through the e2e routes (`/e2e/*`): metrics (a check writes two JSON files into $THRONG_OUTPUT and exits 0; metrics are read from both), taskmetrics (a task adds a metric over a project check, scored with source task; a clash main later adds makes the next run invalid; through `/api`), taskchecks (a task adds a metric over a project check and a check of its own; the gate follows the task check; making the check only report rescores the open attempts; through `/api`), failing (a failing check fails the gate, whatever the others do),
 // invalid (an invalid config fails the gate with a config entry), preview (a check writes a fake
 // preview URL to $THRONG_OUTPUT and a `url` metric reads it; nothing deploys), coalesce (two quick
 // pushes; the first run is cancelled and only the newest sha is scored), intrusion (an attempt's checks
@@ -119,7 +119,6 @@ class Timeline {
 interface Check {
   name: string;
   source: "platform" | "project" | "task";
-  required: boolean;
   outcome: string;
   durationMs: number;
   notes: string[];
@@ -482,7 +481,7 @@ async function conflict(): Promise<void> {
 /**
  * A push to a queued or landing merge request's source dequeues it with `newPush` to
  * `needsReview`, and it stays there once the new head passes: only an approval requeues it. A slow
- * required check keeps the landing in its retest long enough to push.
+ * check keeps the landing in its retest long enough to push.
  */
 async function needsreview(): Promise<void> {
   const timeline = new Timeline();
@@ -651,9 +650,9 @@ async function describePage({ page }: BrowserSession): Promise<void> {
 }
 
 /**
- * A passing project whose optional `report` check writes two JSON files into `$THRONG_OUTPUT`, then
- * fails: its metrics are still read from both files, through objects and an array, and one whose path
- * doesn't exist is null with a note naming the segment and the keys there.
+ * A passing project whose `report` check only reports: it writes two JSON files into
+ * `$THRONG_OUTPUT` and exits 0. Its metrics are read from both files, through objects and an array,
+ * and one whose path doesn't exist is null with a note naming the segment and the keys there.
  */
 async function metrics(): Promise<void> {
   const timeline = new Timeline();
@@ -672,14 +671,12 @@ writeFileSync(
   }),
 );
 writeFileSync(out + "/coverage-summary.json", JSON.stringify({ total: { lines: { pct: 87.5 } } }));
-process.exit(1);
 `,
     ".throng/config.yml": `checks:
   - name: test
     command: npm test
   - name: report
     command: node scripts/report.js
-    required: false
 metrics:
   - { name: tests, from: report.report.numTotalTests, type: number }
   - { name: slowest, from: report.report.testResults.0.duration, type: number, unit: ms, order: asc }
@@ -699,7 +696,7 @@ metrics:
   assert(result.gate === "passed", `expected the gate to pass: ${JSON.stringify(result.checks)}`);
   const [test, reporter] = configChecks(result);
   assert(
-    test?.outcome === "passed" && reporter?.outcome === "failed",
+    test?.outcome === "passed" && reporter?.outcome === "passed",
     `unexpected outcomes ${JSON.stringify(result.checks)}`,
   );
   const expected: Record<string, number> = { tests: 12, slowest: 7, coverage: 87.5 };
@@ -707,7 +704,7 @@ metrics:
     const metric = result.metrics[name];
     assert(
       metric?.source === "project" && metric.type === "number" && metric.value === value,
-      `${name} not read from the failed check's output as ${value}: ${JSON.stringify(metric)}`,
+      `${name} not read from the check's output as ${value}: ${JSON.stringify(metric)}`,
     );
   }
   const typed: Record<string, Metric> = {
@@ -825,13 +822,16 @@ writeFileSync(process.env.THRONG_OUTPUT + "/coverage-summary.json", JSON.stringi
 }
 
 /**
- * A task adds a metric over the project's `report` check and a required `smoke` check of its own,
- * which needs the greeting to say who it's from. Both attempts show the task's check and metrics with
- * `source: task`, after the project's; the gate follows `smoke`: passed for a1, failed for a2. Then
- * the task makes `smoke` optional, which rescores the open a2 at the same head: `smoke` still fails,
- * but the gate passes.
+ * A task adds a metric over the project's `report` check and a `smoke` check of its own, which needs
+ * the greeting to say who it's from. Both attempts show the task's check and metrics with
+ * `source: task`, after the project's; the gate follows `smoke`: passed for a1, failed for a2, whose
+ * `smoked` is null as `smoke` failed. Then the task makes `smoke` only report, exiting 0 whatever it
+ * finds, which rescores the open a2 at the same head: `smoke` passes, `smoked` reports false, and the
+ * gate passes.
  */
 const SMOKE = { name: "smoke", command: "node scripts/smoke.js", timeout: "2m" };
+/** `smoke`, only reporting: it writes `smoked` and exits 0. */
+const SMOKE_REPORTS = { ...SMOKE, command: "node scripts/smoke.js || true" };
 
 async function taskchecks(): Promise<void> {
   const timeline = new Timeline();
@@ -847,7 +847,7 @@ process.exit(ok ? 0 : 1);
     ".throng/config.yml": TASK_METRICS_CONFIG,
   });
   const [t1, a1, a2] = ["t1", "t1a1", "t1a2"];
-  const { ref, checks } = await throng<{ ref: string; checks: { name: string; source: string; required: boolean }[] }>(
+  const { ref, checks } = await throng<{ ref: string; checks: { name: string; source: string }[] }>(
     p,
     "POST",
     "/tasks",
@@ -861,7 +861,7 @@ process.exit(ok ? 0 : 1);
     },
   );
   assert(
-    ref === t1 && checks.map((c) => `${c.name}:${c.source}:${String(c.required)}`).join() === "smoke:task:true",
+    ref === t1 && checks.map((c) => `${c.name}:${c.source}`).join() === "smoke:task",
     `unexpected task ${ref}: ${JSON.stringify(checks)}`,
   );
   const fixture = (await git(p.work, "rev-parse", "HEAD")).trim();
@@ -873,15 +873,15 @@ process.exit(ok ? 0 : 1);
   for (const attempt of [a1, a2]) await throng(p, "POST", `/attempts/${attempt}/open`);
   const passed = (await scoredHead(p, a1, passing)).result;
   const failed = (await scoredHead(p, a2, unsigned)).result;
-  for (const [result, gate, outcome, ok] of [
+  for (const [result, gate, outcome, smokedValue] of [
     [passed, "passed", "passed", true],
-    [failed, "failed", "failed", false],
+    [failed, "failed", "failed", null],
   ] as const) {
-    const ran = configChecks(result).map((c) => `${c.name}:${c.source}:${String(c.required)}:${c.outcome}`);
+    const ran = configChecks(result).map((c) => `${c.name}:${c.source}:${c.outcome}`);
     assert(
       result.config.kind === "valid" &&
         result.gate === gate &&
-        ran.join() === `report:project:true:passed,smoke:task:true:${outcome}`,
+        ran.join() === `report:project:passed,smoke:task:${outcome}`,
       `expected the gate to follow smoke (${gate}): ${JSON.stringify({ gate: result.gate, ran, config: result.config })}`,
     );
     const { lines, smoked, smoke } = result.metrics;
@@ -889,7 +889,7 @@ process.exit(ok ? 0 : 1);
       lines?.source === "task" &&
         lines.value === 40 &&
         smoked?.source === "task" &&
-        smoked.value === ok &&
+        smoked.value === smokedValue &&
         smoke?.source === "task" &&
         smoke.value === outcome,
       `expected the task's metrics with source task: ${JSON.stringify(result.metrics)}`,
@@ -897,17 +897,16 @@ process.exit(ok ? 0 : 1);
   }
   timeline.mark("task check gated");
 
-  await throng(p, "PATCH", `/tasks/${t1}`, { checks: [{ ...SMOKE, required: false }] });
+  await throng(p, "PATCH", `/tasks/${t1}`, { checks: [SMOKE_REPORTS] });
   const rescored = await poll(`${a2}'s rescore under the edited checks`, async () => {
     const s = await throng<ScoringStatus>(p, "GET", `/attempts/${a2}/scoring`);
     assert(s.status !== "errored", `${a2}'s rescore errored`);
     const smoke = s.result?.checks.find((c) => c.name === "smoke");
-    return s.sha === unsigned && s.status === "done" && smoke?.required === false ? (s.result ?? null) : null;
+    return s.sha === unsigned && s.status === "done" && smoke?.outcome === "passed" ? (s.result ?? null) : null;
   });
-  const smoke = rescored.checks.find((c) => c.name === "smoke");
   assert(
-    rescored.gate === "passed" && smoke?.outcome === "failed",
-    `expected the rescore to fail smoke and pass the gate: ${JSON.stringify(rescored)}`,
+    rescored.gate === "passed" && rescored.metrics["smoked"]?.value === false,
+    `expected the rescore to report smoked false and pass the gate: ${JSON.stringify(rescored)}`,
   );
   timeline.mark("edit rescored");
   await finish(p.project, p.work, timeline);
@@ -1005,7 +1004,7 @@ function pick<T, K extends keyof T>(value: T, ...keys: K[]): Pick<T, K> {
   return Object.fromEntries(keys.map((k) => [k, value[k]])) as Pick<T, K>;
 }
 
-/** A required check that fails fails the gate; an optional one that passes doesn't save it. */
+/** A check that fails fails the gate; another that passes doesn't save it. */
 async function failing(): Promise<void> {
   const timeline = new Timeline();
   const { project, work } = await setUpProject(timeline, {
@@ -1014,7 +1013,6 @@ async function failing(): Promise<void> {
     command: grep -q hello src/greeting.js
   - name: test
     command: npm test
-    required: false
 `,
   });
   const fork = await createAttempt(project, "t1a1", timeline);

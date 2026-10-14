@@ -207,7 +207,6 @@ const ConfigCheckSchema = z
   .object({
     name: ConfigNameSchema.openapi({ example: "test" }),
     command: z.string().openapi({ example: "pnpm test" }),
-    required: z.boolean().openapi({ description: "Whether the gate needs it to pass." }),
     timeoutMs: z
       .number()
       .int()
@@ -215,7 +214,10 @@ const ConfigCheckSchema = z
       .openapi({ description: "Defaults to 10 minutes.", example: 600_000 }),
     source: ConfigLayerSchema,
   })
-  .openapi("Check", { description: "A check the config declares: a command whose exit code is its outcome." });
+  .openapi("Check", {
+    description:
+      "A check the config declares: a command whose exit code is its outcome. Every check that runs must pass.",
+  });
 
 const VoteEligibilitySchema = z.enum(VOTE_ELIGIBILITIES).openapi({
   description: "Who may vote: `humans` acting as themselves, `aliases` acting under an alias, or `anyone`.",
@@ -543,16 +545,17 @@ const ScoringResultSchema = z
         z.object({ kind: z.literal("invalid"), error: z.string() }),
       ])
       .openapi({ description: "How the `.throng/config.yml` on `origin/main` it was scored under parsed." }),
-    gate: z
-      .enum(GATES)
-      .openapi({ description: "Passed when every required check passed; failed on an invalid config." }),
+    gate: z.enum(GATES).openapi({
+      description:
+        "Passed when setup passed and every check that ran passed; failed on an invalid config. Throng's own " +
+        "checks never change it.",
+    }),
     checks: z
       .array(
         z
           .object({
             name: z.string().openapi({ example: "test" }),
             source: z.enum(SOURCES),
-            required: z.boolean(),
             outcome: z.enum(CHECK_OUTCOMES),
             durationMs: z.number(),
             notes: z.array(z.string()).openapi({

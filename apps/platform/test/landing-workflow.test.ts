@@ -60,8 +60,8 @@ const params: LandingParams = {
   startedAt: 1_700_000_000_000,
 };
 
-/** A merged tree's config with one required check. */
-const REQUIRED = "checks:\n  - { name: test, command: npm test }\n";
+/** A merged tree's config with one check. */
+const ONE_CHECK = "checks:\n  - { name: test, command: npm test }\n";
 
 beforeEach(() => {
   artifacts.reads.length = 0;
@@ -131,7 +131,7 @@ describe("LandingWorkflow", () => {
   });
 
   it("starts the check container at main's Sandbox size, though the merged tree sets another, and land at lite", async () => {
-    const merged = `sandbox: { size: standard-4 }\n${REQUIRED}`;
+    const merged = `sandbox: { size: standard-4 }\n${ONE_CHECK}`;
     const { events, sizes, outcome } = await land(merged);
     expect(outcome).toEqual({ kind: "landed", sha: MERGE });
     expect(events.filter((e) => e === "run check")).toHaveLength(2);
@@ -140,14 +140,14 @@ describe("LandingWorkflow", () => {
   });
 
   it("reads the retest's logs back at lite, so a lost container isn't restarted at the project's size", async () => {
-    const { logReads } = await land(REQUIRED);
+    const { logReads } = await land(ONE_CHECK);
     expect(logReads).toEqual([["check", "lite"]]);
   });
 
   it("gives the check container main's .npmrc registries, for both the conflict check and the retest", async () => {
     artifacts.files.set(ORIGIN_MAIN, { [NPMRC_PATH]: "@acme:registry=https://npm.acme.dev/\n" });
     artifacts.files.set("abc123-t1a1@main", { [NPMRC_PATH]: "registry=https://evil.example.com/\n" });
-    const { outcome, checkAccess } = await land(REQUIRED);
+    const { outcome, checkAccess } = await land(ONE_CHECK);
     expect(outcome).toEqual({ kind: "landed", sha: MERGE });
     // The conflict check starts the container, so its access is what the retest runs under.
     expect(checkAccess.map((access) => access.registries)).toEqual([
@@ -163,7 +163,7 @@ describe("LandingWorkflow", () => {
   it("gives the check container main's network.allow, for both the conflict check and the retest, never the merged tree's", async () => {
     artifacts.files.set(ORIGIN_MAIN, { [CONFIG_PATH]: "network: { allow: [api.example.com] }\n" });
     artifacts.files.set("abc123-t1a1@main", { [CONFIG_PATH]: "network: { allow: [fork.example.com] }\n" });
-    const merged = `network: { allow: [evil.example.com] }\n${REQUIRED}`;
+    const merged = `network: { allow: [evil.example.com] }\n${ONE_CHECK}`;
     const { outcome, checkAccess } = await land(merged);
     expect(outcome).toEqual({ kind: "landed", sha: MERGE });
     expect(checkAccess.map((access) => access.allow)).toEqual([["api.example.com"], ["api.example.com"]]);
@@ -174,7 +174,7 @@ describe("LandingWorkflow", () => {
       [CONFIG_PATH]: "sandbox: { size: standard-2 }\nnetwork: { allow: [api.example.com] }\n",
       [NPMRC_PATH]: "@acme:registry=https://npm.acme.dev/\n",
     });
-    const { checkAccess, sizes } = await land(REQUIRED);
+    const { checkAccess, sizes } = await land(ONE_CHECK);
     expect(artifacts.reads).toEqual([
       { repo: "abc123-main", ref: MAIN, path: CONFIG_PATH },
       { repo: "abc123-main", ref: MAIN, path: NPMRC_PATH },

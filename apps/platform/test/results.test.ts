@@ -34,7 +34,6 @@ checks:
     timeout: 2m
   - name: bundle
     command: npm run size
-    required: false
 metrics:
   - { name: bundle_kb, from: bundle.size.kb, type: number, unit: KB, order: asc }
   - { name: coverage, from: test.coverage-summary.total.lines.pct, type: number, unit: "%" }
@@ -56,11 +55,10 @@ describe("checkOutcome", () => {
   });
 });
 
-function entry(required: boolean, outcome: CheckResult["outcome"]): CheckResult {
+function entry(outcome: CheckResult["outcome"], source: CheckResult["source"] = "project"): CheckResult {
   return {
     name: "c",
-    source: "project",
-    required,
+    source,
     outcome,
     durationMs: 0,
     notes: [],
@@ -68,15 +66,20 @@ function entry(required: boolean, outcome: CheckResult["outcome"]): CheckResult 
 }
 
 describe("gateFor", () => {
-  it("passes when every required check passed, and with no checks at all", () => {
+  it("passes when every check passed, and with no checks at all", () => {
     expect(gateFor([])).toBe("passed");
-    expect(gateFor([entry(true, "passed"), entry(false, "failed")])).toBe("passed");
+    expect(gateFor([entry("passed"), entry("passed", "task")])).toBe("passed");
   });
 
-  it("fails on any required check that didn't pass", () => {
+  it("fails on any project or task check that didn't pass", () => {
     for (const outcome of ["failed", "timedOut", "skipped"] as const) {
-      expect(gateFor([entry(true, "passed"), entry(true, outcome)])).toBe("failed");
+      expect(gateFor([entry("passed"), entry(outcome)])).toBe("failed");
+      expect(gateFor([entry("passed"), entry(outcome, "task")])).toBe("failed");
     }
+  });
+
+  it("leaves Throng's own checks out of the gate", () => {
+    expect(gateFor([entry("passed"), entry("errored", "platform")])).toBe("passed");
   });
 });
 
@@ -141,7 +144,7 @@ describe("buildResult", () => {
       base: BASE,
       config: { kind: "none" },
       gate: "passed",
-      checks: [{ name: "_diff", source: "platform", required: false, outcome: "passed", durationMs: 12, notes: [] }],
+      checks: [{ name: "_diff", source: "platform", outcome: "passed", durationMs: 12, notes: [] }],
       metrics: {
         _diff: { source: "platform", type: "enum", value: "passed", values: OUTCOMES },
         "_diff.filesChanged": { source: "platform", type: "number", value: 3, order: "asc" },
@@ -164,7 +167,7 @@ describe("buildResult", () => {
     expect(result.checks.map((c) => [c.name, c.outcome, c.notes])).toEqual([["_diff", "passed", []]]);
   });
 
-  it("scores each check from its exit, and gates on the required ones", () => {
+  it("scores each check from its exit, and fails the gate on any that didn't pass", () => {
     const result = buildResult(
       CONFIG,
       raw({
@@ -174,10 +177,10 @@ describe("buildResult", () => {
         ],
       }),
     );
-    expect(result.gate).toBe("passed");
+    expect(result.gate).toBe("failed");
     expect(result.checks.slice(1, 3)).toEqual([
-      { name: "test", source: "project", required: true, outcome: "passed", durationMs: 900, notes: [] },
-      { name: "bundle", source: "project", required: false, outcome: "failed", durationMs: 40, notes: [] },
+      { name: "test", source: "project", outcome: "passed", durationMs: 900, notes: [] },
+      { name: "bundle", source: "project", outcome: "failed", durationMs: 40, notes: [] },
     ]);
   });
 
@@ -205,7 +208,26 @@ describe("buildResult", () => {
       test: { source: "project", type: "enum", value: "passed", values: OUTCOMES },
       coverage: { source: "project", type: "number", value: 92, order: "desc", unit: "%" },
       bundle: { source: "project", type: "enum", value: "failed", values: OUTCOMES },
-      bundle_kb: { source: "project", type: "number", value: 120, order: "asc", unit: "KB" },
+    });
+  });
+
+  it("nulls the metrics of a check that failed, whatever it reported, saying so", () => {
+    const result = buildResult(
+      CONFIG,
+      raw({
+        checks: [
+          { exit: 0, durationMs: 900, metrics: { coverage: { value: 92 } } },
+          { exit: 1, durationMs: 40, metrics: { bundle_kb: { value: 120 } } },
+        ],
+      }),
+    );
+    expect(result.metrics.bundle_kb).toEqual({
+      source: "project",
+      type: "number",
+      value: null,
+      order: "asc",
+      unit: "KB",
+      note: "bundle: bundle failed",
     });
   });
 
@@ -255,7 +277,7 @@ describe("buildResult", () => {
     expect(result.metrics.n).toEqual({ source: "project", type: "number", value: 1, order: "desc" });
   });
 
-  it("fails the gate on a required check that timed out, and still reads its output", () => {
+  it("fails the gate on a check that timed out, and nulls its metrics", () => {
     const result = buildResult(
       CONFIG,
       raw({
@@ -267,7 +289,7 @@ describe("buildResult", () => {
     );
     expect(result.checks.map((c) => c.outcome)).toEqual(["passed", "timedOut", "passed"]);
     expect(result.metrics.test).toMatchObject({ value: "timedOut" });
-    expect(result.metrics.coverage).toMatchObject({ value: 40 });
+    expect(result.metrics.coverage).toMatchObject({ value: null, note: "test: test timed out" });
     expect(result.gate).toBe("failed");
   });
 
@@ -291,6 +313,11 @@ describe("buildResult", () => {
       value: null,
       note: "test: test was skipped: setup command 1 failed",
     });
+  });
+
+  it("fails the gate on a failed setup, even with no checks", () => {
+    expect(buildResult(parseConfig("setup: [npm ci]\n"), raw({ setupFailed: 1 })).gate).toBe("failed");
+    expect(buildResult(parseConfig("setup: [npm ci]\n"), raw()).gate).toBe("passed");
   });
 
   it("skips a check the score script reported no exit for, saying so on it and its metrics", () => {
@@ -412,12 +439,11 @@ describe("upgradeResult", () => {
       config: { kind: "valid" },
       gate: "passed",
       checks: [
-        { name: "_diff", source: "platform", required: false, outcome: "passed", durationMs: 12, notes: [] },
-        { name: "test", source: "project", required: true, outcome: "passed", durationMs: 900, notes: [] },
+        { name: "_diff", source: "platform", outcome: "passed", durationMs: 12, notes: [] },
+        { name: "test", source: "project", outcome: "passed", durationMs: 900, notes: [] },
         {
           name: "bundle",
           source: "project",
-          required: false,
           outcome: "timedOut",
           durationMs: 40,
           notes: ["metric bundle_kb was not reported"],
@@ -468,6 +494,15 @@ describe("upgradeResult", () => {
     expect(result.checks.map((c) => c.name)).toEqual(["_diff"]);
     expect(result.config).toEqual({ kind: "invalid", error: "checks[0].name: bad" });
     expect(result.gate).toBe("failed");
+  });
+
+  it("drops required from the checks of a result stored when a check could be optional", () => {
+    const current = buildResult(CONFIG, raw());
+    const stored = {
+      ...current,
+      checks: current.checks.map((check) => ({ ...check, required: check.source !== "platform" })),
+    };
+    expect(upgradeResult(stored)).toEqual(current);
   });
 
   it("leaves a result already in the new shape as it is", () => {

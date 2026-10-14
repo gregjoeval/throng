@@ -28,7 +28,6 @@ const task = (...metrics: Partial<Pick<MetricConfig, "name" | "from">>[]) => ({
 const taskCheck = (check: Partial<CheckConfig> = {}): CheckConfig => ({
   name: "smoke",
   command: "./smoke.sh",
-  required: true,
   timeoutMs: 60_000,
   source: "task",
   ...check,
@@ -114,23 +113,21 @@ checks:
       ]),
     );
     expect(result.gate).toBe("passed");
-    expect(result.checks.map((check) => [check.name, check.source, check.required])).toEqual([
-      ["_diff", "platform", false],
-      ["test", "project", true],
-      ["smoke", "task", true],
+    expect(result.checks.map((check) => [check.name, check.source])).toEqual([
+      ["_diff", "platform"],
+      ["test", "project"],
+      ["smoke", "task"],
     ]);
     expect(result.metrics["smoke"]).toMatchObject({ source: "task", type: "enum", value: "passed" });
     expect(result.metrics["smoked"]).toEqual({ source: "task", type: "boolean", order: "desc", value: true });
   });
 
-  it("fails the gate when a required task check fails, and not when an optional one does", () => {
+  it("fails the gate when a task check fails", () => {
     const failing = raw([
       { exit: 0, durationMs: 5, metrics: {} },
       { exit: 1, durationMs: 5, metrics: {} },
     ]);
     expect(buildResult(withTask(PROJECT, { checks: [taskCheck()], metrics: [] }), failing).gate).toBe("failed");
-    const optional = withTask(PROJECT, { checks: [taskCheck({ required: false })], metrics: [] });
-    expect(buildResult(optional, failing).gate).toBe("passed");
   });
 
   it("runs a task's checks on a project with no config", () => {

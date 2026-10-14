@@ -279,15 +279,20 @@ describe("task checks", () => {
     const { call, ada, bob, base } = await withConfig();
     const created = await call("POST", `${base}/tasks`, ada, { title: "a", checks: [SMOKE], metrics: [SMOKED] });
     expect(created.status).toBe(201);
-    const smoke = { name: "smoke", command: "./smoke.sh", required: true, timeoutMs: 120_000, source: "task" };
+    const smoke = { name: "smoke", command: "./smoke.sh", timeoutMs: 120_000, source: "task" };
     expect(created.body["checks"]).toEqual([smoke]);
     expect(created.body["metrics"]).toEqual([{ ...SMOKED, order: "desc", source: "task" }]);
     expect((await call("GET", `${base}/tasks/t1`, bob)).body["checks"]).toEqual([smoke]);
 
-    const optional = await call("PATCH", `${base}/tasks/t1`, ada, { checks: [{ ...SMOKE, required: false }] });
-    expect(optional.status).toBe(200);
-    expect(optional.body["checks"]).toEqual([{ ...smoke, required: false }]);
-    expect(optional.body["metrics"]).toHaveLength(1);
+    const edited = await call("PATCH", `${base}/tasks/t1`, ada, { checks: [{ ...SMOKE, timeout: "5m" }] });
+    expect(edited.status).toBe(200);
+    expect(edited.body["checks"]).toEqual([{ ...smoke, timeoutMs: 300_000 }]);
+    expect(edited.body["metrics"]).toHaveLength(1);
+    const required = await call("PATCH", `${base}/tasks/t1`, ada, { checks: [{ ...SMOKE, required: false }] });
+    expect(required.status).toBe(400);
+    expect(JSON.stringify(required.body)).toContain(
+      "checks[0].required: required is gone: every check that runs must pass; to report without blocking, exit 0 and write a metric",
+    );
     expect((await call("POST", `${base}/tasks`, ada, { title: "b" })).body["checks"]).toEqual([]);
   });
 

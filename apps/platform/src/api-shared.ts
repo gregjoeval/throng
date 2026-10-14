@@ -174,7 +174,7 @@ export const TaskChecksInputSchema = z.array(z.unknown()).openapi({
   description:
     "The task's own checks, run after the project's in the same container, under its `setup` and " +
     "`network.allow`, in the shape of `.throng/config.yml`'s `checks`: `name`, `command`, and optionally " +
-    "`required` (true by default; a required task check gates the task's attempts) and `timeout`. Names must " +
+    "`timeout`. Every task check that runs must pass for an attempt's gate to pass. Names must " +
     "not start with `_` or clash with a check or metric in the project's config on `main`. Replaces the " +
     "task's checks; its metrics may read them.",
   example: [{ name: "smoke", command: "./smoke.sh", timeout: "2m" }],

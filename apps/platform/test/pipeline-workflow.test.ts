@@ -9,16 +9,21 @@ import { describe, expect, it, vi } from "vitest";
 import type { CacheKey, CacheRestore, CacheSave } from "../src/caches.ts";
 import type { NamedSecrets, SandboxSize } from "../src/config.ts";
 import type { OutboundAccess } from "../src/network.ts";
+import type { TreeEntry } from "../src/repos.ts";
 import type { RunOutcome } from "../src/run-outcome.ts";
-import type { PipelineParams, PlanVerdict, RunReport } from "../src/scoring.ts";
+import type { LandingRunParams, PipelineParams, PlanVerdict, RunReport } from "../src/scoring.ts";
+import type { LandResult } from "../src/scripts.ts";
 import { keyringFrom, sealSecret } from "../src/secrets.ts";
 import { importWorkerModule } from "./support/worker-module.ts";
 import { result } from "./support/workflow-runs.ts";
 
 vi.mock("cloudflare:workers", () => import("./support/cloudflare-workers.ts"));
 
-/** The config on the origin's `main` for the run under way, and the head's lockfile's blob id, which keys its caches. */
-const configs = { main: "", lockfile: "lock-1" as string | null, treeReads: [] as string[] };
+/**
+ * The config on the origin's `main` for the run under way, the one it runs under (the merged
+ * tree's, for a landing), and the head's lockfile's blob id, which keys its caches.
+ */
+const configs = { main: "", run: "", lockfile: "lock-1" as string | null, treeReads: [] as string[] };
 
 vi.mock("../src/artifacts", () => ({
   reposFor: () => ({
@@ -94,6 +99,8 @@ interface Behaviour {
   unready?: { step: string; times: number };
   /** A post-gate step whose container is lost once readied, before its command runs. */
   lost?: string;
+  /** For a landing: what its `merge` and `land` do, and what the project answers it. */
+  landing?: LandingBehaviour;
   /** What the project answers for each cache: the scope it restores from and saves to; neither by default. */
   cacheLookup?: Record<string, { restore: string | null; save: string | null; unsaved?: string }>;
   /** How restoring a cache into a container goes, by cache name; restored by default. */
@@ -105,6 +112,27 @@ interface Behaviour {
   /** The head's lockfile blob, which keys the caches; null when it has none, `unreadable` when its tree is missing. */
   lockfile?: string | null;
 }
+
+/** What a landing's own containers do, and what the project answers it. */
+interface LandingBehaviour {
+  /** The merged tree's config; `Behaviour.config` by default. */
+  merged?: string | null;
+  /** Its `merge` conflicts in `README.md`. */
+  conflict?: boolean;
+  /** What `land` reports, or `broken` for a container that keeps failing; landed at `LANDED` by default. */
+  land?: LandResult | "broken";
+  /** Whether the project lets it claim the push: true by default. */
+  claimed?: boolean;
+  /** What the project finds on `main` after `land` failed. */
+  onMain?: string | null;
+  /** The trees its merge made, by hash; by default the merged tree alone, holding the lockfile `merged-lock`. */
+  trees?: Record<string, TreeEntry[]>;
+}
+
+/** `main` as a landing merges onto it, the tree the merge gives, and the commit `land` pushes. */
+const MAIN_SHA = "m".repeat(40);
+const TREE = "c".repeat(40);
+const LANDED = "d".repeat(40);
 
 /** The keyring the project's secrets are sealed under, as `SECRETS_KEYRING` holds it. */
 const KEYRING = JSON.stringify({ current: "k1", keys: { k1: btoa("k".repeat(32)) } });
@@ -140,6 +168,8 @@ interface Started {
 /** Runs the Workflow against fake bindings, recording each container's start, the order things happened and the report. */
 async function pipeline(behaviour: Behaviour = {}) {
   configs.main = behaviour.config ?? CONFIG;
+  const merged = behaviour.landing?.merged;
+  configs.run = merged === undefined ? configs.main : (merged ?? "");
   configs.lockfile = behaviour.lockfile === undefined ? "lock-1" : behaviour.lockfile;
   configs.treeReads = [];
   /** Each cache call: `restore <container> <key>`, `save <container> <key>`, `saved <key> <size>`, in order. */
@@ -161,6 +191,7 @@ async function pipeline(behaviour: Behaviour = {}) {
   let planned: string[] | null = null;
   let named: NamedSecrets[] | null = null;
   let report: RunReport | null = null;
+  const landed: string[] = [];
   const keyring = keyringFrom(KEYRING);
   const env = {
     SECRETS_KEYRING: KEYRING,
@@ -195,6 +226,37 @@ async function pipeline(behaviour: Behaviour = {}) {
             }
             running.add(container);
             events.push(`run ${container}`);
+            if (container === "merge") {
+              if (behaviour.landing?.conflict === true) {
+                const entries = ["1", "2", "3"].map((stage) => `100644 ${stage.repeat(40)} ${stage}\tREADME.md`);
+                const output = [TREE, ...entries, "", ""].join("\0");
+                return result({
+                  main: MAIN_SHA,
+                  clean: false,
+                  base: "b".repeat(40),
+                  output,
+                  remerges: [],
+                  config: null,
+                });
+              }
+              const config = configs.run === "" ? null : configs.run;
+              const lockfile = { name: "pnpm-lock.yaml", mode: "100644", hash: "merged-lock", type: "blob" };
+              return result({
+                main: MAIN_SHA,
+                clean: true,
+                base: "b".repeat(40),
+                output: `${TREE}\0`,
+                remerges: [],
+                config,
+                trees: behaviour.landing?.trees ?? { [TREE]: [lockfile] },
+              });
+            }
+            if (container === "land") {
+              const land = behaviour.landing?.land ?? { kind: "landed", sha: LANDED };
+              if (land === "broken") return { exitCode: 13, stdout: "", stderr: "push failed" };
+              commands.push("land");
+              return result(land);
+            }
             if (container.startsWith("step:")) {
               const postGate = container.slice("step:".length);
               if (!command) {
@@ -211,7 +273,7 @@ async function pipeline(behaviour: Behaviour = {}) {
             }
             if (container === "setup") {
               let failed = false;
-              const setups = setupNamesOf(configs.main).map((setup) => {
+              const setups = setupNamesOf(configs.run).map((setup) => {
                 if (failed) return { exit: null, durationMs: 0 };
                 const exit = behaviour.setups?.[setup] ?? 0;
                 failed = exit !== 0;
@@ -297,7 +359,20 @@ async function pipeline(behaviour: Behaviour = {}) {
           report = finished;
           events.push("report");
         },
+        claimLand: async () => {
+          events.push("claim");
+          return behaviour.landing?.claimed ?? true;
+        },
+        pipelineLanded: async (_run: number, sha: string) => {
+          landed.push(sha);
+          events.push("landed");
+        },
+        landedOnMain: async () => behaviour.landing?.onMain ?? null,
+        legacyLandingResumed: async (landing: number) => void events.push(`resumed ${landing}`),
       }),
+    },
+    DB: {
+      prepare: () => ({ bind: () => ({ all: async () => ({ results: [{ id: "ada00001", handle: "ada" }] }) }) }),
     },
     LOGS: {
       put: async (key: string, value: string) => void stored.set(key, value),
@@ -319,6 +394,7 @@ async function pipeline(behaviour: Behaviour = {}) {
     named: named as NamedSecrets[] | null,
     report: report as RunReport | null,
     returned,
+    landed,
     cacheCalls,
     looked,
   };
@@ -829,6 +905,212 @@ describe("PipelineWorkflow on a task branch and main", () => {
     expect(commands).toEqual([]);
     expect(persisted.filter((p) => p === "step migrate")).toHaveLength(1);
     expect(report).toMatchObject({ status: "errored", error: expect.stringContaining("step migrate gave no result") });
+  });
+});
+
+describe("PipelineWorkflow for a landing", () => {
+  const HEAD = "a".repeat(40);
+  const landingParams: LandingRunParams = {
+    project: "abc123",
+    line: "main",
+    sha: null,
+    run: 7,
+    landing: {
+      task: 1,
+      attempt: 1,
+      title: "Do it",
+      head: HEAD,
+      approver: { user: "ada00001", alias: null },
+      coAuthors: [],
+      startedAt: 1_700_000_000_000,
+    },
+  };
+  /** `main`'s own config: smaller, with checks the merged tree drops and a host it allows. */
+  const ON_MAIN = `sandbox: { size: lite }
+network: { allow: [api.example.com] }
+checks:
+  - { name: old, command: npm run old }
+`;
+  const land = (landing: LandingBehaviour = {}, rest: Behaviour = {}) =>
+    pipeline({ config: ON_MAIN, payload: landingParams, ...rest, landing: { merged: MAIN_CONFIG, ...landing } });
+  const READ_ORIGIN = {
+    remote: "https://artifacts.invalid/abc123-main.git",
+    token: "read:abc123-main",
+    access: "read",
+  };
+  const READ_FORK = { remote: "https://artifacts.invalid/abc123-t1a1.git", token: "read:abc123-t1a1", access: "read" };
+
+  it("merges, runs the setups and checks on the merged tree, lands, then runs the post-gate steps", async () => {
+    const { events, commands, report, landed } = await land();
+    expect(events.filter((e) => e.startsWith("run ") || ["plan", "claim", "landed", "report"].includes(e))).toEqual([
+      "run merge",
+      "plan",
+      "run setup",
+      expect.stringMatching(/^run check:/u),
+      expect.stringMatching(/^run check:/u),
+      "claim",
+      "run land",
+      "landed",
+      "run step:migrate",
+      "run step:migrate",
+      "run step:deploy",
+      "run step:deploy",
+      "report",
+    ]);
+    expect(commands).toEqual(["land", "migrate", "deploy"]);
+    expect(landed).toEqual([LANDED]);
+    const outcome = outcomeOf(report);
+    expect(outcome.steps.map((s) => [s.name, s.kind, s.source, s.outcome])).toEqual([
+      ["_diff", "check", "platform", "passed"],
+      ["merge", "step", "platform", "passed"],
+      ["deps", "setup", "project", "passed"],
+      ["lint", "check", "project", "passed"],
+      ["test", "check", "project", "passed"],
+      ["land", "step", "platform", "passed"],
+      ["migrate", "step", "project", "passed"],
+      ["deploy", "step", "project", "passed"],
+    ]);
+    expect(outcome).toMatchObject({ gate: "passed", landed: { sha: LANDED } });
+  });
+
+  it("runs the merged tree's config, at main's Sandbox size and network", async () => {
+    const { started, report } = await land();
+    // `old` is only on `main`; `preview` isn't in main's groups.
+    expect(
+      outcomeOf(report)
+        .steps.filter((s) => s.kind === "check")
+        .map((s) => s.name),
+    ).toEqual(["_diff", "lint", "test"]);
+    expect(started.get("setup")).toMatchObject({ size: "lite", access: { allow: ["api.example.com"] } });
+    expect(started.get("check:test")).toMatchObject({ access: { allow: ["api.example.com"] } });
+  });
+
+  it("merges and checks untrusted, with read grants on the origin and the fork; lands trusted, with origin write", async () => {
+    const { started } = await land({}, { snapshot: null });
+    for (const name of ["merge", "setup", "check:lint", "check:test"]) {
+      expect(started.get(name)?.access.grants, name).toEqual([READ_ORIGIN, READ_FORK]);
+    }
+    expect(started.get("merge")?.access.allow).toEqual([]);
+    expect(started.get("land")?.access.grants).toEqual([
+      { remote: "https://artifacts.invalid/abc123-main.git", token: "write:abc123-main", access: "write" },
+      READ_FORK,
+    ]);
+    expect(started.get("land")?.size).toBe("lite");
+    // Post-gate steps run on the landed commit, read from the origin like any `main` run's.
+    expect(started.get("step:deploy")?.access.grants).toEqual([READ_ORIGIN]);
+  });
+
+  it("tells setups and checks it has no head yet, and the post-gate steps the landed sha", async () => {
+    const { started } = await land({}, { snapshot: null });
+    expect(started.get("setup")?.env).toMatchObject({ THRONG_PIPELINE: "main", THRONG_LINE: "main", THRONG_SHA: "" });
+    expect(started.get("step:deploy")?.env).toMatchObject({ THRONG_SHA: LANDED });
+  });
+
+  it("ends `conflict` at a conflicting merge, keeping the conflict, starting nothing more", async () => {
+    const { events, report, planned } = await land({ conflict: true });
+    expect(events.filter((e) => e.startsWith("run "))).toEqual(["run merge"]);
+    expect(planned).toBeNull();
+    const outcome = outcomeOf(report);
+    expect(outcome).toMatchObject({
+      gate: "failed",
+      landed: "conflict",
+      conflict: { attempt: "t1a1", head: HEAD, main: MAIN_SHA, files: [{ path: "README.md", type: "content" }] },
+    });
+    expect(outcome.steps.map((s) => [s.name, s.outcome])).toEqual([
+      ["merge", "failed"],
+      ["land", "skipped"],
+    ]);
+  });
+
+  it("doesn't land when its gate fails: `land` and the post-gate steps are skipped", async () => {
+    const { events, commands, report, landed } = await land({}, { checks: { test: 1 } });
+    expect(commands).toEqual([]);
+    expect(events).not.toContain("claim");
+    expect(landed).toEqual([]);
+    const outcome = outcomeOf(report);
+    expect(outcome.gate).toBe("failed");
+    expect(outcome.landed).toBeUndefined();
+    expect(outcome.steps.filter((s) => s.kind === "step").map((s) => [s.name, s.outcome])).toEqual([
+      ["merge", "passed"],
+      ["land", "skipped"],
+      ["migrate", "skipped"],
+      ["deploy", "skipped"],
+    ]);
+  });
+
+  it("ends `errored` when main moved: the lease failed, and nothing after it runs", async () => {
+    const { commands, report, landed } = await land({ land: { kind: "moved" } });
+    expect(commands).toEqual(["land"]);
+    expect(landed).toEqual([]);
+    expect(report).toMatchObject({ status: "errored", error: expect.stringContaining(`main moved from ${MAIN_SHA}`) });
+  });
+
+  it("doesn't push once its merge request left the queue", async () => {
+    const { commands, report } = await land({ claimed: false });
+    expect(commands).toEqual([]);
+    expect(report).toMatchObject({ status: "errored", error: expect.stringContaining("left the queue") });
+  });
+
+  it("finds its merge commit on main when `land` kept failing after it pushed, and carries on", async () => {
+    const { report, landed } = await land({ land: "broken", onMain: LANDED });
+    expect(landed).toEqual([LANDED]);
+    expect(outcomeOf(report).landed).toEqual({ sha: LANDED });
+  });
+
+  it("destroys its merge and land containers with the rest when it ends", async () => {
+    const { events } = await land({}, { snapshot: null });
+    const destroyed = events.filter((e) => e.startsWith("destroy "));
+    expect(destroyed).toEqual(expect.arrayContaining(["destroy merge", "destroy land"]));
+  });
+
+  /** A merged tree's config with one cache, keyed by the lockfile, which the setup uses. */
+  const CACHED_LANDING = `caches:
+  pnpm: { path: ~/.pnpm, key: pnpm-lock.yaml }
+setup:
+  - { name: deps, command: pnpm install, caches: [pnpm] }
+checks:
+  - { name: test, command: pnpm test }
+`;
+
+  it("keys its caches by the merged tree it runs on, whose trees the merge made are in no repo", async () => {
+    const { looked } = await land({ merged: CACHED_LANDING });
+    expect(configs.treeReads).toEqual([]);
+    // The same cache keyed by a head whose tree holds the same lockfile has the same key.
+    const onMain = await pipeline({
+      config: CACHED_LANDING,
+      payload: { ...params, line: "main" },
+      lockfile: "merged-lock",
+    });
+    expect(looked[0]?.[0]?.keyHash).toBe(onMain.looked[0]?.[0]?.keyHash);
+    // And differs from one keyed by another lockfile.
+    const other = await pipeline({ config: CACHED_LANDING, payload: { ...params, line: "main" } });
+    expect(looked[0]?.[0]?.keyHash).not.toBe(other.looked[0]?.[0]?.keyHash);
+  });
+
+  it("reads the rest of the merged tree from main's repo, then the attempt's fork", async () => {
+    const config = CACHED_LANDING.replace("key: pnpm-lock.yaml", "key: app/pnpm-lock.yaml");
+    const trees = { [TREE]: [{ name: "app", mode: "040000", hash: "app-tree", type: "tree" as const }] };
+    const { looked } = await land({ merged: config, trees });
+    expect(configs.treeReads).toEqual(["abc123-main app-tree"]);
+    expect(looked[0]?.map((key) => key.name)).toEqual(["pnpm"]);
+  });
+
+  it("hands a landing a Landing Workflow started back to the project, its containers gone", async () => {
+    const legacy = {
+      project: "abc123",
+      landing: 3,
+      task: 1,
+      attempt: 1,
+      title: "Do it",
+      head: HEAD,
+      approver: { user: "ada00001", alias: null },
+      coAuthors: [],
+      startedAt: 1,
+    };
+    const { events, report, returned } = await pipeline({ payload: legacy });
+    expect(events).toEqual(["resumed 3"]);
+    expect(report).toBeNull();
+    expect(returned).toBeNull();
   });
 });
 

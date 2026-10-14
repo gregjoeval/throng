@@ -2,7 +2,14 @@ import { describe, expect, it } from "vitest";
 import { ServiceError } from "../src/errors.ts";
 import type { CheckResult, LegacyResult, ScoringResult } from "../src/results.ts";
 import { runReport, SCORING_CAP } from "../src/scoring.ts";
-import type { PipelineParams, PipelineWorkflowBinding, RunReport, ScoringRequest, StoredRun } from "../src/scoring.ts";
+import type {
+  LandingRunParams,
+  PipelineParams,
+  PipelineWorkflowBinding,
+  RunReport,
+  ScoringRequest,
+  StoredRun,
+} from "../src/scoring.ts";
 import { keyringFrom, openSealed } from "../src/secrets.ts";
 import { attemptRef } from "../src/task-refs.ts";
 import { TaskStore } from "../src/task-store.ts";
@@ -29,11 +36,11 @@ const cat = actor("cat00001");
 
 /** A Workflow binding that records what it was asked to do. */
 class FakeWorkflow implements PipelineWorkflowBinding {
-  readonly created: { id: string; params: PipelineParams }[] = [];
+  readonly created: { id: string; params: PipelineParams | LandingRunParams }[] = [];
   readonly terminated: string[] = [];
   failNext = false;
 
-  async create(options: { id: string; params: PipelineParams }): Promise<unknown> {
+  async create(options: { id: string; params: PipelineParams | LandingRunParams }): Promise<unknown> {
     if (this.failNext) {
       this.failNext = false;
       throw new Error("workflow service unavailable");
@@ -468,7 +475,7 @@ describe("rescoring on a task edit", () => {
 
   it("queues one rescore behind a run that's running, which may have read the old definitions", async () => {
     const { store, workflow, runs, open } = await scored();
-    const sha = at(runs(open), 0).sha;
+    const sha = defined(at(runs(open), 0).sha);
     store.scoring.request({ project: PROJECT.id, line: "t1a1", sha, trigger: "rescore", actor: ada, ownersPush: null });
     await store.scoring.drain();
     expect(runs(open).map((r) => [r.trigger, r.status])).toEqual([
@@ -494,7 +501,7 @@ describe("rescoring on a task edit", () => {
 
   it("still answers a push or score now for a head that's running with the run, queuing nothing", async () => {
     const { store, runs, open } = await scored();
-    const sha = at(runs(open), 0).sha;
+    const sha = defined(at(runs(open), 0).sha);
     const head = { project: PROJECT.id, line: "t1a1", sha, actor: ada, ownersPush: null };
     store.scoring.request({ ...head, trigger: "rescore" });
     await store.scoring.drain();
@@ -826,7 +833,7 @@ describe("line-keyed runs", () => {
     const [one, two] = await drafts(2);
     await store.openAttempt(PROJECT, ada, defined(one));
     await store.scoring.drain();
-    const sha = at(runs(defined(one)), 0).sha;
+    const sha = defined(at(runs(defined(one)), 0).sha);
     store.scoring.request({ project: PROJECT.id, line: "t1a1", sha, trigger: "rescore", actor: ada, ownersPush: null });
     await store.openAttempt(PROJECT, ada, defined(two));
     await store.scoring.drain();

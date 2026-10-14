@@ -149,7 +149,7 @@ export interface Config {
   attempts: { limit: number | null };
   /** Who makes each task's selection, unless a task overrides it. */
   selection: SelectionPolicy;
-  /** The size of the containers that run the repository's code: setups, checks and retests. */
+  /** The size of the containers that run the repository's code: setups, checks and a landing's merge. */
   sandbox: { size: SandboxSize };
   /** What each pipeline runs: `main` on `main`, `default` on every other line. */
   pipelines: Record<Pipeline, PipelineConfig>;

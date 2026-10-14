@@ -1,14 +1,16 @@
-// The latest dequeue of a task's merge request: its details, the display diff of each conflicting
-// file, and a failed retest's logs.
+// The latest dequeue of a task's merge request: why, the landing's run behind it, and the details
+// that run holds.
 
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import type { AccessVerifier } from "../src/access.ts";
 import { apiRoutes } from "../src/api.ts";
 import type { ConflictDetails } from "../src/conflicts.ts";
-import type { LandingOutcome } from "../src/landing.ts";
+import { conflictOutcome } from "../src/landing.ts";
 import type { LogStore } from "../src/logs.ts";
 import type { ScoringResult } from "../src/results.ts";
+import type { RunOutcome, RunStep } from "../src/run-outcome.ts";
+import type { RunReport } from "../src/scoring.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
 import { at } from "./support/defined.ts";
@@ -66,7 +68,7 @@ async function setup() {
   const repos = new FakeRepos();
   const logs = new MemoryLogs();
   const runner = { workflow, teardown: async () => {} };
-  const { backend, store } = testTaskBackends(repos, now, runner, runner);
+  const { backend, store } = testTaskBackends(repos, now, runner);
   const api = apiRoutes({
     verifierFor: () => verify,
     now,
@@ -112,14 +114,17 @@ async function setup() {
   await tasks.drain(id);
   expect((await call("GET", `${p}/tasks/t1/merge-request`, ada)).body["state"]).toBe("landing");
 
-  /** Ends the landing (the first one) the way its Workflow would report it. */
-  const finish = async (outcome: LandingOutcome) => {
-    expect(await tasks.landingFinished(1, outcome)).toBeTruthy();
+  /** Ends the landing's run the way its Workflow would report it; returns the run's id. */
+  const finish = async (report: RunReport) => {
+    const [landing] = tasks.scoring.liveLandings();
+    if (landing === undefined) throw new Error("nothing is landing");
+    expect(await tasks.pipelineReported(landing.id, report)).toBeTruthy();
+    return landing.id;
   };
   return { call, request, logs, finish, greg, ada, bob, id, base, head, main, p };
 }
 
-/** The details the Landing Workflow reports for the spike's conflict, plus a file deleted on main. */
+/** The conflict a landing's `merge` reports for the spike's conflict, plus a file deleted on main. */
 function greetingConflict({ base, head, main }: { base: string; head: string; main: string }): ConflictDetails {
   return {
     attempt: "t1a1",
@@ -157,17 +162,30 @@ function greetingConflict({ base, head, main }: { base: string; head: string; ma
   };
 }
 
+/** A run step, as a landing's run's outcome lists it. */
+const step = (name: string, kind: RunStep["kind"], outcome: RunStep["outcome"]): RunStep => ({
+  name,
+  kind,
+  source: name === "land" ? "platform" : "project",
+  group: null,
+  outcome,
+  durationMs: 1,
+  notes: [],
+  log: null,
+});
+
 describe("GET …/tasks/{t}/merge-request/dequeue", () => {
-  it("serves a conflict's details in camelCase, hunks and blobs included", async () => {
+  it("serves a conflict's details from its landing's run, in camelCase, hunks and blobs included", async () => {
     const env = await setup();
     const { call, finish, bob, base, head, main, p } = env;
     expect((await call("GET", `${p}/tasks/t1/merge-request/dequeue`, bob)).status).toBe(404);
-    await finish({ kind: "conflict", details: greetingConflict(env) });
+    const run = await finish({ status: "done", outcome: conflictOutcome(greetingConflict(env)) });
 
     const res = await call("GET", `${p}/tasks/t1/merge-request/dequeue`, bob);
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
       reason: "conflict",
+      run,
       at: "2026-10-10T12:00:00.000Z",
       details: {
         attempt: "t1a1",
@@ -204,17 +222,49 @@ describe("GET …/tasks/{t}/merge-request/dequeue", () => {
         ],
       },
     });
+    // The merge request names the run behind it, whose outcome keeps the conflict.
+    expect((await call("GET", `${p}/tasks/t1/merge-request`, bob)).body["lastDequeue"]).toEqual({
+      reason: "conflict",
+      run,
+      at: "2026-10-10T12:00:00.000Z",
+    });
+    const detail = await call("GET", `${p}/runs/${run}`, bob);
+    expect(detail.body["outcome"]).toMatchObject({ landed: "conflict", conflict: { files: [{}, {}] } });
   });
 
-  it("serves failed checks details as stored", async () => {
+  it("serves a failed gate's failed steps from its landing's run", async () => {
     const env = await setup();
     const { call, finish, bob, p } = env;
-    const details = { checks: [{ name: "test", outcome: "failed", log: "test" }] };
-    await finish({ kind: "failedChecks", details: details as never });
+    const outcome: RunOutcome = {
+      base: null,
+      config: { kind: "valid" },
+      gate: "failed",
+      steps: [
+        step("deps", "setup", "passed"),
+        step("test", "check", "failed"),
+        step("e2e", "check", "skipped"),
+        step("land", "step", "skipped"),
+      ],
+      metrics: {},
+    };
+    const run = await finish({ status: "done", outcome });
     expect((await call("GET", `${p}/tasks/t1/merge-request/dequeue`, bob)).body).toEqual({
       reason: "failedChecks",
+      run,
       at: expect.any(String),
-      details,
+      details: { steps: [{ name: "test", kind: "check", outcome: "failed" }] },
+    });
+  });
+
+  it("serves an errored landing's error from its run", async () => {
+    const env = await setup();
+    const { call, finish, bob, p } = env;
+    const run = await finish({ status: "errored", error: "land: main moved; the lease failed" });
+    expect((await call("GET", `${p}/tasks/t1/merge-request/dequeue`, bob)).body).toEqual({
+      reason: "errored",
+      run,
+      at: expect.any(String),
+      details: { error: "land: main moved; the lease failed" },
     });
   });
 
@@ -225,99 +275,13 @@ describe("GET …/tasks/{t}/merge-request/dequeue", () => {
     expect((await call("GET", `${p}/tasks/x/merge-request/dequeue`, ada)).status).toBe(400);
     expect((await call("GET", `${p}/tasks/t1/merge-request/dequeue`)).status).toBe(401);
   });
-});
 
-describe("GET …/tasks/{t}/merge-request/dequeue/files/{path}/diff", () => {
-  it("diffs one conflicting file from the base to main, or to the attempt", async () => {
-    const env = await setup();
-    const { call, finish, bob, p } = env;
-    await finish({ kind: "conflict", details: greetingConflict(env) });
-
-    const toMain = await call("GET", `${p}/tasks/t1/merge-request/dequeue/files/src/greeting.js/diff?side=main`, bob);
-    expect(toMain.status).toBe(200);
-    expect(toMain.body).toMatchObject({
-      path: "src/greeting.js",
-      status: "modified",
-      oldMode: "100644",
-      newMode: "100644",
-      oldHash: blobSha(greeting("hello")),
-      newHash: blobSha(greeting("hello from a1")),
-      additions: 1,
-      deletions: 1,
-      flags: [],
-    });
-    expect(toMain.body["patch"]).toContain(
-      '-export const GREETING = "hello";\n+export const GREETING = "hello from a1";\n',
-    );
-    const toAttempt = await call(
-      "GET",
-      `${p}/tasks/t1/merge-request/dequeue/files/src/greeting.js/diff?side=attempt`,
-      bob,
-    );
-    expect(toAttempt.body["patch"]).toContain('+export const GREETING = "hello from a2";\n');
-  });
-
-  it("gives the unified patch for Accept: text/x-diff", async () => {
+  it("has no per-file diff or log routes: the run's own routes serve its steps", async () => {
     const env = await setup();
     const { request, finish, bob, p } = env;
-    await finish({ kind: "conflict", details: greetingConflict(env) });
-    const res = await request(`${p}/tasks/t1/merge-request/dequeue/files/src/greeting.js/diff?side=attempt`, bob, {
-      headers: { Accept: "text/x-diff" },
-    });
-    expect(res.headers.get("Content-Type")).toBe("text/x-diff; charset=utf-8");
-    expect(await res.text()).toMatch(/^diff --git a\/src\/greeting.js b\/src\/greeting.js\n/u);
-  });
-
-  it("shows a file deleted on main as deleted", async () => {
-    const env = await setup();
-    const { call, finish, bob, p } = env;
-    await finish({ kind: "conflict", details: greetingConflict(env) });
-    const res = await call("GET", `${p}/tasks/t1/merge-request/dequeue/files/src/gone.js/diff?side=main`, bob);
-    expect(res.body).toMatchObject({
-      path: "src/gone.js",
-      status: "deleted",
-      oldHash: blobSha("x\n"),
-      newHash: null,
-    });
-    const toAttempt = await call("GET", `${p}/tasks/t1/merge-request/dequeue/files/src/gone.js/diff?side=attempt`, bob);
-    expect(toAttempt.body).toMatchObject({ status: "modified", additions: 1, deletions: 1 });
-  });
-
-  it("is 404 for a path that isn't conflicting or a dequeue that isn't a conflict, 400 for a bad side", async () => {
-    const env = await setup();
-    const { call, finish, bob, p } = env;
-    const diff = (path: string, side = "main") =>
-      call("GET", `${p}/tasks/t1/merge-request/dequeue/files/${path}/diff?side=${side}`, bob);
-    expect((await diff("src/greeting.js")).status).toBe(404);
-    await finish({ kind: "conflict", details: greetingConflict(env) });
-    expect((await diff("src/other.js")).body["error"]["code"]).toBe("notFound");
-    expect((await diff("src/greeting.js", "base")).status).toBe(400);
-  });
-});
-
-describe("GET …/tasks/{t}/merge-request/dequeue/logs/{name}", () => {
-  it("streams a failed retest's log from the landing that stored it", async () => {
-    const env = await setup();
-    const { request, logs, finish, bob, id, head, p } = env;
-    logs.objects.set(`logs/${id}/t1a1/${head}/landing-1/test.log`, "1 failed\n");
-    await finish({ kind: "failedChecks", details: { checks: [{ name: "test", outcome: "failed", log: "test" }] } });
-
-    const res = await request(`${p}/tasks/t1/merge-request/dequeue/logs/test`, bob);
-    expect(res.status).toBe(200);
-    expect(res.headers.get("Content-Type")).toBe("text/plain; charset=utf-8");
-    expect(await res.text()).toBe("1 failed\n");
-  });
-
-  it("is 404 for a check with no stored log, or a dequeue that isn't failed checks", async () => {
-    const env = await setup();
-    const { request, finish, bob, p } = env;
-    expect((await request(`${p}/tasks/t1/merge-request/dequeue/logs/test`, bob)).status).toBe(404);
-    await finish({
-      kind: "failedChecks",
-      details: { checks: [{ name: "lint", outcome: "timedOut", log: null }] },
-    });
-    for (const name of ["lint", "test", "..%2Fx"]) {
-      expect((await request(`${p}/tasks/t1/merge-request/dequeue/logs/${name}`, bob)).status, name).toBe(404);
+    await finish({ status: "done", outcome: conflictOutcome(greetingConflict(env)) });
+    for (const path of ["files/src/greeting.js/diff?side=main", "logs/test"]) {
+      expect((await request(`${p}/tasks/t1/merge-request/dequeue/${path}`, bob)).status, path).toBe(404);
     }
   });
 });

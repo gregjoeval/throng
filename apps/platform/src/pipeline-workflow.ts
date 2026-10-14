@@ -3,29 +3,44 @@ import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import { reposFor } from "./artifacts";
 import { lineBase } from "./base";
 import { CACHE_TRANSFER_TIMEOUT_MS, cacheKeyHashes, cacheObjectKey, restoreNote, saveNote } from "./caches";
-import type { CacheSave, RunCache } from "./caches";
-import { loadConfig, namedSecrets, networkAllow, pipelineConfig, sandboxSize } from "./config";
+import type { CacheSave, RunCache, TreeReader } from "./caches";
+import { loadConfig, namedSecrets, networkAllow, parseConfig, pipelineConfig, sandboxSize } from "./config";
 import type { CacheConfig, ConfigResult, SandboxSize, SetupConfig, StepConfig } from "./config";
-import { legacyScoreSandboxName, pipelineSandboxName } from "./grants";
+import { conflictFiles, parseMergeTree } from "./conflicts";
+import type { ConflictDetails } from "./conflicts";
+import { landingSandboxNames, legacyScoreSandboxName, pipelineSandboxName, sandboxName, TRUSTED_SIZE } from "./grants";
+import { actedAlias, conflictOutcome, landingOutcome, mergeAuthor, mergeCommitMessage } from "./landing";
+import type { LandingParams, LegacyLandingParams, Signer } from "./landing";
 import { logKey, setupLogName, stepLogName } from "./logs";
 import { NO_NETWORK } from "./network";
 import type { NetworkAccess } from "./network";
 import { loadRegistries } from "./npmrc";
-import { lineRepo, originMainRef } from "./repos";
+import { forkRepo, lineRepo, originMainRef, originRepo } from "./repos";
+import type { TreeEntry } from "./repos";
 import { checkOrder, POST_GATE_STEP_TIMEOUT_MS, scorePlan, setupTimeoutMs, STEP_SLACK_MS } from "./results";
 import type { PlannedCheck, RawScore, ScorePlan } from "./results";
 import { pipelineOutcome, withPostGateSteps } from "./run-outcome";
 import type { PostGateRun, RunOutcome, SetupRun } from "./run-outcome";
-import type { SandboxSnapshot, StartOptions } from "./sandbox";
+import type { RunResult, SandboxSnapshot, StartOptions } from "./sandbox";
 import { pipelineFor } from "./scoring";
-import type { PipelineParams, PlanVerdict, RunReport } from "./scoring";
-import { checkScript, parseResult, setupScript, stepReadyScript, stepScript } from "./scripts";
-import type { CheckRun, SetupResult, StepReady, StepRun } from "./scripts";
+import type { LandingRunParams, PipelineParams, PlanVerdict, RunReport } from "./scoring";
+import { checkScript, landScript, mergeScript, parseResult, setupScript, stepReadyScript, stepScript } from "./scripts";
+import type {
+  Checkout,
+  CheckRun,
+  LandResult,
+  MergePlan,
+  MergeResult,
+  SetupResult,
+  StepReady,
+  StepRun,
+} from "./scripts";
 import { keyringFrom, maskedDeep, masking, openSealed } from "./secrets";
 import type { Keyring, SecretRefusal } from "./secrets";
 import { NO_TASK_DEFINITIONS, withTask } from "./task-definitions";
-import { parseAttemptRef } from "./task-refs";
+import { attemptRef, parseAttemptRef } from "./task-refs";
 import { runInSandbox, STEP_RETRIES, storeLogs } from "./workflows";
+import type { ScriptOptions } from "./workflows";
 
 /** The note on a check whose container ran the setups itself, because it couldn't start from their snapshot. */
 const SETUPS_RERUN = "setups re-run in this check's container: it couldn't start from the setups' snapshot";
@@ -89,12 +104,30 @@ interface CheckStage extends Omit<CheckRun, "setupsRerun" | "exit"> {
  * retried, so a deploy never runs twice by itself: an infrastructure error once it started ends the
  * run `errored`.
  *
- * Every container (`<instance>/setup`, `<instance>/check:<name>`, `<instance>/step:<name>`) holds one
+ * A merge request's landing is a `main` run with a `merge` before its setups and a `land` before its
+ * post-gate steps (spec #257, "Landing"):
+ *
+ * 1. `merge`, untrusted, in `<instance>/merge` (read grants on the origin and the attempt's fork):
+ *    `git merge-tree` of `main` and the approved head. A conflict ends the run there, keeping the
+ *    conflict in its outcome; a clean merge records the merged tree and its `.throng/config.yml`.
+ * 2. The setups and checks run on the merged tree, under its config rather than `main`'s, so a merge
+ *    request that fixes a broken config can land. Their containers make the merge again from the
+ *    origin and the fork, with the same read grants. The Sandbox size and network are still `main`'s.
+ *    A failed gate ends the run there.
+ * 3. `land`, trusted, in `<instance>/land` (origin write, fork read, no repository code): it claims
+ *    the push from the project, which fails once the merge request has left the queue, commits the
+ *    merge as the approver, checks its tree against step 1's and pushes with a lease on step 1's
+ *    `main`. A moved `main` ends the run `errored`. One whose result was lost after it pushed finds
+ *    its merge commit on `main`. The landed sha becomes the run's head, and the project merges the
+ *    merge request.
+ * 4. The post-gate steps run on the landed commit.
+ *
+ * Every other container (`<instance>/setup`, `<instance>/check:<name>`, `<instance>/step:<name>`) holds one
  * read grant on its line's repo (the fork for an attempt, the origin for a task branch or `main`, both
  * fetched with `refs/tasks/*`) and no write grant, reaches only `main`'s `network.allow` and `.npmrc`
- * registries, and gets the run's `THRONG_*` variables. Each copies its logs to R2 within its step, while it still runs, then
- * stops. When the run ends, or a newer head cancels it, every planned container is destroyed and
- * the snapshot released.
+ * registries, and gets the run's `THRONG_*` variables (a landing's `THRONG_SHA` is empty until it
+ * lands). Each copies its logs to R2 within its step, while it still runs, then stops. When the run
+ * ends, or a newer head cancels it, every planned container is destroyed and the snapshot released.
  *
  * Setups and checks name secrets. The plan names them to the project, which refuses the run when one
  * has no value or isn't allowed in its pipeline, and hands an untrusted run that names any to the
@@ -108,89 +141,133 @@ interface CheckStage extends Omit<CheckRun, "setupsRerun" | "exit"> {
  *
  * It takes over the `ScoringWorkflow`'s Workflow name, so a run that started under that class resumes
  * here: its params name the line `attempt`, and its old step names (`score`) are never called again.
+ * It takes over the `LandingWorkflow`'s too: a landing that started under that class resumes here
+ * only to hand its landing back to the project, which lands it again as a run.
  */
-export class PipelineWorkflow extends WorkflowEntrypoint<Env, PipelineParams | ScoringParams> {
+export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
   /** Opens the secrets a step loads: `SECRETS_KEYRING`, read on first use. */
   #keyring: Keyring | null = null;
 
-  override async run(
-    event: Readonly<WorkflowEvent<PipelineParams | ScoringParams>>,
-    step: WorkflowStep,
-  ): Promise<RunReport | null> {
-    const params = paramsLine(event.payload);
+  override async run(event: Readonly<WorkflowEvent<WorkflowParams>>, step: WorkflowStep): Promise<RunReport | null> {
+    const payload = event.payload;
+    if (isLegacyLanding(payload)) {
+      await this.#retireLanding(payload, event.instanceId, step);
+      return null;
+    }
+    const params = paramsLine(payload);
     const instanceId = event.instanceId;
+    const landing = params.sha === null ? params.landing : null;
 
-    let report: RunReport;
-    let plan: RunPlan | null = null;
+    let report: RunReport | null;
+    const planned: { plan: RunPlan | null } = { plan: null };
     try {
-      // Pinned once, so the config and the `.npmrc` are read from the same commit even if `main` moves.
-      const main = await step.do("main", { retries: STEP_RETRIES, timeout: "1 minute" }, () =>
-        originMainRef(reposFor(this.env), params.project),
-      );
-      // Named apart from the steps it replaced, whose recorded outputs had other shapes.
-      const { config, size } = await step.do("pipeline config", { retries: STEP_RETRIES, timeout: "1 minute" }, () =>
-        this.#config(params, main),
-      );
-      const registries = await step.do("registries", { retries: STEP_RETRIES, timeout: "1 minute" }, () =>
-        loadRegistries(reposFor(this.env), params.project, main),
-      );
-      const base = await step.do("base", { retries: STEP_RETRIES, timeout: "1 minute" }, () =>
-        lineBase(reposFor(this.env), params.project, { line: params.line, head: params.sha }),
-      );
-      const planned = { ...scorePlan(config), steps: postGateSteps(config, params) };
-      plan = planned;
-      // Before any container starts, so a cancel can name every one the run may start, and so the
-      // secrets the run names are checked against the settings, by name, before anything runs.
-      const verdict = await step.do(
-        "plan",
-        { retries: STEP_RETRIES, timeout: "1 minute" },
-        async (): Promise<PlanVerdict> => {
-          const answer = await this.env.PROJECT.getByName(params.project).pipelinePlanned(
-            params.run,
-            plannedContainers(instanceId, planned),
-            namedSecrets(planned),
-          );
-          return answer.kind === "refused" ? { kind: "refused", error: answer.error } : { kind: answer.kind };
-        },
-      );
-      // An untrusted run that names a secret is the owner's to start; it started nothing.
-      if (verdict.kind === "waiting") return null;
-      if (verdict.kind === "refused") throw new Error(verdict.error);
-      const caches = await this.#caches(step, instanceId, params, runCaches(config, planned));
-      // A task's definitions never change `network.allow`, so the run's config gives `main`'s.
-      const context: RunContext = {
-        instanceId,
-        params,
-        plan: planned,
-        size,
-        network: { registries, allow: networkAllow(config) },
-        caches,
-      };
-      const setup = await step.do(
-        "setup",
-        {
-          retries: STEP_RETRIES,
-          timeout: setupTimeoutMs(planned) + 2 * STEP_SLACK_MS + cacheTransfersMs(setupCaches(planned), 2),
-        },
-        () => this.#setup(context, base?.sha ?? null),
-      );
-      const checks = setup.setups.every((s) => s.exit === 0)
-        ? await this.#checks(step, context, setup)
-        : new Map<string, CheckStage>();
-      const scored = outcomeOf(config, planned, setup, checks);
-      report = { status: "done", outcome: await this.#postGate(step, context, setup.snapshot, scored) };
+      report = await this.#run(step, instanceId, params, planned);
     } catch (error) {
       report = { status: "errored", error: String(error).slice(0, 4000) };
     }
+    // An untrusted run that names a secret is the owner's to start; it started nothing.
+    if (report === null) return null;
 
-    const containers = plan === null ? [] : plannedContainers(instanceId, plan);
-    await step.do("teardown", { retries: STEP_RETRIES }, () =>
-      teardownPipeline(this.env.SANDBOX, instanceId, containers),
-    );
+    const containers = planned.plan === null ? [] : plannedContainers(instanceId, planned.plan);
+    const all = landing === null ? containers : [...landingSandboxNames(instanceId), ...containers];
+    await step.do("teardown", { retries: STEP_RETRIES }, () => teardownPipeline(this.env.SANDBOX, instanceId, all));
+    const reported = report;
     await step.do("report", { retries: STEP_RETRIES }, async () => {
-      await this.env.PROJECT.getByName(params.project).pipelineFinished(params.run, report);
+      await this.env.PROJECT.getByName(params.project).pipelineFinished(params.run, reported);
     });
     return report;
+  }
+
+  /**
+   * The run up to its report: its outcome, or null when it waits for the owner. What it plans to run
+   * goes in `planned` as soon as it's known, so the containers it may have started are torn down
+   * whatever happens next.
+   */
+  async #run(
+    step: WorkflowStep,
+    instanceId: string,
+    params: RunParams,
+    planned: { plan: RunPlan | null },
+  ): Promise<RunReport | null> {
+    const landing = params.sha === null ? params.landing : null;
+    const oneMinute = { retries: STEP_RETRIES, timeout: "1 minute" } as const;
+    // Pinned once, so the config and the `.npmrc` are read from the same commit even if `main` moves.
+    const main = await step.do("main", oneMinute, () => originMainRef(reposFor(this.env), params.project));
+    let config: ConfigResult;
+    let size: SandboxSize;
+    let allow: string[];
+    let base: string | null;
+    let merge: LandingMerge | null = null;
+    if (landing === null) {
+      // Named apart from the steps it replaced, whose recorded outputs had other shapes.
+      ({ config, size } = await step.do("pipeline config", oneMinute, () =>
+        this.#config(params.project, params.line, main),
+      ));
+      // A task's definitions never change `network.allow`, so the run's config gives `main`'s.
+      allow = networkAllow(config);
+      const found = await step.do("base", oneMinute, () =>
+        lineBase(reposFor(this.env), params.project, { line: params.line, head: params.sha ?? "" }),
+      );
+      base = found?.sha ?? null;
+    } else {
+      // A landing's containers start at the size, and reach the hosts, `main`'s config sets, whatever
+      // the merged tree's says.
+      ({ size, allow } = await step.do("main settings", oneMinute, async () => {
+        const mainConfig = await loadConfig(reposFor(this.env), params.project, main);
+        return { size: sandboxSize(mainConfig), allow: networkAllow(mainConfig) };
+      }));
+      const merged = await step.do("merge", { retries: STEP_RETRIES, timeout: "10 minutes" }, () =>
+        this.#merge(instanceId, params, landing, size),
+      );
+      if (merged.kind === "conflict") return { status: "done", outcome: conflictOutcome(merged.details) };
+      merge = { attempt: attemptRef(landing.task, landing.attempt), plan: merged.plan, trees: merged.trees };
+      // The merged tree's config, so a merge request that fixes a broken config can land.
+      config = pipelineConfig(parseConfig(merged.config), "main");
+      base = merged.plan.main;
+    }
+    const registries = await step.do("registries", oneMinute, () =>
+      loadRegistries(reposFor(this.env), params.project, main),
+    );
+    const plan = { ...scorePlan(config), steps: postGateSteps(config, params) };
+    planned.plan = plan;
+    // Before any container starts, so a cancel can name every one the run may start, and so the
+    // secrets the run names are checked against the settings, by name, before anything runs.
+    const verdict = await step.do("plan", oneMinute, async (): Promise<PlanVerdict> => {
+      const answer = await this.env.PROJECT.getByName(params.project).pipelinePlanned(
+        params.run,
+        plannedContainers(instanceId, plan),
+        namedSecrets(plan),
+      );
+      return answer.kind === "refused" ? { kind: "refused", error: answer.error } : { kind: answer.kind };
+    });
+    if (verdict.kind === "waiting") return null;
+    if (verdict.kind === "refused") throw new Error(verdict.error);
+    // Keyed by the tree the run runs on: a landing's merged tree, which its head isn't.
+    const caches = await this.#caches(step, instanceId, params, runCaches(config, plan), merge);
+    const context: RunContext = { instanceId, params, merge, plan, size, network: { registries, allow }, caches };
+    const setup = await step.do(
+      "setup",
+      {
+        retries: STEP_RETRIES,
+        timeout: setupTimeoutMs(plan) + 2 * STEP_SLACK_MS + cacheTransfersMs(setupCaches(plan), 2),
+      },
+      () => this.#setup(context, base),
+    );
+    const checks = setup.setups.every((s) => s.exit === 0)
+      ? await this.#checks(step, context, setup)
+      : new Map<string, CheckStage>();
+    const scored = outcomeOf(config, plan, setup, checks);
+    if (landing === null || merge === null) {
+      return { status: "done", outcome: await this.#postGate(step, context, setup.snapshot, scored) };
+    }
+    if (scored.gate !== "passed") {
+      return { status: "done", outcome: landingOutcome(withPostGateSteps(scored, plan.steps, new Map()), null) };
+    }
+    const sha = await this.#land(step, instanceId, params, landing, merge.plan);
+    // The post-gate steps run on the landed commit, read from the origin like any `main` run's.
+    const landed: RunContext = { ...context, params: { ...params, sha }, merge: null };
+    const outcome = await this.#postGate(step, landed, setup.snapshot, scored);
+    return { status: "done", outcome: landingOutcome(outcome, { sha }) };
   }
 
   /**
@@ -199,14 +276,141 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, PipelineParams | S
    * attempts have no task row, so they get the project's alone. The Sandbox size is the project's own,
    * which a task's definitions never change, even when they clash.
    */
-  async #config(params: PipelineParams, main: string): Promise<{ config: ConfigResult; size: SandboxSize }> {
-    const task = parseAttemptRef(params.line)?.task;
+  async #config(projectId: string, line: string, main: string): Promise<{ config: ConfigResult; size: SandboxSize }> {
+    const task = parseAttemptRef(line)?.task;
     const [project, definitions] = await Promise.all([
-      loadConfig(reposFor(this.env), params.project, main),
-      task === undefined ? NO_TASK_DEFINITIONS : this.env.PROJECT.getByName(params.project).definitionsOf(task),
+      loadConfig(reposFor(this.env), projectId, main),
+      task === undefined ? NO_TASK_DEFINITIONS : this.env.PROJECT.getByName(projectId).definitionsOf(task),
     ]);
-    const config = pipelineConfig(withTask(project, definitions), pipelineFor(params.line));
+    const config = pipelineConfig(withTask(project, definitions), pipelineFor(line));
     return { config, size: sandboxSize(project) };
+  }
+
+  /**
+   * A landing's `merge`, in its own untrusted container, which runs git alone and so reaches none of
+   * `main`'s `network.allow`: `git merge-tree` of `main` and the approved head. A conflict comes back with
+   * its files; a clean merge with the tree and the merged tree's config. The container is gone
+   * before the step ends.
+   */
+  async #merge(instanceId: string, params: RunParams, landing: LandingParams, size: SandboxSize): Promise<Merged> {
+    const attempt = attemptRef(landing.task, landing.attempt);
+    const run = await runInSandbox(
+      this.env,
+      instanceId,
+      { project: params.project, line: attempt },
+      "merge",
+      (g) => mergeScript(g.originRead.remote, g.forkRead.remote, landing.head),
+      { size },
+    );
+    await this.env.SANDBOX.getByName(sandboxName(instanceId, "merge")).destroy();
+    const result = parseResult<MergeResult>(run.stdout);
+    if (result === null) throw new Error(`merge gave no result (exit ${run.exitCode}): ${run.stderr.slice(-2000)}`);
+    const merged = parseMergeTree(result.output);
+    if (!result.clean) {
+      const files = conflictFiles(merged.files, result.remerges);
+      return {
+        kind: "conflict",
+        details: { attempt, head: landing.head, main: result.main, base: result.base, files },
+      };
+    }
+    const plan = { head: landing.head, main: result.main, tree: merged.tree };
+    return { kind: "clean", plan, config: result.config, trees: result.trees ?? {} };
+  }
+
+  /**
+   * A landing's `land`: claims the push, then commits the merge as the approver and pushes it with a
+   * lease on the `main` it merged onto, in the trusted `land` container. A landing whose push was
+   * claimed but whose result was lost reads `main` for its merge commit before it gives up. The
+   * project then records the landed sha. Returns it.
+   */
+  async #land(
+    step: WorkflowStep,
+    instanceId: string,
+    params: RunParams,
+    landing: LandingParams,
+    merge: MergePlan,
+  ): Promise<string> {
+    const project = () => this.env.PROJECT.getByName(params.project);
+    const oneMinute = { retries: STEP_RETRIES, timeout: "1 minute" } as const;
+    const signers = await step.do("signers", oneMinute, () => this.#signers(landing));
+    const claimed = await step.do("claim", oneMinute, () => project().claimLand(params.run));
+    if (!claimed) throw new Error("land: its merge request left the queue before it landed");
+    let landed: LandResult;
+    try {
+      landed = await step.do("land", { retries: STEP_RETRIES, timeout: "10 minutes" }, async () => {
+        const run = await runInSandbox(
+          this.env,
+          instanceId,
+          { project: params.project, line: attemptRef(landing.task, landing.attempt) },
+          "land",
+          (g) =>
+            landScript(g.originWrite.remote, g.forkRead.remote, {
+              ...merge,
+              message: mergeCommitMessage({
+                task: landing.task,
+                attempt: landing.attempt,
+                title: landing.title,
+                approver: signers.approver,
+                coAuthors: signers.coAuthors,
+              }),
+              author: mergeAuthor(signers.approver),
+              committedAt: Math.floor(landing.startedAt / 1000),
+            }),
+          { size: TRUSTED_SIZE },
+        );
+        await this.env.SANDBOX.getByName(sandboxName(instanceId, "land")).destroy();
+        const result = parseResult<LandResult>(run.stdout);
+        if (result === null) throw new Error(`land gave no result (exit ${run.exitCode}): ${run.stderr.slice(-2000)}`);
+        return result;
+      });
+    } catch (error) {
+      const onMain = await step.do("landed on main", oneMinute, () => project().landedOnMain(params.run));
+      if (onMain === null) throw new Error(`land: ${String(error)}`, { cause: error });
+      landed = { kind: "landed", sha: onMain };
+    }
+    switch (landed.kind) {
+      case "landed": {
+        const { sha } = landed;
+        await step.do("landed", { retries: STEP_RETRIES, timeout: "5 minutes" }, () =>
+          project().pipelineLanded(params.run, sha),
+        );
+        return sha;
+      }
+      case "moved": {
+        throw new Error(`land: main moved from ${merge.main}; the lease failed`);
+      }
+      case "mismatch": {
+        throw new Error(`land: the merge gave tree ${landed.tree}, not the merged ${merge.tree}`);
+      }
+    }
+  }
+
+  /** The approver and each co-author, with their handles from D1. */
+  async #signers(landing: LandingParams): Promise<{ approver: Signer; coAuthors: Signer[] }> {
+    const ids = [...new Set([landing.approver.user, ...landing.coAuthors.map((c) => c.user)])];
+    const { results } = await this.env.DB.prepare(
+      `SELECT id, handle FROM users WHERE id IN (${ids.map(() => "?").join(", ")})`,
+    )
+      .bind(...ids)
+      .all<{ id: string; handle: string }>();
+    const handles = new Map(results.map((u) => [u.id, u.handle]));
+    const signer = (id: string, alias: string | null): Signer => ({ id, handle: handles.get(id) ?? id, alias });
+    return {
+      approver: signer(landing.approver.user, actedAlias(landing.approver)),
+      coAuthors: landing.coAuthors.map((c) => signer(c.user, actedAlias(c))),
+    };
+  }
+
+  /**
+   * A landing a `LandingWorkflow` started, resumed here: its containers are destroyed, so nothing it
+   * started can still push, and the project lands its merge request again as a run, or records it
+   * landed when `main` already holds its merge commit.
+   */
+  async #retireLanding(params: LegacyLandingParams, instanceId: string, step: WorkflowStep): Promise<void> {
+    await step.do("retire", { retries: STEP_RETRIES, timeout: "5 minutes" }, async () => {
+      await Promise.all(landingSandboxNames(instanceId).map((name) => this.env.SANDBOX.getByName(name).destroy()));
+      await this.env.PROJECT.getByName(params.project).legacyLandingResumed(params.landing);
+    });
   }
 
   /**
@@ -217,19 +421,16 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, PipelineParams | S
   async #caches(
     step: WorkflowStep,
     instanceId: string,
-    params: PipelineParams,
+    params: RunParams,
     caches: readonly CacheConfig[],
+    merge: LandingMerge | null,
   ): Promise<RunCache[]> {
     if (caches.length === 0) return [];
     try {
       const lookups = await step.do("caches", { retries: STEP_RETRIES, timeout: "2 minutes" }, async () => {
-        const repos = reposFor(this.env);
-        const repo = lineRepo(params.project, params.line);
-        const head = await repos.readCommit(repo, params.sha);
-        if (head === null) throw new Error(`the head ${params.sha} is missing`);
+        const { root, reader } = await this.#keyTree(params, merge);
         const image = await this.env.SANDBOX.getByName(pipelineSandboxName(instanceId, { kind: "setup" })).image();
-        const reader = { readTree: (hash: string) => repos.readTree(repo, hash) };
-        const keys = await cacheKeyHashes(reader, head.treeHash, caches, image);
+        const keys = await cacheKeyHashes(reader, root, caches, image);
         return this.env.PROJECT.getByName(params.project).pipelineCaches(params.run, keys);
       });
       return caches.map((cache): RunCache => {
@@ -242,6 +443,32 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, PipelineParams | S
       const message = error instanceof Error ? error.message : String(error);
       return caches.map((cache) => ({ ...cache, error: message.slice(0, 300) }));
     }
+  }
+
+  /**
+   * The tree the run's caches are keyed by, and how to read its trees: the line's head's, from the
+   * line's repo; or for a landing the merged tree it runs on, whose trees are the ones its merge
+   * made, then `main`'s, from the origin, then the approved head's, from the attempt's fork.
+   */
+  async #keyTree(params: RunParams, merge: LandingMerge | null): Promise<{ root: string; reader: TreeReader }> {
+    const repos = reposFor(this.env);
+    if (merge === null) {
+      const repo = lineRepo(params.project, params.line);
+      const head = await repos.readCommit(repo, params.sha ?? "");
+      if (head === null) throw new Error(`the head ${params.sha} is missing`);
+      return { root: head.treeHash, reader: { readTree: (hash) => repos.readTree(repo, hash) } };
+    }
+    const sides = [originRepo(params.project), forkRepo(params.project, merge.attempt)];
+    const readTree = async (hash: string) => {
+      const made = merge.trees[hash];
+      if (made !== undefined) return made;
+      for (const repo of sides) {
+        const entries = await repos.readTree(repo, hash);
+        if (entries !== null) return entries;
+      }
+      return null;
+    };
+    return { root: merge.plan.tree, reader: { readTree } };
   }
 
   /**
@@ -345,23 +572,16 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, PipelineParams | S
     const caches = setupCaches(plan);
     let restoreNotes: string[] = [];
     try {
-      const run = await runInSandbox(
-        this.env,
-        instanceId,
-        { project: params.project, line: params.line },
-        "pipeline",
-        (g) => setupScript(g.lineRead.remote, { sha: params.sha, base }, plan.setup),
-        {
-          network,
-          size,
-          sandbox: name,
-          env: { ...runContext(params), ...held.env },
-          timeoutMs: setupTimeoutMs(plan) + STEP_SLACK_MS,
-          prepare: async (start) => {
-            restoreNotes = await this.#restoreCaches(context, name, caches, start);
-          },
+      const run = await this.#runIn(context, (checkout) => setupScript(checkout, base, plan.setup), {
+        network,
+        size,
+        sandbox: name,
+        env: { ...runContext(params), ...held.env },
+        timeoutMs: setupTimeoutMs(plan) + STEP_SLACK_MS,
+        prepare: async (start) => {
+          restoreNotes = await this.#restoreCaches(context, name, caches, start);
         },
-      );
+      });
       const result = parseResult<SetupResult>(run.stdout);
       if (result === null) throw new Error(`setup gave no result (exit ${run.exitCode}): ${run.stderr.slice(-2000)}`);
       const sandbox = this.env.SANDBOX.getByName(name);
@@ -450,30 +670,23 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, PipelineParams | S
     let held = NOTHING_HELD;
     let cacheNotes: string[] = [];
     try {
-      const run = await runInSandbox(
-        this.env,
-        instanceId,
-        { project: params.project, line: params.line },
-        "pipeline",
-        (g) => checkScript(g.lineRead.remote, params.sha, plan.setup, check),
-        {
-          network,
-          size,
-          sandbox: name,
-          prepare: async (start, fromSnapshot) => {
-            cacheNotes = await this.#prepareCaches(context, name, check.caches, start, fromSnapshot);
-          },
-          env: async (fromSnapshot) => {
-            const names = fromSnapshot ? check.secrets : [...setupSecrets(plan), ...check.secrets];
-            const holding = await this.#hold(params, names);
-            if ("error" in holding) throw new SecretUnavailable(holding.error);
-            held = holding;
-            return { ...runContext(params), ...holding.env };
-          },
-          snapshot,
-          timeoutMs: checkTimeoutMs(plan, check),
+      const run = await this.#runIn(context, (checkout) => checkScript(checkout, plan.setup, check), {
+        network,
+        size,
+        sandbox: name,
+        prepare: async (start, fromSnapshot) => {
+          cacheNotes = await this.#prepareCaches(context, name, check.caches, start, fromSnapshot);
         },
-      );
+        env: async (fromSnapshot) => {
+          const names = fromSnapshot ? check.secrets : [...setupSecrets(plan), ...check.secrets];
+          const holding = await this.#hold(params, names);
+          if ("error" in holding) throw new SecretUnavailable(holding.error);
+          held = holding;
+          return { ...runContext(params), ...holding.env };
+        },
+        snapshot,
+        timeoutMs: checkTimeoutMs(plan, check),
+      });
       const result = parseResult<CheckRun>(run.stdout);
       if (result === null)
         throw new Error(`check ${check.name} gave no result (exit ${run.exitCode}): ${run.stderr.slice(-2000)}`);
@@ -548,6 +761,38 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, PipelineParams | S
   }
 
   /**
+   * Runs `script` in one of the run's containers, checking out what the run runs on: the line's
+   * head, read with the line's one read grant; or, for a landing before it lands, the merge it makes
+   * again, read from the origin and the attempt's fork in the untrusted `merge` role.
+   */
+  async #runIn(
+    context: RunContext,
+    script: (checkout: Checkout) => string,
+    options: ScriptOptions<"pipeline">,
+  ): Promise<RunResult> {
+    const { instanceId, params, merge } = context;
+    if (merge === null) {
+      const sha = params.sha ?? "";
+      return runInSandbox(
+        this.env,
+        instanceId,
+        { project: params.project, line: params.line },
+        "pipeline",
+        (g) => script({ kind: "line", remote: g.lineRead.remote, sha }),
+        options,
+      );
+    }
+    return runInSandbox(
+      this.env,
+      instanceId,
+      { project: params.project, line: merge.attempt },
+      "merge",
+      (g) => script({ kind: "merge", origin: g.originRead.remote, fork: g.forkRead.remote, merge: merge.plan }),
+      options,
+    );
+  }
+
+  /**
    * Readies a post-gate step's container: restored from the snapshot, or with the setups re-run, and
    * with the caches it uses restored. Says how restoring them went.
    */
@@ -564,7 +809,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, PipelineParams | S
       instanceId,
       { project: params.project, line: params.line },
       "pipeline",
-      (g) => stepReadyScript(g.lineRead.remote, params.sha, plan.setup, postGate),
+      (g) => stepReadyScript(g.lineRead.remote, params.sha ?? "", plan.setup, postGate),
       {
         network,
         size,
@@ -625,7 +870,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, PipelineParams | S
    * starts it, from what the project's settings hold now; or why one can't be had. Never persisted:
    * only the container's env and the step's masking hold them.
    */
-  async #hold(params: PipelineParams, names: readonly string[]): Promise<Held | SecretRefusal> {
+  async #hold(params: RunParams, names: readonly string[]): Promise<Held | SecretRefusal> {
     if (names.length === 0) return NOTHING_HELD;
     const loaded = await this.env.PROJECT.getByName(params.project).pipelineSecrets(params.run, [...new Set(names)]);
     if ("error" in loaded) return { secret: loaded.secret, error: loaded.error };
@@ -673,20 +918,51 @@ export interface ScoringParams extends Omit<PipelineParams, "line"> {
   attempt: string;
 }
 
+/** A run's params in the current shape: a landing's has no head until it lands. */
+type RunParams = PipelineParams | LandingRunParams;
+
+/**
+ * What the Workflow may be started with: a run's params, as a Pipeline Workflow or a Scoring
+ * Workflow started it, or a Landing Workflow's, from before landings were runs.
+ */
+type WorkflowParams = PipelineParams | LandingRunParams | ScoringParams | LegacyLandingParams;
+
+/** Whether the Workflow was started as a Landing Workflow, before landings were runs. */
+function isLegacyLanding(params: Readonly<WorkflowParams>): params is Readonly<LegacyLandingParams> {
+  return "landing" in params && typeof params.landing === "number";
+}
+
+/** How a landing's `merge` went: the conflict, or the merge and the merged tree's config. */
+type Merged =
+  | { kind: "conflict"; details: ConflictDetails }
+  | { kind: "clean"; plan: MergePlan; config: string | null; trees: Record<string, TreeEntry[]> };
+
+/**
+ * What a landing runs on before it lands: the source attempt, the merge its containers make again,
+ * and the trees that merge made, which no repo has.
+ */
+interface LandingMerge {
+  attempt: string;
+  plan: MergePlan;
+  trees: Record<string, TreeEntry[]>;
+}
+
 /** What the run plans to run: its setups and checks, and the post-gate steps after its gate. */
 interface RunPlan extends ScorePlan {
   steps: StepConfig[];
 }
 
 /** The post-gate steps the run's pipeline has: only `main`'s, and none without a valid config. */
-function postGateSteps(config: ConfigResult, params: PipelineParams): StepConfig[] {
+function postGateSteps(config: ConfigResult, params: Pick<RunParams, "line">): StepConfig[] {
   return config.kind === "valid" ? config.config.pipelines[pipelineFor(params.line)].steps : [];
 }
 
 /** What every step of a run's containers needs. */
 interface RunContext {
   instanceId: string;
-  params: PipelineParams;
+  params: RunParams;
+  /** For a landing before it lands: what it runs on. */
+  merge: LandingMerge | null;
   plan: RunPlan;
   size: SandboxSize;
   network: NetworkAccess;
@@ -743,7 +1019,7 @@ function withCacheNotes(
 }
 
 /** A run's params in the current shape, whichever code started it. */
-function paramsLine(params: PipelineParams | ScoringParams): PipelineParams {
+function paramsLine(params: PipelineParams | LandingRunParams | ScoringParams): RunParams {
   if ("line" in params) return params;
   const { attempt, ...rest } = params;
   return { ...rest, line: attempt };
@@ -759,13 +1035,13 @@ function checkTimeoutMs(plan: ScorePlan, check: PlannedCheck): number {
   return setupTimeoutMs(plan) + check.timeoutMs + STEP_SLACK_MS;
 }
 
-/** What every container of the run is told about it. */
-export function runContext(params: PipelineParams): Record<string, string> {
+/** What every container of the run is told about it. A landing has no head (`THRONG_SHA` is empty) until it lands. */
+export function runContext(params: RunParams): Record<string, string> {
   return {
     THRONG_PROJECT: params.project,
     THRONG_PIPELINE: pipelineFor(params.line),
     THRONG_LINE: params.line,
-    THRONG_SHA: params.sha,
+    THRONG_SHA: params.sha ?? "",
     THRONG_RUN: String(params.run),
   };
 }

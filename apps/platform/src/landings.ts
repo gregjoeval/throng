@@ -1,122 +1,152 @@
-// A project's landings: one row per Landing Workflow the merge queue starts, in the project Durable
-// Object's SQLite. The task store decides when a landing starts and what its report does to the merge
-// request; this module keeps the rows. A landing is
-//
-//   running ─► pushing (its land step claimed the push to main) ─► landed | dequeued
-//   running ─► dequeued, or stopped (its merge request left the queue; its Workflow is terminated)
-//
-// Only a `running` landing can be stopped. Once `pushing`, its merge request stays in the queue, so
-// whatever the compare-and-swap on `main` decides is what the report records.
+// The `landings` table, from before a merge request's landing was a `main` run, folded into
+// `pipeline_runs` (spec #257, "Run storage"). Each landing becomes a landing's run, linked to its
+// merge request, so the runs list and the dequeue banner find it; the table is then dropped.
 
+import { normaliseDequeue } from "./casing.ts";
+import type { ConflictDetails } from "./conflicts.ts";
+import { conflictOutcome, landedOutcome, legacyFailedOutcome } from "./landing.ts";
+import type { LegacyFailedCheck } from "./landing.ts";
+import type { LegacyDequeueDetails } from "./merge-requests.ts";
+import type { RunOutcome } from "./run-outcome.ts";
+import { MAIN_LINE } from "./scoring.ts";
+import type { RunStatus } from "./scoring.ts";
 import type { Sql } from "./task-store.ts";
 
-export const LANDING_STATUSES = ["running", "pushing", "landed", "dequeued", "stopped"] as const;
-export type LandingStatus = (typeof LANDING_STATUSES)[number];
-
-export interface StoredLanding {
+/** A row of the `landings` table: `running ─► pushing ─► landed | dequeued`, or `stopped`. */
+interface LandingRow {
   id: number;
   project: string;
-  task: number;
-  attempt: number;
-  /** The merge request it lands. */
   merge_request: number;
-  head: string;
   instance_id: string;
-  status: LandingStatus;
+  status: "running" | "pushing" | "landed" | "dequeued" | "stopped";
   started_at: number;
   finished_at: number | null;
-}
-
-interface LandingRow extends Omit<StoredLanding, "status"> {
-  status: string;
   torn_down: number;
 }
 
-const SCHEMA = `CREATE TABLE IF NOT EXISTS landings (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  project TEXT NOT NULL,
-  task INTEGER NOT NULL,
-  attempt INTEGER NOT NULL,
-  merge_request INTEGER NOT NULL,
-  head TEXT NOT NULL,
-  instance_id TEXT NOT NULL,
-  status TEXT NOT NULL,
-  started_at INTEGER NOT NULL,
-  finished_at INTEGER,
-  torn_down INTEGER NOT NULL DEFAULT 0
-)`;
-
-export class Landings {
-  readonly #sql: Sql;
-  readonly #now: () => Date;
-
-  constructor({ sql, now }: { sql: Sql; now: () => Date }) {
-    this.#sql = sql;
-    this.#now = now;
-    sql.exec(SCHEMA);
-  }
-
-  /** Records a landing as `running`; `instanceId` names its Workflow. */
-  start(
-    input: Omit<StoredLanding, "id" | "instance_id" | "status" | "started_at" | "finished_at">,
-    instanceId: (id: number) => string,
-  ): StoredLanding {
-    const [row] = this.#sql.exec<LandingRow>(
-      `INSERT INTO landings (project, task, attempt, merge_request, head, instance_id, status, started_at)
-       VALUES (?, ?, ?, ?, ?, '', 'running', ?) RETURNING *`,
-      input.project,
-      input.task,
-      input.attempt,
-      input.merge_request,
-      input.head,
-      this.#now().getTime(),
-    );
-    if (row === undefined) throw new Error("landing insert returned no row");
-    this.#sql.exec("UPDATE landings SET instance_id = ? WHERE id = ?", instanceId(row.id), row.id);
-    return this.get(row.id) as StoredLanding;
-  }
-
-  get(id: number): StoredLanding | null {
-    const [row] = this.#sql.exec<LandingRow>("SELECT * FROM landings WHERE id = ?", id);
-    return row === undefined ? null : toLanding(row);
-  }
-
-  /** The landing still in flight (running or pushing), if any. There is at most one. */
-  active(): StoredLanding | null {
-    const [row] = this.#sql.exec<LandingRow>(
-      "SELECT * FROM landings WHERE status IN ('running', 'pushing') ORDER BY id DESC LIMIT 1",
-    );
-    return row === undefined ? null : toLanding(row);
-  }
-
-  /** The merge request's latest landing that ended `dequeued`: the one its `last_dequeue` came from, if any did. */
-  lastDequeued(mergeRequest: number): StoredLanding | null {
-    const [row] = this.#sql.exec<LandingRow>(
-      "SELECT * FROM landings WHERE merge_request = ? AND status = 'dequeued' ORDER BY id DESC LIMIT 1",
-      mergeRequest,
-    );
-    return row === undefined ? null : toLanding(row);
-  }
-
-  /** Moves a landing on, recording when it ended unless it is now `pushing`. */
-  move(id: number, status: LandingStatus): void {
-    this.#sql.exec(
-      "UPDATE landings SET status = ?, finished_at = ? WHERE id = ?",
-      status,
-      status === "pushing" ? null : this.#now().getTime(),
-      id,
-    );
-  }
-
-  /** Stopped landings whose Workflow hasn't been terminated yet, now marked torn down. */
-  claimStopped(): StoredLanding[] {
-    const rows = this.#sql.exec<LandingRow>("SELECT * FROM landings WHERE status = 'stopped' AND torn_down = 0");
-    for (const row of rows) this.#sql.exec("UPDATE landings SET torn_down = 1 WHERE id = ?", row.id);
-    return rows.map(toLanding);
-  }
+/** What a landing's run takes from its merge request. */
+interface MergeRequestRow {
+  approved_by_user: string;
+  approved_by_alias: string | null;
+  approved_by_owner: number;
+  merge_sha: string | null;
+  last_dequeue: string | null;
 }
 
-function toLanding(row: LandingRow): StoredLanding {
-  const { torn_down: _tornDown, ...landing } = row;
-  return { ...landing, status: row.status as LandingStatus };
+/** How a landing went, as its run records it. */
+interface Ended {
+  status: RunStatus;
+  sha: string | null;
+  outcome: RunOutcome | null;
+  error: string | null;
+}
+
+/** The reasons only a landing's report dequeues with. */
+const LANDING_REASONS = new Set(["conflict", "failedChecks", "errored"]);
+
+/** The error of a landing dequeued before its merge request's last dequeue, whose reason only that kept. */
+const UNKNOWN_DEQUEUE = "dequeued before landings were runs, which kept no reason for it";
+
+/**
+ * Moves every landing into `pipeline_runs` as a landing's run on `main`, asked for by its merge
+ * request's approver and trusted as their approval was, keeping its instance id and times. One in
+ * flight stays `running` (its claim on the push kept), naming its old id so its Landing Workflow's
+ * reports still find it. A landed one is `done` at its merge request's merge commit. A dequeued one
+ * takes what its merge request's last dequeue kept, when it was that dequeue's landing, and that
+ * dequeue now names its run. A stopped one is `cancelled`. Idempotent: the table is dropped after.
+ */
+export function migrateLandings(sql: Sql): void {
+  const [table] = sql.exec<{ name: string }>(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'landings'",
+  );
+  if (table === undefined) return;
+  sql.transaction(() => {
+    for (const landing of sql.exec<LandingRow>("SELECT * FROM landings ORDER BY id")) {
+      const [mr] = sql.exec<MergeRequestRow>("SELECT * FROM merge_requests WHERE id = ?", landing.merge_request);
+      if (mr === undefined) continue;
+      const [last] = sql.exec<{ id: number }>(
+        "SELECT id FROM landings WHERE merge_request = ? AND status = 'dequeued' ORDER BY id DESC LIMIT 1",
+        landing.merge_request,
+      );
+      // The merge request's last dequeue is this landing's when it's the latest dequeued one, and no
+      // new push or cancel dequeued it since.
+      const stored = last?.id === landing.id && mr.last_dequeue !== null ? storedDequeue(mr.last_dequeue) : null;
+      const dequeue = stored !== null && LANDING_REASONS.has(stored.reason) ? stored : null;
+      const ended = endOf(landing, mr, dequeue);
+      const [run] = sql.exec<{ id: number }>(
+        `INSERT INTO pipeline_runs (project, line, sha, pipeline, trigger, merge_request, user_id, alias, trusted,
+           status, outcome, error, instance_id, created_at, started_at, finished_at, torn_down, land_claimed,
+           legacy_landing)
+         VALUES (?, ?, ?, 'main', 'merge', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+        landing.project,
+        MAIN_LINE,
+        ended.sha,
+        landing.merge_request,
+        mr.approved_by_user,
+        mr.approved_by_alias,
+        mr.approved_by_owner,
+        ended.status,
+        ended.outcome === null ? null : JSON.stringify(ended.outcome),
+        ended.error,
+        landing.instance_id,
+        landing.started_at,
+        landing.started_at,
+        landing.finished_at,
+        landing.torn_down,
+        landing.status === "pushing" ? 1 : 0,
+        landing.id,
+      );
+      if (dequeue !== null && run !== undefined) {
+        sql.exec(
+          "UPDATE merge_requests SET last_dequeue = ? WHERE id = ?",
+          JSON.stringify({ ...dequeue, run: run.id }),
+          landing.merge_request,
+        );
+      }
+    }
+    sql.exec("DROP TABLE landings");
+  });
+}
+
+/** A dequeue as stored before landings were runs: its reason, its details, and when. */
+interface StoredDequeue {
+  reason: string;
+  at: string;
+  details?: LegacyDequeueDetails;
+}
+
+function storedDequeue(json: string): StoredDequeue {
+  return normaliseDequeue(JSON.parse(json) as StoredDequeue);
+}
+
+/** How the landing went, from its status and, for a dequeued one, the dequeue it left. */
+function endOf(landing: LandingRow, mr: MergeRequestRow, dequeue: StoredDequeue | null): Ended {
+  const none = { sha: null, outcome: null, error: null };
+  switch (landing.status) {
+    case "running":
+    case "pushing": {
+      return { status: "running", ...none };
+    }
+    case "stopped": {
+      return { status: "cancelled", ...none };
+    }
+    case "landed": {
+      const sha = mr.merge_sha;
+      return { status: "done", sha, outcome: sha === null ? null : landedOutcome(sha), error: null };
+    }
+    case "dequeued": {
+      const details = dequeue?.details;
+      if (dequeue?.reason === "conflict" && details !== undefined && "files" in details) {
+        return { status: "done", sha: null, outcome: conflictOutcome(details as ConflictDetails), error: null };
+      }
+      if (dequeue?.reason === "failedChecks" && details !== undefined && "checks" in details) {
+        const failed = details as { checks: LegacyFailedCheck[]; error?: string };
+        return { status: "done", sha: null, outcome: legacyFailedOutcome(failed), error: null };
+      }
+      if (dequeue?.reason === "errored" && details !== undefined && "step" in details) {
+        return { status: "errored", sha: null, outcome: null, error: `${details.step}: ${details.error}` };
+      }
+      return { status: "errored", sha: null, outcome: null, error: UNKNOWN_DEQUEUE };
+    }
+  }
 }

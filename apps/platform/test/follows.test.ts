@@ -5,9 +5,9 @@
 
 import { describe, expect, it } from "vitest";
 import type { FollowOutcome, FollowParams } from "../src/follows.ts";
-import type { LandingParams } from "../src/landing.ts";
+import { landedOutcome } from "../src/landing.ts";
 import type { ScoringResult } from "../src/results.ts";
-import type { PipelineParams } from "../src/scoring.ts";
+import type { LandingRunParams, PipelineParams } from "../src/scoring.ts";
 import { TaskStore } from "../src/task-store.ts";
 import type { AttemptInput, ProjectContext } from "../src/task-store.ts";
 import type { Actor } from "../src/tokens.ts";
@@ -51,8 +51,8 @@ const passed: ScoringResult = {
 const fork = (ref: AttemptInput) => `abc123-t${ref.task}a${ref.number}`;
 
 /**
- * Task t1 by cat, with an open attempt by ada (t1a1) and a draft by bob (t1a2). Without a landing
- * runner nothing lands, so a queued merge request stays queued.
+ * Task t1 by cat, with an open attempt by ada (t1a1) and a draft by bob (t1a2). Without `landing`
+ * nothing lands, so a queued merge request stays queued.
  */
 async function setup({ landing = true } = {}) {
   const repos = new FakeRepos();
@@ -60,15 +60,14 @@ async function setup({ landing = true } = {}) {
   const base = repos.commit(ORIGIN, { files: { "README.md": "hi\n" }, message: "init" });
   const sql = testSql();
   let clock = Date.parse("2026-10-10T12:00:00.000Z");
-  const scoringWorkflow = new FakeWorkflows<PipelineParams>();
-  const landingWorkflow = new FakeWorkflows<LandingParams>();
+  const scoringWorkflow = new FakeWorkflows<PipelineParams | LandingRunParams>();
   const followWorkflow = new FakeWorkflows<FollowParams>();
   const store = new TaskStore({
     sql,
     repos,
     now: () => new Date((clock += 1000)),
     scoring: { workflow: scoringWorkflow, teardown: async () => {} },
-    landing: landing ? { workflow: landingWorkflow, teardown: async () => {} } : null,
+    lands: landing,
     follow: { workflow: followWorkflow },
   });
   const drain = () => store.drain(PROJECT.id);
@@ -131,6 +130,8 @@ async function setup({ landing = true } = {}) {
     expect(store.scoringFinished(run.id, { status: "done", result: passed })).toBeTruthy();
   };
   const mr = () => store.getMergeRequest(PROJECT, owner, { task: 1 });
+  /** The merge request's landing: the latest `main` run. */
+  const landingRun = () => at(store.scoring.listRuns("main"), -1).id;
 
   return {
     repos,
@@ -150,7 +151,7 @@ async function setup({ landing = true } = {}) {
     scoreLatest,
     mr,
     followWorkflow,
-    landingWorkflow,
+    landingRun,
   };
 }
 
@@ -447,14 +448,17 @@ describe("a merge request's source", () => {
   });
 
   it("leaves the source alone while its landing has claimed the push to main, and drops the follow once it lands", async () => {
-    const { store, drain, mr, attempt, t1a1, moveTaskBranch, followWorkflow } = await selected({ passed: true });
+    const { store, drain, mr, attempt, t1a1, moveTaskBranch, followWorkflow, landingRun } = await selected({
+      passed: true,
+    });
     await drain();
-    expect(store.claimLandingPush(1)).toBeTruthy();
+    expect(store.claimLandingPush(landingRun())).toBeTruthy();
     moveTaskBranch();
     await drain();
     expect(followWorkflow.created).toHaveLength(0);
 
-    await store.landingFinished(1, { kind: "landed", sha: "e".repeat(40) });
+    expect(await store.pipelineLanded(landingRun(), "e".repeat(40))).toBeTruthy();
+    store.pipelineFinished(landingRun(), { status: "done", outcome: landedOutcome("e".repeat(40)) });
     await drain();
     expect(mr().state).toBe("merged");
     expect(attempt(t1a1).state).toBe("merged");
@@ -462,18 +466,17 @@ describe("a merge request's source", () => {
   });
 
   it("refuses a follow's claim once the landing claimed its push, and follows after the landing is dequeued", async () => {
-    const { store, drain, t1a1, mr, moveTaskBranch, started, follow, merged, followWorkflow } = await selected({
-      passed: true,
-    });
+    const { store, drain, t1a1, mr, moveTaskBranch, started, follow, merged, followWorkflow, landingRun } =
+      await selected({ passed: true });
     await drain();
     const { head } = moveTaskBranch();
     await drain();
-    expect(store.claimLandingPush(1)).toBeTruthy();
+    expect(store.claimLandingPush(landingRun())).toBeTruthy();
     expect(store.claimFollowPush(defined(started(t1a1), "follow").params.follow)).toBeFalsy();
     await drain();
     expect(followWorkflow.created).toHaveLength(1);
 
-    await store.landingFinished(1, { kind: "errored", details: { step: "land", error: "lost" } });
+    expect(await store.pipelineReported(landingRun(), { status: "errored", error: "land: lost" })).toBeTruthy();
     await drain();
     expect(mr().state).toBe("pending");
     expect(followWorkflow.created).toHaveLength(2);

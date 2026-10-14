@@ -19,15 +19,16 @@ import { ServiceError } from "./errors.ts";
 import type { ErrorCode } from "./errors.ts";
 import { Follows } from "./follows.ts";
 import type { FollowOutcome, FollowParams, FollowRunner, StoredFollow } from "./follows.ts";
-import type { LandingOutcome, LandingParams, LandingRunner } from "./landing.ts";
-import { Landings } from "./landings.ts";
-import type { StoredLanding } from "./landings.ts";
-import { isLogName, landingLogKey, legacyLogKey, logKey, missingLog } from "./logs.ts";
-import { dequeueCause, MergeRequests } from "./merge-requests.ts";
+import { conflictOutcome, dequeueDetails, landedOutcome, legacyFailedOutcome } from "./landing.ts";
+import type { DequeueDetails, LandingParams, LegacyLandingOutcome } from "./landing.ts";
+import { migrateLandings } from "./landings.ts";
+import { isLogName, legacyLogKey, logKey, missingLog } from "./logs.ts";
+import { MergeRequests } from "./merge-requests.ts";
 import type {
   Dequeue,
   DequeueCause,
   DequeueReason,
+  LandingDequeueReason,
   MergeRequestEvent,
   MergeRequestState,
   StoredMergeRequest,
@@ -38,7 +39,7 @@ import { forkRepo, originRepo } from "./repos.ts";
 import type { Repos } from "./repos.ts";
 import { GATES } from "./results.ts";
 import type { Gate } from "./results.ts";
-import { cancellable, MAIN_LINE, runReport, runSettled, SCORING_CAP, ScoringQueue } from "./scoring.ts";
+import { cancellable, runReport, runSettled, SCORING_CAP, ScoringQueue } from "./scoring.ts";
 import type {
   AttemptScoring,
   PlanVerdict,
@@ -232,8 +233,17 @@ export interface PushNotice {
 }
 
 /** How many files a dequeue's details name (a conflict's), or null when they name none. */
-function fileCount(dequeue: Dequeue): number | null {
-  return dequeue.reason === "conflict" ? dequeue.details.files.length : null;
+function fileCount(details: DequeueDetails | null): number | null {
+  return details !== null && "files" in details ? details.files.length : null;
+}
+
+/** A merge request's latest dequeue, with the details its landing's run holds. */
+export interface DequeueDetail {
+  reason: DequeueReason;
+  /** The landing's run behind it; null for a new push or a cancel, or a dequeue from before landings were runs. */
+  run: number | null;
+  at: string;
+  details: DequeueDetails | null;
 }
 
 /** An attempt as verdicts key it. */
@@ -487,10 +497,13 @@ export interface TaskStoreDeps {
   sql: Sql;
   repos: Repos;
   now?: () => Date;
-  /** Starts and stops scoring runs; without one, scoring requests stay queued. */
+  /** Starts and stops pipeline runs, landings included; without one, runs stay queued and nothing lands on its own. */
   scoring?: ScoringRunner | null | undefined;
-  /** Starts and stops the merge queue's Landing Workflows; without one, nothing lands on its own. */
-  landing?: LandingRunner | null | undefined;
+  /**
+   * Whether the merge queue lands its front merge request on its own, which it does whenever there's
+   * a runner; false holds merge requests in the queue, as a test needs to.
+   */
+  lands?: boolean | undefined;
   /** Starts Follow Workflows, which merge a moved task branch into active attempts; without one, follows stay queued. */
   follow?: FollowRunner | null | undefined;
   /** Seals secrets' values: `SECRETS_KEYRING`'s. Without one, setting a secret fails. */
@@ -521,15 +534,14 @@ export class TaskStore {
   readonly scoring: ScoringQueue;
   /** The project's merge requests and merge queue. */
   readonly mergeRequests: MergeRequests;
-  /** The merge queue's landings, one Landing Workflow each. */
-  readonly landings: Landings;
   /** The project's verdicts. */
   readonly verdicts: Verdicts;
   /** The project's votes. */
   readonly votes: Votes;
   /** What of its tasks and attempts is still to be published to the D1 projection. */
   readonly projection: Projection;
-  readonly #landing: LandingRunner | null;
+  /** Whether the merge queue lands on its own. */
+  readonly #lands: boolean;
   /** Active attempts' follows of their task branch. */
   readonly follows: Follows;
   readonly #follow: FollowRunner | null;
@@ -546,7 +558,7 @@ export class TaskStore {
     repos,
     now = () => new Date(),
     scoring = null,
-    landing = null,
+    lands = scoring !== null,
     follow = null,
     keyring = keyringFrom(undefined),
     cacheObjects = null,
@@ -554,13 +566,12 @@ export class TaskStore {
     this.#sql = sql;
     this.#repos = repos;
     this.#now = now;
+    this.#lands = lands;
     this.#cacheObjects = cacheObjects;
-    this.#landing = landing;
     this.#follow = follow;
     migrate(sql);
     migrateProjection(sql, now());
     this.projection = new Projection({ sql });
-    this.landings = new Landings({ sql, now });
     this.follows = new Follows({ sql, now, taskHead: (task) => this.#taskHead(task) });
     this.verdicts = new Verdicts({ sql });
     this.votes = new Votes({ sql });
@@ -570,7 +581,8 @@ export class TaskStore {
       sql,
       runner: scoring,
       now,
-      reserved: () => this.#landingSlots() + this.follows.running(),
+      reserved: () => this.follows.running(),
+      landing: (run) => this.#landingParams(run),
     });
     this.mergeRequests = new MergeRequests({
       sql,
@@ -578,6 +590,7 @@ export class TaskStore {
       journal: (actor, kind, mr, detail) =>
         this.#journal(actor, kind, mr.task, mr.attempt, { mergeRequest: taskRef(mr.task), ...detail }),
     });
+    migrateLandings(sql);
     migrateValues(sql);
   }
 
@@ -1085,8 +1098,9 @@ export class TaskStore {
   runLogKeys(project: ProjectContext, actor: Actor, input: { run: number; name: string }): string[] {
     const run = this.getScoringRun(project, actor, input);
     if (!isLogName(input.name)) throw missingLog(input.run, input.name);
-    const key = { project: project.id, line: run.line, sha: run.sha, run: run.id };
-    return run.legacy_logs ? [legacyLogKey(key, input.name), logKey(key, input.name)] : [logKey(key, input.name)];
+    const key = { project: project.id, line: run.line, run: run.id };
+    if (!run.legacy_logs || run.sha === null) return [logKey(key, input.name)];
+    return [legacyLogKey({ ...key, sha: run.sha }, input.name), logKey(key, input.name)];
   }
 
   /** open → draft: takes the attempt back out of consideration. Only its author may. */
@@ -1552,7 +1566,7 @@ export class TaskStore {
 
   /**
    * Starts a Follow Workflow for each queued follow whose attempt has none running, while a Sandbox
-   * slot is free: a landing goes first, then a `main` run, and task-branch and attempt runs wait for
+   * slot is free: a `main` run (a landing, say) goes first, and task-branch and attempt runs wait for
    * follows. A follow whose attempt ended is dropped, and one a claimed landing holds back waits.
    */
   async #drainFollows(project: string): Promise<void> {
@@ -1569,7 +1583,7 @@ export class TaskStore {
         if (this.#landingHolds(attempt)) continue;
         // A `main` run about to start goes before any follow.
         const main = this.scoring.mainStartable() ? 1 : 0;
-        if (SCORING_CAP - this.scoring.running() - this.#landingSlots() - this.follows.running() - main <= 0) break;
+        if (SCORING_CAP - this.scoring.running() - this.follows.running() - main <= 0) break;
         const running = this.follows.start(
           follow.id,
           (id) => `${forkRepo(project, attemptRef(follow.task, follow.attempt))}-follow-${id}`,
@@ -1607,7 +1621,9 @@ export class TaskStore {
     if (mr === null) return null;
     const unseen = this.mergeRequests.takeUnseenDequeue(mr);
     const dequeue =
-      unseen === null || unseen.reason === "newPush" ? null : { reason: unseen.reason, files: fileCount(unseen) };
+      unseen === null || unseen.reason === "newPush"
+        ? null
+        : { reason: unseen.reason, files: fileCount(this.#dequeueDetails(unseen)) };
     if (dequeue === null && needsReview === null) return null;
     return { task: mr.task, dequeue, needsReview };
   }
@@ -1890,22 +1906,20 @@ export class TaskStore {
   }
 
   /**
-   * Where the log `name` of the retest that dequeued the task's merge request with `failedChecks`
-   * is stored. Anyone signed in may read it. `notFound` unless its latest dequeue is `failedChecks`
-   * with a stored log by that name.
+   * The task's latest merge request's latest dequeue, with the details its landing's run holds: the
+   * conflict, the steps that failed, or the error. Anyone signed in may read it. `notFound` when it
+   * was never dequeued.
    */
-  dequeueLogKey(project: ProjectContext, actor: Actor, input: { task: number; name: string }): string {
+  getDequeue(project: ProjectContext, actor: Actor, input: { task: number }): DequeueDetail {
     const mr = this.getMergeRequest(project, actor, input);
     const dequeue = mr.last_dequeue;
-    const missing = new ServiceError("notFound", `${taskRef(input.task)}'s last dequeue has no log ${input.name}`);
-    if (dequeue?.reason !== "failedChecks" || !isLogName(input.name)) throw missing;
-    if (!dequeue.details.checks.some((check) => check.log === input.name)) throw missing;
-    const landing = this.landings.lastDequeued(mr.id);
-    if (landing === null) throw missing;
-    return landingLogKey(
-      { project: project.id, task: mr.task, attempt: mr.attempt, head: landing.head, landing: landing.id },
-      input.name,
-    );
+    if (dequeue === null) throw new ServiceError("notFound", `${taskRef(mr.task)} has never been dequeued`);
+    return { reason: dequeue.reason, run: dequeue.run, at: dequeue.at, details: this.#dequeueDetails(dequeue) };
+  }
+
+  /** A dequeue's details, from its landing's run. */
+  #dequeueDetails(dequeue: Dequeue): DequeueDetails | null {
+    return dequeueDetails(dequeue, dequeue.run === null ? null : this.scoring.getRun(dequeue.run));
   }
 
   /** The project's merge queue: the landing merge request first, then the queued ones, first in first out. */
@@ -1963,6 +1977,12 @@ export class TaskStore {
       }
       const names = [...new Set(named.flatMap((n) => n.secrets))];
       if (names.length === 0 || run.trusted) return { kind: "start" };
+      // No one can start a landing that waits: it would hold the merge queue. Its merge request is
+      // dequeued, and lands once the owner approves it, which trusts it.
+      if (run.merge_request !== null) {
+        const error = `a landing only the project owner approved may hold secrets, and this one names ${names.join(", ")}`;
+        return { kind: "refused", error };
+      }
       this.scoring.wait(run, names);
       return { kind: "waiting" };
     });
@@ -2303,13 +2323,19 @@ export class TaskStore {
 
   /**
    * Records how a pipeline run ended (see `ScoringQueue.finish`), then checks whether the merge
-   * request its attempt is the source of can enter the queue. Returns whether the run was recorded.
+   * request its attempt is the source of can enter the queue. A landing's run that didn't land
+   * dequeues its merge request instead. Returns whether the run was recorded.
    */
   pipelineFinished(run: number, report: RunReport): boolean {
     try {
       return this.#sql.transaction(() => {
         if (!this.scoring.finish(run, report)) return false;
-        const attempt = parseAttemptRef(this.scoring.getRun(run)?.line ?? "");
+        const finished = this.scoring.getRun(run);
+        if (finished?.merge_request != null) {
+          this.#landingEnded(finished);
+          return true;
+        }
+        const attempt = parseAttemptRef(finished?.line ?? "");
         if (attempt === null) return true;
         const mr = this.mergeRequests.open(attempt.task);
         if (mr !== null && mr.attempt === attempt.number) this.#evaluate(null, mr);
@@ -2319,6 +2345,23 @@ export class TaskStore {
       this.wakeWaiters();
     }
   }
+
+  /**
+   * Records a run's Workflow's report (see `pipelineFinished`). A landing that errored after its
+   * `land` step claimed the push, without recording what it landed, may have pushed anyway (its
+   * result lost after the push, say): when `main`'s head is its merge commit it is recorded as
+   * landed first, so its merge request is merged, and never returns to `pending` to land twice.
+   */
+  async pipelineReported(run: number, report: RunReport): Promise<boolean> {
+    const current = this.scoring.getRun(run);
+    const unrecorded = current?.status === "running" && current.land_claimed && current.sha === null;
+    if (report.status === "errored" && unrecorded) {
+      const sha = await this.landedOnMain(run);
+      if (sha !== null) await this.pipelineLanded(run, sha);
+    }
+    return this.pipelineFinished(run, report);
+  }
+
   /** Records how a run ended from a report in the shape a Scoring Workflow gave (see `pipelineFinished`). */
   scoringFinished(run: number, outcome: ScoringOutcome): boolean {
     return this.pipelineFinished(run, runReport(outcome));
@@ -2326,7 +2369,7 @@ export class TaskStore {
 
   /**
    * For the merge queue: when nothing is landing, moves the front of the queue to `landing` and
-   * returns it; otherwise null. The caller starts its Landing Workflow.
+   * returns it; otherwise null. `drain` queues its landing's run.
    */
   startLanding(_project: ProjectContext, actor: Actor | null): StoredMergeRequest | null {
     return this.#sql.transaction(() => {
@@ -2338,13 +2381,13 @@ export class TaskStore {
 
   /**
    * For the merge queue: takes a queued or landing merge request out of the queue for `conflict`,
-   * `failedChecks` or `errored`, back to `pending` with its approval kept. It requeues only on a
-   * new approval, or after a push and its approval.
+   * `failedChecks` or `errored`, naming the landing's run behind it, back to `pending` with its
+   * approval kept. It requeues only on a new approval, or after a push and its approval.
    */
   dequeueMergeRequest(
     _project: ProjectContext,
     actor: Actor | null,
-    { task, ...cause }: { task: number } & Extract<DequeueCause, { details: unknown }>,
+    { task, ...cause }: { task: number } & Extract<DequeueCause, { run: number }>,
   ): StoredMergeRequest {
     return this.#sql.transaction(() => {
       const mr = this.#openMergeRequest(task);
@@ -2383,18 +2426,25 @@ export class TaskStore {
 
   // --- landings --------------------------------------------------------------------------------
   //
-  // The Durable Object calls `drain` after every store call and report. It stops the Landing
-  // Workflow of a merge request that left the queue (a new push or a cancel) before its land step
-  // claimed the push to main, then starts one for the front of the queue when nothing is landing
-  // and a Sandbox slot is free, then starts scoring runs. A landing takes a slot under the cap ahead
-  // of waiting scoring runs: while one is landing or waiting to, scoring leaves it a slot.
+  // A merge request's landing is a `main` run (spec #257, "Landing"). The Durable Object calls
+  // `drain` after every store call and report. It cancels the landing's run of a merge request that
+  // left the queue (a new push or a cancel), until its `land` step claims the push to main; then,
+  // when nothing is landing, moves the front of the queue to `landing` and queues its run; then
+  // starts follows and runs. `main` runs take a free slot first, and one runs at a time, so landings
+  // and the deploys after them happen one after another. The run merges, runs the setups and checks
+  // on the merged tree, claims the push (`claimLandingPush`), lands (`pipelineLanded`, which merges
+  // the merge request), then runs the post-gate steps; a conflict, a failed gate or an error
+  // dequeues the merge request instead, naming the run (`pipelineFinished`).
 
-  /** Stops stale landings, starts the next one, starts queued follows, then drains the scoring queue. */
+  /** Cancels stale landings, queues the next one, starts queued follows, then drains the run queue. */
   async drain(project: string): Promise<void> {
     try {
-      await this.#drainLandings(project);
+      this.#sql.transaction(() => this.#drainLandings(project));
       await this.#drainFollows(project);
       await this.scoring.drain();
+      // A landing whose Workflow couldn't be started errored: its merge request leaves the queue, and
+      // the next one's landing starts.
+      if (this.#sql.transaction(() => this.#drainLandings(project))) await this.scoring.drain();
       await this.#evictCachesSafely(project);
     } finally {
       this.wakeWaiters();
@@ -2411,207 +2461,215 @@ export class TaskStore {
   }
 
   /**
-   * For the Landing Workflow's land step, right before it pushes: claims the push (again, for a retried step), so the merge
-   * request can no longer be dequeued by a push or cancelled, and the result of the push to main is
-   * what gets recorded. False when the landing was stopped; it must not push.
+   * For a landing's `land` step, right before it pushes: claims the push (again, for a retried
+   * step), so the merge request can no longer be dequeued by a push or cancelled, and what the push
+   * to main does is what gets recorded. False when its merge request left the queue: it must not push.
    */
-  claimLandingPush(landing: number): boolean {
+  claimLandingPush(run: number): boolean {
     return this.#sql.transaction(() => {
-      const current = this.landings.get(landing);
-      if (current === null || !this.#landingCurrent(current)) return false;
-      if (current.status === "pushing") return true;
-      if (current.status !== "running") return false;
-      this.landings.move(landing, "pushing");
+      const current = this.scoring.getRun(run);
+      if (current?.merge_request == null || current.status !== "running") return false;
+      if (!this.#landingCurrent(current)) return false;
+      this.scoring.claimLand(run);
       return true;
     });
   }
 
   /**
-   * Records how a landing ended, from its Workflow's report: `landed` merges the merge request (its
-   * source attempt merged, its task closed, its fork archived) and journals `mainAdvanced`; any
-   * other outcome dequeues it with that reason and its details, back to `pending`, or to
-   * `needsReview` if its source moved while it was pushing. A report from a landing that was stopped,
-   * or already reported, is discarded. Returns whether it was recorded. The caller drains afterwards,
-   * which starts the next landing.
-   *
-   * An `errored` landing that claimed its push may have pushed anyway (its result lost after the
-   * push, say). When `main`'s head is its merge commit it is recorded as landed, so its merge request
-   * never returns to `pending` and lands twice. A landing's merge and its `mainAdvanced` are
-   * recorded in one transaction before the source is archived, so a report retried after an
-   * interrupted archive finds the landing already recorded.
+   * For a landing's run once its `land` step pushed `sha` to main: the landed sha becomes the run's
+   * head and `main`'s, and the merge request is merged (its source attempt merged, its task closed,
+   * its fork archived), journalling `mainAdvanced`. Its post-gate steps run after. Recorded once, in
+   * one transaction before the archive, so a step retried after an interrupted archive finds it
+   * recorded. Returns whether this call recorded it.
    */
-  async landingFinished(landing: number, reported: LandingOutcome): Promise<boolean> {
+  async pipelineLanded(run: number, sha: string): Promise<boolean> {
     try {
-      return await this.#landingFinished(landing, reported);
+      const landed = this.#sql.transaction(() => {
+        const current = this.scoring.getRun(run);
+        if (current?.merge_request == null || current.status !== "running" || !current.land_claimed) return null;
+        if (current.sha !== null) return null;
+        const mr = this.mergeRequests.get(current.merge_request);
+        if (mr?.state !== "landing") return null;
+        const { source } = this.#landRows(null, { task: mr.task, sha });
+        this.scoring.landed(current, sha);
+        this.#journal(null, "mainAdvanced", mr.task, mr.attempt, {
+          mergeRequest: taskRef(mr.task),
+          head: mr.approved_head,
+          sha,
+          run,
+        });
+        return { project: current.project, source };
+      });
+      if (landed === null) return false;
+      await this.#archive({ id: landed.project }, [landed.source]);
+      return true;
     } finally {
       this.wakeWaiters();
     }
   }
 
-  async #landingFinished(landing: number, reported: LandingOutcome): Promise<boolean> {
-    // A Workflow started before values were camelCase may still report `failedChecks`.
-    const outcome = normaliseLandingOutcome(reported);
-    let current = this.#reportable(landing);
-    if (current === null) return false;
-    let sha = outcome.kind === "landed" ? outcome.sha : null;
-    if (outcome.kind === "errored" && current.status === "pushing") {
-      sha = await this.#mergedOnMain(current);
-      current = this.#reportable(landing);
-      if (current === null) return false;
-    }
-    const { task, attempt, head, project } = current;
-    if (sha !== null) {
-      const landedSha = sha;
-      const { source } = this.#sql.transaction(() => {
-        // Read before landing it: the owner's approval makes the landing the owner's merge.
-        const ownersMerge = this.mergeRequests.ownerApproved(this.#openMergeRequest(task));
-        const landed = this.#landRows(null, { task, sha: landedSha });
-        this.landings.move(landing, "landed");
-        this.#journal(null, "mainAdvanced", task, attempt, { mergeRequest: taskRef(task), head, sha: landedSha });
-        // `main` moved: it runs the `main` pipeline on what landed.
-        this.scoring.request({
-          project,
-          line: MAIN_LINE,
-          sha: landedSha,
-          trigger: "push",
-          actor: null,
-          ownersPush: ownersMerge,
-        });
-        return landed;
-      });
-      await this.#archive({ id: project }, [source]);
-      return true;
-    }
-    if (outcome.kind === "landed") return false;
-    this.#sql.transaction(() => {
-      this.landings.move(landing, "dequeued");
-      const mr = this.#openMergeRequest(task);
-      const source = this.#attempt(sourceOf(mr));
-      const moved = this.scoring.statusFor(attemptLine(source)).sha !== mr.approved_head;
-      this.mergeRequests.dequeue(null, mr, dequeueCause(outcome), moved ? "needsReview" : "pending");
-    });
-    return true;
+  /**
+   * `main`'s head when it is the landing's merge commit: a merge whose second parent is the approved
+   * head. A landing whose `land` step lost its result after pushing reads it here, so it is recorded
+   * as landed and its merge request never lands twice. Only landings write `main`, one at a time,
+   * so nothing else can have put it there. A failed read throws, so the caller tries again.
+   */
+  async landedOnMain(run: number): Promise<string | null> {
+    const current = this.scoring.getRun(run);
+    const mr = current?.merge_request == null ? null : this.mergeRequests.get(current.merge_request);
+    if (current === null || mr === null) return null;
+    const [tip] = await this.#repos.listCommits(originRepo(current.project), { ref: "main", limit: 1 });
+    return tip !== undefined && tip.parents.length === 2 && tip.parents[1] === mr.approved_head ? tip.hash : null;
   }
 
   /**
-   * The landing, while a report from it can still be recorded: it is running or pushing and its
-   * merge request is still landing. A landing whose merge request left the queue is marked stopped.
+   * A landing's run ended without landing (its `pipelineLanded` merged its merge request when it
+   * did): a conflict, a failed gate or an error dequeues its merge request, naming the run, back to
+   * `pending`, or to `needsReview` if its source moved meanwhile. One whose merge request already
+   * left the queue changes nothing. In the caller's transaction.
    */
-  #reportable(landing: number): StoredLanding | null {
-    const current = this.landings.get(landing);
-    if (current === null || (current.status !== "running" && current.status !== "pushing")) {
-      console.log({ event: "landing.discarded_report", landing, status: current?.status ?? null });
-      return null;
-    }
-    if (!this.#landingCurrent(current)) {
-      this.#sql.transaction(() => this.landings.move(landing, "stopped"));
-      return null;
-    }
-    return current;
+  #landingEnded(run: StoredRun): void {
+    if (run.sha !== null || run.merge_request === null) return;
+    const mr = this.mergeRequests.get(run.merge_request);
+    if (mr?.state !== "landing") return;
+    let reason: LandingDequeueReason = "errored";
+    if (run.status === "done") reason = run.outcome?.landed === "conflict" ? "conflict" : "failedChecks";
+    const source = this.#attempt(sourceOf(mr));
+    const moved = this.scoring.statusFor(attemptLine(source)).sha !== mr.approved_head;
+    this.mergeRequests.dequeue(null, mr, { reason, run: run.id }, moved ? "needsReview" : "pending");
   }
 
-  /**
-   * The landing's merge commit when `main`'s head is one: a merge whose second parent is the
-   * landing's head. Only the merge queue writes `main`, one landing at a time, so nothing else can
-   * have put it there. A failed read throws, so the report is retried rather than recorded wrongly.
-   */
-  async #mergedOnMain(landing: StoredLanding): Promise<string | null> {
-    const [tip] = await this.#repos.listCommits(originRepo(landing.project), { ref: "main", limit: 1 });
-    return tip !== undefined && tip.parents.length === 2 && tip.parents[1] === landing.head ? tip.hash : null;
-  }
-
-  /** The landing's merge request is still open and landing. */
-  #landingCurrent(landing: StoredLanding): boolean {
-    const mr = this.mergeRequests.open(landing.task);
-    return mr !== null && mr.id === landing.merge_request && mr.state === "landing";
+  /** Whether the landing's merge request is still open and landing. */
+  #landingCurrent(run: StoredRun): boolean {
+    const mr = run.merge_request === null ? null : this.mergeRequests.get(run.merge_request);
+    return mr?.state === "landing";
   }
 
   /** Whether the merge request's landing has claimed its push to main. */
   #pushing(mr: StoredMergeRequest): boolean {
     if (mr.state !== "landing") return false;
-    const active = this.landings.active();
-    return active?.merge_request === mr.id && active.status === "pushing";
-  }
-
-  /** The Sandbox slot the merge queue holds: one while a landing is in flight or the queue is waiting to start one. */
-  #landingSlots(): number {
-    if (this.#landing === null) return 0;
-    return this.landings.active() !== null || this.mergeRequests.queue().length > 0 ? 1 : 0;
-  }
-
-  async #drainLandings(project: string): Promise<void> {
-    const runner = this.#landing;
-    if (runner === null) return;
-    const stopping = this.#sql.transaction(() => {
-      const active = this.landings.active();
-      if (active?.status === "running" && !this.#landingCurrent(active)) this.landings.move(active.id, "stopped");
-      return this.landings.claimStopped();
-    });
-    await Promise.all(stopping.map((landing) => this.#stopLanding(runner, landing)));
-
-    const started = this.#sql.transaction(() => this.#startLanding(project));
-    if (started === null) return;
-    try {
-      await runner.workflow.create({ id: started.instance_id, params: started.params });
-    } catch (error) {
-      await this.landingFinished(started.id, {
-        kind: "errored",
-        details: { step: "start", error: String(error).slice(0, 2000) },
-      });
-      await this.#drainLandings(project);
-      return;
-    }
-    // A push or cancel may have dequeued it while its Workflow was being created.
-    if (this.landings.get(started.id)?.status === "running" && !this.#landingCurrent(started)) {
-      await this.#drainLandings(project);
-    }
+    const run = this.scoring.latestLanding(mr.id);
+    return run?.status === "running" && run.land_claimed;
   }
 
   /**
-   * Starts a landing for the front of the queue when nothing is landing and a Sandbox slot is free:
-   * moves it to `landing` and records the landing with what its Workflow needs.
+   * Cancels each landing's run whose merge request left the queue, until it claims its push; then,
+   * when no landing is queued or running but one that has landed (and runs its post-gate steps),
+   * queues one for the front of the queue, moving it to `landing`. A landing merge request whose run errored before it ran (its Workflow couldn't be
+   * started) is dequeued first. Nothing lands without a runner to start runs. In the caller's
+   * transaction; returns whether it changed anything.
    */
-  #startLanding(project: string): (StoredLanding & { params: LandingParams }) | null {
-    if (this.landings.active() !== null) return null;
-    if (this.scoring.running() >= SCORING_CAP) return null;
-    const [front] = this.mergeRequests.queue();
-    if (front === undefined) return null;
-    // A merge request already landing without a landing in flight (one started before landings were
-    // recorded) gets one now.
-    const mr = front.state === "queued" ? this.mergeRequests.startLanding(null, front) : front;
-    const landing = this.landings.start(
-      { project, task: mr.task, attempt: mr.attempt, merge_request: mr.id, head: mr.approved_head },
-      (id) => `${forkRepo(project, attemptRef(mr.task, mr.attempt))}-landing-${id}`,
-    );
+  #drainLandings(project: string): boolean {
+    if (!this.#lands) return false;
+    let changed = false;
+    for (const run of this.scoring.liveLandings()) {
+      if (run.land_claimed || this.#landingCurrent(run)) continue;
+      this.scoring.cancel(run, "its merge request left the queue");
+      changed = true;
+    }
+    if (this.scoring.liveLandings().some((run) => run.sha === null)) return changed;
+    for (const front of this.mergeRequests.queue()) {
+      const last = front.state === "landing" ? this.scoring.latestLanding(front.id) : null;
+      if (last?.status === "errored") {
+        this.#landingEnded(last);
+        changed = true;
+        continue;
+      }
+      // A merge request already landing with no run (one whose Landing Workflow was retired) gets one.
+      const mr = front.state === "queued" ? this.mergeRequests.startLanding(null, front) : front;
+      this.scoring.requestLanding({
+        project,
+        mergeRequest: mr.id,
+        approver: mr.approved_by,
+        trusted: this.mergeRequests.ownerApproved(mr),
+      });
+      return true;
+    }
+    return changed;
+  }
+
+  /** What a landing's Workflow is told of its merge: the approved head, who approved it and who co-authored it. */
+  #landingParams(run: StoredRun): LandingParams {
+    const mr = run.merge_request === null ? null : this.mergeRequests.get(run.merge_request);
+    if (mr === null) throw new Error(`run ${run.id} lands no merge request`);
     const coAuthors = this.#sql.exec<{ user: string; alias: string }>(
       `SELECT user_id AS user, alias FROM journal WHERE kind = 'pushed' AND task = ? AND attempt = ?
          AND user_id IS NOT NULL AND alias IS NOT NULL GROUP BY user_id, alias ORDER BY MIN(id)`,
       mr.task,
       mr.attempt,
     );
-    const params: LandingParams = {
-      project,
-      landing: landing.id,
+    return {
       task: mr.task,
       attempt: mr.attempt,
       title: this.#task(mr.task).title,
       head: mr.approved_head,
       approver: mr.approved_by,
       coAuthors: coAuthors.map(({ user, alias }) => ({ user, alias })),
-      startedAt: landing.started_at,
+      startedAt: run.created_at,
     };
-    return { ...landing, params };
   }
 
-  async #stopLanding(runner: LandingRunner, landing: StoredLanding): Promise<void> {
-    try {
-      const instance = await runner.workflow.get(landing.instance_id);
-      await instance.terminate();
-      await runner.teardown(landing.instance_id);
-    } catch (error) {
-      // It may already have ended; its report is discarded either way.
-      console.warn({ event: "landing.stop_failed", instance_id: landing.instance_id, error: String(error) });
+  // A Landing Workflow under way when landings became runs reports as it did, naming its landing's
+  // old id, which its run keeps (`migrateLandings`). Once it resumes on the Pipeline Workflow's
+  // code, it hands its landing back (`legacyLandingResumed`).
+
+  /** For a Landing Workflow's land step, under its old code: `claimLandingPush` for its run. */
+  claimLegacyLandingPush(landing: number): boolean {
+    const run = this.scoring.legacyLanding(landing);
+    return run !== null && this.claimLandingPush(run.id);
+  }
+
+  /**
+   * For a Landing Workflow ending under its old code: records its outcome on its run. One that
+   * errored after claiming its push is landed when `main` holds its merge commit. Returns whether
+   * it was recorded.
+   */
+  async legacyLandingFinished(landing: number, reported: LegacyLandingOutcome): Promise<boolean> {
+    const run = this.scoring.legacyLanding(landing);
+    if (run?.status !== "running") return false;
+    // A Workflow started before values were camelCase may still report `failedChecks`.
+    const outcome = normaliseLandingOutcome(reported);
+    let sha = outcome.kind === "landed" ? outcome.sha : null;
+    if (outcome.kind === "errored" && run.land_claimed) sha = await this.landedOnMain(run.id);
+    if (sha !== null) {
+      if (!run.land_claimed) this.claimLandingPush(run.id);
+      await this.pipelineLanded(run.id, sha);
+      return this.pipelineFinished(run.id, { status: "done", outcome: landedOutcome(sha) });
     }
+    switch (outcome.kind) {
+      case "landed": {
+        return false;
+      }
+      case "conflict": {
+        return this.pipelineFinished(run.id, { status: "done", outcome: conflictOutcome(outcome.details) });
+      }
+      case "failedChecks": {
+        return this.pipelineFinished(run.id, { status: "done", outcome: legacyFailedOutcome(outcome.details) });
+      }
+      case "errored": {
+        const { step, error } = outcome.details;
+        return this.pipelineFinished(run.id, { status: "errored", error: `${step}: ${error}` });
+      }
+    }
+  }
+
+  /**
+   * For a Landing Workflow resumed on the Pipeline Workflow's code, once its containers are gone:
+   * one that had claimed its push and whose merge commit is on `main` landed; any other is let go,
+   * and its merge request, still landing, gets a new landing's run at the next drain.
+   */
+  async legacyLandingResumed(landing: number): Promise<void> {
+    const run = this.scoring.legacyLanding(landing);
+    if (run?.status !== "running") return;
+    const sha = run.land_claimed ? await this.landedOnMain(run.id) : null;
+    if (sha !== null) {
+      await this.pipelineLanded(run.id, sha);
+      this.pipelineFinished(run.id, { status: "done", outcome: landedOutcome(sha) });
+      return;
+    }
+    this.#sql.transaction(() =>
+      this.scoring.abandon(run, "its Landing Workflow was retired; the landing starts again"),
+    );
   }
 
   // --- internals -------------------------------------------------------------------------------
@@ -3256,7 +3314,7 @@ export const TASK_METHODS = [
   "getVote",
   "cancelMergeRequest",
   "getMergeRequest",
-  "dequeueLogKey",
+  "getDequeue",
   "mergeQueue",
   "listSecrets",
   "putSecret",

@@ -49,7 +49,7 @@ import {
   SOURCES,
   VOTE_ELIGIBILITIES,
 } from "./config.ts";
-import { dequeueRoutes } from "./dequeue-api.ts";
+import { ConflictDetailsSchema, dequeueRoutes } from "./dequeue-api.ts";
 import type { DiffCache } from "./diff.ts";
 import { errorBody, errorResponse, ServiceError } from "./errors.ts";
 import { FORWARDED_EMAIL_HEADER } from "./forwarded.ts";
@@ -531,8 +531,10 @@ const RunSchema = z
       example: "t42a3",
     }),
     pipeline: z.enum(PIPELINES).openapi({ description: "`main` on the `main` line, `default` on every other." }),
-    sha: z.string().openapi({ description: "The head it runs." }),
-    trigger: z.enum(SCORING_TRIGGERS),
+    sha: z.string().nullable().openapi({
+      description: "The head it runs; null for a merge request's landing until it lands, when it is the landed commit.",
+    }),
+    trigger: z.enum(SCORING_TRIGGERS).openapi({ description: "`merge` for a merge request's landing." }),
     status: z.enum(RUN_STATUSES).openapi({
       description: "`waiting` while it needs the project owner to start it; it holds no slot meanwhile.",
     }),
@@ -546,7 +548,8 @@ const RunSchema = z
     gate: z.enum(GATES).nullable().openapi({ description: "Its gate once `done`; null until then." }),
     cancellable: z.boolean().openapi({
       description:
-        "Whether the project owner may cancel it now: while it is queued, waiting, or running on any line but `main`.",
+        "Whether the project owner may cancel it now: while it is queued, waiting, or running on any line but " +
+        "`main`. Never a landing, which only its merge request leaving the queue cancels.",
     }),
   })
   .openapi("Run", { description: "One pipeline run on one of the project's lines." });
@@ -680,7 +683,18 @@ const RunStepSchema = z
 const RunOutcomeSchema = ScoringResultSchema.pick({ base: true, config: true, gate: true, metrics: true })
   .extend({
     steps: z.array(RunStepSchema).openapi({
-      description: "Every step in run order: Throng's `_diff`, the setups, the checks, then any post-gate steps.",
+      description:
+        "Every step in run order: Throng's `_diff`, the setups, the checks, then any post-gate steps. A landing " +
+        "has Throng's `merge` after `_diff` and `land` before the post-gate steps.",
+    }),
+    landed: z
+      .union([z.object({ sha: z.string() }), z.literal("conflict")])
+      .optional()
+      .openapi({
+        description: "For a landing: the commit it landed, or `conflict` when its merge conflicted; absent otherwise.",
+      }),
+    conflict: ConflictDetailsSchema.optional().openapi({
+      description: "For a landing whose merge conflicted: the conflict, file by file.",
     }),
   })
   .openapi("RunOutcome");
@@ -773,7 +787,13 @@ const MergeRequestSchema = z
       .nullable()
       .openapi({ description: "Its 1-based place in the merge queue while queued or landing; the landing one is 1." }),
     lastDequeue: z
-      .object({ reason: z.enum(DEQUEUE_REASONS), at: z.string() })
+      .object({
+        reason: z.enum(DEQUEUE_REASONS),
+        run: z.number().int().nullable().openapi({
+          description: "The landing's run behind it; null for `newPush` and `cancelled`.",
+        }),
+        at: z.string(),
+      })
       .nullable()
       .openapi({ description: "Why it last left the queue without landing." }),
     mergeSha: z.string().nullable().openapi({ description: "The merge commit on `main`, once merged." }),
@@ -2210,7 +2230,7 @@ export function apiRoutes(options: ApiOptions = {}) {
       "/",
       browseRoutes({ auth: browser, repos: reposFor, tasks: backendFor, diffCache: options.diffCache ?? workersCache }),
     )
-    .route("/", dequeueRoutes({ auth: browser, repos: reposFor, tasks: backendFor, logs: logsFor }))
+    .route("/", dequeueRoutes({ auth: browser, repos: reposFor, tasks: backendFor }))
     .route("/", secretsRoutes({ auth: browser, repos: reposFor, tasks: backendFor }));
 
   api.doc31("/openapi.json", { openapi: "3.1.0", info: { title: "Throng API", version: "0.0.0" } });

@@ -3,6 +3,7 @@
 
 import { parseAttemptRef, parseTaskRef, taskRef } from "@throng/platform/task-refs";
 import type { ProjectRef, Run, RunWithOutcome } from "@/lib/api";
+import { shortSha } from "@/lib/commits";
 import { buildPath } from "@/lib/paths";
 
 export type RunStep = NonNullable<RunWithOutcome["outcome"]>["steps"][number];
@@ -21,6 +22,7 @@ export const TRIGGER_LABELS: Record<Run["trigger"], string> = {
   push: "Push",
   scoreNow: "Score now",
   rescore: "Rescore",
+  merge: "Merge",
 };
 
 export const STEP_OUTCOME_LABELS: Record<RunStep["outcome"], string> = {
@@ -60,14 +62,20 @@ export function triggeredBy(run: Pick<Run, "requestedBy" | "alias">): string {
 
 /**
  * Where a run's line links: an attempt's or a task branch's line to its task's page, and `main` to
- * the commit the run ran.
+ * the commit the run ran, or to `main`'s commits for a landing that hasn't landed.
  */
 export function lineHref(projectRef: ProjectRef, run: Pick<Run, "line" | "sha">): string {
   const attempt = parseAttemptRef(run.line);
   if (attempt !== null) return buildPath({ view: "task", ...projectRef, task: taskRef(attempt.task) });
   const task = parseTaskRef(run.line);
   if (task !== null) return buildPath({ view: "task", ...projectRef, task: taskRef(task) });
+  if (run.sha === null) return buildPath({ view: "commits", ...projectRef, ref: run.line });
   return buildPath({ view: "commit", ...projectRef, sha: run.sha });
+}
+
+/** A run's head as the runs pages show it: short, or a dash for a landing that hasn't landed. */
+export function runHead(run: Pick<Run, "sha">): string {
+  return run.sha === null ? "—" : shortSha(run.sha);
 }
 
 /** Throng's own steps of a landing, which the run page shows between the checks and the post-gate steps. */

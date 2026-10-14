@@ -1,15 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseConfig } from "../src/config.ts";
-import {
-  buildResult,
-  checkOutcome,
-  gateFor,
-  parseShortstat,
-  scorePlan,
-  scoreTimeoutMs,
-  SETUP_TIMEOUT_MS,
-  upgradeResult,
-} from "../src/results.ts";
+import { buildResult, checkOutcome, gateFor, parseShortstat, scorePlan, upgradeResult } from "../src/results.ts";
 import type { CheckResult, LegacyResult, RawScore } from "../src/results.ts";
 
 const BASE = "a".repeat(40);
@@ -137,10 +128,6 @@ describe("scorePlan", () => {
       { name: "link", from: "t.out.link", rule: { type: "string" } },
     ]);
     expect(scorePlan({ kind: "invalid", error: "x" })).toEqual({ setup: [], checks: [], allow: [] });
-  });
-
-  it("gives the score step room for every setup command and check at its timeout", () => {
-    expect(scoreTimeoutMs(scorePlan(CONFIG))).toBe(SETUP_TIMEOUT_MS + 720_000 + 5 * 60 * 1000);
   });
 });
 

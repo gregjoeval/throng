@@ -9,8 +9,9 @@ import { THRONG_COMMITTER } from "./landing.ts";
 import { setupLogName, stepLogName } from "./logs.ts";
 import { METRIC_VALUES_SOURCE, metricValue, parseFrom } from "./metric-values.ts";
 import type { MetricValue } from "./metric-values.ts";
-import { checkOrder, MAX_OUTPUT_BYTES, SETUP_TIMEOUT_MS } from "./results.ts";
-import type { PlannedCheck, PlannedMetric, ScorePlan } from "./results.ts";
+import type { TreeEntry } from "./repos.ts";
+import { MAX_OUTPUT_BYTES, SETUP_TIMEOUT_MS } from "./results.ts";
+import type { PlannedCheck, PlannedMetric } from "./results.ts";
 import { taskBranchRef } from "./task-refs.ts";
 
 export const RESULT_PREFIX = "THRONG_RESULT ";
@@ -38,14 +39,38 @@ export const RERUN_SETUP_FAILED_EXIT = 17;
 export const STEP_NOT_READY_EXIT = 18;
 
 /**
- * Bash that fetches the head `sha` from the line's repo into `tree` and checks it out, in a clean
- * `/workspace` with `logs` and `out` beside it. It fetches the repo's branches and its task branches
- * (`refs/tasks/*`), as a task branch's head is only under the latter. Needs `PRELUDE`.
+ * What a pipeline run's containers check out: a line's head `sha`, fetched from the line's repo, or
+ * for a landing the merge of its approved head onto `main` (`merge`), fetched from the origin and
+ * the attempt's fork.
  */
-function checkoutTree(remote: string, sha: string): string {
-  return `rm -rf tree logs out ${SETUP_DONE} ${STEP_READY} && mkdir logs out && git init -q tree && cd tree
-git fetch -q ${quote(remote)} '+refs/heads/*:refs/remotes/line/*' '+refs/tasks/*:refs/remotes/tasks/*' || exit 10
-git checkout -q --detach ${quote(sha)} || exit 11`;
+export type Checkout =
+  | { kind: "line"; remote: string; sha: string }
+  | { kind: "merge"; origin: string; fork: string; merge: MergePlan };
+
+/**
+ * Bash that checks `checkout` out into `tree`, in a clean `/workspace` with `logs` and `out` beside
+ * it. A line's head is fetched with the repo's branches and its task branches (`refs/tasks/*`), as a
+ * task branch's head is only under the latter. A landing's merge is made again from `main` and the
+ * approved head, which must give the tree its `merge` step recorded, and committed here only (never
+ * pushed), so `HEAD` holds the merged tree with `main` and the head as its parents. Needs `PRELUDE`.
+ */
+function checkoutTree(checkout: Checkout): string {
+  const fresh = `rm -rf tree logs out ${SETUP_DONE} ${STEP_READY} && mkdir logs out && git init -q tree && cd tree`;
+  if (checkout.kind === "line") {
+    return `${fresh}
+git fetch -q ${quote(checkout.remote)} '+refs/heads/*:refs/remotes/line/*' '+refs/tasks/*:refs/remotes/tasks/*' || exit 10
+git checkout -q --detach ${quote(checkout.sha)} || exit 11`;
+  }
+  const { head, main, tree } = checkout.merge;
+  const { name, email } = THRONG_COMMITTER;
+  const who = `GIT_AUTHOR_NAME=${quote(name)} GIT_AUTHOR_EMAIL=${quote(email)} GIT_COMMITTER_NAME=${quote(name)} GIT_COMMITTER_EMAIL=${quote(email)}`;
+  return `${fresh}
+git fetch -q ${quote(checkout.fork)} '+refs/heads/*:refs/remotes/fork/*' || exit 10
+git fetch -q ${quote(checkout.origin)} '+refs/heads/main:refs/remotes/origin/main' || exit 12
+git cat-file -e ${quote(`${head}^{commit}`)} && git cat-file -e ${quote(`${main}^{commit}`)} || exit 11
+[ "$(git merge-tree --write-tree ${quote(main)} ${quote(head)} | head -n 1)" = ${quote(tree)} ] || exit 14
+merged=$(${who} git commit-tree ${quote(tree)} -p ${quote(main)} -p ${quote(head)} -m 'Merge for the landing') || exit 14
+git checkout -q --detach "$merged" || exit 11`;
 }
 
 /**
@@ -74,17 +99,14 @@ export interface SetupResult {
 }
 
 /**
- * A pipeline run's setup container: fetches the head `sha` from the line's repo and records the diff size
- * from `base`, the attempt's base as `attemptBase` derived it (an ancestor of the head, so the fork
- * has it), or from the empty tree when it has none. Then it runs each setup in order under `timeout`,
- * each logging to `logs/<setup.n>.log`, and stops at the first that fails. When every one passed it
- * leaves `setup.done`, so the snapshot taken of it next carries both the setups' work and the mark.
+ * A pipeline run's setup container: checks `checkout` out and records the diff size from `base`
+ * (the line's base as `lineBase` derived it, an ancestor of the head so the repo has it; `main` for
+ * a landing), or from the empty tree when it has none. Then it runs each setup in order under
+ * `timeout`, each logging to `logs/<setup.n>.log`, and stops at the first that fails. When every one
+ * passed it leaves `setup.done`, so the snapshot taken of it next carries both the setups' work and
+ * the mark.
  */
-export function setupScript(
-  remote: string,
-  { sha, base }: { sha: string; base: string | null },
-  setups: readonly SetupConfig[],
-): string {
+export function setupScript(checkout: Checkout, base: string | null, setups: readonly SetupConfig[]): string {
   const steps = setups
     .map(
       ({ command }, i) => `t0=$(now)
@@ -96,7 +118,7 @@ printf '%s %s\\n' "$code" "$(( $(now) - t0 ))" > ../out/${setupLogName(i + 1)}.s
     .map((step) => `if [ -z "$setup_failed" ]; then\n${step}\nfi`)
     .join("\n");
   return `${PRELUDE}
-${checkoutTree(remote, sha)}
+${checkoutTree(checkout)}
 now() { date +%s%3N; }
 t0=$(now)
 base=${quote(base ?? "")}
@@ -135,15 +157,14 @@ export interface CheckRun {
 /**
  * A pipeline run's container for one check. Restored from the setup container's snapshot it finds
  * `setup.done` and goes straight to the check; otherwise (no snapshot, or one that couldn't be
- * restored) it fetches the head and runs the setups itself first, their output at the top of the
- * check's log. A setup that fails here passed in the setup container, so it's an infrastructure
+ * restored) it checks `checkout` out and runs the setups itself first, their output at the top of
+ * the check's log. A setup that fails here passed in the setup container, so it's an infrastructure
  * failure (`RERUN_SETUP_FAILED_EXIT`). The check runs under `timeout` with `$THRONG_OUTPUT` pointing
  * at an empty directory of its own, logging to `logs/<name>.log`, and as soon as it exits, whatever
  * its outcome, `readValues` reads its metrics from that directory.
  */
 export function checkScript(
-  remote: string,
-  sha: string,
+  checkout: Checkout,
   setups: readonly SetupConfig[],
   check: Pick<PlannedCheck, "name" | "command" | "timeoutMs" | "metrics">,
 ): string {
@@ -154,7 +175,7 @@ now() { date +%s%3N; }
 setups_rerun=false
 if [ ! -f ${SETUP_DONE} ]; then
   setups_rerun=true
-  ${checkoutTree(remote, sha).replaceAll("\n", "\n  ")}
+  ${checkoutTree(checkout).replaceAll("\n", "\n  ")}
 ${rerunSetups(setups, log)}
   touch ../${SETUP_DONE}
 else
@@ -177,9 +198,11 @@ export interface StepReady {
 
 /**
  * Readies a pipeline run's container for one post-gate step, without starting the step's command:
- * restored from the setups' snapshot it finds `setup.done`; otherwise it fetches the head and runs
- * the setups itself, their output at the top of the step's log. Then it leaves `step.ready` for
- * `stepScript`. Safe to retry: the step's command hasn't started.
+ * restored from the setups' snapshot it finds `setup.done`; otherwise it fetches the head `sha` and
+ * runs the setups itself, their output at the top of the step's log. A landing's snapshot holds the
+ * merged tree under a commit of its own, so a container restored from it then checks out the landed
+ * commit `sha`, whose tree is the same: what the setups made stays as it is. Then it leaves
+ * `step.ready` for `stepScript`. Safe to retry: the step's command hasn't started.
  */
 export function stepReadyScript(remote: string, sha: string, setups: readonly SetupConfig[], step: StepConfig): string {
   const log = `../logs/${stepLogName(step.name)}.log`;
@@ -187,10 +210,13 @@ export function stepReadyScript(remote: string, sha: string, setups: readonly Se
 setups_rerun=false
 if [ ! -f ${SETUP_DONE} ]; then
   setups_rerun=true
-  ${checkoutTree(remote, sha).replaceAll("\n", "\n  ")}
+  ${checkoutTree({ kind: "line", remote, sha }).replaceAll("\n", "\n  ")}
 ${rerunSetups(setups, log)}
   touch ../${SETUP_DONE}
   cd ..
+elif [ "$(git -C tree rev-parse HEAD)" != ${quote(sha)} ]; then
+  git -C tree fetch -q ${quote(remote)} '+refs/heads/*:refs/remotes/line/*' || exit 10
+  git -C tree checkout -q --detach ${quote(sha)} || exit 11
 fi
 touch ${STEP_READY}
 result "{\\"setupsRerun\\":$setups_rerun}"
@@ -219,78 +245,6 @@ timeout -k 10s ${seconds(timeoutMs)} bash -c ${quote(step.command)} < /dev/null 
 code=$?
 result "{\\"exit\\":$code,\\"durationMs\\":$(( $(now) - t0 ))}"
 `;
-}
-
-/**
- * Bash that runs each setup and then every check, one at a time, in the checked-out tree, each under
- * `timeout` with `$THRONG_OUTPUT` pointing at an empty directory of its own. A failed setup skips
- * every check; a check runs only once every check it waits for passed, and a failed check doesn't
- * stop the others. As soon as a check exits, whatever its outcome, `readValues` reads the values of
- * its metrics from that directory. Each step's output goes to `../logs/<name>.log`, named by
- * `logNames`. It ends with a `RawScore` result made from `$base`, `$shortstat` and `$builtin_ms`,
- * and needs `$out` and `now`.
- */
-function runPlan(plan: ScorePlan): string {
-  const setup = plan.setup
-    .map(
-      (
-        { command },
-        i,
-      ) => `if [ -z "$setup_failed" ] && ! timeout -k 10s ${seconds(SETUP_TIMEOUT_MS)} bash -c ${quote(command)} < /dev/null > ../logs/${setupLogName(i + 1)}.log 2>&1; then
-  setup_failed=${i + 1}
-fi`,
-    )
-    .join("\n");
-  const index = new Map(plan.checks.map((check, i) => [check.name, i]));
-  const checks = checkOrder(plan.checks)
-    .map((check) => {
-      const i = index.get(check.name) ?? 0;
-      // A check waits for every check it names to have exited 0.
-      const waits = check.after
-        .map((name) => ` && [ "$(cut -d ' ' -f 1 "$out/${index.get(name) ?? 0}.status" 2> /dev/null)" = 0 ]`)
-        .join("");
-      return `if [ -z "$setup_failed" ]${waits}; then
-  mkdir "$out/${i}.output"
-  t0=$(now)
-  THRONG_OUTPUT="$out/${i}.output" timeout -k 10s ${seconds(check.timeoutMs)} bash -c ${quote(check.command)} < /dev/null > ../logs/${check.name}.log 2>&1
-  code=$?
-  printf '%s %s\\n' "$code" "$(( $(now) - t0 ))" > "$out/${i}.status"
-${check.metrics.length === 0 ? "" : readValues(`"$out/${i}.output"`, check.metrics, `"$out/${i}.values"`)}
-fi`;
-    })
-    .join("\n");
-  return `setup_failed=""
-${setup}
-${checks}
-node - "$out" ${plan.checks.length} "$base" "$shortstat" "$builtin_ms" "$setup_failed" <<'NODE' || exit 16
-const fs = require("fs");
-const [out, count, base, shortstat, builtinMs, setupFailed] = process.argv.slice(2);
-const values = (path) => {
-  try {
-    const values = JSON.parse(fs.readFileSync(path, "utf8"));
-    return typeof values === "object" && values !== null && !Array.isArray(values) ? values : {};
-  } catch {
-    return {};
-  }
-};
-const checks = [];
-for (let i = 0; i < Number(count); i++) {
-  if (!fs.existsSync(out + "/" + i + ".status")) {
-    checks.push({ exit: null, durationMs: 0, metrics: {} });
-    continue;
-  }
-  const [exit, durationMs] = fs.readFileSync(out + "/" + i + ".status", "utf8").trim().split(" ").map(Number);
-  checks.push({ exit, durationMs, metrics: values(out + "/" + i + ".values") });
-}
-const result = {
-  base: base || null,
-  shortstat,
-  builtinMs: Number(builtinMs),
-  setupFailed: setupFailed === "" ? null : Number(setupFailed),
-  checks,
-};
-process.stdout.write("${RESULT_PREFIX}" + JSON.stringify(result) + "\\n");
-NODE`;
 }
 
 /**
@@ -338,11 +292,11 @@ NODE`;
 }
 
 /**
- * The conflict check's result: `main`'s sha, the merge base (null with no shared history), the raw
+ * The `merge` step's result: `main`'s sha, the merge base (null with no shared history), the raw
  * `merge-tree` output for `parseMergeTree`, each content conflict's zdiff3 re-merge for
  * `conflictFiles`, and for a clean merge the merged tree's config (`parseConfig` it), null with none.
  */
-export interface ConflictCheckResult {
+export interface MergeResult {
   main: string;
   clean: boolean;
   base: string | null;
@@ -350,9 +304,15 @@ export interface ConflictCheckResult {
   remerges: Remerge[];
   /** The merged tree's `.throng/config.yml`, cut one byte past `MAX_CONFIG_BYTES` so an oversized one stays invalid. */
   config: string | null;
+  /**
+   * For a clean merge: each tree the merge made, by its hash, with its entries. They're in no repo,
+   * so a cache key read from the merged tree reads them here; every other tree in it is `main`'s or
+   * the head's. Absent from a result of a script that didn't give them.
+   */
+  trees?: Record<string, TreeEntry[]>;
 }
 
-/** The merge the Landing Workflow lands: the approved head onto `main`, giving `tree`. */
+/** The merge a landing lands: the approved head onto `main`, giving `tree`. */
 export interface MergePlan {
   head: string;
   main: string;
@@ -360,7 +320,7 @@ export interface MergePlan {
 }
 
 /**
- * Landing step 1, untrusted (read grants only): fetches the origin's `main` and the approved head
+ * A landing's `merge` step, untrusted (read grants only): fetches the origin's `main` and the approved head
  * from the fork, then runs `git merge-tree --write-tree --messages -z` on them. It writes nothing;
  * `parseMergeTree` reads the merged tree, or the conflicting paths, from `output`.
  *
@@ -370,9 +330,9 @@ export interface MergePlan {
  * over twice the total cap, is `tooLarge`; `conflictFiles` applies the exact caps.
  *
  * On a clean merge it reads `.throng/config.yml` from the merged tree, before any repository code
- * runs: the retest runs under the config the merge would land, not `main`'s.
+ * runs: the landing's setups and checks run under the config the merge would land, not `main`'s.
  */
-export function conflictCheckScript(
+export function mergeScript(
   originRemote: string,
   forkRemote: string,
   head: string,
@@ -443,36 +403,40 @@ for (let i = 0; i + 1 < list.length; i += 2) {
 process.stdout.write(JSON.stringify(out));
 ') || exit 16
 config=null
+trees='{}'
 if [ "$code" = 0 ]; then
   tree=$(head -z -n 1 ../merge-tree.out | tr -d '\\0')
   if [ "$(git cat-file -t "$tree:${CONFIG_PATH}" 2> /dev/null)" = blob ]; then
     git cat-file blob "$tree:${CONFIG_PATH}" > ../config.yml || exit 16
     config=$(head -c ${MAX_CONFIG_BYTES + 1} ../config.yml | node -e 'process.stdout.write(JSON.stringify(require("fs").readFileSync(0, "utf8")))') || exit 16
   fi
-fi
-result "{\\"main\\":\\"$main\\",\\"clean\\":$clean,\\"base\\":$base,\\"output\\":$output,\\"remerges\\":$remerges,\\"config\\":$config}"
-`;
+  # The trees the merge made, which neither main nor the head has: what a cache key needs besides theirs.
+  trees=$(node - "$tree" "$main" ${quote(head)} <<'NODE'
+const { execFileSync } = require("child_process");
+const git = (...args) => execFileSync("git", args, { encoding: "utf8", maxBuffer: 1 << 30 });
+const ls = (...args) =>
+  git("ls-tree", "-z", ...args)
+    .split("\\0")
+    .filter(Boolean)
+    .map((line) => {
+      const tab = line.indexOf("\\t");
+      const [mode, type, hash] = line.slice(0, tab).split(" ");
+      return { name: line.slice(tab + 1), mode, type, hash };
+    });
+const [merged, ...sides] = process.argv.slice(2);
+const known = new Set();
+for (const side of sides) {
+  known.add(git("rev-parse", side + "^{tree}").trim());
+  for (const entry of ls("-r", "-t", side)) if (entry.type === "tree") known.add(entry.hash);
 }
-
-/**
- * Landing step 2, untrusted (read grants only): reproduces the merged tree with
- * `git merge --no-ff --no-commit` of the approved head onto the recorded `main`, then runs the
- * plan (setup and every check) on it like scoring does, ending with a `RawScore`. A merge
- * that doesn't give the recorded tree is an infrastructure failure.
- */
-export function retestScript(originRemote: string, forkRemote: string, merge: MergePlan, plan: ScorePlan): string {
-  return `${PRELUDE}
-rm -rf retest logs out && mkdir logs out && out="$PWD/out" && git init -q retest && cd retest
-git fetch -q ${quote(forkRemote)} '+refs/heads/*:refs/remotes/fork/*' || exit 10
-git fetch -q ${quote(originRemote)} '+refs/heads/main:refs/remotes/origin/main' || exit 12
-git checkout -q --detach ${quote(merge.main)} || exit 11
-git merge -q --no-ff --no-commit ${quote(merge.head)} > ../merge.log 2>&1 || exit 14
-[ "$(git write-tree)" = ${quote(merge.tree)} ] || exit 14
-now() { date +%s%3N; }
-base=${quote(merge.main)}
-shortstat=""
-builtin_ms=0
-${runPlan(plan)}
+const made = [merged, ...ls("-r", "-t", merged).filter((e) => e.type === "tree").map((e) => e.hash)];
+const trees = {};
+for (const hash of made) if (!known.has(hash)) trees[hash] = ls(hash);
+process.stdout.write(JSON.stringify(trees));
+NODE
+) || exit 16
+fi
+result "{\\"main\\":\\"$main\\",\\"clean\\":$clean,\\"base\\":$base,\\"output\\":$output,\\"remerges\\":$remerges,\\"config\\":$config,\\"trees\\":$trees}"
 `;
 }
 
@@ -486,9 +450,9 @@ export interface LandPlan extends MergePlan {
 }
 
 /**
- * Landing step 3, trusted: holds origin write, so it runs no repository code (no npm or node, no
+ * A landing's `land` step, trusted: holds origin write, so it runs no repository code (no npm or node, no
  * work tree, hooks off, no system, global or repo config). It merges the approved head onto the
- * recorded `main` with `git merge-tree`, checks the result is the tree the conflict check recorded,
+ * recorded `main` with `git merge-tree`, checks the result is the tree the `merge` step recorded,
  * commits it as a two-parent (`--no-ff`) merge, author the approver and committer Throng, and pushes
  * it with `--force-with-lease=main:<main>`, so a `main` that moved since is never overwritten. A
  * rerun after a push that landed reports the same landing.

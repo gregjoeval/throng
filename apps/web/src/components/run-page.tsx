@@ -67,9 +67,13 @@ function Header({ projectRef, run }: { projectRef: ProjectRef; run: RunWithOutco
           </Link>
         </Field>
         <Field label="Head">
-          <Link to={buildPath({ view: "commit", ...projectRef, sha: run.sha })} className="font-mono hover:underline">
-            {shortSha(run.sha)}
-          </Link>
+          {run.sha === null ? (
+            <span className="text-muted-foreground">Not landed</span>
+          ) : (
+            <Link to={buildPath({ view: "commit", ...projectRef, sha: run.sha })} className="font-mono hover:underline">
+              {shortSha(run.sha)}
+            </Link>
+          )}
         </Field>
         <Field label="Pipeline">{run.pipeline}</Field>
         <Field label="Trigger">{TRIGGER_LABELS[run.trigger]}</Field>

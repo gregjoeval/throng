@@ -79,6 +79,22 @@ describe("the runs list", () => {
     expect(within(row(9)).getByRole("link", { name: "main" })).toHaveAttribute("href", `/ada/alpha/commit/${SHA}`);
   });
 
+  it("lists a merge request's landing as a `main` run by its trigger, with no head until it lands", async () => {
+    server.use(
+      serveRuns([
+        listed(11, { line: "main", pipeline: "main", trigger: "merge", sha: null, status: "running", gate: null }),
+        listed(10, { line: "main", pipeline: "main", trigger: "merge" }),
+      ]),
+    );
+    await renderApp("/ada/alpha/runs");
+    const table = await screen.findByRole("table", { name: "Runs" });
+    const row = (id: number) => within(table).getByRole("row", { name: `Run ${id}` });
+    expect(row(11)).toHaveTextContent("11mainmainMerge—Running");
+    expect(within(row(11)).getByRole("link", { name: "main" })).toHaveAttribute("href", "/ada/alpha/commits/main");
+    expect(row(10)).toHaveTextContent("10mainmainMergea1b2c3dDone");
+    expect(within(row(10)).getByRole("link", { name: "main" })).toHaveAttribute("href", `/ada/alpha/commit/${SHA}`);
+  });
+
   it("filters by line and status through the URL, starting each filter from the newest run", async () => {
     const asked: string[] = [];
     server.use(serveRuns([listed(4)], null, asked));
@@ -166,6 +182,13 @@ describe("a run's page", () => {
     expect(item("migrate")).toHaveTextContent("migrateFailed");
     expect(item("deploy")).toHaveTextContent("deploySkipped0.9 sskipped: migrate failed");
     expect(within(item("deploy")).queryByRole("button")).toBeNull();
+  });
+
+  it("says a landing that hasn't landed has no head yet", async () => {
+    server.use(serveRun(runDetail(14, SHA, { line: "main", pipeline: "main", trigger: "merge", sha: null })));
+    await renderApp("/ada/alpha/runs/14");
+    const header = await screen.findByLabelText("Run");
+    expect(header).toHaveTextContent("HeadNot landedPipelinemainTriggerMerge");
   });
 
   it("expands a step's log", async () => {

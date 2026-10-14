@@ -29,7 +29,9 @@
   "workflows": [
     // Keeps the name `ScoringWorkflow` ran under, so a run that started on its code resumes on this.
     { "name": "throng-scoring", "binding": "PIPELINE", "class_name": "PipelineWorkflow" },
-    { "name": "throng-landing", "binding": "LANDING", "class_name": "LandingWorkflow" },
+    // A landing is a `main` run now. Landings that started on `LandingWorkflow`'s code resume on this,
+    // and hand their landing back to the project to land again as a run.
+    { "name": "throng-landing", "binding": "LANDING", "class_name": "PipelineWorkflow" },
     { "name": "throng-follow", "binding": "FOLLOW", "class_name": "FollowWorkflow" },
   ],
   // Scoring run logs. R2's lifecycle rule (30 days on `logs/`) isn't wrangler config: see the README.
@@ -82,7 +84,7 @@
       // Workflow names are account-wide, so they can't reuse production's.
       "workflows": [
         { "name": "throng-ci-scoring", "binding": "PIPELINE", "class_name": "PipelineWorkflow" },
-        { "name": "throng-ci-landing", "binding": "LANDING", "class_name": "LandingWorkflow" },
+        { "name": "throng-ci-landing", "binding": "LANDING", "class_name": "PipelineWorkflow" },
         { "name": "throng-ci-follow", "binding": "FOLLOW", "class_name": "FollowWorkflow" },
       ],
       "r2_buckets": [

@@ -6,15 +6,13 @@ import { currentBase, readTaskBranch } from "./base.ts";
 import type { Base } from "./base.ts";
 import { loadConfig, namedSecrets, selectionPolicy } from "./config.ts";
 import type { CheckConfig, MetricConfig, SelectionPolicy, VoteEligibility } from "./config.ts";
-import type { ConflictDetails, ConflictFile } from "./conflicts.ts";
 import { ServiceError } from "./errors.ts";
 import { attemptRemote } from "./git-remotes.ts";
 import type { ProjectPath } from "./git-remotes.ts";
-import type { ErroredDetails, FailedChecksDetails } from "./landing.ts";
-import type { Dequeue, DequeueReason, StoredMergeRequest } from "./merge-requests.ts";
+import type { DequeueDetails } from "./landing.ts";
+import type { DequeueReason, StoredMergeRequest } from "./merge-requests.ts";
 import type { Pipeline } from "./pipelines.ts";
 import { resolveProject } from "./projects.ts";
-import { forkRepo, originRepo } from "./repos.ts";
 import type { Repos } from "./repos.ts";
 import type { Gate, ScoringResult } from "./results.ts";
 import type { RunOutcome, RunStep } from "./run-outcome.ts";
@@ -170,7 +168,8 @@ export interface MergeRequest {
   approvedAt: string;
   queuedAt: string | null;
   position: number | null;
-  lastDequeue: { reason: DequeueReason; at: string } | null;
+  /** Why it last left the queue, when, and the landing's run behind it (null for a new push or a cancel). */
+  lastDequeue: { reason: DequeueReason; run: number | null; at: string } | null;
   mergeSha: string | null;
   mergedAt: string | null;
   createdAt: string;
@@ -207,20 +206,15 @@ export interface ClosedVote {
   mergeRequest: MergeRequest | null;
 }
 
-/** A merge request's latest dequeue with its details: null for a new push or a cancel. */
+/**
+ * A merge request's latest dequeue, the landing's run behind it, and the details that run holds:
+ * the conflict, the steps that failed, or the error. Null run and details for a new push or a cancel.
+ */
 export interface MergeRequestDequeue {
   reason: DequeueReason;
+  run: number | null;
   at: string;
-  details: ConflictDetails | FailedChecksDetails | ErroredDetails | null;
-}
-
-/** A conflicting file of the latest dequeue, and the repos its blobs can be read from. */
-export interface DequeueFile {
-  file: ConflictFile;
-  /** The origin: it holds the base and `main` blobs, and the attempt's once its fork is archived. */
-  origin: string;
-  /** The source attempt's fork: it holds the base and attempt blobs while the attempt is active. */
-  fork: string;
+  details: DequeueDetails | null;
 }
 
 /** One entry of a project's merge queue. */
@@ -237,7 +231,8 @@ export interface Run {
   /** The line it runs on: `t42a3`, `t42` or `main`. */
   line: string;
   pipeline: Pipeline;
-  sha: string;
+  /** The head it runs; null for a landing until it lands. */
+  sha: string | null;
   trigger: StoredRun["trigger"];
   status: StoredRun["status"];
   /** Whether it may hold the secrets its pipeline allows. */
@@ -692,29 +687,9 @@ export function taskService({ db, repos, backend, origin }: TaskServiceDeps) {
     /** The task's latest merge request. Any signed-in user may read it. */
     getMergeRequest: mergeRequestMove("getMergeRequest"),
 
-    /** The task's merge request's latest dequeue, with its details. Any signed-in user may read it. */
+    /** The task's merge request's latest dequeue, with the details its run holds. Any signed-in user may read it. */
     async getDequeue(actor: Actor, input: TaskPath): Promise<MergeRequestDequeue> {
-      const dequeue = lastDequeue(
-        await invoke("getMergeRequest", await project(input), actor, { task: taskNumber(input.task) }),
-      );
-      return { reason: dequeue.reason, at: dequeue.at, details: "details" in dequeue ? dequeue.details : null };
-    },
-
-    /** A conflicting file of the latest dequeue, which must be a `conflict` listing `path`. */
-    async getDequeueFile(actor: Actor, input: TaskPath & { path: string }): Promise<DequeueFile> {
-      const ctx = await project(input);
-      const mr = await invoke("getMergeRequest", ctx, actor, { task: taskNumber(input.task) });
-      const dequeue = lastDequeue(mr);
-      const file = dequeue.reason === "conflict" ? dequeue.details.files.find((f) => f.path === input.path) : undefined;
-      if (file === undefined) {
-        throw new ServiceError("notFound", `${taskRef(mr.task)}'s last dequeue has no conflict in ${input.path}`);
-      }
-      return { file, origin: originRepo(ctx.id), fork: forkRepo(ctx.id, attemptRef(mr.task, mr.attempt)) };
-    },
-
-    /** Where a log of the retest behind the latest `failedChecks` dequeue is stored. */
-    async dequeueLogKey(actor: Actor, input: TaskPath & { name: string }): Promise<string> {
-      return invoke("dequeueLogKey", await project(input), actor, { task: taskNumber(input.task), name: input.name });
+      return invoke("getDequeue", await project(input), actor, { task: taskNumber(input.task) });
     },
 
     /**
@@ -914,7 +889,10 @@ function publicMergeRequest(mr: StoredMergeRequest, users: Map<string, string>):
     approvedAt: mr.approved_at,
     queuedAt: mr.queued_at,
     position: mr.position,
-    lastDequeue: mr.last_dequeue === null ? null : { reason: mr.last_dequeue.reason, at: mr.last_dequeue.at },
+    lastDequeue:
+      mr.last_dequeue === null
+        ? null
+        : { reason: mr.last_dequeue.reason, run: mr.last_dequeue.run, at: mr.last_dequeue.at },
     mergeSha: mr.merge_sha,
     mergedAt: mr.merged_at,
     createdAt: mr.created_at,
@@ -947,11 +925,6 @@ function publicVote(v: VoteDetail, users: Map<string, string>): Vote {
     myBallot:
       ballot === null ? null : { attempt: ref(ballot.attempt), head: ballot.head, alias: ballot.alias, at: ballot.at },
   };
-}
-
-function lastDequeue(mr: StoredMergeRequest): Dequeue {
-  if (mr.last_dequeue === null) throw new ServiceError("notFound", `${taskRef(mr.task)} has never been dequeued`);
-  return mr.last_dequeue;
 }
 
 function publicScoring(request: ScoringRequest, users: Map<string, string>): ScoringAnswer {

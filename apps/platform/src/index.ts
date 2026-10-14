@@ -9,7 +9,6 @@ import type { GitProxyOptions } from "./git-proxy";
 export { ProjectCoordinator } from "./project";
 export { RunSandbox, OutboundAuth } from "./sandbox";
 export { PipelineWorkflow } from "./pipeline-workflow";
-export { LandingWorkflow } from "./landing-workflow";
 export { FollowWorkflow } from "./follow-workflow";
 
 // The API and the git proxy are typed against the bindings they read; at runtime their env is this Worker's.

@@ -16,6 +16,3 @@ export function conflictDetails(paths: string[]): ConflictDetails {
   const sha = "c".repeat(40);
   return { attempt: "t1a1", head: sha, main: sha, base: sha, files: paths.map((p) => conflictFile(p, "content")) };
 }
-
-/** An `errored` dequeue's details. */
-export const ERRORED = { step: "land", error: "boom" };

@@ -202,38 +202,13 @@ export const mergeRequestQuery = (projectRef: ProjectRef, task: string) => ({
 });
 
 /**
- * Why the merge request last left the queue, with the conflict, failed checks or error. Keyed by
- * when it happened, so a later dequeue is a new query.
+ * Why the merge request last left the queue, the landing's run behind it, and the conflict, failed
+ * steps or error that run holds. Keyed by when it happened, so a later dequeue is a new query.
  */
 export const dequeueQuery = (projectRef: ProjectRef, task: string, at: string) =>
   apiQuery([...taskKey(projectRef, task), "dequeue", at], (init) =>
     tasksApi[":t"]["merge-request"].dequeue.$get({ param: { ...projectRef, t: task } }, { init }),
   );
-
-/** The URL of a log of the checks behind a `failedChecks` dequeue. */
-export const dequeueLogUrl = (projectRef: ProjectRef, task: string, name: string) =>
-  `${projectPath(projectRef)}/tasks/${encodeURIComponent(task)}/merge-request/dequeue/logs/${encodeURIComponent(name)}`;
-
-/**
- * One conflicting file of the dequeue at `at`, diffed from the merge base to `main` or to the
- * attempt. The path is a tail of path segments, which `hc` can't type, so the URL is built here.
- */
-export const dequeueFileDiffQuery = (
-  projectRef: ProjectRef,
-  task: string,
-  at: string,
-  path: string,
-  side: "main" | "attempt",
-) =>
-  queryOptions({
-    queryKey: [...taskKey(projectRef, task), "dequeue", at, "file", path, side] as const,
-    staleTime: Number.POSITIVE_INFINITY,
-    queryFn: ({ signal }) => {
-      const tail = path.split("/").map(encodeURIComponent).join("/");
-      const base = `${projectPath(projectRef)}/tasks/${encodeURIComponent(task)}/merge-request/dequeue`;
-      return getJson<FileDiff>(`${base}/files/${tail}/diff?side=${side}`, signal);
-    },
-  });
 
 /**
  * Selects `attempt` as the task's merge request, closing its other active attempts. Rejects with

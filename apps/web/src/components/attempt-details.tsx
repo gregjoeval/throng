@@ -32,6 +32,7 @@ import {
   failedSetup,
   formatDuration,
   RUN_STATUS_LABELS,
+  runHead,
   runSections,
   STEP_OUTCOME_LABELS,
   TRIGGER_LABELS,
@@ -192,7 +193,7 @@ function Runs({ projectRef, attempt }: InProject & { attempt: string }) {
               </Link>
               <span className="text-muted-foreground">{TRIGGER_LABELS[run.trigger]}</span>
               <span>{RUN_STATUS_LABELS[run.status]}</span>
-              <span className="font-mono text-muted-foreground">{shortSha(run.sha)}</span>
+              <span className="font-mono text-muted-foreground">{runHead(run)}</span>
               {run.gate === null ? null : <span>Gate {GATE_LABELS[run.gate].toLowerCase()}</span>}
               {run.superseded ? <span className="text-muted-foreground">Superseded</span> : null}
             </li>

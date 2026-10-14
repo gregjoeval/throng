@@ -4,7 +4,7 @@
 
 import { describe, expect, it } from "vitest";
 import type { CacheKey } from "../src/caches.ts";
-import type { PipelineParams } from "../src/scoring.ts";
+import type { LandingRunParams, PipelineParams } from "../src/scoring.ts";
 import { TaskStore } from "../src/task-store.ts";
 import type { ProjectContext } from "../src/task-store.ts";
 import type { Actor } from "../src/tokens.ts";
@@ -21,7 +21,7 @@ function setup() {
   void repos.create("abc123-main", { defaultBranch: "main" });
   let now = Date.parse("2026-10-14T00:00:00.000Z");
   const deleted: string[] = [];
-  const created: PipelineParams[] = [];
+  const created: (PipelineParams | LandingRunParams)[] = [];
   const store = new TaskStore({
     sql: testSql(),
     repos,

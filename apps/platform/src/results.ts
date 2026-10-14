@@ -163,12 +163,6 @@ export function setupTimeoutMs(plan: Pick<ScorePlan, "setup">): number {
   return plan.setup.length * SETUP_TIMEOUT_MS;
 }
 
-/** How long a script that runs the whole plan in one container may take: every setup and check at its timeout, plus slack. */
-export function scoreTimeoutMs(plan: ScorePlan): number {
-  const checks = plan.checks.reduce((sum, check) => sum + check.timeoutMs, 0);
-  return setupTimeoutMs(plan) + checks + STEP_SLACK_MS;
-}
-
 /**
  * The plan's checks in an order that runs each after the checks it waits for, otherwise in plan
  * order. A valid config's `after`s make no circle; a check in one would come last.

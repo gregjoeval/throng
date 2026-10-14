@@ -2,12 +2,11 @@ import { describe, expect, it } from "vitest";
 import { ServiceError } from "../src/errors.ts";
 import type { DequeueCause } from "../src/merge-requests.ts";
 import type { Gate, ScoringResult } from "../src/results.ts";
-import type { PipelineParams, PipelineWorkflowBinding, ScoringOutcome } from "../src/scoring.ts";
+import type { LandingRunParams, PipelineParams, PipelineWorkflowBinding, ScoringOutcome } from "../src/scoring.ts";
 import { TaskStore } from "../src/task-store.ts";
 import type { AttemptInput, ProjectContext } from "../src/task-store.ts";
 import type { Actor } from "../src/tokens.ts";
 import { FakeRepos } from "./fake-repos.ts";
-import { conflictDetails, ERRORED } from "./support/conflicts.ts";
 import { at, defined } from "./support/defined.ts";
 import { testSql } from "./support/task-backend.ts";
 
@@ -25,7 +24,7 @@ const ada = actor("ada00001");
 const bob = actor("bob00001");
 
 class FakeWorkflow implements PipelineWorkflowBinding {
-  async create(_options: { id: string; params: PipelineParams }): Promise<unknown> {
+  async create(_options: { id: string; params: PipelineParams | LandingRunParams }): Promise<unknown> {
     return {};
   }
   async get(_id: string): Promise<{ terminate: () => Promise<void> }> {
@@ -390,7 +389,7 @@ describe("the queue", () => {
     expect(store.startLanding(PROJECT, null)).toBeNull();
     expect(store.getMergeRequest(PROJECT, cat, { task: t3 }).position).toBe(2);
 
-    store.dequeueMergeRequest(PROJECT, null, { task: t2, reason: "errored", details: ERRORED });
+    store.dequeueMergeRequest(PROJECT, null, { task: t2, reason: "errored", run: 1 });
     expect(queue()).toEqual([
       [t3, "queued", 1],
       [t4, "queued", 2],
@@ -405,10 +404,10 @@ describe("the queue", () => {
 });
 
 describe("dequeue", () => {
-  const causes: Extract<DequeueCause, { details: unknown }>[] = [
-    { reason: "conflict", details: conflictDetails(["README.md"]) },
-    { reason: "failedChecks", details: { checks: [{ name: "test", outcome: "failed", log: "test" }] } },
-    { reason: "errored", details: ERRORED },
+  const causes: Extract<DequeueCause, { run: number }>[] = [
+    { reason: "conflict", run: 1 },
+    { reason: "failedChecks", run: 2 },
+    { reason: "errored", run: 3 },
   ];
   it.each(causes)(
     "returns to pending after $reason, keeping the approval, and doesn't requeue on its own",
@@ -437,7 +436,7 @@ describe("dequeue", () => {
     await open(ref1);
     await score(ref1);
     await store.selectAttempt(PROJECT, cat, ref1);
-    store.dequeueMergeRequest(PROJECT, null, { task: 1, reason: "errored", details: ERRORED });
+    store.dequeueMergeRequest(PROJECT, null, { task: 1, reason: "errored", run: 1 });
     expect(await store.approveMergeRequest(PROJECT, cat, { task: 1 })).toMatchObject({ state: "queued" });
     expect(mr().last_dequeue).toMatchObject({ reason: "errored" });
   });
@@ -447,7 +446,7 @@ describe("dequeue", () => {
     await open(ref1);
     await score(ref1);
     await store.selectAttempt(PROJECT, cat, ref1);
-    store.dequeueMergeRequest(PROJECT, null, { task: 1, reason: "conflict", details: conflictDetails(["README.md"]) });
+    store.dequeueMergeRequest(PROJECT, null, { task: 1, reason: "conflict", run: 1 });
     push(ref1);
     expect(mr()).toMatchObject({ state: "needsReview", last_dequeue: { reason: "conflict" } });
     await store.approveMergeRequest(PROJECT, cat, { task: 1 });
@@ -459,12 +458,7 @@ describe("dequeue", () => {
     const { store, ref1, open } = await setup();
     await open(ref1);
     await store.selectAttempt(PROJECT, cat, ref1);
-    const dequeue = () =>
-      store.dequeueMergeRequest(PROJECT, null, {
-        task: 1,
-        reason: "conflict",
-        details: conflictDetails(["README.md"]),
-      });
+    const dequeue = () => store.dequeueMergeRequest(PROJECT, null, { task: 1, reason: "conflict", run: 1 });
     expect(await code(dequeue)).toBe("invalidState");
   });
 });

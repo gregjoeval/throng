@@ -9,6 +9,7 @@ import { publicApp } from "../src/app.ts";
 import { CONFIG_PATH } from "../src/config.ts";
 import { DIFF_CAPS } from "../src/diff.ts";
 import { FORWARDED_EMAIL_HEADER } from "../src/forwarded.ts";
+import { landedOutcome } from "../src/landing.ts";
 import type { LogStore } from "../src/logs.ts";
 import { MAX_FILE_BYTES, MAX_LOG_SLICE_BYTES } from "../src/mcp.ts";
 import type { ScoringOutcome } from "../src/scoring.ts";
@@ -89,7 +90,7 @@ const runner = {
 async function setup() {
   const repos = new FakeRepos();
   const logs = new MemoryLogs();
-  const { backend, store, sql } = testTaskBackends(repos, now, runner, runner);
+  const { backend, store, sql } = testTaskBackends(repos, now, runner);
   // Every store call a tool makes, with the actor it passed: a store method takes `(project, actor, …)`.
   const storeCalls: { method: string; actor: Actor }[] = [];
   const recording = (projectId: string): TaskBackend => ({
@@ -138,12 +139,18 @@ async function setup() {
       while (!stopped.signal.aborted) {
         const tasks = store(projectId);
         await tasks.drain(projectId);
-        const runs = sql(projectId).exec<{ id: number }>("SELECT id FROM pipeline_runs WHERE status = 'running'");
-        for (const { id } of runs) tasks.scoringFinished(id, { status: "done", result: PASSED });
-        const landing = tasks.landings.active();
-        if (landing !== null) {
+        const runs = sql(projectId).exec<{ id: number; merge_request: number | null }>(
+          "SELECT id, merge_request FROM pipeline_runs WHERE status = 'running'",
+        );
+        for (const { id, merge_request } of runs) {
+          if (merge_request === null) {
+            tasks.scoringFinished(id, { status: "done", result: PASSED });
+            continue;
+          }
           const merge = repos.commit(`${projectId}-main`, { files: { "README.md": "merged\n" } }).hash;
-          await tasks.landingFinished(landing.id, { kind: "landed", sha: merge });
+          tasks.claimLandingPush(id);
+          await tasks.pipelineLanded(id, merge);
+          tasks.pipelineFinished(id, { status: "done", outcome: landedOutcome(merge) });
         }
         await new Promise((r) => setTimeout(r, 5));
       }

@@ -355,3 +355,17 @@ describe("closing and obsoleting a task", () => {
     expect(screen.queryByRole("button", { name: "Mark obsolete" })).toBeNull();
   });
 });
+
+describe("the page width", () => {
+  // jsdom lays nothing out, so the width cap is read off the main area's class.
+  it("spans the whole window on a task, so its lanes have room, and stays capped elsewhere", async () => {
+    await openTask(task(1, { title: "Fix login" }), [
+      attempt(1, 1, { state: "open" }),
+      attempt(1, 2, { state: "open" }),
+    ]);
+    expect(screen.getByRole("main")).not.toHaveClass("max-w-6xl");
+
+    await renderApp("/ada/alpha/tasks");
+    await waitFor(() => expect(screen.getByRole("main")).toHaveClass("max-w-6xl"));
+  });
+});

@@ -3,8 +3,12 @@ import { ProjectView } from "@/components/project-view";
 import { TaskPage } from "@/components/task-page";
 import { parseArenaSearch } from "@/lib/arena-view";
 
-/** The arena's view rides in the search params (`?lanes=t42a1,t42a3&by=file&ref=base&layout=split`). */
+/**
+ * The arena's view rides in the search params (`?lanes=t42a1,t42a3&by=file&ref=base&layout=split`).
+ * The page is wide: attempts' lanes sit side by side.
+ */
 export const Route = createFileRoute("/$owner/$project/tasks/$t")({
+  staticData: { wide: true },
   validateSearch: parseArenaSearch,
   component: Task,
 });

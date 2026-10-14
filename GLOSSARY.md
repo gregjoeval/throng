@@ -60,6 +60,10 @@ _Avoid_: Run, try, submission
 The user who holds the claim on an attempt and is its final authority.
 _Avoid_: Contributor, assignee, worker
 
+**Commit author**:
+A person a commit on `main` names as its author, counted by email; not necessarily a user, and unrelated to an attempt's author.
+_Avoid_: Contributor
+
 **Claim**:
 An author's exclusive right to push to an attempt's fork.
 _Avoid_: Lock, assignment

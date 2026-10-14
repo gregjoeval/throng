@@ -3,7 +3,7 @@ import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
 import { renderApp } from "./app";
 import { serveRepo } from "./repo";
-import { server } from "./server";
+import { serveImported, server, serveStats, stats } from "./server";
 
 const FILES = {
   "README.md": "# Alpha\n\nSee the [guide](docs/guide.md).\n\n![logo](docs/logo.png)\n",
@@ -64,14 +64,135 @@ describe("project home", () => {
     const asked = serveRepo({ main: { "src/a.ts": "a\n" } });
     await renderApp("/ada/alpha");
     await entriesList();
-    expect(screen.queryByRole("region")).toBeNull();
+    expect(screen.queryByRole("region", { name: /readme/iu })).toBeNull();
     expect(asked.filter((url) => url.startsWith("blob"))).toEqual([]);
   });
 
   it("says so when main has no commits yet", async () => {
     serveRepo({}, { main: { ref: "main", sha: null }, active: [], archived: [] });
     await renderApp("/ada/alpha");
-    expect(await screen.findByText("Nothing pushed yet")).toBeInTheDocument();
+    expect(await screen.findByText("This project is empty")).toBeInTheDocument();
+  });
+});
+
+const about = () => screen.findByRole("complementary", { name: "About" });
+
+describe("the About sidebar", () => {
+  it("shows the description, source, commit authors most first and each language's share", async () => {
+    serveRepo({ main: FILES });
+    server.use(
+      serveImported("https://github.com/ada/alpha"),
+      serveStats(
+        stats({
+          description: "Alpha does one thing well.",
+          commitAuthors: [
+            { name: "Ada", email: "ada@example.com", commits: 12, newestAt: 2 },
+            { name: "Bob", email: "bob@example.com", commits: 1, newestAt: 1 },
+          ],
+          languages: [
+            { name: "TypeScript", bytes: 900, share: 0.9 },
+            { name: "CSS", bytes: 99, share: 0.099 },
+            { name: "Shell", bytes: 1, share: 0.001 },
+          ],
+        }),
+      ),
+    );
+    await renderApp("/ada/alpha");
+    const sidebar = await about();
+    expect(await within(sidebar).findByText("Alpha does one thing well.")).toBeInTheDocument();
+    expect(within(sidebar).getByRole("link", { name: "github.com/ada/alpha" })).toHaveAttribute(
+      "href",
+      "https://github.com/ada/alpha",
+    );
+    const authors = within(sidebar).getByRole("region", { name: "Commit authors" });
+    expect(
+      within(authors)
+        .getAllByRole("listitem")
+        .map((li) => li.textContent),
+    ).toEqual(["Ada12 commits", "Bob1 commit"]);
+    const languages = within(sidebar).getByRole("region", { name: "Languages" });
+    expect(
+      within(languages)
+        .getAllByRole("listitem")
+        .map((li) => li.textContent),
+    ).toEqual(["TypeScript90.0%", "CSS9.9%", "Shell0.1%"]);
+    // The directory and README still show beside it.
+    expect(await entriesList()).toBeInTheDocument();
+  });
+
+  it("sums the languages past the fourth as Other, and counts the commit authors past the tenth", async () => {
+    serveRepo({ main: FILES });
+    const names = ["A", "B", "C", "D", "E", "F"];
+    server.use(
+      serveStats(
+        stats({
+          commitAuthors: Array.from({ length: 12 }, (_, i) => ({
+            name: `P${i}`,
+            email: `p${i}@x`,
+            commits: 12 - i,
+            newestAt: i,
+          })),
+          languages: names.map((name, i) => ({ name, bytes: 6 - i, share: (6 - i) / 21 })),
+        }),
+      ),
+    );
+    await renderApp("/ada/alpha");
+    const sidebar = await about();
+    const languages = await within(sidebar).findByRole("region", { name: "Languages" });
+    expect(
+      within(languages)
+        .getAllByRole("listitem")
+        .map((li) => li.textContent),
+    ).toEqual(["A28.6%", "B23.8%", "C19.0%", "D14.3%", "Other14.3%"]);
+    const authors = within(sidebar).getByRole("region", { name: "Commit authors" });
+    expect(within(authors).getAllByRole("listitem")).toHaveLength(10);
+    expect(authors).toHaveTextContent("and 2 more");
+  });
+
+  it("marks the commit author count and the languages as partial when history or the tree was cut off", async () => {
+    serveRepo({ main: FILES });
+    server.use(
+      serveStats(
+        stats({
+          commitAuthors: [{ name: "Ada", email: "ada@example.com", commits: 1000, newestAt: 1 }],
+          languages: [{ name: "TypeScript", bytes: 1, share: 1 }],
+          commitsTruncated: true,
+          filesTruncated: true,
+        }),
+      ),
+    );
+    await renderApp("/ada/alpha");
+    const sidebar = await about();
+    const authors = await within(sidebar).findByRole("region", { name: "Commit authors" });
+    expect(within(authors).getByRole("heading")).toHaveTextContent("Commit authors 1+");
+    expect(authors).toHaveTextContent("Counted from the newest commits only.");
+    expect(within(sidebar).getByRole("region", { name: "Languages" })).toHaveTextContent(
+      "Counted from the files nearest the root only.",
+    );
+  });
+
+  it("still shows, with the source, when nothing is pushed yet", async () => {
+    serveRepo({}, { main: { ref: "main", sha: null }, active: [], archived: [] });
+    server.use(serveImported("https://github.com/ada/alpha"), serveStats(stats({}, null)));
+    await renderApp("/ada/alpha");
+    expect(await screen.findByText("This project is empty")).toBeInTheDocument();
+    const sidebar = await about();
+    expect(await within(sidebar).findByText("No commits yet.")).toBeInTheDocument();
+    expect(within(sidebar).getByText("No code yet.")).toBeInTheDocument();
+    expect(within(sidebar).getByText("No description.")).toBeInTheDocument();
+    expect(within(sidebar).getByRole("link", { name: "github.com/ada/alpha" })).toBeInTheDocument();
+  });
+
+  it("says when the stats can't be read, and still lists the files", async () => {
+    serveRepo({ main: FILES });
+    server.use(
+      http.get("*/api/projects/:owner/:project/stats", () =>
+        HttpResponse.json({ error: { code: "internal", message: "stats broke" } }, { status: 500 }),
+      ),
+    );
+    await renderApp("/ada/alpha");
+    expect(await within(await about()).findByText("stats broke")).toBeInTheDocument();
+    expect(await entriesList()).toBeInTheDocument();
   });
 });
 

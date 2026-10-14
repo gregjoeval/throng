@@ -38,6 +38,8 @@ import type { DiffCache } from "./diff.ts";
 import { errorBody, errorResponse, ServiceError } from "./errors.ts";
 import { TREE_ENTRY_TYPES } from "./repos.ts";
 import type { Repos } from "./repos.ts";
+import { commitStats, MAX_DESCRIPTION, STATS_CAPS } from "./stats.ts";
+import type { CommitStats } from "./stats.ts";
 import { ATTEMPT_STATES } from "./task-store.ts";
 import type { TaskBackend } from "./tasks.ts";
 import type { Actor } from "./tokens.ts";
@@ -186,6 +188,64 @@ const RefsSchema = z
   })
   .openapi("Refs");
 
+const StatsSchema = z
+  .object({
+    ref: z.literal("main"),
+    sha: z.string().nullable().openapi({ description: "`main`'s head; null before the first push." }),
+    description: z
+      .string()
+      .nullable()
+      .openapi({
+        description:
+          `The root README's first paragraph as plain text, cut to ${MAX_DESCRIPTION} characters; ` +
+          "null when there's no README or it has no paragraph.",
+      }),
+    commitAuthors: z
+      .array(
+        z.object({
+          name: z.string().openapi({ description: "The name on their newest commit." }),
+          email: z.string().openapi({
+            description: "Lowercased; what their commits are counted by, so one person with two emails is two authors.",
+          }),
+          commits: z.number().int(),
+          newestAt: z.number().int().openapi({ description: "Unix seconds of their newest commit." }),
+        }),
+      )
+      .openapi({ description: "Authors of the commits reachable from `main`, most commits first." }),
+    languages: z
+      .array(
+        z.object({
+          name: z.string().openapi({ example: "TypeScript" }),
+          bytes: z.number().int(),
+          share: z.number().openapi({ description: "Of the counted bytes, from 0 to 1.", example: 0.82 }),
+        }),
+      )
+      .openapi({
+        description:
+          "The bytes of code in each language, most first, by file extension. Data and prose (JSON, YAML, " +
+          "Markdown) and build output and vendored directories (`node_modules`, `vendor`, `dist`, `build`, " +
+          "`out`, `coverage`) are left out.",
+      }),
+    commitsTruncated: z.boolean().openapi({
+      description: `More than ${STATS_CAPS.maxCommits} commits, so \`commitAuthors\` counts only those read.`,
+    }),
+    filesTruncated: z.boolean().openapi({
+      description:
+        `More than ${STATS_CAPS.maxFiles} code files or ${STATS_CAPS.maxTrees} directories, so \`languages\` ` +
+        "covers only the files nearest the root.",
+    }),
+  })
+  .openapi("ProjectStats");
+
+/** A project's stats before anything is pushed: nothing to count. */
+const NO_STATS: CommitStats = {
+  description: null,
+  commitAuthors: [],
+  languages: [],
+  commitsTruncated: false,
+  filesTruncated: false,
+};
+
 const CompareParamSchema = ProjectPathSchema.extend({
   from: z.string().openapi({ description: "The old side: a ref or sha, as `{ref}` takes.", example: "main" }),
   to: z.string().openapi({ description: "The new side: a ref or sha, as `{ref}` takes.", example: "t42a3" }),
@@ -259,6 +319,41 @@ export function browseRoutes({ auth, repos, tasks, diffCache }: BrowseOptions) {
         const refs = await browse(c.env).refs(c.var.actor, c.req.valid("param"));
         c.header("Cache-Control", REF_CACHE);
         return c.json(refs, 200);
+      },
+    )
+    .openapi(
+      createRoute({
+        method: "get",
+        path: "/projects/{owner}/{project}/stats",
+        operationId: "getProjectStats",
+        summary: "Get a project's stats at `main`: commit authors, languages and description",
+        description:
+          "For the project home's About sidebar. Computed from `main`'s history and tree, and cached by " +
+          "its head: the ETag is the head's sha. Before the first push there is nothing to count.",
+        tags: ["Browse"],
+        security,
+        middleware: [auth] as const,
+        request: { params: ProjectPathSchema },
+        responses: {
+          200: { description: "The stats.", ...json(StatsSchema) },
+          304: refErrors[304],
+          401: refErrors[401],
+          404: errorResponse("No such project."),
+        },
+      }),
+      async (c) => {
+        const main = await browse(c.env).mainHead(c.req.valid("param"));
+        if (main === null) {
+          c.header("Cache-Control", REF_CACHE);
+          return c.json({ ref: "main" as const, sha: null, ...NO_STATS }, 200);
+        }
+        if (matches(c.req.header("If-None-Match"), etag(main))) {
+          cacheFor(c, main);
+          return c.body(null, 304);
+        }
+        const stats = await commitStats(repos(c.env), main, { cache: diffCache(c.env) });
+        cacheFor(c, main);
+        return c.json({ ref: "main" as const, sha: main.sha, ...stats }, 200);
       },
     )
     .openapi(

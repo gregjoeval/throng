@@ -12,6 +12,10 @@ _Avoid_: Account, org (when meaning either kind)
 A human with an identity on Throng.
 _Avoid_: Account, member
 
+**Maintainer**:
+A user whose code a project trusts with its secrets, as themselves or under an alias; for now, only the user who owns the project.
+_Avoid_: Admin, collaborator, trusted user
+
 **Alias**:
 A name one user acts under through tokens minted for it, such as `greg (claude)`. It is the user acting: the work is theirs, and an alias is never an author on its own. Aliases are meant for agents working on a user's behalf, but Throng only ever sees the alias.
 _Avoid_: Agent (when meaning the alias), bot, worker, service account
@@ -72,16 +76,40 @@ _Avoid_: Parent, builds on
 Any repo in a project other than its origin, where work is pushed; a fork made for an attempt is named after it (`t42a3`), and a personal fork belongs to the user who made it.
 _Avoid_: Branch (a fork is a whole repo)
 
+**Pipeline**:
+What a push to one of a project's repos runs: its setups, then its checks, then any other steps. A landing on `origin/main` runs the project's main pipeline; every other push runs its default one.
+_Avoid_: Workflow, CI, job
+
+**Pipeline run**:
+One execution of a pipeline for one pushed head.
+_Avoid_: Build, job, run (on its own)
+
+**Line**:
+What a project's pipeline runs follow as it moves: an attempt's fork, a task's task branch, or `origin/main`. Each pipeline run belongs to one line, and a newer head on a line replaces the runs still waiting on it.
+_Avoid_: Branch, ref, stream
+
+**Step**:
+One command in a pipeline. Every setup and every check is a step; a step that is neither runs only once its pipeline run's gate passes, and produces no metrics.
+_Avoid_: Job, stage, action
+
+**Setup**:
+A step that prepares a pushed head's checkout for the checks, such as installing dependencies.
+_Avoid_: Install, prep, before-script
+
 **Check**:
-One configured command run against an attempt's tree, defined by the project or added by a task; its outcome and its output are where metrics come from.
+One configured step run against a pushed head's checkout, after its setups and alongside the other checks, defined by the project or added by a task; its outcome and its output are where metrics come from.
 _Avoid_: Test, job, CI step
 
+**Check group**:
+The one name a project's check may carry so a pipeline can choose to run it. A pipeline that names groups runs only the checks in them, plus its task's checks; one that names none runs every check.
+_Avoid_: Tag, stage, label
+
 **Metric**:
-One named, typed value in an attempt's score, taken from a check or measured by Throng; it is null when nothing fits it.
+One named, typed value of a pipeline run, taken from a check or measured by Throng; it is null when nothing fits it. An attempt's score is made of them.
 _Avoid_: Stat, KPI, signal, measure
 
 **Gate**:
-Whether every required condition on an attempt's metrics holds, such as each required check having passed.
+Whether a pipeline run passed: every setup passed, and every check it ran passed. Metrics never decide it.
 _Avoid_: Status, pass/fail
 
 **Score**:
@@ -117,8 +145,8 @@ A user's one choice in a vote, for a candidate at its pinned head; their aliases
 _Avoid_: Vote (when meaning one user's choice)
 
 **Scoring**:
-The whole run that produces an attempt's gate and score.
-_Avoid_: CI, pipeline
+The part of a pipeline run up to and including its checks, which settles its gate and, for an attempt, its score.
+_Avoid_: CI
 
 **Sandbox**:
 The container one role of a scoring run, landing or follow works in, with only that role's grants. Those that run the project's code start at the Sandbox size its config on `main` sets; the trusted ones that only run git start at the smallest.
@@ -191,3 +219,7 @@ _Avoid_: Preview environment, staging
 **Archived**:
 A fork whose head has been saved as a hidden ref in the origin (`refs/attempts/t42a3`), so its work survives the fork's deletion.
 _Avoid_: Backed up, stashed
+
+**Secret**:
+A value a project's owner stores for its pipelines, such as a deploy token, with the pipelines it may be used in. A step gets only the secrets it or its pipeline names, the owner allows in that pipeline, and only in a pipeline run of code from a maintainer or started by one.
+_Avoid_: Credential, env var, grant

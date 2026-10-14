@@ -32,6 +32,14 @@ _Avoid_: Repo (when meaning the project as a whole)
 A project's own repo, the one every fork starts from; its default branch is written `origin/main`.
 _Avoid_: Canonical repo, upstream, "main" (when meaning the repo rather than its branch)
 
+**Source**:
+The public git repository a project was imported from, named by its HTTPS URL. It records where the code came from; the project never reads it again.
+_Avoid_: Upstream, remote, parent
+
+**Import**:
+Starting a project's origin as a one-time copy of its source's default branch, renamed `main`, with its full history.
+_Avoid_: Mirror, sync, clone (when meaning the platform's copy)
+
 **Task**:
 One change to a project, worked on through competing attempts. It lands at most once, through a merge request. Numbered sequentially per project and referred to as `t42`. Follow-up work is a new task.
 _Avoid_: Ticket, issue, job

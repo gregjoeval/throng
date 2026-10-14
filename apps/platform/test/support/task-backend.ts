@@ -2,7 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { SQLInputValue } from "node:sqlite";
 import type { FollowRunner } from "../../src/follows.ts";
 import type { Repos } from "../../src/repos.ts";
-import type { ScoringRunner } from "../../src/scoring.ts";
+import type { PipelineRunner } from "../../src/scoring.ts";
 import { keyringFrom } from "../../src/secrets.ts";
 import { runTaskMethod, TaskStore } from "../../src/task-store.ts";
 import type { Sql } from "../../src/task-store.ts";
@@ -42,7 +42,7 @@ export function testSql(): Sql & { db: DatabaseSync } {
  * `scoring` runner to let tests start runs, landings included, with `store(id).drain(id)`, and a
  * `follow` one to let it start follows of task branches.
  */
-export function testTaskBackends(repos: Repos, now?: () => Date, scoring?: ScoringRunner, follow?: FollowRunner) {
+export function testTaskBackends(repos: Repos, now?: () => Date, scoring?: PipelineRunner, follow?: FollowRunner) {
   const stores = new Map<string, { store: TaskStore; sql: ReturnType<typeof testSql> }>();
   const open = (projectId: string) => {
     let found = stores.get(projectId);
@@ -52,7 +52,7 @@ export function testTaskBackends(repos: Repos, now?: () => Date, scoring?: Scori
         store: new TaskStore({
           sql,
           repos,
-          scoring,
+          runner: scoring,
           follow,
           keyring: TEST_KEYRING,
           ...(now === undefined ? {} : { now }),

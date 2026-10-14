@@ -1,5 +1,5 @@
 // Where an ended attempt's work is kept once its fork is gone: a hidden ref in the origin, one per
-// attempt. Archiving is an internal push (`Repos.copyRef`), so it never reaches the scoring queue.
+// attempt. Archiving is an internal push (`Repos.copyRef`), so it never reaches `PipelineRuns`.
 
 /**
  * The origin ref prefix archived attempts live under: `refs/attempts/t42a3`. If Artifacts turns

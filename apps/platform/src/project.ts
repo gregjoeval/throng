@@ -61,7 +61,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
     this.#tasks = new TaskStore({
       sql,
       repos: reposFor(env),
-      scoring: {
+      runner: {
         workflow: env.PIPELINE,
         teardown: (instanceId, containers) => teardownPipeline(env.SANDBOX, instanceId, containers),
       },
@@ -86,13 +86,13 @@ export class ProjectCoordinator extends DurableObject<Env> {
   async e2eScore(project: string, attempt: string, sha: string): Promise<ScoringRequest> {
     const ref = parseAttemptRef(attempt);
     if (ref === null) throw new Error(`not an attempt: ${attempt}`);
-    const request = this.#tasks.scoring.request({
+    const request = this.#tasks.runs.request({
       project,
       line: attemptRef(ref.task, ref.number),
       sha,
       trigger: "push",
       actor: null,
-      ownersPush: true,
+      pushedBy: { kind: "maintainer" },
     });
     await this.#drain(project);
     return request;
@@ -100,7 +100,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 
   /** For the e2e routes only: one scoring run, with its result. */
   e2eRun(id: number): StoredRun | null {
-    return this.#tasks.scoring.getRun(id);
+    return this.#tasks.runs.getRun(id);
   }
 
   /**
@@ -120,17 +120,17 @@ export class ProjectCoordinator extends DurableObject<Env> {
    */
   async pipelinePlanned(run: number, containers: string[], named: NamedSecrets[] = []): Promise<PlanVerdict> {
     const verdict = this.#tasks.pipelinePlanned(run, containers, named);
-    if (verdict.kind === "waiting") await this.#drain(this.#tasks.scoring.getRun(run)?.project);
+    if (verdict.kind === "waiting") await this.#drain(this.#tasks.runs.getRun(run)?.project);
     return verdict;
   }
 
   /**
    * Called by a trusted run's Pipeline Workflow in the step that starts a container: the sealed values
-   * of the secrets it names, or why one can't be had (see `TaskStore.pipelineSecrets`). The step opens
+   * of the secrets it names, or why one can't be had (see `TaskStore.sealedSecretsFor`). The step opens
    * them; they're never persisted.
    */
   pipelineSecrets(run: number, names: string[]): { sealed: SealedSecret[] } | SecretRefusal {
-    return this.#tasks.pipelineSecrets(run, names);
+    return this.#tasks.sealedSecretsFor(run, names);
   }
 
   /**
@@ -153,7 +153,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
   ): Promise<boolean> {
     const recorded = this.#tasks.pipelineCacheSaved(run, entry);
     // A new entry may take the project over its cap, and falls unused in time.
-    await this.#drain(this.#tasks.scoring.getRun(run)?.project);
+    await this.#drain(this.#tasks.runs.getRun(run)?.project);
     return recorded;
   }
 
@@ -167,7 +167,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
     try {
       await this.#tasks.pipelineReported(run, report);
     } finally {
-      await this.#drain(this.#tasks.scoring.getRun(run)?.project);
+      await this.#drain(this.#tasks.runs.getRun(run)?.project);
     }
   }
 
@@ -177,7 +177,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
    */
   async scoringFinished(run: number, outcome: ScoringOutcome): Promise<void> {
     this.#tasks.scoringFinished(run, outcome);
-    await this.#drain(this.#tasks.scoring.getRun(run)?.project);
+    await this.#drain(this.#tasks.runs.getRun(run)?.project);
   }
 
   /**
@@ -196,7 +196,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
     try {
       await this.#tasks.pipelineLanded(run, sha);
     } finally {
-      await this.#drain(this.#tasks.scoring.getRun(run)?.project);
+      await this.#drain(this.#tasks.runs.getRun(run)?.project);
     }
   }
 
@@ -221,7 +221,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
     try {
       await this.#tasks.legacyLandingFinished(landing, outcome);
     } finally {
-      await this.#drain(this.#tasks.scoring.legacyLanding(landing)?.project);
+      await this.#drain(this.#tasks.runs.legacyLanding(landing)?.project);
     }
   }
 
@@ -233,7 +233,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
     try {
       await this.#tasks.legacyLandingResumed(landing);
     } finally {
-      await this.#drain(this.#tasks.scoring.legacyLanding(landing)?.project);
+      await this.#drain(this.#tasks.runs.legacyLanding(landing)?.project);
     }
   }
 
@@ -312,7 +312,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
       this.ctx.storage.kv.put(PROJECT_KEY, project);
     }
     try {
-      if (this.#project === null) await this.#tasks.scoring.drain();
+      if (this.#project === null) await this.#tasks.runs.drain();
       else await this.#tasks.drain(this.#project);
     } catch (error) {
       console.error({ event: "project.drain_failed", error: String(error) });

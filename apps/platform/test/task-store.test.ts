@@ -953,7 +953,7 @@ describe("migrate", () => {
     expect(run.result?.checks.find((c) => c.name === "test")?.outcome).toBe("timedOut");
     expect(run.result?.metrics["test"]).toMatchObject({ type: "enum", value: "timedOut" });
     expect(sql.exec("SELECT kind FROM journal ORDER BY id")).toEqual(
-      ["returnedToDraft", "handedOff", "madeObsolete", "mainAdvanced", "needsReview", "scoringQueued", "forkReady"].map(
+      ["returnedToDraft", "handedOff", "madeObsolete", "mainAdvanced", "needsReview", "runQueued", "forkReady"].map(
         (kind) => ({ kind }),
       ),
     );
@@ -966,6 +966,17 @@ describe("migrate", () => {
         at,
       ),
     ).toThrow(/UNIQUE/u);
+  });
+
+  it("reads journal entries stored under a scoring queue's event names under a pipeline run's", () => {
+    const sql = testSql();
+    expect(new TaskStore({ sql, repos: new FakeRepos() })).toBeDefined();
+    const old = ["scoringQueued", "scoringWaiting", "scoringStarted", "scoringErrored", "scoringCancelled", "scored"];
+    for (const kind of old) sql.exec("INSERT INTO journal (at, kind, detail) VALUES (1, ?, '{}')", kind);
+    expect(new TaskStore({ sql, repos: new FakeRepos() })).toBeDefined();
+    expect(sql.exec("SELECT kind FROM journal ORDER BY id")).toEqual(
+      ["runQueued", "runWaiting", "runStarted", "runErrored", "runCancelled", "scored"].map((kind) => ({ kind })),
+    );
   });
 
   it("reads task checks and results stored when a check could be optional without required, and waiting for none", () => {

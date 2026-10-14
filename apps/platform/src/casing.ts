@@ -57,9 +57,19 @@ const VALUE_COLUMNS: { table: string; column: string; values: string[] }[] = [
   { table: "pipeline_runs", column: "trigger", values: ["score_now"] },
 ];
 
+/** Journal event names renamed since they were stored: a scoring queue's events are a pipeline run's. */
+const RENAMED_KINDS: [from: string, to: string][] = [
+  ["scoringQueued", "runQueued"],
+  ["scoringWaiting", "runWaiting"],
+  ["scoringStarted", "runStarted"],
+  ["scoringErrored", "runErrored"],
+  ["scoringCancelled", "runCancelled"],
+];
+
 /**
  * Rewrites values stored in snake_case to camelCase: merge request states, run triggers and every
- * journal event name. Idempotent; tables that don't exist yet are skipped.
+ * journal event name, then renames the journal event names that were renamed. Idempotent; tables
+ * that don't exist yet are skipped.
  */
 export function migrateValues(sql: Sql): void {
   const tables = new Set(
@@ -74,5 +84,6 @@ export function migrateValues(sql: Sql): void {
   if (tables.has("journal")) {
     const kinds = sql.exec<{ kind: string }>("SELECT DISTINCT kind FROM journal WHERE kind GLOB '*[_-]*'");
     for (const { kind } of kinds) sql.exec("UPDATE journal SET kind = ? WHERE kind = ?", camelCase(kind), kind);
+    for (const [from, to] of RENAMED_KINDS) sql.exec("UPDATE journal SET kind = ? WHERE kind = ?", to, from);
   }
 }

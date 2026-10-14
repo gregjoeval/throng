@@ -272,7 +272,7 @@ describe("the D1 projection of tasks and attempts", () => {
 
   it("publishes the attempts a vote's close closes, and leaves its winner and task as they were", async () => {
     const { repos, store, db, listings } = await setup({
-      scoring: {
+      runner: {
         workflow: { create: async () => ({}), get: async () => ({ terminate: async () => {} }) },
         teardown: async () => {},
       },
@@ -284,8 +284,8 @@ describe("the D1 projection of tasks and attempts", () => {
     for (const attempt of attempts) {
       const ref = { task: task.number, number: attempt.number };
       await store.openAttempt(PROJECT, ada, ref);
-      await store.scoring.drain();
-      const run = defined(store.scoring.listRuns(`t${ref.task}a${ref.number}`).at(-1), "a run");
+      await store.runs.drain();
+      const run = defined(store.runs.listRuns(`t${ref.task}a${ref.number}`).at(-1), "a run");
       store.scoringFinished(run.id, { status: "done", result: PASSED });
     }
     await store.openVote(PROJECT, owner, { task: task.number });

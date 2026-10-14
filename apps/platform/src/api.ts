@@ -1907,7 +1907,7 @@ export function apiRoutes(options: ApiOptions = {}) {
         description:
           "Only the project owner may, and only while the run is `cancellable`: queued, waiting, or running on any " +
           "line but `main`, whose running run may be deploying. A running run's containers are torn down. Journals " +
-          "`scoringCancelled`.",
+          "`runCancelled`.",
         security: bearerOrWeb,
         middleware: [browser] as const,
         request: { params: RunPathSchema },
@@ -1939,7 +1939,7 @@ export function apiRoutes(options: ApiOptions = {}) {
           "refused when the run waits on another, when its line moved on since, or, for a merge request's landing, " +
           "when the merge request no longer approves it or can't join the queue. Each secret the run names, as " +
           "`main`'s config is now, must have a value and be allowed in its pipeline. A started landing joins the merge " +
-          "queue and lands in its turn. Journals `scoringQueued`.",
+          "queue and lands in its turn. Journals `runQueued`.",
         security: bearerOrWeb,
         middleware: [browser] as const,
         request: { params: RunPathSchema, body: { required: true, ...json(StartRunSchema) } },

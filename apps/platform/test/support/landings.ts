@@ -19,7 +19,7 @@ export const ERRORED: RunReport = { status: "errored", error: "land: boom" };
  */
 export async function endLanding(store: TaskStore, project: string, report: RunReport): Promise<number> {
   await store.drain(project);
-  const [run] = store.scoring.liveLandings();
+  const [run] = store.runs.liveLandings();
   if (run?.status !== "running") throw new Error("no landing is running");
   store.pipelineFinished(run.id, report);
   return run.id;

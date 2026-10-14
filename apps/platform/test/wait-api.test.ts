@@ -103,7 +103,7 @@ async function setup() {
   };
   /** Starts queued runs, then reports how ada's attempt `t1a<n>`'s latest run ended. */
   const finish = async (attempt: number, outcome: ScoringOutcome = { status: "done", result: RESULT }) => {
-    const scoring = store(projectId).scoring;
+    const scoring = store(projectId).runs;
     await scoring.drain();
     const run = at(scoring.listRuns(`t1a${attempt}`), -1);
     expect(store(projectId).scoringFinished(run.id, outcome)).toBeTruthy();
@@ -220,10 +220,10 @@ describe("waiting on an attempt", () => {
     await call("POST", `${base}/attempts/t1a1/open`, ada);
     const { answer, answered } = await wait(1, "wait=30&until=scored");
     const head = await push(1, "one\n");
-    await store(projectId).scoring.drain();
+    await store(projectId).runs.drain();
     await settle();
     expect(answered()).toBeFalsy();
-    const run = at(store(projectId).scoring.listRuns("t1a1"), -1);
+    const run = at(store(projectId).runs.listRuns("t1a1"), -1);
     expect(store(projectId).pipelinePlanned(run.id, [], [{ step: "check deploy", secrets: ["DEPLOY"] }])).toEqual({
       kind: "waiting",
     });

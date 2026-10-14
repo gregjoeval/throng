@@ -10,13 +10,18 @@ import type { LegacyDequeueDetails } from "./merge-requests.ts";
 import type { RunOutcome } from "./run-outcome.ts";
 import { MAIN_LINE } from "./scoring.ts";
 import type { RunStatus } from "./scoring.ts";
+import { attemptRef } from "./task-refs.ts";
 import type { Sql } from "./task-store.ts";
 
 /** A row of the `landings` table: `running ─► pushing ─► landed | dequeued`, or `stopped`. */
 interface LandingRow {
   id: number;
   project: string;
+  task: number;
+  attempt: number;
   merge_request: number;
+  /** The approved head it retested, which its logs were stored under (`legacyLandingLogKey`). */
+  head: string;
   instance_id: string;
   status: "running" | "pushing" | "landed" | "dequeued" | "stopped";
   started_at: number;
@@ -76,8 +81,8 @@ export function migrateLandings(sql: Sql): void {
       const [run] = sql.exec<{ id: number }>(
         `INSERT INTO pipeline_runs (project, line, sha, pipeline, trigger, merge_request, user_id, alias, trusted,
            status, outcome, error, instance_id, created_at, started_at, finished_at, torn_down, land_claimed,
-           legacy_landing)
-         VALUES (?, ?, ?, 'main', 'merge', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+           legacy_landing, merge_head, merge_attempt)
+         VALUES (?, ?, ?, 'main', 'merge', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
         landing.project,
         MAIN_LINE,
         ended.sha,
@@ -95,6 +100,8 @@ export function migrateLandings(sql: Sql): void {
         landing.torn_down,
         landing.status === "pushing" ? 1 : 0,
         landing.id,
+        landing.head,
+        attemptRef(landing.task, landing.attempt),
       );
       if (dequeue !== null && run !== undefined) {
         sql.exec(

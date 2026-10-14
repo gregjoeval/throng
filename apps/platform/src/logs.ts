@@ -64,6 +64,17 @@ export function legacyLogKey(
   return `${LOG_PREFIX}${project}/${line}/${sha}/${run}/${name}.log`;
 }
 
+/**
+ * Where a landing stored its retest's log before landings were runs,
+ * `logs/<projectId>/<t42a3>/<head>/landing-<landingId>/<name>.log`; read until the lifecycle rule expires them.
+ */
+export function legacyLandingLogKey(
+  { project, attempt, head, landing }: { project: string; attempt: string; head: string; landing: number },
+  name: string,
+): string {
+  return `${LOG_PREFIX}${project}/${attempt}/${head}/landing-${landing}/${name}.log`;
+}
+
 /** The `notFound` for a log a run doesn't have: never stored, expired, or a name no log can have. */
 export function missingLog(run: number, name: string): ServiceError {
   return new ServiceError("notFound", `run ${run} has no log ${name}`);

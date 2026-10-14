@@ -22,7 +22,7 @@ import type { FollowOutcome, FollowParams, FollowRunner, StoredFollow } from "./
 import { conflictOutcome, dequeueDetails, landedOutcome, legacyFailedOutcome } from "./landing.ts";
 import type { DequeueDetails, LandingParams, LegacyLandingOutcome } from "./landing.ts";
 import { migrateLandings } from "./landings.ts";
-import { isLogName, legacyLogKey, logKey, missingLog } from "./logs.ts";
+import { isLogName, legacyLandingLogKey, legacyLogKey, logKey, missingLog } from "./logs.ts";
 import { MergeRequests } from "./merge-requests.ts";
 import type {
   Dequeue,
@@ -1145,6 +1145,11 @@ export class TaskStore {
     const run = this.getScoringRun(project, actor, input);
     if (!isLogName(input.name)) throw missingLog(input.run, input.name);
     const key = { project: project.id, line: run.line, run: run.id };
+    const landing = this.scoring.legacyLandingId(run.id);
+    if (landing !== null && run.merge_attempt !== null && run.merge_head !== null) {
+      const legacy = { project: project.id, attempt: run.merge_attempt, head: run.merge_head, landing };
+      return [legacyLandingLogKey(legacy, input.name), logKey(key, input.name)];
+    }
     if (!run.legacy_logs || run.sha === null) return [logKey(key, input.name)];
     return [legacyLogKey({ ...key, sha: run.sha }, input.name), logKey(key, input.name)];
   }

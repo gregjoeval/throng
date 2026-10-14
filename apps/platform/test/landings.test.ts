@@ -832,6 +832,19 @@ describe("landings from before landings were runs", () => {
     expect(after.store.listRuns(PROJECT, owner, { line: "main", limit: 10 }).runs).toHaveLength(3);
   });
 
+  it("reads a moved landing's logs where its Landing Workflow stored them first", async () => {
+    const { after } = await migrated([{ status: "dequeued", mr: 1 }], async (t) => {
+      await t.queued("One");
+      t.store.startLanding(PROJECT, null);
+      t.store.dequeueMergeRequest(PROJECT, null, { task: 1, reason: "errored", run: 0 });
+    });
+    const run = after.landing();
+    expect(after.store.runLogKeys(PROJECT, owner, { run: run.id, name: "test" })).toEqual([
+      "logs/abc123/t1a1/h/landing-1/test.log",
+      `logs/abc123/main/${run.id}/test.log`,
+    ]);
+  });
+
   it("keeps a landing in flight running, so its Landing Workflow's reports still land it", async () => {
     const { after } = await migrated([{ status: "pushing", mr: 1 }], async (t) => {
       await t.queued("One");

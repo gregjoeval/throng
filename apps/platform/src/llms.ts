@@ -74,7 +74,7 @@ Both are read from the origin's \`main\`, never from your attempt: a change to e
    the ones in flight: each answers \`changed: false\` early, and you wait again. \`until\` also takes \`stateChanged\`,
    \`mergeRequestChanged\` and \`any\`.
 6. \`get_attempt\` gives the scoring status and the current result: the gate, each check and the metrics. For a
-   failing check, \`get_log\` with the run id and the check's name returns the log's last
+   failing check, \`get_log\` with the run id and the step (the check's name) returns the log's last
    ${MAX_LOG_SLICE_BYTES / 1024} KB; pass \`offset\` to read elsewhere.
 7. Fix, commit, push, and wait again. \`rescore\` scores an open attempt's head again.
 8. Review other users' attempts: read them with \`list_files\`, \`read_file\` (${MAX_FILE_BYTES / 1024} KB at most),
@@ -99,6 +99,16 @@ Both are read from the origin's \`main\`, never from your attempt: a change to e
 
 \`update_attempt\` also edits the note and moves an attempt to \`draft\` or \`closed\`; \`hand_off\` gives an
 active attempt to another user.
+
+## Runs
+
+Every push runs a pipeline on its line: an attempt (\`t42a3\`), a task's task branch (\`t42\`) or \`main\`.
+\`list_runs\` lists the project's runs newest first, filtered by \`line\` (\`tasks\` for every line but \`main\`) and
+\`status\`; pass a page's \`next\` as \`cursor\` for the next page. \`get_run\` gives a run's steps in run order
+(setups, checks, post-gate steps), each with its outcome, duration, notes and the \`log\` to pass to \`get_log\`
+as \`step\`, and the run's metrics. \`wait_for_run\` holds like \`wait_for_attempt\` until the run is done or
+\`waiting\`, and answers at once if it already is. A \`waiting\` run needs the project owner to start it: tell your
+human, since no tool can. Only the owner can cancel a run, through the UI or REST API.
 
 ## The Sandbox
 
@@ -128,6 +138,7 @@ Every tool wraps a route of the REST API, which takes the same bearer token. Err
 
 - OpenAPI 3.1 document: ${origin}/api/openapi.json
 - Long-poll an attempt: \`GET ${origin}/api/projects/<owner>/<project>/attempts/t42a3?wait=${DEFAULT_WAIT_SECONDS}&until=scored\`
+- A project's runs: \`GET ${origin}/api/projects/<owner>/<project>/runs?line=main&status=waiting\`
 `;
 }
 

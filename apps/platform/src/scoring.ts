@@ -24,7 +24,7 @@ import { upgradeResult } from "./results.ts";
 import type { ScoringResult, StoredResult } from "./results.ts";
 import { runOutcome, scoringResult } from "./run-outcome.ts";
 import type { RunOutcome } from "./run-outcome.ts";
-import { parseAttemptRef } from "./task-refs.ts";
+import { isAttemptRef, parseAttemptRef, parseTaskRef } from "./task-refs.ts";
 import type { Sql } from "./task-store.ts";
 import type { Actor } from "./tokens.ts";
 
@@ -36,6 +36,46 @@ export const SCORING_TRIGGERS = ["open", "push", "scoreNow", "rescore"] as const
 export const RUN_STATUSES = ["queued", "waiting", "running", "done", "cancelled", "errored"] as const;
 export type ScoringTrigger = (typeof SCORING_TRIGGERS)[number];
 export type RunStatus = (typeof RUN_STATUSES)[number];
+/** Whether the run rests until someone acts: it ended, or it waits for the owner. What `wait_for_run` waits for. */
+export function runSettled(run: Pick<StoredRun, "status">): boolean {
+  return run.status !== "queued" && run.status !== "running";
+}
+
+/** How many runs one page of a project's runs lists unless asked, and at most. */
+export const DEFAULT_RUNS_PAGE = 50;
+export const MAX_RUNS_PAGE = 100;
+/** What a runs listing's `line` may name besides a task or attempt line: `tasks` is every line but `main`. */
+export const LINE_GROUPS = ["main", "tasks"] as const;
+
+/** Whether `line` is something a runs listing can filter by: `main`, `tasks`, a task (`t42`) or an attempt (`t42a3`). */
+export function isLineFilter(line: string): boolean {
+  if ((LINE_GROUPS as readonly string[]).includes(line) || isAttemptRef(line)) return true;
+  return line.startsWith("t") && parseTaskRef(line) !== null;
+}
+
+/** Which of a project's runs a page lists: newest first, older than `before` when given. */
+export interface RunsQuery {
+  /** A line (`t42`, `t42a3`), `main`, or `tasks` for every line but `main`; every line when absent. */
+  line?: string | undefined;
+  status?: RunStatus | undefined;
+  /** A run id: only runs older than it, as a previous page's `next` gives. */
+  before?: number | undefined;
+  limit: number;
+}
+
+/** A page of runs, newest first, and the `before` of the next page; null on the last. */
+export interface RunsPage {
+  runs: StoredRun[];
+  next: number | null;
+}
+
+/**
+ * Whether the owner may cancel the run: while it is queued or waiting, or running on any line but
+ * `main`, whose running run may be deploying.
+ */
+export function cancellable(run: Pick<StoredRun, "status" | "pipeline">): boolean {
+  return run.status === "queued" || run.status === "waiting" || (run.status === "running" && run.pipeline !== "main");
+}
 
 export const PIPELINES = ["default", "main"] as const;
 export type Pipeline = (typeof PIPELINES)[number];
@@ -472,6 +512,27 @@ export class ScoringQueue {
   getRun(id: number): StoredRun | null {
     const [row] = this.#sql.exec<RunRow>("SELECT * FROM pipeline_runs WHERE id = ?", id);
     return row === undefined ? null : toRun(row);
+  }
+
+  /** A page of the project's runs, newest first, filtered by line and status. */
+  listPage({ line, status, before, limit }: RunsQuery): RunsPage {
+    const rows = this.#sql
+      .exec<RunRow>(
+        `SELECT * FROM pipeline_runs
+         WHERE (? IS NULL OR line = ? OR (? = 'tasks' AND line != ?))
+           AND (? IS NULL OR status = ?) AND (? IS NULL OR id < ?)
+         ORDER BY id DESC LIMIT ?`,
+        ...[line, line, line, MAIN_LINE, status, status, before, before].map((v) => v ?? null),
+        limit + 1,
+      )
+      .map(toRun);
+    const runs = rows.slice(0, limit);
+    return { runs, next: rows.length > limit ? (runs.at(-1)?.id ?? null) : null };
+  }
+
+  /** Cancels a run because the owner asked; the next `drain` stops it if it had started. */
+  cancel(run: StoredRun, reason: string): void {
+    this.#cancel(run, { reason });
   }
 
   /** A line's runs, oldest first. */

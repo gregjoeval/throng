@@ -20,6 +20,8 @@ export interface RunStep {
   source: Source;
   /** The check's group; null outside one. */
   group: string | null;
+  /** The checks a check waited for; absent on a step stored before checks could wait, which waited for none. */
+  after?: string[];
   outcome: StepOutcome;
   durationMs: number;
   /** What the run noticed about the step, such as why it was skipped. */

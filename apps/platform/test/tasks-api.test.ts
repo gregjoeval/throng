@@ -465,15 +465,20 @@ describe("attempt routes", () => {
       reason: null,
       run: {
         id: 1,
-        ref: "t1a1",
+        line: "t1a1",
+        pipeline: "default",
         sha: head,
         trigger: "scoreNow",
         status: "queued",
+        trusted: false,
         requestedBy: { id: expect.any(String), handle: "ada" },
         alias: "claude",
         createdAt: "2026-10-10T12:00:00.000Z",
         startedAt: null,
         finishedAt: null,
+        superseded: false,
+        gate: null,
+        cancellable: true,
       },
     });
     expect((await call("POST", `${a}/score`, ada)).body).toMatchObject({ queued: false, reason: "already queued" });
@@ -724,6 +729,6 @@ describe("over throng-web's service binding", () => {
     expect((await callAs("POST", `${base}/attempts/t1a1/score`, "bob@example.com")).status).toBe(403);
     const scored = await callAs("POST", `${base}/attempts/t1a1/score`, "ada@example.com");
     expect(scored.status).toBe(200);
-    expect(scored.body).toMatchObject({ queued: true, run: { ref: "t1a1", trigger: "scoreNow", alias: null } });
+    expect(scored.body).toMatchObject({ queued: true, run: { line: "t1a1", trigger: "scoreNow", alias: null } });
   });
 });

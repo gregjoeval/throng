@@ -468,17 +468,22 @@ describe("scoring runs", () => {
     expect(one.status).toBe(200);
     expect(one.body).toEqual({
       id: 1,
-      ref: "t1a1",
+      line: "t1a1",
+      pipeline: "default",
       sha: first,
       trigger: "open",
       status: "done",
+      trusted: false,
       requestedBy: { id: expect.any(String), handle: "ada" },
       alias: null,
       createdAt: "2026-10-10T12:00:00.000Z",
       startedAt: "2026-10-10T12:00:00.000Z",
       finishedAt: "2026-10-10T12:00:00.000Z",
       superseded: true,
+      gate: "passed",
+      cancellable: false,
       error: null,
+      outcome: expect.objectContaining({ gate: "passed" }),
       result: result(),
     });
     expect(list.body["runs"][2]).toEqual(one.body);

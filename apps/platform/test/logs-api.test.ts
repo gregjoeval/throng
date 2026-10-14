@@ -70,7 +70,7 @@ async function setup() {
   return { request, web, env, logs, greg, ada, run, prefix, migrate, legacyPrefix, base: "/projects/greg/throng" };
 }
 
-describe("GET /projects/{owner}/{project}/runs/{runId}/logs/{name}", () => {
+describe("GET /projects/{owner}/{project}/runs/{runId}/logs/{step}", () => {
   it("streams a run's stored log as text", async () => {
     const { request, logs, ada, run, prefix, base } = await setup();
     logs.objects.set(`${prefix}/test.log`, "ok\nall 3 passed\n");

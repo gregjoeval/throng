@@ -58,7 +58,7 @@ async function setup() {
   };
   const followed: FollowParams[] = [];
   const follow = { workflow: { create: async ({ params }: { params: FollowParams }) => followed.push(params) } };
-  const { backend, store } = testTaskBackends(repos, now, runner, undefined, follow);
+  const { backend, store, sql } = testTaskBackends(repos, now, runner, undefined, follow);
   const api = apiRoutes({
     verifierFor: () => verify,
     now,
@@ -133,6 +133,7 @@ async function setup() {
   };
   return {
     api,
+    sql: () => sql(projectId),
     env,
     repos,
     projectId,
@@ -298,7 +299,7 @@ describe("the arena", () => {
   });
 
   it("answers in the current shape for a result stored with builtin and preview", async () => {
-    const { call, ada, base, drafts, commit, finish } = await setup();
+    const { call, ada, base, drafts, commit, sql } = await setup();
     await drafts();
     commit("t1a1", "one\n");
     await call("POST", `${base}/attempts/t1a1/score`, ada);
@@ -313,7 +314,8 @@ describe("the arena", () => {
       preview: { status: "failed" },
       logs: ["test"],
     };
-    await finish(1, { status: "done", result: legacy as unknown as ScoringResult });
+    // As a run stored it before upgrades: only old rows hold this shape.
+    sql().exec("UPDATE pipeline_runs SET status = 'done', outcome = ? WHERE id = 1", JSON.stringify(legacy));
 
     const run = (await call("GET", `${base}/runs/1`, ada)).body["result"] as Json;
     expect(run).not.toHaveProperty("builtin");

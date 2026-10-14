@@ -107,7 +107,7 @@ async function setup() {
   const finish = async (attempt: number, outcome: ScoringOutcome = { status: "done", result: RESULT }) => {
     const scoring = store(projectId).scoring;
     await scoring.drain();
-    const run = at(scoring.listRuns({ task: 1, attempt }), -1);
+    const run = at(scoring.listRuns(`t1a${attempt}`), -1);
     expect(store(projectId).scoringFinished(run.id, outcome)).toBeTruthy();
   };
   /**

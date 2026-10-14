@@ -138,7 +138,7 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
     const logs = await storeLogs(this.env, {
       sandbox: sandboxName(instanceId, "score"),
       names: logNames(plan),
-      key: (log) => logKey(params, log),
+      key: (log) => logKey({ project: params.project, line: params.attempt, run: params.run }, log),
       size,
       notes,
     });
@@ -165,7 +165,7 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
     const previewLogs: LogsToStore = {
       sandbox: sandboxName(instanceId, "preview"),
       names: [PREVIEW_LOG],
-      key: (log) => logKey(params, log),
+      key: (log) => logKey({ project: params.project, line: params.attempt, run: params.run }, log),
       size,
     };
     try {

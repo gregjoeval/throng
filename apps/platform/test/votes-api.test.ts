@@ -87,7 +87,7 @@ async function setup(selection = "selection: { policy: vote }\n") {
   /** Ends t1a`number`'s latest run with `outcome`, a pass by default; returns the run's id. */
   const finish = async (number: number, outcome: ScoringOutcome = { status: "done", result: PASSED }) => {
     await tasks.scoring.drain();
-    const run = at(tasks.scoring.listRuns({ task: 1, attempt: number }), -1);
+    const run = at(tasks.scoring.listRuns(`t${1}a${number}`), -1);
     tasks.scoringFinished(run.id, outcome);
     return run.id;
   };

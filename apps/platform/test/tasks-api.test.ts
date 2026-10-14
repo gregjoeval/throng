@@ -622,7 +622,7 @@ describe("merge request routes", () => {
 
     const tasks = store(project["id"]);
     await tasks.scoring.drain();
-    const run = at(tasks.scoring.listRuns({ task: 1, attempt: 2 }), -1);
+    const run = at(tasks.scoring.listRuns("t1a2"), -1);
     tasks.scoringFinished(run.id, {
       status: "done",
       result: {
@@ -649,7 +649,7 @@ describe("the task list's summaries", () => {
   async function finish(env: Env, attempt: number, gate: "passed" | "failed") {
     const tasks = env.store(env.project["id"]);
     await tasks.scoring.drain();
-    const run = at(tasks.scoring.listRuns({ task: 1, attempt }), -1);
+    const run = at(tasks.scoring.listRuns(`t1a${attempt}`), -1);
     tasks.scoringFinished(run.id, {
       status: "done",
       result: {

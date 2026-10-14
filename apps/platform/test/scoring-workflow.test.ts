@@ -49,6 +49,7 @@ async function score({ main = MAIN_CONFIG, definitions = {} }: { main?: string; 
   const sizes: [string | undefined, SandboxSize][] = [];
   const logReads: [string | undefined, SandboxSize][] = [];
   const stored = new Map<string, string>();
+  const keys: string[] = [];
   const env = {
     CF_ACCOUNT_ID: "acct",
     SANDBOX: {
@@ -73,10 +74,15 @@ async function score({ main = MAIN_CONFIG, definitions = {} }: { main?: string; 
         scoringFinished: async () => {},
       }),
     },
-    LOGS: { put: async (key: string, value: string) => void stored.set(key.split("/").at(-1) ?? key, value) },
+    LOGS: {
+      put: async (key: string, value: string) => {
+        keys.push(key);
+        stored.set(key.split("/").at(-1) ?? key, value);
+      },
+    },
   };
   const outcome = await new ScoringWorkflow({}, env).run({ payload: params, instanceId: "abc123-t1a1-7" }, runOnce);
-  return { sizes, logReads, stored, outcome };
+  return { sizes, logReads, stored, keys, outcome };
 }
 
 describe("ScoringWorkflow", () => {
@@ -100,6 +106,11 @@ describe("ScoringWorkflow", () => {
       ["score", "lite"],
       ["preview", "lite"],
     ]);
+  });
+
+  it("stores each log under the run's line and id", async () => {
+    const { keys } = await score();
+    expect(keys).toEqual(["logs/abc123/t1a1/7/test.log", "logs/abc123/t1a1/7/preview.deploy.log"]);
   });
 
   it("records the size in each log it stores", async () => {

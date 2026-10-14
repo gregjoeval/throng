@@ -7,7 +7,7 @@ import type { SandboxRole } from "./grants";
 import type { LandingOutcome } from "./landing";
 import type { ScoringOutcome, ScoringRequest, StoredRun } from "./scoring";
 import type { TaskDefinitions } from "./task-definitions";
-import { parseAttemptRef } from "./task-refs";
+import { attemptRef, parseAttemptRef } from "./task-refs";
 import { runTaskMethod, TaskStore } from "./task-store";
 import type { ProjectContext, Sql, TaskOutcome } from "./task-store";
 import type { BatchDatabase } from "./users";
@@ -80,8 +80,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
     if (ref === null) throw new Error(`not an attempt: ${attempt}`);
     const request = this.#tasks.scoring.request({
       project,
-      task: ref.task,
-      attempt: ref.number,
+      line: attemptRef(ref.task, ref.number),
       sha,
       trigger: "push",
       actor: null,

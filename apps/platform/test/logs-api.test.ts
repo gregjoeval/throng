@@ -58,12 +58,12 @@ async function setup() {
   const greg = await tokenFor("greg@example.com");
   const ada = await tokenFor("ada@example.com");
   const project = await post("/projects", greg, { handle: "throng" });
-  const head = repos.commit(`${project["id"]}-main`, { files: { "README.md": "hi\n" } }).hash;
+  repos.commit(`${project["id"]}-main`, { files: { "README.md": "hi\n" } });
   await post("/projects/greg/throng/tasks", greg, { title: "a" });
   await post("/projects/greg/throng/tasks/t1/attempts", ada);
   const scored = await post("/projects/greg/throng/attempts/t1a1/score", ada);
   const run = scored["run"]["id"] as number;
-  const prefix = `logs/${project["id"]}/t1a1/${head}/${run}`;
+  const prefix = `logs/${project["id"]}/t1a1/${run}`;
   return { request, web, env, logs, greg, ada, run, prefix, base: "/projects/greg/throng" };
 }
 

@@ -82,7 +82,7 @@ async function setup() {
   /** Finishes the attempt's latest run with `outcome`, starting it first. */
   const score = async (ref: AttemptInput, outcome: ScoringOutcome = done()) => {
     await store.scoring.drain();
-    const run = at(store.scoring.listRuns({ task: ref.task, attempt: ref.number }), -1);
+    const run = at(store.scoring.listRuns(`t${ref.task}a${ref.number}`), -1);
     store.scoringFinished(run.id, outcome);
   };
   let n = 0;

@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   isLogName,
   landingLogKey,
+  legacyLogKey,
   logKey,
   logNames,
   MAX_LOG_BYTES,
@@ -19,11 +20,18 @@ import {
 const SHA = "c".repeat(40);
 
 describe("logKey", () => {
-  it("lays a run's log out under the project, attempt, head and run", () => {
-    const run = { project: "p123", attempt: "t42a3", sha: SHA, run: 7 };
-    expect(logKey(run, "test")).toBe(`logs/p123/t42a3/${SHA}/7/test.log`);
-    expect(logKey(run, setupLogName(2))).toBe(`logs/p123/t42a3/${SHA}/7/setup.2.log`);
-    expect(logKey(run, PREVIEW_LOG)).toBe(`logs/p123/t42a3/${SHA}/7/preview.deploy.log`);
+  it("lays a run's log out under the project, line and run", () => {
+    const run = { project: "p123", line: "t42a3", run: 7 };
+    expect(logKey(run, "test")).toBe("logs/p123/t42a3/7/test.log");
+    expect(logKey(run, setupLogName(2))).toBe("logs/p123/t42a3/7/setup.2.log");
+    expect(logKey(run, PREVIEW_LOG)).toBe("logs/p123/t42a3/7/preview.deploy.log");
+  });
+});
+
+describe("legacyLogKey", () => {
+  it("lays a log out where runs stored it before they were keyed on their line: under the head too", () => {
+    const run = { project: "p123", line: "t42a3", sha: SHA, run: 7 };
+    expect(legacyLogKey(run, "test")).toBe(`logs/p123/t42a3/${SHA}/7/test.log`);
   });
 });
 

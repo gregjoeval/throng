@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import { ServiceError } from "../src/errors.ts";
 import type { CheckResult, LegacyResult, ScoringResult } from "../src/results.ts";
 import { SCORING_CAP } from "../src/scoring.ts";
-import type { ScoringOutcome, ScoringParams, ScoringRequest, ScoringWorkflow } from "../src/scoring.ts";
+import type { ScoringOutcome, ScoringParams, ScoringRequest, ScoringWorkflow, StoredRun } from "../src/scoring.ts";
+import { attemptRef } from "../src/task-refs.ts";
 import { TaskStore } from "../src/task-store.ts";
 import type { AttemptInput, ProjectContext } from "../src/task-store.ts";
 import type { Actor } from "../src/tokens.ts";
@@ -60,7 +61,7 @@ function setup() {
     (sql.db.prepare("SELECT kind, detail FROM journal ORDER BY id").all() as { kind: string; detail: string }[]).map(
       (e): Record<string, unknown> => ({ kind: e.kind, ...(JSON.parse(e.detail) as Record<string, unknown>) }),
     );
-  const runs = (ref: AttemptInput) => store.scoring.listRuns({ task: ref.task, attempt: ref.number });
+  const runs = (ref: AttemptInput) => store.scoring.listRuns(attemptRef(ref.task, ref.number));
 
   /** Commits on an attempt's fork `main`, as a push would, and returns the new head. */
   const commit = (ref: AttemptInput, content: string) =>
@@ -208,7 +209,7 @@ describe("scoring triggers", () => {
     const ref = { task: made.task, number: made.number };
     expect(await code(store.scoreNow(PROJECT, ada, ref))).toBe("invalidState");
     expect((await store.openAttempt(PROJECT, ada, ref)).state).toBe("open");
-    expect(store.scoring.listRuns({ task: ref.task, attempt: ref.number })).toEqual([]);
+    expect(store.scoring.listRuns(attemptRef(ref.task, ref.number))).toEqual([]);
   });
 });
 
@@ -391,7 +392,7 @@ describe("the scoring queue", () => {
     const a = at(await store.createAttempts(PROJECT, ada, { task: task.number }), 0);
     await store.openAttempt(PROJECT, ada, { task: a.task, number: a.number });
     await store.scoring.drain();
-    expect(store.scoring.listRuns({ task: a.task, attempt: a.number })).toMatchObject([{ status: "queued" }]);
+    expect(store.scoring.listRuns(attemptRef(a.task, a.number))).toMatchObject([{ status: "queued" }]);
   });
 });
 
@@ -463,7 +464,7 @@ describe("rescoring on a task edit", () => {
   it("queues one rescore behind a run that's running, which may have read the old definitions", async () => {
     const { store, workflow, runs, open } = await scored();
     const sha = at(runs(open), 0).sha;
-    store.scoring.request({ project: PROJECT.id, task: 1, attempt: 1, sha, trigger: "rescore", actor: ada });
+    store.scoring.request({ project: PROJECT.id, line: "t1a1", sha, trigger: "rescore", actor: ada });
     await store.scoring.drain();
     expect(runs(open).map((r) => [r.trigger, r.status])).toEqual([
       ["open", "done"],
@@ -489,7 +490,7 @@ describe("rescoring on a task edit", () => {
   it("still answers a push or score now for a head that's running with the run, queuing nothing", async () => {
     const { store, runs, open } = await scored();
     const sha = at(runs(open), 0).sha;
-    const head = { project: PROJECT.id, task: 1, attempt: 1, sha, actor: ada };
+    const head = { project: PROJECT.id, line: "t1a1", sha, actor: ada };
     store.scoring.request({ ...head, trigger: "rescore" });
     await store.scoring.drain();
     const running = at(runs(open), 1);
@@ -535,22 +536,12 @@ describe("results", () => {
     expect(journal().find((e) => e.kind === "scored")).toMatchObject({ gate: "passed", summary: "1 passed, 1 failed" });
   });
 
-  it("reads a result stored before runs kept logs as having none", async () => {
-    const { store, runs, draft } = setup();
-    const ref = await draft();
-    await store.openAttempt(PROJECT, ada, ref);
-    await store.scoring.drain();
+  it("reads a result stored before runs kept logs as having none", () => {
     const { logs: _logs, ...older } = result();
-    store.scoring.finish(at(runs(ref), 0).id, { status: "done", result: older as ScoringResult });
-
-    expect(at(runs(ref), 0).result).toEqual(result({ logs: [] }));
+    expect(migratedRun(older).result).toEqual(result({ logs: [] }));
   });
 
-  it("reads a result stored with builtin and preview in the current shape", async () => {
-    const { store, runs, draft } = setup();
-    const ref = await draft();
-    await store.openAttempt(PROJECT, ada, ref);
-    await store.scoring.drain();
+  it("reads a result stored with builtin and preview in the current shape", () => {
     const legacy: LegacyResult = {
       base: null,
       config: { kind: "valid" },
@@ -562,9 +553,7 @@ describe("results", () => {
       preview: { status: "ready", url: "https://x.workers.dev" },
       logs: ["test"],
     };
-    store.scoring.finish(at(runs(ref), 0).id, { status: "done", result: legacy as unknown as ScoringResult });
-
-    const read = at(runs(ref), 0).result;
+    const read = migratedRun(legacy).result;
     expect(read?.checks.map((c) => [c.name, c.source, c.outcome])).toEqual([
       ["_diff", "platform", "passed"],
       ["test", "project", "passed"],
@@ -649,7 +638,7 @@ describe("results", () => {
     expect(status()).toEqual({ status: "done", sha: base.hash });
   });
 
-  it("adds the result columns to a scoring_runs table from before results", () => {
+  it("moves a scoring_runs table from before results to pipeline runs", () => {
     const sql = testSql();
     sql.exec(`CREATE TABLE scoring_runs (
       id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, task INTEGER NOT NULL, attempt INTEGER NOT NULL,
@@ -657,8 +646,194 @@ describe("results", () => {
       instance_id TEXT NOT NULL, created_at INTEGER NOT NULL, started_at INTEGER, finished_at INTEGER,
       torn_down INTEGER NOT NULL DEFAULT 0
     )`);
-    expect(new TaskStore({ sql, repos: new FakeRepos() }).scoring).toBeDefined();
-    const columns = sql.exec<{ name: string }>("PRAGMA table_info(scoring_runs)").map((c) => c.name);
-    expect(columns.slice(-3)).toEqual(["result", "error", "superseded"]);
+    sql.exec(
+      `INSERT INTO scoring_runs (project, task, attempt, sha, trigger, user_id, agent, status, instance_id, created_at)
+       VALUES ('abc123', 1, 1, 'a', 'open', 'ada', 'claude', 'done', 'i', 1)`,
+    );
+    const store = new TaskStore({ sql, repos: new FakeRepos() });
+    expect(store.scoring.listRuns("t1a1")).toMatchObject([
+      { id: 1, line: "t1a1", alias: "claude", outcome: null, result: null, error: null, superseded: false },
+    ]);
+  });
+});
+
+/** The `scoring_runs` and `scoring_heads` tables as they were before runs were keyed on their line. */
+function scoringTables(sql: ReturnType<typeof testSql>): void {
+  sql.exec(`CREATE TABLE scoring_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, task INTEGER NOT NULL, attempt INTEGER NOT NULL,
+    sha TEXT NOT NULL, trigger TEXT NOT NULL, user_id TEXT, alias TEXT, status TEXT NOT NULL,
+    instance_id TEXT NOT NULL, created_at INTEGER NOT NULL, started_at INTEGER, finished_at INTEGER,
+    torn_down INTEGER NOT NULL DEFAULT 0, result TEXT, error TEXT, superseded INTEGER NOT NULL DEFAULT 0
+  )`);
+  sql.exec(`CREATE TABLE scoring_heads (
+    task INTEGER NOT NULL, attempt INTEGER NOT NULL, sha TEXT NOT NULL, PRIMARY KEY (task, attempt)
+  )`);
+}
+
+/** The done run a project stored with `stored` as its result before runs were keyed on their line, as read since. */
+function migratedRun(stored: object): StoredRun {
+  const sql = testSql();
+  scoringTables(sql);
+  sql.exec(
+    `INSERT INTO scoring_runs (project, task, attempt, sha, trigger, status, instance_id, created_at, result)
+     VALUES ('abc123', 1, 1, 'a', 'open', 'done', 'i', 0, ?)`,
+    JSON.stringify(stored),
+  );
+  return at(new TaskStore({ sql, repos: new FakeRepos() }).scoring.listRuns("t1a1"), 0);
+}
+
+describe("line-keyed runs", () => {
+  it("moves scoring runs to pipeline runs on their attempt's line, keeping their ids", () => {
+    const sql = testSql();
+    scoringTables(sql);
+    const legacy = {
+      base: null,
+      config: { kind: "valid" },
+      gate: "passed",
+      checks: [{ name: "test", required: true, outcome: "passed", durationMs: 9, metrics: {}, notes: [] }],
+      builtin: { filesChanged: 1, additions: 2, deletions: 0, durationMs: 3 },
+      preview: { status: "none" },
+      logs: ["test"],
+    };
+    sql.exec(
+      `INSERT INTO scoring_runs (id, project, task, attempt, sha, trigger, user_id, alias, status, instance_id,
+         created_at, started_at, finished_at, result, superseded)
+       VALUES (4, 'abc123', 1, 2, 'a', 'open', 'ada', 'claude', 'done', 'i4', 1, 2, 3, ?, 1),
+              (7, 'abc123', 1, 2, 'b', 'push', 'ada', NULL, 'running', 'i7', 4, 5, NULL, NULL, 0)`,
+      JSON.stringify(legacy),
+    );
+    sql.exec("INSERT INTO scoring_heads (task, attempt, sha) VALUES (1, 2, 'b')");
+
+    const store = new TaskStore({ sql, repos: new FakeRepos() });
+    expect(new TaskStore({ sql, repos: new FakeRepos() })).toBeDefined();
+
+    expect(store.scoring.listRuns("t1a2")).toMatchObject([
+      {
+        id: 4,
+        line: "t1a2",
+        pipeline: "default",
+        sha: "a",
+        trigger: "open",
+        merge_request: null,
+        user_id: "ada",
+        alias: "claude",
+        trusted: false,
+        status: "done",
+        instance_id: "i4",
+        superseded: true,
+      },
+      { id: 7, line: "t1a2", pipeline: "default", sha: "b", status: "running", superseded: false },
+    ]);
+    expect(at(store.scoring.listRuns("t1a2"), 0).outcome?.steps.map((s) => s.name)).toEqual([
+      "_diff",
+      "test",
+      "_preview",
+    ]);
+    expect(store.scoring.statusFor("t1a2")).toEqual({ status: "running", sha: "b" });
+    const next = store.scoring.request({ project: PROJECT.id, line: "t1a2", sha: "c", trigger: "push", actor: ada });
+    expect(next.run.id).toBe(8);
+    const tables = sql.exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table'").map((t) => t.name);
+    expect(tables).toContain("pipeline_runs");
+    expect(tables).not.toContain("scoring_runs");
+    expect(tables).not.toContain("scoring_heads");
+  });
+
+  it("upgrades a migrated run's result to steps on read, and scoring reads the same result as before", () => {
+    const stored = {
+      base: "b".repeat(40),
+      config: { kind: "valid" },
+      gate: "failed",
+      checks: [
+        { name: "_diff", source: "platform", outcome: "passed", durationMs: 2, notes: [] },
+        { name: "test", source: "project", outcome: "timed_out", durationMs: 9, notes: [] },
+        { name: "_preview", source: "platform", outcome: "skipped", durationMs: 0, notes: ["the gate failed"] },
+      ],
+      metrics: {
+        _diff: { source: "platform", type: "enum", value: "passed", values: ["passed"] },
+        test: { source: "project", type: "enum", value: "timedOut", values: ["passed", "timedOut"] },
+      },
+      logs: ["setup.1", "test"],
+    };
+    const run = migratedRun(stored);
+
+    const step = { group: null, notes: [], durationMs: 0 };
+    expect(run.outcome?.steps).toEqual([
+      { ...step, name: "_diff", kind: "check", source: "platform", outcome: "passed", durationMs: 2, log: null },
+      { ...step, name: "setup.1", kind: "setup", source: "project", outcome: "passed", log: "setup.1" },
+      { ...step, name: "test", kind: "check", source: "project", outcome: "failed", durationMs: 9, log: "test" },
+      {
+        ...step,
+        name: "_preview",
+        kind: "check",
+        source: "platform",
+        outcome: "skipped",
+        notes: ["the gate failed"],
+        log: null,
+      },
+    ]);
+    expect(run.result?.checks.map((c) => [c.name, c.outcome])).toEqual([
+      ["_diff", "passed"],
+      ["test", "timedOut"],
+      ["_preview", "skipped"],
+    ]);
+    expect(run.result?.logs).toEqual(["setup.1", "test"]);
+  });
+
+  it("stores a run's outcome as steps, with the setup that failed", async () => {
+    const { store, runs, draft } = setup();
+    const ref = await draft();
+    await store.openAttempt(PROJECT, ada, ref);
+    await store.scoring.drain();
+    const checks: CheckResult[] = [
+      { name: "_diff", source: "platform", outcome: "passed", durationMs: 2, notes: [] },
+      {
+        name: "test",
+        source: "project",
+        outcome: "skipped",
+        durationMs: 0,
+        notes: ["skipped: setup command 2 failed"],
+      },
+    ];
+    const failed = result({ config: { kind: "valid" }, gate: "failed", checks, logs: ["setup.1", "setup.2"] });
+    store.scoring.finish(at(runs(ref), 0).id, { status: "done", result: failed });
+
+    const run = at(runs(ref), 0);
+    expect(run.outcome?.steps.map((s) => [s.name, s.kind, s.outcome, s.log])).toEqual([
+      ["_diff", "check", "passed", null],
+      ["setup.1", "setup", "passed", "setup.1"],
+      ["setup.2", "setup", "failed", "setup.2"],
+      ["test", "check", "skipped", null],
+    ]);
+    expect(run.outcome).toMatchObject({ base: failed.base, config: { kind: "valid" }, gate: "failed", metrics: {} });
+    expect(run.result).toEqual(failed);
+  });
+
+  it("starts one run per line at a time, and runs on other lines alongside it", async () => {
+    const { store, runs, drafts, workflow } = setup();
+    const [one, two] = await drafts(2);
+    await store.openAttempt(PROJECT, ada, defined(one));
+    await store.scoring.drain();
+    const sha = at(runs(defined(one)), 0).sha;
+    store.scoring.request({ project: PROJECT.id, line: "t1a1", sha, trigger: "rescore", actor: ada });
+    await store.openAttempt(PROJECT, ada, defined(two));
+    await store.scoring.drain();
+    expect(workflow.created.map((c) => c.params.attempt)).toEqual(["t1a1", "t1a2"]);
+    expect(runs(defined(one))).toMatchObject([
+      { line: "t1a1", status: "running" },
+      { line: "t1a1", status: "queued" },
+    ]);
+  });
+
+  it("reads a migrated run's log under its old key, and a new run's under its line", () => {
+    const sql = testSql();
+    scoringTables(sql);
+    sql.exec(
+      `INSERT INTO scoring_runs (project, task, attempt, sha, trigger, status, instance_id, created_at)
+       VALUES ('abc123', 1, 1, 'a', 'open', 'done', 'i', 0)`,
+    );
+    const store = new TaskStore({ sql, repos: new FakeRepos() });
+    expect(store.runLogKey(PROJECT, ada, { run: 1, name: "test" })).toBe("logs/abc123/t1a1/a/1/test.log");
+    store.scoring.request({ project: PROJECT.id, line: "t1a1", sha: "b", trigger: "push", actor: ada });
+    expect(store.runLogKey(PROJECT, ada, { run: 2, name: "test" })).toBe("logs/abc123/t1a1/2/test.log");
   });
 });

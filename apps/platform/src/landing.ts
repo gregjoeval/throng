@@ -88,8 +88,8 @@ export function actedAlias(acted: { alias?: string | null; agent?: string | null
 }
 
 /**
- * How a required check can fail to pass: every outcome but `passed` and `errored`, as only `_preview`
- * errors, and it is never required.
+ * How a required check can fail to pass: every outcome but `passed` and `errored`: a check's outcome
+ * comes from its exit, so it never errors.
  */
 export type FailedCheckOutcome = Exclude<CheckOutcome, "passed" | "errored">;
 

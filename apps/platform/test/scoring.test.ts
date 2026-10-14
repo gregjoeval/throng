@@ -524,7 +524,6 @@ describe("results", () => {
       { name: "_diff", source: "platform", required: false, outcome: "passed", durationMs: 2, notes: [] },
       { name: "test", source: "project", required: true, outcome: "passed", durationMs: 9, notes: [] },
       { name: "lint", source: "project", required: false, outcome: "failed", durationMs: 1, notes: [] },
-      { name: "_preview", source: "platform", required: false, outcome: "skipped", durationMs: 0, notes: [] },
     ];
     expect(store.scoring.finish(at(runs(ref), 0).id, done({ config: { kind: "valid" }, checks }))).toBeTruthy();
 
@@ -546,7 +545,7 @@ describe("results", () => {
     expect(at(runs(ref), 0).result).toEqual(result({ logs: [] }));
   });
 
-  it("reads a result stored with builtin and preview in the current shape", async () => {
+  it("reads a result stored with builtin and preview in the current shape, without the preview", async () => {
     const { store, runs, draft } = setup();
     const ref = await draft();
     await store.openAttempt(PROJECT, ada, ref);
@@ -568,13 +567,12 @@ describe("results", () => {
     expect(read?.checks.map((c) => [c.name, c.source, c.outcome])).toEqual([
       ["_diff", "platform", "passed"],
       ["test", "project", "passed"],
-      ["_preview", "platform", "passed"],
     ]);
     expect(read?.metrics).toMatchObject({
       "_diff.filesChanged": { value: 2 },
       coverage: { source: "project", type: "number", value: 80 },
-      "_preview.url": { value: "https://x.workers.dev" },
     });
+    expect(Object.keys(read?.metrics ?? {})).not.toContain("_preview.url");
     expect(read).not.toHaveProperty("builtin");
     expect(read).not.toHaveProperty("preview");
   });

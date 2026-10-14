@@ -19,7 +19,6 @@ import { DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS } from "../src/waiters.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
 import type { Json } from "./support/json.ts";
-import { FakePreviewWorkers } from "./support/preview-workers.ts";
 import { PASSED } from "./support/results.ts";
 import { testTaskBackends } from "./support/task-backend.ts";
 
@@ -99,7 +98,6 @@ async function setup() {
     verifierFor: () => verify,
     now,
     repos: () => repos,
-    previewWorkers: () => new FakePreviewWorkers(),
     tasks: () => recording,
     logs: () => logs,
   });

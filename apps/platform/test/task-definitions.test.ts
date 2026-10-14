@@ -118,7 +118,6 @@ checks:
       ["_diff", "platform", false],
       ["test", "project", true],
       ["smoke", "task", true],
-      ["_preview", "platform", false],
     ]);
     expect(result.metrics["smoke"]).toMatchObject({ source: "task", type: "enum", value: "passed" });
     expect(result.metrics["smoked"]).toEqual({ source: "task", type: "boolean", order: "desc", value: true });

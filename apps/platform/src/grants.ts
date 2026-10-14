@@ -14,10 +14,10 @@ export interface GitGrant {
  * Each role runs in its own container. Intercepts are fixed when a container starts, so roles with
  * different grants need different containers.
  */
-export const SANDBOX_ROLES = ["score", "preview", "check", "land", "follow"] as const;
+export const SANDBOX_ROLES = ["score", "check", "land", "follow"] as const;
 export type SandboxRole = (typeof SANDBOX_ROLES)[number];
-/** The roles a scoring run's Workflow starts containers for: scoring, then its Preview. */
-export const SCORING_ROLES = ["score", "preview"] as const satisfies readonly SandboxRole[];
+/** The roles a scoring run's Workflow starts containers for: scoring. */
+export const SCORING_ROLES = ["score"] as const satisfies readonly SandboxRole[];
 /**
  * The roles a Landing Workflow starts containers for: the untrusted conflict check and retest, then
  * the trusted land step.
@@ -27,12 +27,11 @@ export const LANDING_ROLES = ["check", "land"] as const satisfies readonly Sandb
 export const FOLLOW_ROLES = ["follow"] as const satisfies readonly SandboxRole[];
 
 /**
- * Roles whose container runs the repository's own code (npm, its scripts, wrangler builds). They
+ * Roles whose container runs the repository's own code (npm and its scripts). They
  * start at the project's Sandbox size; the trusted roles only run git, and start at `TRUSTED_SIZE`.
  */
 export const RUNS_REPO_CODE = {
   score: true,
-  preview: true,
   check: true,
   land: false,
   follow: false,
@@ -61,7 +60,6 @@ export const GRANT_SOURCES: Record<keyof RunGrants, { repo: "origin" | "fork"; a
 /** The grants each role's container gets. */
 export const ROLE_GRANTS = {
   score: ["forkRead"],
-  preview: ["forkRead"],
   check: ["originRead", "forkRead"],
   land: ["originWrite", "forkRead"],
   follow: ["originRead", "forkWrite"],

@@ -418,7 +418,7 @@ function mcpServer({ repos, tasks, logs, diffCache }: Deps, { actor, token, env,
 
   tool(
     "get_log",
-    `Read a scoring run's log: a check's name, \`setup.<n>\`, or \`preview.deploy\`. Returns the last ` +
+    `Read a scoring run's log: a check's name, or \`setup.<n>\`. Returns the last ` +
       `${MAX_LOG_SLICE_BYTES / 1024} KB by default; pass \`offset\` (bytes) to read ${MAX_LOG_SLICE_BYTES / 1024} ` +
       "KB from there instead.",
     onProject.extend({

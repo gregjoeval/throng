@@ -5,14 +5,12 @@ import {
   checkOutcome,
   gateFor,
   parseShortstat,
-  previewPlan,
   scorePlan,
   scoreTimeoutMs,
   SETUP_TIMEOUT_MS,
   upgradeResult,
-  withPreview,
 } from "../src/results.ts";
-import type { CheckResult, LegacyResult, RawScore, ScoringResult } from "../src/results.ts";
+import type { CheckResult, LegacyResult, RawScore } from "../src/results.ts";
 
 const BASE = "a".repeat(40);
 const OUTCOMES = ["passed", "failed", "timedOut", "errored", "skipped"];
@@ -138,35 +136,17 @@ describe("scorePlan", () => {
 });
 
 describe("buildResult", () => {
-  it("passes a zero-config project, recording the diff as the _diff check and skipping _preview", () => {
+  it("passes a zero-config project, recording the diff as the _diff check, Throng's only check", () => {
     expect(buildResult({ kind: "none" }, raw())).toEqual({
       base: BASE,
       config: { kind: "none" },
       gate: "passed",
-      checks: [
-        { name: "_diff", source: "platform", required: false, outcome: "passed", durationMs: 12, notes: [] },
-        {
-          name: "_preview",
-          source: "platform",
-          required: false,
-          outcome: "skipped",
-          durationMs: 0,
-          notes: ["skipped: the config has no preview section"],
-        },
-      ],
+      checks: [{ name: "_diff", source: "platform", required: false, outcome: "passed", durationMs: 12, notes: [] }],
       metrics: {
         _diff: { source: "platform", type: "enum", value: "passed", values: OUTCOMES },
         "_diff.filesChanged": { source: "platform", type: "number", value: 3, order: "asc" },
         "_diff.additions": { source: "platform", type: "number", value: 10, order: "asc" },
         "_diff.deletions": { source: "platform", type: "number", value: 4, order: "asc" },
-        _preview: { source: "platform", type: "enum", value: "skipped", values: OUTCOMES },
-        "_preview.url": {
-          source: "platform",
-          type: "string",
-          format: "url",
-          value: null,
-          note: "_preview was skipped: the config has no preview section",
-        },
       },
       logs: [],
     });
@@ -181,10 +161,7 @@ describe("buildResult", () => {
       gate: "failed",
       metrics: { "_diff.filesChanged": { value: 3 } },
     });
-    expect(result.checks.map((c) => [c.name, c.outcome, c.notes])).toEqual([
-      ["_diff", "passed", []],
-      ["_preview", "skipped", ["skipped: the config is invalid"]],
-    ]);
+    expect(result.checks.map((c) => [c.name, c.outcome, c.notes])).toEqual([["_diff", "passed", []]]);
   });
 
   it("scores each check from its exit, and gates on the required ones", () => {
@@ -223,8 +200,6 @@ describe("buildResult", () => {
       "coverage",
       "bundle",
       "bundle_kb",
-      "_preview",
-      "_preview.url",
     ]);
     expect(result.metrics).toMatchObject({
       test: { source: "project", type: "enum", value: "passed", values: OUTCOMES },
@@ -290,7 +265,7 @@ describe("buildResult", () => {
         ],
       }),
     );
-    expect(result.checks.map((c) => c.outcome)).toEqual(["passed", "timedOut", "passed", "skipped"]);
+    expect(result.checks.map((c) => c.outcome)).toEqual(["passed", "timedOut", "passed"]);
     expect(result.metrics.test).toMatchObject({ value: "timedOut" });
     expect(result.metrics.coverage).toMatchObject({ value: 40 });
     expect(result.gate).toBe("failed");
@@ -406,93 +381,6 @@ metrics:
   });
 });
 
-describe("previewPlan", () => {
-  const WITH_PREVIEW = parseConfig("preview:\n  command: npm run build\n");
-  const passed = buildResult(WITH_PREVIEW, raw());
-
-  it("deploys a Preview, with the configured build command, when preview is configured and the gate passed", () => {
-    expect(previewPlan(WITH_PREVIEW, passed)).toEqual({ command: "npm run build" });
-    expect(previewPlan(parseConfig("preview: {}\n"), passed)).toEqual({ command: null });
-  });
-
-  it("deploys nothing when the gate failed", () => {
-    const failing = parseConfig("preview:\n  command: npm run build\nchecks:\n  - { name: test, command: npm test }\n");
-    const result = buildResult(failing, raw({ checks: [{ exit: 1, durationMs: 1, metrics: {} }] }));
-    expect(result.gate).toBe("failed");
-    expect(previewPlan(failing, result)).toBeNull();
-    expect(result.checks.at(-1)).toMatchObject({
-      name: "_preview",
-      outcome: "skipped",
-      notes: ["skipped: the gate failed"],
-    });
-    expect(result.metrics["_preview.url"]).toMatchObject({
-      value: null,
-      note: "_preview was skipped: the gate failed",
-    });
-  });
-
-  it("deploys nothing without a preview section, without a config, or with an invalid one", () => {
-    for (const config of [parseConfig(""), parseConfig(null), parseConfig("preview: nope\n")]) {
-      expect(previewPlan(config, buildResult(config, raw()))).toBeNull();
-    }
-  });
-});
-
-/** A result's `_preview` check, its outcome metric and `_preview.url`. */
-const preview = (result: ScoringResult) => ({
-  check: result.checks.at(-1),
-  outcome: result.metrics["_preview"],
-  url: result.metrics["_preview.url"],
-});
-
-describe("withPreview", () => {
-  const passed = buildResult(parseConfig("preview: {}\n"), raw());
-
-  it("skips _preview until it deploys, as the last check", () => {
-    expect(preview(passed)).toMatchObject({ check: { name: "_preview", outcome: "skipped" } });
-  });
-
-  it("records a deployed Preview as passed, with _preview.url", () => {
-    const result = withPreview(passed, { ok: true, url: "https://t1a1-pabc-w.acct.workers.dev" }, 4200);
-    expect(preview(result)).toEqual({
-      check: { name: "_preview", source: "platform", required: false, outcome: "passed", durationMs: 4200, notes: [] },
-      outcome: { source: "platform", type: "enum", value: "passed", values: OUTCOMES },
-      url: { source: "platform", type: "string", format: "url", value: "https://t1a1-pabc-w.acct.workers.dev" },
-    });
-  });
-
-  it("records a failed build or deploy as failed, with a null URL, without changing the gate or the other checks", () => {
-    for (const [deployed, why] of [
-      [{ ok: false, stage: "build", output: "boom" }, "its build step failed"],
-      [null, "the preview script gave no result"],
-    ] as const) {
-      const result = withPreview(passed, deployed, 10);
-      expect(result.gate).toBe("passed");
-      expect(result.checks.slice(0, -1)).toEqual(passed.checks.slice(0, -1));
-      expect(preview(result)).toMatchObject({
-        check: { outcome: "failed", notes: [`failed: ${why}`] },
-        outcome: { value: "failed" },
-        url: { value: null, note: `_preview failed: ${why}` },
-      });
-    }
-  });
-
-  it("records an infrastructure error as errored, apart from a failed build, without changing the gate", () => {
-    const result = withPreview(passed, { error: "Error: preview script exited 12: fetch failed" }, 0);
-    expect(result.gate).toBe("passed");
-    expect(preview(result)).toMatchObject({
-      check: { outcome: "errored", notes: ["errored: Error: preview script exited 12: fetch failed"] },
-      outcome: { value: "errored" },
-      url: { value: null, note: "_preview errored: Error: preview script exited 12: fetch failed" },
-    });
-  });
-
-  it("keeps the metrics in run order", () => {
-    const result = withPreview(passed, { ok: true, url: "https://x.workers.dev" }, 1);
-    expect(Object.keys(result.metrics)).toEqual(Object.keys(passed.metrics));
-  });
-});
-
 /** A result as runs stored it before built-in checks: `builtin`, `preview` and per-check metrics. */
 function legacy(overrides: Partial<LegacyResult> = {}): LegacyResult {
   return {
@@ -517,14 +405,8 @@ function legacy(overrides: Partial<LegacyResult> = {}): LegacyResult {
   };
 }
 
-/** A legacy result with this Preview status, upgraded: `_preview`'s outcome and notes, and `_preview.url`. */
-function upgradedPreview(status: LegacyResult["preview"]) {
-  const result = upgradeResult(legacy({ preview: status }));
-  return [result.checks.at(-1)?.outcome, result.checks.at(-1)?.notes, result.metrics["_preview.url"]?.value];
-}
-
 describe("upgradeResult", () => {
-  it("turns builtin into _diff, preview into _preview, and each check's metrics into project numbers", () => {
+  it("turns builtin into _diff and each check's metrics into project numbers, dropping the retired preview", () => {
     expect(upgradeResult(legacy())).toEqual({
       base: BASE,
       config: { kind: "valid" },
@@ -540,7 +422,6 @@ describe("upgradeResult", () => {
           durationMs: 40,
           notes: ["metric bundle_kb was not reported"],
         },
-        { name: "_preview", source: "platform", required: false, outcome: "passed", durationMs: 0, notes: [] },
       ],
       metrics: {
         _diff: { source: "platform", type: "enum", value: "passed", values: OUTCOMES },
@@ -556,8 +437,6 @@ describe("upgradeResult", () => {
           note: "converted from an older result, which didn't record its order or unit",
         },
         bundle: { source: "project", type: "enum", value: "timedOut", values: OUTCOMES },
-        _preview: { source: "platform", type: "enum", value: "passed", values: OUTCOMES },
-        "_preview.url": { source: "platform", type: "string", format: "url", value: "https://x.workers.dev" },
       },
       logs: ["test", "preview.deploy"],
     });
@@ -575,12 +454,6 @@ describe("upgradeResult", () => {
     ]);
   });
 
-  it("reads each stored Preview status as a _preview outcome", () => {
-    expect(upgradedPreview({ status: "none" })).toEqual(["skipped", [], null]);
-    expect(upgradedPreview({ status: "failed" })).toEqual(["failed", [], null]);
-    expect(upgradedPreview({ status: "errored", error: "boom" })).toEqual(["errored", ["errored: boom"], null]);
-  });
-
   it("drops an invalid config's synthetic config check, keeping the error on config", () => {
     const result = upgradeResult(
       legacy({
@@ -592,7 +465,7 @@ describe("upgradeResult", () => {
         preview: { status: "none" },
       }),
     );
-    expect(result.checks.map((c) => c.name)).toEqual(["_diff", "_preview"]);
+    expect(result.checks.map((c) => c.name)).toEqual(["_diff"]);
     expect(result.config).toEqual({ kind: "invalid", error: "checks[0].name: bad" });
     expect(result.gate).toBe("failed");
   });

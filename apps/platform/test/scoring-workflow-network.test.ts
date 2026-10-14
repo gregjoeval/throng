@@ -1,6 +1,6 @@
-// The Scoring Workflow's network access against fake bindings: what the score and preview containers
-// may reach, and where that comes from. `cloudflare:workers`, the base lookup and the preview Workers
-// are stubbed; the Artifacts binding is a `FakeRepos`, and each step retries as its config says.
+// The Scoring Workflow's network access against fake bindings: what the score container may reach,
+// and where that comes from. `cloudflare:workers` and the base lookup are stubbed; the Artifacts
+// binding is a `FakeRepos`, and each step retries as its config says.
 
 import { describe, expect, it, vi } from "vitest";
 import { CONFIG_PATH } from "../src/config.ts";
@@ -17,7 +17,6 @@ const binding = vi.hoisted(() => ({ repos: null as unknown }));
 vi.mock("cloudflare:workers", () => import("./support/cloudflare-workers.ts"));
 vi.mock("../src/artifacts", () => ({ reposFor: () => binding.repos }));
 vi.mock("../src/base", () => ({ attemptBase: async () => null }));
-vi.mock("../src/preview-workers", () => ({ previewWorkersFor: () => ({ ensure: async () => {} }) }));
 
 // Imported by a computed path: the module is Worker code, which this project's Node typecheck can't
 // follow (`cloudflare:workers`), so it is typed here by what the test calls.
@@ -31,8 +30,7 @@ const { ScoringWorkflow } = await importWorkerModule<{
 const ORIGIN = "abc123-main";
 const FORK = "abc123-t1a1";
 const params: ScoringParams = { project: "abc123", attempt: "t1a1", sha: "a".repeat(40), run: 7 };
-const config = (host: string) =>
-  `preview: {}\nnetwork:\n  allow: [${host}]\nchecks:\n  - { name: test, command: npm test }\n`;
+const config = (host: string) => `network:\n  allow: [${host}]\nchecks:\n  - { name: test, command: npm test }\n`;
 const npmrc = (host: string) => `@acme:registry=https://${host}/\n`;
 
 /** A step that runs `fn`, trying again on failure up to its config's retry limit, as Workflows does. */
@@ -53,7 +51,6 @@ async function score(repos: FakeRepos): Promise<{ access: Map<string, OutboundAc
   binding.repos = repos;
   const access = new Map<string, OutboundAccess>();
   const env = {
-    CF_ACCOUNT_ID: "acct",
     SANDBOX: {
       getByName: (name: string) => {
         const role = name.split("/").at(-1) ?? name;
@@ -61,7 +58,7 @@ async function score(repos: FakeRepos): Promise<{ access: Map<string, OutboundAc
           run: async (script: string, options: { access: OutboundAccess }) => {
             if (script.includes("f=logs/")) return { exitCode: 0, stdout: "log\n", stderr: "" };
             access.set(role, options.access);
-            return role === "score" ? result(PASSED) : result({ ok: true, url: "https://preview.invalid" });
+            return result(PASSED);
           },
           destroy: async () => {},
         };
@@ -91,15 +88,22 @@ async function project<R extends FakeRepos>(repos: R, files: Record<string, stri
 const MAIN = { [CONFIG_PATH]: config("api.example.com"), [NPMRC_PATH]: npmrc("npm.acme.dev") };
 
 describe("ScoringWorkflow network access", () => {
-  it("gives the score and preview containers main's network.allow and .npmrc registries, never the attempt's", async () => {
+  it("gives the score container main's network.allow and .npmrc registries, never the attempt's", async () => {
     const { access, outcome } = await score(await project(new FakeRepos(), MAIN));
     expect(outcome.status).toBe("done");
-    for (const role of ["score", "preview"]) {
-      expect({ role, access: access.get(role) }).toMatchObject({
-        role,
-        access: { registries: ["registry.npmjs.org", "npm.acme.dev"], allow: ["api.example.com"] },
-      });
-    }
+    expect([...access.keys()]).toEqual(["score"]);
+    expect(access.get("score")).toMatchObject({
+      registries: ["registry.npmjs.org", "npm.acme.dev"],
+      allow: ["api.example.com"],
+    });
+  });
+
+  it("opens the Cloudflare API to the score container only when main's network.allow lists it", async () => {
+    const listed = { ...MAIN, [CONFIG_PATH]: config("api.cloudflare.com") };
+    const { access } = await score(await project(new FakeRepos(), listed));
+    expect(access.get("score")?.allow).toEqual(["api.cloudflare.com"]);
+    const { access: unlisted } = await score(await project(new FakeRepos(), MAIN));
+    expect(unlisted.get("score")?.allow).not.toContain("api.cloudflare.com");
   });
 
   it("reads the config and the .npmrc from one commit of main, even when main moves between the reads", async () => {

@@ -7,7 +7,6 @@ import { userForEmail } from "../src/users.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
 import type { Json } from "./support/json.ts";
-import { FakePreviewWorkers } from "./support/preview-workers.ts";
 
 const NOW = new Date("2026-10-10T12:00:00.000Z");
 const verify: AccessVerifier = async (token) => (token === "valid" ? { email: "greg@example.com" } : null);
@@ -19,7 +18,6 @@ async function setup() {
     verifierFor: () => verify,
     now: () => NOW,
     repos: () => repos,
-    previewWorkers: () => new FakePreviewWorkers(),
   };
   const apps = { public: publicApp(options), binding: webApp(options) };
   const owner = await userForEmail(env.DB, "owner@example.com");

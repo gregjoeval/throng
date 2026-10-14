@@ -43,12 +43,11 @@
     },
   ],
   "vars": {
-    "CF_ACCOUNT_ID": "9ff7e9e225aeb0ab0c56b05b42ca2b13",
     // PLACEHOLDER: the Zero Trust team domain and the Access application's audience (AUD) tag.
     "ACCESS_TEAM_DOMAIN": "gregjoeval.cloudflareaccess.com",
     "ACCESS_AUD": "2a713dce7fdf28f6d07c5954b0a9d57e867717b5af65ba730b98473b3366712b",
   },
-  "secrets": { "required": ["E2E_TOKEN", "CF_PREVIEW_TOKEN"] },
+  "secrets": { "required": ["E2E_TOKEN"] },
   "observability": { "enabled": true },
   "env": {
     // The Worker the manual Integration workflow (.github/workflows/integration.yml) deploys and runs
@@ -92,11 +91,10 @@
         },
       ],
       "vars": {
-        "CF_ACCOUNT_ID": "9ff7e9e225aeb0ab0c56b05b42ca2b13",
         "ACCESS_TEAM_DOMAIN": "gregjoeval.cloudflareaccess.com",
         "ACCESS_AUD": "2a713dce7fdf28f6d07c5954b0a9d57e867717b5af65ba730b98473b3366712b",
       },
-      "secrets": { "required": ["E2E_TOKEN", "CF_PREVIEW_TOKEN"] },
+      "secrets": { "required": ["E2E_TOKEN"] },
       "observability": { "enabled": true },
     },
   },

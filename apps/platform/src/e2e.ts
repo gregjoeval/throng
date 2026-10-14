@@ -8,7 +8,6 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import { camelKeys } from "./casing.ts";
 import { LOG_PREFIX } from "./logs.ts";
-import type { PreviewWorkers } from "./preview-workers.ts";
 import { projectService } from "./projects.ts";
 import type { Project } from "./projects.ts";
 import { forkRepo, originRepo, parseRepoName } from "./repos.ts";
@@ -62,14 +61,10 @@ export async function e2eToken(
 export async function e2eProject(
   db: Database,
   repos: Repos,
-  previewWorkers: PreviewWorkers,
   id: string,
 ): Promise<{ project: Project; remote: string; token: string }> {
   const user = await userForEmail(db, E2E_EMAIL);
-  const project = await projectService({ db, repos, previewWorkers, newId: () => id }).create(
-    { user, alias: null },
-    { handle: id },
-  );
+  const project = await projectService({ db, repos, newId: () => id }).create({ user, alias: null }, { handle: id });
   const [origin, { token }] = await Promise.all([
     repos.get(originRepo(id)),
     repos.mintToken(originRepo(id), "write", ORIGIN_TOKEN_TTL_SECONDS),
@@ -112,7 +107,6 @@ export interface E2eProjectStub {
 export interface E2eDeps<E> {
   db: (env: E) => Database;
   repos: (env: E) => Repos;
-  previewWorkers: (env: E) => PreviewWorkers;
   logs: (env: E) => LogBucket;
   project: (env: E, id: string) => E2eProjectStub;
   /** The bearer secret every route needs (the Worker's `E2E_TOKEN`); unset or empty, every request is refused. */
@@ -121,7 +115,7 @@ export interface E2eDeps<E> {
 
 /**
  * Deletes everything an e2e project made: its D1 row (its projected tasks and attempts go with it), its
- * Durable Object's storage, its logs in R2, its repos and its preview Worker.
+ * Durable Object's storage, its logs in R2 and its repos.
  */
 export async function deleteE2eProject<E>(deps: E2eDeps<E>, env: E, id: string): Promise<void> {
   if (!isE2eName(id)) throw new Error(`not an e2e project: ${id}`);
@@ -138,8 +132,6 @@ export async function deleteE2eProject<E>(deps: E2eDeps<E>, env: E, id: string):
   // join `projects`.
   await deps.project(env, id).destroy();
   await deleteLogs(deps.logs(env), `${LOG_PREFIX}${id}/`);
-  // Before the repos: a sweep finds a project by its row or its repos, so a failure here is retried.
-  await deps.previewWorkers(env).delete(id);
   const names = await repos.list(`${id}-`);
   await Promise.all(names.filter((name) => parseRepoName(name)?.project === id).map((name) => repos.delete(name)));
 }
@@ -239,7 +231,7 @@ export function e2eRoutes<E extends object>(deps: E2eDeps<E>) {
     const project = c.req.param("project");
     if (!isE2eName(project)) return refused(c, "the project");
     const began = Date.now();
-    const made = await e2eProject(deps.db(c.env), deps.repos(c.env), deps.previewWorkers(c.env), project);
+    const made = await e2eProject(deps.db(c.env), deps.repos(c.env), project);
     const createMs = Date.now() - began;
     await deps.project(c.env, project).note("repoCreated", { project, createMs });
     return c.json({ remote: made.remote, token: made.token, createMs, owner: made.project.owner.handle });

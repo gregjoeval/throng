@@ -50,7 +50,7 @@ open attempt at \`t42\`. The origin's \`main\` only moves through the merge queu
 
 ## Network access
 
-Setup, the checks and the Preview build have no internet. They may reach, over HTTPS on the default port:
+Setup and the checks have no internet. They may reach, over HTTPS on the default port:
 
 - \`${NPM_REGISTRY_HOST}\`, and each \`registry=\` or \`@scope:registry=\` host in the \`.npmrc\` on the origin's \`main\`
   (an \`https:\` URL on the default port with a DNS hostname). A registry takes
@@ -102,7 +102,7 @@ active attempt to another user.
 
 ## The Sandbox
 
-Setup, the checks and the Preview build run in a container whose size the project's \`.throng/config.yml\`
+Setup and the checks run in a container whose size the project's \`.throng/config.yml\`
 sets, as in \`sandbox: {size: standard-2}\`. The sizes are ${oneOf(SANDBOX_SIZES.map(describeSize))}.
 The default is ${DEFAULT_SANDBOX_SIZE}. Like the rest of the config, it is read from the origin's \`main\`: an
 attempt that changes it still runs at \`main\`'s size, and the change applies once it lands. Each stored log

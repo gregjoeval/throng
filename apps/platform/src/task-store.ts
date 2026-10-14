@@ -996,8 +996,10 @@ export class TaskStore {
    * as a trusted run, which holds the secrets it names. Only the project owner acting as themselves
    * may, so an agent steered by untrusted text can't. Refused unless the run still waits on `sha`
    * and its line hasn't moved on (for a held landing: its merge request still approves `sha` and may
-   * join the queue, which it then does), and unless each secret the run names, as `main`'s config
-   * is now, has a value and is allowed in its pipeline.
+   * join the queue, which it then does), and unless each secret the run's pipeline names under
+   * `main`'s config as it is now has a value and is allowed in it. That's a fail-fast only: a
+   * landing runs its merged tree's config, which `main`'s may not match, and its plan re-checks
+   * every secret that names against the settings (`pipelinePlanned`).
    */
   async startRun(project: ProjectContext, actor: Actor, input: { run: number; sha: string }): Promise<StoredRun> {
     mayGrant(project, actor);

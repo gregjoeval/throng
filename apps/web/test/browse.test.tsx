@@ -71,7 +71,7 @@ describe("project home", () => {
   it("says so when main has no commits yet", async () => {
     serveRepo({}, { main: { ref: "main", sha: null }, active: [], archived: [] });
     await renderApp("/ada/alpha");
-    expect(await screen.findByText("Nothing pushed yet")).toBeInTheDocument();
+    expect(await screen.findByText("This project is empty")).toBeInTheDocument();
   });
 });
 

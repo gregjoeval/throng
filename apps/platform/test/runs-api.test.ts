@@ -217,7 +217,7 @@ describe("GET /projects/{owner}/{project}/runs/{runId}", () => {
 async function waitingRun(t: Awaited<ReturnType<typeof setup>>, head?: string) {
   const id = t.run("t1a1", "push", head);
   const sha = defined(t.queue().getRun(id)?.sha);
-  t.queue().moveHead("t1a1", sha, false);
+  t.queue().moveHead("t1a1", sha, { kind: "other" });
   await t.queue().drain();
   expect(t.queue().wait(defined(t.queue().getRun(id)), ["DEPLOY"])).toBeTruthy();
   return { id, sha };

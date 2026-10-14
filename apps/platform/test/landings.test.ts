@@ -540,7 +540,7 @@ describe("a landing that lands", () => {
       sha: SHA,
       trigger: "push",
       actor: null,
-      ownersPush: true,
+      pushedBy: { kind: "maintainer" },
     });
     expect(again).toMatchObject({ queued: false, run: { id: run } });
   });
@@ -765,7 +765,7 @@ describe("cancelling a landing", () => {
       sha: "f".repeat(40),
       trigger: "push",
       actor: null,
-      ownersPush: true,
+      pushedBy: { kind: "maintainer" },
     });
     expect(store.scoring.getRun(run.id)?.status).toBe("running");
   });

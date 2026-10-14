@@ -92,7 +92,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
       sha,
       trigger: "push",
       actor: null,
-      ownersPush: true,
+      pushedBy: { kind: "maintainer" },
     });
     await this.#drain(project);
     return request;

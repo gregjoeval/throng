@@ -476,7 +476,14 @@ describe("rescoring on a task edit", () => {
   it("queues one rescore behind a run that's running, which may have read the old definitions", async () => {
     const { store, workflow, runs, open } = await scored();
     const sha = defined(at(runs(open), 0).sha);
-    store.scoring.request({ project: PROJECT.id, line: "t1a1", sha, trigger: "rescore", actor: ada, ownersPush: null });
+    store.scoring.request({
+      project: PROJECT.id,
+      line: "t1a1",
+      sha,
+      trigger: "rescore",
+      actor: ada,
+      pushedBy: { kind: "notAPush" },
+    });
     await store.scoring.drain();
     expect(runs(open).map((r) => [r.trigger, r.status])).toEqual([
       ["open", "done"],
@@ -502,7 +509,7 @@ describe("rescoring on a task edit", () => {
   it("still answers a push or score now for a head that's running with the run, queuing nothing", async () => {
     const { store, runs, open } = await scored();
     const sha = defined(at(runs(open), 0).sha);
-    const head = { project: PROJECT.id, line: "t1a1", sha, actor: ada, ownersPush: null };
+    const head = { project: PROJECT.id, line: "t1a1", sha, actor: ada, pushedBy: { kind: "notAPush" } };
     store.scoring.request({ ...head, trigger: "rescore" });
     await store.scoring.drain();
     const running = at(runs(open), 1);
@@ -748,7 +755,7 @@ describe("line-keyed runs", () => {
       sha: "c",
       trigger: "push",
       actor: ada,
-      ownersPush: true,
+      pushedBy: { kind: "maintainer" },
     });
     expect(next.run.id).toBe(8);
     const tables = sql.exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table'").map((t) => t.name);
@@ -834,7 +841,14 @@ describe("line-keyed runs", () => {
     await store.openAttempt(PROJECT, ada, defined(one));
     await store.scoring.drain();
     const sha = defined(at(runs(defined(one)), 0).sha);
-    store.scoring.request({ project: PROJECT.id, line: "t1a1", sha, trigger: "rescore", actor: ada, ownersPush: null });
+    store.scoring.request({
+      project: PROJECT.id,
+      line: "t1a1",
+      sha,
+      trigger: "rescore",
+      actor: ada,
+      pushedBy: { kind: "notAPush" },
+    });
     await store.openAttempt(PROJECT, ada, defined(two));
     await store.scoring.drain();
     expect(workflow.created.map((c) => c.params.line)).toEqual(["t1a1", "t1a2"]);
@@ -862,7 +876,7 @@ describe("line-keyed runs", () => {
       sha: "b",
       trigger: "push",
       actor: ada,
-      ownersPush: true,
+      pushedBy: { kind: "maintainer" },
     });
     expect(store.runLogKeys(PROJECT, ada, { run: 2, name: "test" })).toEqual(["logs/abc123/t1a1/2/test.log"]);
   });
@@ -1049,7 +1063,7 @@ describe("starting a waiting run", () => {
     const sha = defined(run.sha);
     expect(await code(t.store.startRun(PROJECT, owner, { run: run.id, sha: "f".repeat(40) }))).toBe("invalidState");
     // A draft's push moves its line's head without asking for a run.
-    t.store.scoring.moveHead(attemptRef(ref.task, ref.number), t.commit(ref, "moved\n"), false);
+    t.store.scoring.moveHead(attemptRef(ref.task, ref.number), t.commit(ref, "moved\n"), { kind: "other" });
     expect(await code(t.store.startRun(PROJECT, owner, { run: run.id, sha }))).toBe("invalidState");
     expect(t.store.scoring.getRun(run.id)?.status).toBe("waiting");
   });
@@ -1082,7 +1096,14 @@ describe("starting a waiting run", () => {
 
 /** Requests a run of `sha` on `main`, as `main` moving does. */
 const onMain = (t: ReturnType<typeof setup>, sha: string) =>
-  t.store.scoring.request({ project: PROJECT.id, line: "main", sha, trigger: "push", actor: null, ownersPush: true });
+  t.store.scoring.request({
+    project: PROJECT.id,
+    line: "main",
+    sha,
+    trigger: "push",
+    actor: null,
+    pushedBy: { kind: "maintainer" },
+  });
 
 describe("runs on task branches and main", () => {
   /** Pushes task 1's task branch to a new commit as `who`, as the git proxy records it. */

@@ -40,11 +40,12 @@ import { forkRepo, originRepo } from "./repos.ts";
 import type { Repos } from "./repos.ts";
 import { GATES } from "./results.ts";
 import type { Gate } from "./results.ts";
-import { cancellable, runReport, runSettled, SCORING_CAP, ScoringQueue } from "./scoring.ts";
+import { cancellable, pushBy, runReport, runSettled, SCORING_CAP, ScoringQueue } from "./scoring.ts";
 import type {
   AttemptScoring,
   LandingRequest,
   PlanVerdict,
+  PushedBy,
   RunReport,
   RunsPage,
   RunsQuery,
@@ -1344,11 +1345,11 @@ export class TaskStore {
       if (head === null) return { scoring: null, mergeRequest, head };
       // A draft isn't scored, but its old result no longer describes its head.
       if (current.state !== "open") {
-        this.scoring.moveHead(attemptLine(current), head, isMaintainer(project, actor));
+        this.scoring.moveHead(attemptLine(current), head, pushBy(isMaintainer(project, actor)));
         return { scoring: null, mergeRequest, head };
       }
       return {
-        scoring: this.#request(project, actor, current, head, "push", isMaintainer(project, actor)),
+        scoring: this.#request(project, actor, current, head, "push", pushBy(isMaintainer(project, actor))),
         mergeRequest,
         head,
       };
@@ -1403,7 +1404,7 @@ export class TaskStore {
         sha: input.head,
         trigger: "push",
         actor,
-        ownersPush: isMaintainer(project, actor),
+        pushedBy: pushBy(isMaintainer(project, actor)),
       });
       const active = this.#activeAttempts(input.task);
       for (const attempt of active) {
@@ -1527,8 +1528,8 @@ export class TaskStore {
     if (vote !== null && recorded !== null) this.votes.repin(vote.id, attempt.number, { from: recorded, to: after });
     this.#setFollow(attempt, { followed_head: after });
     this.#pushedToSource(null, attempt, after);
-    if (attempt.state === "open") this.#request(project, null, attempt, after, "push", false);
-    else this.scoring.moveHead(attemptLine(attempt), after, false);
+    if (attempt.state === "open") this.#request(project, null, attempt, after, "push", pushBy(false));
+    else this.scoring.moveHead(attemptLine(attempt), after, pushBy(false));
   }
 
   #setFollow(
@@ -1826,7 +1827,7 @@ export class TaskStore {
       const attempt = this.#attempt({ task: row.task, number: row.attempt });
       this.#recordPushed(actor, attempt, input.updates);
       this.#dropBranchPush(attempt);
-      const scoring = this.#request(project, actor, attempt, input.head, "open", isMaintainer(project, actor));
+      const scoring = this.#request(project, actor, attempt, input.head, "open", pushBy(isMaintainer(project, actor)));
       return { task: this.#task(row.task), attempt: this.#attempt(attempt), scoring };
     });
     // The pushed head replaced the fork's `main`, which began at the task head; if its author didn't
@@ -3023,17 +3024,19 @@ export class TaskStore {
       console.error({ event: "scoring.head_unreadable", attempt: attempt.fork, trigger, error: String(error) });
       return null;
     }
-    return head === null ? null : this.#request(project, actor, attempt, head, trigger, null, readSince);
+    return head === null
+      ? null
+      : this.#request(project, actor, attempt, head, trigger, { kind: "notAPush" }, readSince);
   }
 
-  /** Asks for a run of the attempt's head `sha`; `ownersPush` as `ScoringRequestInput` takes it. */
+  /** Asks for a run of the attempt's head `sha`; `pushedBy` as `ScoringRequestInput` takes it. */
   #request(
     project: ProjectId,
     actor: Actor | null,
     attempt: StoredAttempt,
     sha: string,
     trigger: ScoringTrigger,
-    ownersPush: boolean | null,
+    pushedBy: PushedBy,
     readSince?: number,
   ): ScoringRequest {
     return this.scoring.request({
@@ -3042,7 +3045,7 @@ export class TaskStore {
       sha,
       trigger,
       actor,
-      ownersPush,
+      pushedBy,
       readSince,
     });
   }

@@ -224,7 +224,7 @@ describe("the Sandbox cap", () => {
       sha: "1".repeat(40),
       trigger: "push",
       actor: null,
-      ownersPush: true,
+      pushedBy: { kind: "maintainer" },
     });
     moveTaskBranch();
     await drain();

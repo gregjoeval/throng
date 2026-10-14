@@ -120,6 +120,14 @@ export interface LandingRunParams extends Omit<PipelineParams, "sha"> {
  */
 export type PlanVerdict = { kind: "start" } | { kind: "waiting" } | { kind: "refused"; error: string };
 
+/** Who pushed a head: a maintainer, someone else, or nobody, as the request isn't a push. */
+export type PushedBy = { kind: "maintainer" } | { kind: "other" } | { kind: "notAPush" };
+
+/** A push, by a maintainer or not. */
+export function pushBy(maintainer: boolean): PushedBy {
+  return maintainer ? { kind: "maintainer" } : { kind: "other" };
+}
+
 /** What a landing is asked for with: its merge request, the head it merges from which attempt, and who approved it. */
 export interface LandingRequest {
   project: string;
@@ -258,10 +266,10 @@ export interface ScoringRequestInput {
   trigger: ScoringTrigger;
   actor: Actor | null;
   /**
-   * Whether the project's owner (as themselves or under an alias) pushed `sha`, which makes its run
-   * trusted; null when the request isn't a push, so the run is trusted as the head's push was.
+   * Who pushed `sha`: a maintainer's push makes its run trusted. A request that isn't a push has
+   * its run trusted as the head's push was.
    */
-  ownersPush: boolean | null;
+  pushedBy: PushedBy;
   /**
    * The newest run id on the line when the caller began reading `sha`. A run queued since then
    * came from a push recorded meanwhile, whose head is at least as new as `sha`, so the request
@@ -398,11 +406,11 @@ export class ScoringQueue {
 
   /**
    * Records that the line's head is now `sha`, marking runs for every other head superseded, and
-   * whether the owner pushed it (`ownersPush`; null keeps what was recorded for the same head, and
-   * says no for a new one). Pushes call it whether or not they ask for a run, so a draft's result is
+   * who pushed it (`pushedBy`; `notAPush` keeps what was recorded for the same head, and says no
+   * maintainer for a new one). Pushes call it whether or not they ask for a run, so a draft's result is
    * superseded too.
    */
-  moveHead(line: string, sha: string, ownersPush: boolean | null): void {
+  moveHead(line: string, sha: string, pushedBy: PushedBy): void {
     this.#sql.transaction(() => {
       this.#sql.exec(
         `INSERT INTO pipeline_heads (line, sha, owners_push) VALUES (?, ?, ?)
@@ -412,8 +420,8 @@ export class ScoringQueue {
            sha = excluded.sha`,
         line,
         sha,
-        ownersPush === true ? 1 : 0,
-        ownersPush === null ? null : 1,
+        pushedBy.kind === "maintainer" ? 1 : 0,
+        pushedBy.kind === "notAPush" ? null : 1,
       );
       // A landing with no head yet is about no head, so nothing supersedes it.
       this.#sql.exec("UPDATE pipeline_runs SET superseded = COALESCE(sha != ?, 0) WHERE line = ?", sha, line);
@@ -475,7 +483,7 @@ export class ScoringQueue {
    */
   request(input: ScoringRequestInput): ScoringRequest {
     return this.#sql.transaction(() => {
-      this.moveHead(input.line, input.sha, input.ownersPush);
+      this.moveHead(input.line, input.sha, input.pushedBy);
       const live = this.#sql
         .exec<RunRow>(
           "SELECT * FROM pipeline_runs WHERE line = ? AND status IN ('queued', 'waiting', 'running') ORDER BY id",
@@ -665,7 +673,7 @@ export class ScoringQueue {
   landed(run: StoredRun, sha: string): void {
     this.#sql.transaction(() => {
       this.#sql.exec("UPDATE pipeline_runs SET sha = ? WHERE id = ?", sha, run.id);
-      this.moveHead(MAIN_LINE, sha, run.trusted);
+      this.moveHead(MAIN_LINE, sha, pushBy(run.trusted));
     });
   }
 

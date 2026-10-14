@@ -44,7 +44,7 @@ function setup() {
       sha: String(++sha).padStart(40, "0"),
       trigger: "push",
       actor: null,
-      ownersPush: trusted,
+      pushedBy: trusted ? { kind: "maintainer" } : { kind: "other" },
     });
     await store.scoring.drain();
     return request.run.id;

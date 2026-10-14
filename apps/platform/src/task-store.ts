@@ -1878,7 +1878,7 @@ export class TaskStore {
       throw invalidState(`${taskRef(task.number)} is selected by vote; open a vote and close it to select`);
     }
     const head = await this.#currentHead(project, current);
-    const main = isOwnersPush(project, actor) ? null : mainSecrets(project.id, config);
+    const main = isOwnerAsThemselves(project, actor) ? null : mainSecrets(project.id, config);
     const { mr, closed } = this.#sql.transaction(() => {
       // The attempt, the task or its merge requests may have moved while the head was read.
       this.#checkSelectable(this.#attempt(current));
@@ -1904,7 +1904,7 @@ export class TaskStore {
       task: attempt.task,
       attempt: attempt.number,
       head,
-      byOwner: isOwnersPush(project, actor),
+      byOwner: isOwnerAsThemselves(project, actor),
     });
     const others = this.#activeAttempts(attempt.task).filter((a) => a.number !== attempt.number);
     for (const other of others) this.#endAttempt(actor, other, "closed");
@@ -1927,13 +1927,17 @@ export class TaskStore {
     this.#expectMergeRequest(mr, ["pending", "needsReview"], "approve");
     const head =
       mr.state === "pending" ? mr.approved_head : await this.#currentHead(project, this.#attempt(sourceOf(mr)));
-    const main = isOwnersPush(project, actor) ? null : await this.#mainSecrets(project.id);
+    const main = isOwnerAsThemselves(project, actor) ? null : await this.#mainSecrets(project.id);
     return this.#sql.transaction(() => {
       const now = this.#openMergeRequest(task.number);
       if (now.id !== mr.id || now.state !== mr.state) {
         throw invalidState(`${taskRef(task.number)}'s merge request moved; try again`);
       }
-      return this.#evaluate(actor, this.mergeRequests.approve(actor, now, head, isOwnersPush(project, actor)), main);
+      return this.#evaluate(
+        actor,
+        this.mergeRequests.approve(actor, now, head, isOwnerAsThemselves(project, actor)),
+        main,
+      );
     });
   }
 
@@ -2250,7 +2254,7 @@ export class TaskStore {
   ): Promise<{ vote: VoteDetail; selected: StoredMergeRequest | null }> {
     const task = this.#task(input.task);
     this.#mayManageTask(project, actor, task);
-    const main = isOwnersPush(project, actor) ? null : await this.#mainSecrets(project.id);
+    const main = isOwnerAsThemselves(project, actor) ? null : await this.#mainSecrets(project.id);
     const { vote, mr, closed } = this.#sql.transaction(() => {
       const open = this.#openVote(task.number);
       const detail = this.#voteDetail(open, actor);
@@ -3638,9 +3642,17 @@ function mainSecrets(project: string, config: ConfigResult): MainSecrets {
   return { project, names: [...new Set(pipelineSecrets(config, "main").flatMap((named) => named.secrets))] };
 }
 
-/** The project owner acting as themselves, never under an alias: who may grant a secret or start a waiting run. */
+/**
+ * Whether `actor` is the project owner acting as themselves, never under an alias: who may grant a
+ * secret or start a waiting run, and whose selection or approval trusts a landing.
+ */
+function isOwnerAsThemselves(project: ProjectContext, actor: Actor): boolean {
+  return actor.user.id === project.owner && actor.alias === null;
+}
+
+/** Throws unless `actor` is the project owner acting as themselves (see `isOwnerAsThemselves`). */
 function mayGrant(project: ProjectContext, actor: Actor): void {
-  if (actor.user.id !== project.owner || actor.alias !== null) {
+  if (!isOwnerAsThemselves(project, actor)) {
     throw new ServiceError("forbidden", "only the project owner, acting as themselves, may");
   }
 }

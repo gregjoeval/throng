@@ -357,6 +357,27 @@ describe("a landing held for the owner", () => {
     expect(store.scoring.heldLandings()).toHaveLength(1);
   });
 
+  it("holds one an owner's alias selected, as it would a non-owner's", async () => {
+    const { store, drain, attempt, score, mr, landing } = await prod();
+    const ref = await attempt("Ada's");
+    await drain();
+    score(ref);
+    await store.selectAttempt(PROJECT, actor("owner001", "claude"), ref);
+    expect(mr(ref.task)).toMatchObject({ state: "pending", position: null });
+    expect(landing()).toMatchObject({ status: "waiting", trusted: false, secrets: ["PROD"] });
+  });
+
+  it("holds one an owner's alias approved, as it would a non-owner's", async () => {
+    const { store, drain, attempt, score, mr, landing } = await prod();
+    const ref = await attempt("Ada's", ada);
+    await drain();
+    score(ref);
+    await store.selectAttempt(PROJECT, ada, ref);
+    await store.approveMergeRequest(PROJECT, actor("owner001", "claude"), { task: ref.task });
+    expect(mr(ref.task)).toMatchObject({ state: "pending", position: null });
+    expect(landing()).toMatchObject({ status: "waiting", trusted: false });
+  });
+
   it("queues at once one whose `main` names no secret, or one the owner approved", async () => {
     const t = setup();
     const t1 = await t.queued("Ada's", ada);

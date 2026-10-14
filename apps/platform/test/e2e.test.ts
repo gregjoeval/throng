@@ -70,6 +70,7 @@ function setup(bindings: { E2E_TOKEN?: string } = { E2E_TOKEN: SECRET }) {
     db: () => db,
     repos: () => repos,
     previewWorkers: () => previewWorkers,
+    fetch: repos.sourceFetch,
     logs: () => logs,
     project: (_env, id) => ({
       note: async () => {},
@@ -124,6 +125,25 @@ describe("the e2e routes", () => {
     expect(made.status).toBe(200);
     expect(made.body).toMatchObject({ remote: expect.any(String), token: expect.any(String), owner: "e2e" });
     expect(await projectIds(db)).toEqual(["e2erun1abc"]);
+  });
+
+  it("import a project's origin from the source the query names, and delete a staging repo it left", async () => {
+    const { db, repos, call } = setup();
+    await repos.create("upstream");
+    const head = repos.commit("upstream", { branch: "master", files: { README: "Hello World!\n" } });
+    const url = "https://github.com/octocat/Hello-World";
+    repos.serveSource(url, "upstream", "master");
+
+    const made = await call("POST", `/e2e/projects/e2erun1abc?source=${encodeURIComponent(url)}`);
+    expect(made.status).toBe(200);
+    const user = await userForEmail(db, "e2e@throng.invalid");
+    expect(await resolveProject(db, user.handle, "e2erun1abc")).toMatchObject({ source: url });
+    expect(repos.ref(originRepo("e2erun1abc"), "refs/heads/main")).toBe(head.hash);
+
+    // A staging repo a crashed import left behind is the project's too.
+    await repos.create("e2erun1abc-import");
+    expect((await call("DELETE", "/e2e/projects/e2erun1abc")).status).toBe(200);
+    expect(await repos.list("e2erun1abc")).toEqual([]);
   });
 
   it("refuse to touch repos outside the e2e prefix", async () => {

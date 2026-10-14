@@ -14,6 +14,7 @@ import {
   BallotSchema,
   CloseVoteSchema,
   CreateAttemptsSchema,
+  CreateProjectSchema,
   CreateTaskSchema,
   EditAttemptSchema,
   HandOffSchema,
@@ -33,6 +34,7 @@ import { browseService } from "./browse.ts";
 import { DIFF_CAPS, diffCommit, unifiedPatch } from "./diff.ts";
 import { ServiceError } from "./errors.ts";
 import { missingLog } from "./logs.ts";
+import { projectService } from "./projects.ts";
 import { ATTEMPT_STATES, TASK_STATES } from "./task-store.ts";
 import { taskService } from "./tasks.ts";
 import type { MergeRequest, ScoringAnswer, Vote } from "./tasks.ts";
@@ -50,7 +52,8 @@ export const CLONE_RECIPE = 'git clone -c http.extraHeader="Authorization: Beare
 /** What the server tells a client it is for: the agent loop, in short. `llms.txt` has the long form. */
 export const MCP_INSTRUCTIONS = [
   "Throng runs many attempts at a task in parallel, scores each, and merges the best one.",
-  "Every tool but `whoami` takes `project` as `owner/project`. Tasks are `t42`, attempts `t42a3`.",
+  "Every tool but `whoami` and `create_project` takes `project` as `owner/project`. Tasks are `t42`, " +
+    "attempts `t42a3`.",
   "The loop: `start_attempts` gives each attempt a git `remote`. Clone it with " +
     `\`${CLONE_RECIPE}\`, ` +
     "which keeps the header for later pushes. Commit, push to `main`, then `update_attempt` with `state: open`. " +
@@ -60,7 +63,8 @@ export const MCP_INSTRUCTIONS = [
     "and push; its head then needs approving again.",
 ].join("\n");
 
-type Deps = Required<Pick<ApiOptions, "repos" | "tasks" | "logs" | "diffCache">>;
+type Deps = Required<Pick<ApiOptions, "repos" | "previewWorkers" | "tasks" | "logs" | "diffCache">> &
+  Pick<ApiOptions, "fetch">;
 
 /** A dependency this server was built without; using it is a bug. */
 function missing(what: string): () => never {
@@ -73,9 +77,11 @@ function missing(what: string): () => never {
 export function mcpRoutes(options: ApiOptions = {}) {
   const deps: Deps = {
     repos: options.repos ?? missing("repos"),
+    previewWorkers: options.previewWorkers ?? missing("preview Workers"),
     tasks: options.tasks ?? missing("a task backend"),
     logs: options.logs ?? missing("a logs bucket"),
     diffCache: options.diffCache ?? workersCache,
+    ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
   };
   return new Hono<AuthEnv>()
     .use(bearerAuth(options.now === undefined ? {} : { now: options.now }))
@@ -175,7 +181,10 @@ function sliceBytes(bytes: Uint8Array, start: number, max: number): string {
   return new TextDecoder().decode(bytes.subarray(start, start + max)).replace(/^�+|�+$/gu, "");
 }
 
-function mcpServer({ repos, tasks, logs, diffCache }: Deps, { actor, token, env, origin }: ToolContext): McpServer {
+function mcpServer(
+  { repos, previewWorkers, fetch, tasks, logs, diffCache }: Deps,
+  { actor, token, env, origin }: ToolContext,
+): McpServer {
   const service = taskService({ db: env.DB, repos: repos(env), backend: tasks(env), origin });
   const browse = browseService({ db: env.DB, repos: repos(env), backend: tasks(env) });
   const server = new McpServer({ name: "throng", version: "0.0.0" }, { instructions: MCP_INSTRUCTIONS });
@@ -201,6 +210,33 @@ function mcpServer({ repos, tasks, logs, diffCache }: Deps, { actor, token, env,
     };
     return answer(`${user.handle}${alias === null ? "" : ` as ${alias}`}`, data);
   });
+
+  tool(
+    "create_project",
+    "Create a project owned by the token's user. With `sourceUrl`, the HTTPS URL of a public git repository, " +
+      "its default branch is copied once into the project's `main`, whatever its name, with full history; " +
+      "the call returns when the copy is done.",
+    z.object({
+      handle: CreateProjectSchema.shape.handle,
+      sourceUrl: CreateProjectSchema.shape.source.unwrap().shape.url.optional(),
+    }),
+    async ({ handle, sourceUrl }) => {
+      const projects = projectService({
+        db: env.DB,
+        repos: repos(env),
+        previewWorkers: previewWorkers(env),
+        ...(fetch === undefined ? {} : { fetch }),
+      });
+      const created = await projects.create(actor, {
+        handle,
+        ...(sourceUrl === undefined ? {} : { source: { url: sourceUrl } }),
+      });
+      const ref = `${created.owner.handle}/${created.handle}`;
+      return answer(created.source === null ? `created ${ref}` : `created ${ref}, imported from ${created.source}`, {
+        project: created,
+      });
+    },
+  );
 
   tool(
     "list_tasks",

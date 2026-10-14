@@ -13,6 +13,7 @@ import {
   BallotSchema,
   CloseVoteSchema,
   CreateAttemptsSchema,
+  CreateProjectSchema,
   CreateTaskSchema,
   EditAttemptSchema,
   HandOffSchema,
@@ -59,7 +60,7 @@ import { METRIC_FORMATS, METRIC_TYPES } from "./metric-values.ts";
 import { DEFAULT_LISTING_PAGE, MAX_LISTING_PAGE, myListings } from "./my-listings.ts";
 import type { PreviewWorkers } from "./preview-workers.ts";
 import { MAX_PROJECTION_RETRY_MS } from "./projection.ts";
-import { MAX_PROJECT_HANDLE, PROJECT_HANDLE, projectService } from "./projects.ts";
+import { projectService } from "./projects.ts";
 import type { Repos } from "./repos.ts";
 import { CHECK_OUTCOMES, GATES } from "./results.ts";
 import { ATTEMPT_SCORING_STATUSES, RUN_STATUSES, SCORING_TRIGGERS } from "./scoring.ts";
@@ -131,19 +132,13 @@ const ProjectSchema = z
     id: z.string().openapi({ description: "The opaque project id, which names its repos.", example: "k3x9q2" }),
     handle: z.string().openapi({ example: "throng" }),
     owner: z.object({ id: z.string(), handle: z.string().openapi({ example: "greg" }) }),
+    source: z.string().nullable().openapi({
+      description: "The public git URL the project was imported from, or null when it started empty.",
+      example: "https://github.com/octocat/Hello-World",
+    }),
     createdAt: z.string(),
   })
   .openapi("Project");
-
-const CreateProjectSchema = z
-  .object({
-    handle: z
-      .string()
-      .max(MAX_PROJECT_HANDLE)
-      .regex(PROJECT_HANDLE, "handle must be lowercase letters and digits, joined by single dashes")
-      .openapi({ description: "The project's handle, unique among the owner's projects.", example: "throng" }),
-  })
-  .openapi("CreateProject");
 
 const UserRefSchema = z.object({ id: z.string(), handle: z.string().openapi({ example: "greg" }) }).openapi("UserRef");
 
@@ -794,6 +789,8 @@ export interface ApiOptions extends AuthOptions {
   repos?: (env: AccessBindings) => Repos;
   /** Projects' preview Workers: production passes the Cloudflare API's, tests a fake. */
   previewWorkers?: (env: AccessBindings) => PreviewWorkers;
+  /** How a project's import source is reached: the global `fetch` by default, tests a fake host. */
+  fetch?: typeof fetch;
   /** A project's task backend: production passes its Durable Object, tests an in-process store. */
   tasks?: (env: AccessBindings) => (projectId: string) => TaskBackend;
   /** The environment's logs bucket: production passes its R2 binding, tests one in memory. */
@@ -1000,7 +997,12 @@ export function apiRoutes(options: ApiOptions = {}) {
   const reposFor = options.repos ?? noRepos;
   const previewWorkersFor = options.previewWorkers ?? noPreviewWorkers;
   const projects = (env: AccessBindings) =>
-    projectService({ db: env.DB, repos: reposFor(env), previewWorkers: previewWorkersFor(env) });
+    projectService({
+      db: env.DB,
+      repos: reposFor(env),
+      previewWorkers: previewWorkersFor(env),
+      ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
+    });
   const backendFor = options.tasks ?? noTasks;
   const logsFor = options.logs ?? noLogs;
   const tasks = requestTaskService(reposFor, backendFor);
@@ -1212,15 +1214,21 @@ export function apiRoutes(options: ApiOptions = {}) {
         summary: "Create a project owned by the caller",
         description:
           "The caller's user becomes the owner, also when an alias's token calls. Creates the project's " +
-          "origin repo with `main` as its default branch.",
+          "origin repo with `main` as its default branch, empty or, with `source`, imported from a public " +
+          "git repository. Only public repositories can be imported, and an import that fails leaves nothing " +
+          "behind.",
         security: bearerOrWeb,
         middleware: [browser] as const,
         request: { body: { required: true, content: { "application/json": { schema: CreateProjectSchema } } } },
         responses: {
           201: { description: "The new project.", content: { "application/json": { schema: ProjectSchema } } },
-          400: errorResponse("The handle is invalid."),
+          400: errorResponse(
+            "The handle or source URL is invalid, the source is not a git repository, or it is too large to import.",
+          ),
           401: unauthorizedBearer,
+          404: errorResponse("The source was not found, or is private."),
           409: errorResponse("The caller already owns a project with this handle."),
+          503: errorResponse("`unavailable`: the source's host couldn't be reached. Try again."),
         },
       }),
       async (c) => {

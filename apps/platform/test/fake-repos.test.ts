@@ -112,4 +112,41 @@ describe("FakeRepos", () => {
     const [archived] = await repos.listCommits("k3x9q2-main", { ref: "refs/attempts/t1a1", limit: 1 });
     expect(archived?.hash).toBe(work.hash);
   });
+
+  it("imports a served source's branch with its history, and advertises the source's HEAD", async () => {
+    const repos = new FakeRepos();
+    await repos.create("upstream");
+    const first = repos.commit("upstream", { branch: "master", files: { a: "1" } });
+    const second = repos.commit("upstream", { branch: "master", files: { a: "2" } });
+    repos.serveSource("https://example.com/o/r", "upstream", "master");
+
+    await repos.import("k3x9q2-main", { url: "https://example.com/o/r", branch: "master" });
+    expect(repos.ref("k3x9q2-main", "refs/heads/master")).toBe(second.hash);
+    expect(repos.ref("k3x9q2-main", "refs/heads/main")).toBeNull();
+    expect(await repos.readCommit("k3x9q2-main", first.hash)).toEqual(first);
+    expect(repos.calls.filter((c) => c.method === "import")).toEqual([
+      { method: "import", args: ["k3x9q2-main", { url: "https://example.com/o/r", branch: "master" }] },
+    ]);
+
+    const advertised = await repos.sourceFetch("https://example.com/o/r.git/info/refs?service=git-upload-pack");
+    expect(advertised.headers.get("Content-Type")).toBe("application/x-git-upload-pack-advertisement");
+    expect(new TextDecoder().decode(await advertised.arrayBuffer())).toContain("symref=HEAD:refs/heads/master");
+    expect((await repos.sourceFetch("https://example.com/o/missing.git/info/refs")).status).toBe(401);
+  });
+
+  it("fails an import as Artifacts does: an unserved URL needs auth, a taken name already exists", async () => {
+    const repos = new FakeRepos();
+    await expect(repos.import("k3x9q2-main", { url: "https://example.com/x", branch: "main" })).rejects.toMatchObject({
+      code: "REMOTE_AUTH_REQUIRED",
+    });
+    await repos.create("upstream");
+    repos.commit("upstream", { files: { a: "1" } });
+    repos.serveSource("https://example.com/o/r", "upstream");
+    await repos.create("k3x9q2-main");
+    await expect(repos.import("k3x9q2-main", { url: "https://example.com/o/r", branch: "main" })).rejects.toMatchObject(
+      {
+        code: "ALREADY_EXISTS",
+      },
+    );
+  });
 });

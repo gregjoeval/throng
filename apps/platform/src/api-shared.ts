@@ -11,6 +11,8 @@ import { DEFAULT_COMMITS_PAGE, MAX_COMMITS_PAGE } from "./browse.ts";
 import { SelectionPolicySchema } from "./config.ts";
 import { DIFF_FLAGS, FILE_STATUSES } from "./diff.ts";
 import type { DiffCache } from "./diff.ts";
+import { MAX_SOURCE_URL } from "./import-source.ts";
+import { MAX_PROJECT_HANDLE, PROJECT_HANDLE } from "./projects.ts";
 import type { Repos } from "./repos.ts";
 import { taskService } from "./tasks.ts";
 import type { TaskBackend } from "./tasks.ts";
@@ -189,6 +191,34 @@ export const TaskMetricsInputSchema = z.array(z.unknown()).openapi({
     "checks, and each `from` must name one of the project's or the task's checks. Replaces the task's metrics.",
   example: [{ name: "lines", from: "test.coverage-summary.total.lines.total", type: "number", order: "asc" }],
 });
+
+export const CreateProjectSchema = z
+  .object({
+    handle: z
+      .string()
+      .max(MAX_PROJECT_HANDLE)
+      .regex(PROJECT_HANDLE, "handle must be lowercase letters and digits, joined by single dashes")
+      .openapi({ description: "The project's handle, unique among the owner's projects.", example: "throng" }),
+    source: z
+      .object({
+        url: z
+          .string()
+          .max(MAX_SOURCE_URL)
+          .openapi({
+            description:
+              "The HTTPS URL of a public git repository on any smart-HTTP host: `https:` only, with no " +
+              "credentials, query or fragment.",
+            example: "https://github.com/octocat/Hello-World",
+          }),
+      })
+      .optional()
+      .openapi({
+        description:
+          "A repository to import. Its default branch becomes the origin's `main`, whatever its name, with " +
+          "its full history. The copy is made once, before the call returns, and never refreshed.",
+      }),
+  })
+  .openapi("CreateProject");
 
 export const CreateTaskSchema = z
   .object({

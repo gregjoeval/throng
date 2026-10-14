@@ -10,7 +10,7 @@ import { camelKeys } from "./casing.ts";
 import { LOG_PREFIX } from "./logs.ts";
 import type { PreviewWorkers } from "./preview-workers.ts";
 import { projectService } from "./projects.ts";
-import type { Project } from "./projects.ts";
+import type { Project, ProjectSource } from "./projects.ts";
 import { forkRepo, originRepo, parseRepoName } from "./repos.ts";
 import type { Repos } from "./repos.ts";
 import { mintToken, revokeToken } from "./tokens.ts";
@@ -57,19 +57,23 @@ export async function e2eToken(
 /**
  * Creates a project owned by the e2e user whose id and handle are both `id`, and returns a write
  * token for its origin. The git proxy refuses pushes to the origin's `main`, so the suite seeds it
- * straight through Artifacts with that token.
+ * straight through Artifacts with that token, unless the project imports `source`.
  */
 export async function e2eProject(
   db: Database,
   repos: Repos,
   previewWorkers: PreviewWorkers,
   id: string,
+  { source, fetch }: { source?: ProjectSource | undefined; fetch?: typeof globalThis.fetch | undefined } = {},
 ): Promise<{ project: Project; remote: string; token: string }> {
   const user = await userForEmail(db, E2E_EMAIL);
-  const project = await projectService({ db, repos, previewWorkers, newId: () => id }).create(
-    { user, alias: null },
-    { handle: id },
-  );
+  const project = await projectService({
+    db,
+    repos,
+    previewWorkers,
+    newId: () => id,
+    ...(fetch === undefined ? {} : { fetch }),
+  }).create({ user, alias: null }, { handle: id, source });
   const [origin, { token }] = await Promise.all([
     repos.get(originRepo(id)),
     repos.mintToken(originRepo(id), "write", ORIGIN_TOKEN_TTL_SECONDS),
@@ -113,6 +117,8 @@ export interface E2eDeps<E> {
   db: (env: E) => Database;
   repos: (env: E) => Repos;
   previewWorkers: (env: E) => PreviewWorkers;
+  /** How an imported project's source is reached: the global `fetch` by default, tests a fake host. */
+  fetch?: typeof fetch;
   logs: (env: E) => LogBucket;
   project: (env: E, id: string) => E2eProjectStub;
   /** The bearer secret every route needs (the Worker's `E2E_TOKEN`); unset or empty, every request is refused. */
@@ -233,13 +239,18 @@ export function e2eRoutes<E extends object>(deps: E2eDeps<E>) {
 
   /**
    * Creates a real project owned by the e2e user, whose id and handle are both `:project`, and
-   * returns a write token for its origin so the caller can push the fixture to `main`.
+   * returns a write token for its origin so the caller can push the fixture to `main`. With
+   * `?source=<url>`, the origin is imported from that public git repository instead.
    */
   app.post("/projects/:project", async (c) => {
     const project = c.req.param("project");
     if (!isE2eName(project)) return refused(c, "the project");
+    const url = c.req.query("source");
     const began = Date.now();
-    const made = await e2eProject(deps.db(c.env), deps.repos(c.env), deps.previewWorkers(c.env), project);
+    const made = await e2eProject(deps.db(c.env), deps.repos(c.env), deps.previewWorkers(c.env), project, {
+      source: url === undefined ? undefined : { url },
+      fetch: deps.fetch,
+    });
     const createMs = Date.now() - began;
     await deps.project(c.env, project).note("repoCreated", { project, createMs });
     return c.json({ remote: made.remote, token: made.token, createMs, owner: made.project.owner.handle });

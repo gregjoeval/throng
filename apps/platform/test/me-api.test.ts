@@ -80,6 +80,7 @@ describe("GET /me/tasks and /me/attempts", () => {
           id: expect.any(String),
           handle: "throng",
           owner: { id: expect.any(String), handle: "greg" },
+          source: null,
           createdAt: expect.any(String),
         },
         ref: "t1",

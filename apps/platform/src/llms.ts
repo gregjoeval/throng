@@ -31,8 +31,20 @@ a token acts as and when it expires.
 - Header: \`Authorization: Bearer $THRONG_TOKEN\`. No token, or a bad one, is a 401. There is no OAuth.
 - Claude Code: \`claude mcp add --transport http throng ${origin}/mcp --header "Authorization: Bearer $THRONG_TOKEN"\`
 
-Every tool but \`whoami\` takes \`project\` as \`owner/project\`. Tasks are \`t42\` (or \`42\`), attempts \`t42a3\`.
-A tool answers with a one-line summary and the data as JSON; a refusal is a tool error, \`code: message\`.
+Every tool but \`whoami\` and \`create_project\` takes \`project\` as \`owner/project\`. Tasks are \`t42\` (or \`42\`),
+attempts \`t42a3\`. A tool answers with a one-line summary and the data as JSON; a refusal is a tool error,
+\`code: message\`.
+
+## Start a project
+
+\`create_project\` (or \`POST ${origin}/api/projects {"handle": "hello"}\`) makes a project you own with an empty
+origin. To start from an existing codebase, add \`sourceUrl\` (REST: \`"source": {"url": …}\`): the HTTPS URL of a
+public git repository on GitHub, GitLab, Codeberg or any smart-HTTP host. Throng copies the source's default
+branch into the origin **as \`main\`**, whatever its name (\`master\`, \`trunk\`), with its full history, and the
+call returns once the copy is done. The copy is made once: the project doesn't follow the source afterwards.
+Only public repositories can be imported, and the URL may carry no credentials, query or fragment. A failed
+import says why (\`notFound\` for a private or missing source, \`invalidRequest\` for one that isn't a git
+repository or is too large, \`unavailable\` when its host can't be reached) and leaves nothing behind.
 
 ## Git
 

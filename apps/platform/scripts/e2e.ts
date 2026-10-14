@@ -35,6 +35,10 @@
 // projected title; an obsolete task and attempt leave the default listings but stay under
 // `state=obsolete`.
 //
+// Importing, import: a project created from a public git URL (octocat/Hello-World, whose default
+// branch is `master`) has the source's head on `main` with its history; the file browser reads it,
+// an attempt forks from it, and deleting the project leaves none of its repos.
+//
 // Every project id starts with E2E_PROJECT_PREFIX (default `e2e`; lowercase alphanumeric, starting
 // with `e2e`, which the Worker's e2e routes insist on). Each scenario deletes what its projects made
 // (D1 rows, Durable Object storage, logs, repos and preview Workers), and the run revokes its tokens when it ends.
@@ -71,6 +75,9 @@ const TEST_CHECK = `checks:
     command: npm test
 `;
 const CHECK_TIMEOUT_MS = 10 * 60 * 1000;
+/** The public repository the `import` scenario imports: tiny, and its default branch is `master`. */
+const IMPORT_SOURCE = "https://github.com/octocat/Hello-World";
+const IMPORT_SOURCE_BRANCH = "refs/heads/master";
 /** How long a change may take to reach the D1 projection; delivery usually takes seconds. */
 const PROJECTION_TIMEOUT_MS = 90 * 1000;
 
@@ -217,6 +224,7 @@ interface Project {
   id: string;
   handle: string;
   owner: { id: string; handle: string };
+  source: string | null;
   createdAt: string;
 }
 
@@ -271,6 +279,7 @@ const scenarios: Record<string, () => Promise<void>> = {
   deps,
   refs,
   me,
+  import: importSource,
 };
 
 async function main(): Promise<void> {
@@ -1321,6 +1330,62 @@ async function retrying<T>(step: () => Promise<T>): Promise<T> {
       if (Date.now() > deadline) throw error;
       await new Promise((r) => setTimeout(r, 2000));
     }
+  }
+}
+
+/**
+ * A project imported from a public git repository whose default branch isn't `main`: its origin's
+ * `main` is the source's head with its history, the file browser reads it, an attempt forks from it,
+ * and deleting the project leaves none of its repos (the staging repo included).
+ */
+async function importSource(): Promise<void> {
+  const timeline = new Timeline();
+  const project = `${projectPrefix}${Date.now().toString(36)}`;
+  console.log(`project ${project}, imported from ${IMPORT_SOURCE}`);
+  const work = await mkdtemp(join(tmpdir(), `${project}-`));
+  const [sourceHead] = (await git(work, "ls-remote", `${IMPORT_SOURCE}.git`, IMPORT_SOURCE_BRANCH)).split(/\s/u);
+  assert(sourceHead !== undefined && /^[0-9a-f]{40}$/u.test(sourceHead), `no ${IMPORT_SOURCE_BRANCH} at the source`);
+
+  timeline.mark("import requested");
+  const made = await api<Grant & { createMs: number }>(
+    "POST",
+    `/e2e/projects/${project}?source=${encodeURIComponent(IMPORT_SOURCE)}`,
+  );
+  timeline.mark(`imported in ${made.createMs} ms`);
+  const { token, user } = await e2eUser();
+  const p: RealProject = { project, owner: user.handle, work, origin: made, token, user };
+
+  const found = await throng<Project>(p, "GET", "");
+  assert(found.source === IMPORT_SOURCE, `the project's source is ${found.source}`);
+  const onMain = await api<{ sha: string | null }>("GET", `/e2e/repos/${originRepo(project)}/head`);
+  assert(onMain.sha === sourceHead, `main is at ${onMain.sha}, the source's head is ${sourceHead}`);
+  const log = await api<{ hash: string }[]>("GET", `/e2e/repos/${originRepo(project)}/log?ref=main`);
+  assert(log.length > 1, `main has ${log.length} commit(s); the source's history didn't come along`);
+  const repos = await api<string[]>("GET", `/e2e/repos?prefix=${project}`);
+  assert(repos.join() === originRepo(project), `the import left ${repos.join(", ")}`);
+
+  const tree = await throng<{ sha: string; entries: { name: string }[] }>(p, "GET", "/tree/main");
+  assert(tree.sha === sourceHead, `the file browser reads main at ${tree.sha}`);
+  assert(
+    tree.entries.some((e) => e.name === "README"),
+    `no README: ${tree.entries.map((e) => e.name).join(", ")}`,
+  );
+  timeline.mark("main browsed");
+
+  await createTask(p, "t1", "Say hello");
+  await createAttempts(p, "t1", ["t1a1"], timeline);
+  const fork = await retrying(async () => {
+    const head = await api<{ sha: string | null }>("GET", `/e2e/repos/${project}-t1a1/head`);
+    assert(head.sha !== null, "the fork has no main yet");
+    return head.sha;
+  });
+  assert(fork === sourceHead, `t1a1 forked from ${fork}, expected ${sourceHead}`);
+  timeline.mark("t1a1 forked");
+
+  await finish(project, work, timeline);
+  if (process.env.E2E_KEEP !== "1") {
+    const left = await api<string[]>("GET", `/e2e/repos?prefix=${project}`);
+    assert(left.length === 0, `deleting ${project} left ${left.join(", ")}`);
   }
 }
 

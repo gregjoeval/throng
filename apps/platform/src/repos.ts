@@ -8,13 +8,28 @@ export const MAX_REPO_NAME = 63;
 
 const PROJECT_ID = /^[a-z0-9]+$/u;
 const ORIGIN_SUFFIX = "main";
+const STAGING_SUFFIX = "import";
 
-/** What a repo name says: a project's origin, or the fork of one of its attempts. */
-export type RepoName = { kind: "origin"; project: string } | { kind: "fork"; project: string; attempt: string };
+/**
+ * What a repo name says: a project's origin, the fork of one of its attempts, or the staging repo an
+ * import passes through.
+ */
+export type RepoName =
+  | { kind: "origin"; project: string }
+  | { kind: "fork"; project: string; attempt: string }
+  | { kind: "staging"; project: string };
 
 /** The origin's repo: `<projectId>-main`. */
 export function originRepo(project: string): string {
   return repoName(project, ORIGIN_SUFFIX);
+}
+
+/**
+ * The repo an import whose default branch isn't `main` lands in before its branch is copied to the
+ * origin's `main`: `<projectId>-import`. It lives only while the project is being created.
+ */
+export function stagingRepo(project: string): string {
+  return repoName(project, STAGING_SUFFIX);
 }
 
 /** An attempt fork's repo, named after the attempt: `<projectId>-t42a3`. */
@@ -23,13 +38,14 @@ export function forkRepo(project: string, attempt: string): string {
   return repoName(project, attempt);
 }
 
-/** Reads a repo name back; null for anything that isn't an origin or attempt fork name. */
+/** Reads a repo name back; null for anything that isn't an origin, attempt fork or staging name. */
 export function parseRepoName(name: string): RepoName | null {
   const at = name.lastIndexOf("-");
   const project = name.slice(0, at);
   const suffix = name.slice(at + 1);
   if (at === -1 || !PROJECT_ID.test(project)) return null;
   if (suffix === ORIGIN_SUFFIX) return { kind: "origin", project };
+  if (suffix === STAGING_SUFFIX) return { kind: "staging", project };
   if (isAttemptRef(suffix)) return { kind: "fork", project, attempt: suffix };
   return null;
 }
@@ -134,6 +150,13 @@ export interface CopyRef {
 export interface Repos {
   /** Creates an empty repo and returns it with a write token for its first push. */
   create: (name: string, opts?: { defaultBranch?: string }) => Promise<RepoInfo & { token: string }>;
+  /**
+   * Creates `name` as a copy of `branch` of the public git repository at `url`, with its full
+   * history and under its own name, `refs/heads/<branch>`, which `HEAD` points at. Resolves once the
+   * copy is done. Fails with the binding's import codes (`REMOTE_AUTH_REQUIRED`, `INVALID_URL`,
+   * `MEMORY_LIMIT`, …), which `importError` turns into the service's.
+   */
+  import: (name: string, source: { url: string; branch: string }) => Promise<void>;
   get: (name: string) => Promise<RepoInfo>;
   /** Forks `source`'s default branch into `name`. The fork can take a moment before `get` finds it. */
   fork: (source: string, name: string) => Promise<void>;

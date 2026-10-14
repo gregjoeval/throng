@@ -11,6 +11,7 @@ export const ERROR_CODES = [
   "attemptLimit",
   "conflict",
   "internal",
+  "unavailable",
 ] as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[number];
@@ -30,7 +31,7 @@ export function errorBody(code: ErrorCode, message: string): ErrorBody {
   return { error: { code, message } };
 }
 
-const STATUS: Record<ErrorCode, 400 | 401 | 403 | 404 | 409 | 500> = {
+const STATUS: Record<ErrorCode, 400 | 401 | 403 | 404 | 409 | 500 | 503> = {
   invalidRequest: 400,
   unauthorized: 401,
   forbidden: 403,
@@ -39,6 +40,8 @@ const STATUS: Record<ErrorCode, 400 | 401 | 403 | 404 | 409 | 500> = {
   attemptLimit: 409,
   conflict: 409,
   internal: 500,
+  /** Something Throng depends on outside Cloudflare failed; trying again may work. */
+  unavailable: 503,
 };
 
 /**
@@ -55,7 +58,7 @@ export class ServiceError extends Error {
     super(message);
   }
 
-  get status(): 400 | 401 | 403 | 404 | 409 | 500 {
+  get status(): 400 | 401 | 403 | 404 | 409 | 500 | 503 {
     return STATUS[this.code];
   }
 }

@@ -6,12 +6,17 @@
 // may read and change them, and journals every change without its value.
 
 import { ServiceError } from "./errors.ts";
+import { PIPELINES } from "./pipelines.ts";
+import type { Pipeline } from "./pipelines.ts";
 import type { Sql } from "./task-store.ts";
 
 /** The keyring's id of each key, and the key: 32 bytes, base64. */
 const KEY_ID = /^[A-Za-z0-9_-]{1,64}$/u;
 const KEY_BYTES = 32;
 const IV_BYTES = 12;
+
+/** An imported key. Named from Web Crypto itself, so the Worker's, Node's and the DOM's typings all agree. */
+type CryptoKey = Awaited<ReturnType<typeof crypto.subtle.importKey>>;
 
 /**
  * The keys values are sealed under. `SECRETS_KEYRING` holds it as JSON:
@@ -26,8 +31,8 @@ export interface Keyring {
 
 /** A sealed value as its row keeps it. */
 export interface SealedValue {
-  ciphertext: Uint8Array;
-  iv: Uint8Array;
+  ciphertext: Uint8Array<ArrayBuffer>;
+  iv: Uint8Array<ArrayBuffer>;
   keyId: string;
 }
 
@@ -79,7 +84,7 @@ async function importKeyring(raw: string | undefined) {
   return { current, keys: imported };
 }
 
-function decodeBase64(text: string): Uint8Array | null {
+function decodeBase64(text: string): Uint8Array<ArrayBuffer> | null {
   try {
     return Uint8Array.from(atob(text), (c) => c.charCodeAt(0));
   } catch {
@@ -88,7 +93,7 @@ function decodeBase64(text: string): Uint8Array | null {
 }
 
 /** What a sealed value is bound to: its project, its name and the key that sealed it. */
-function additionalData(project: string, name: string, keyId: string): Uint8Array {
+function additionalData(project: string, name: string, keyId: string) {
   return new TextEncoder().encode(`${project}/${name}/${keyId}`);
 }
 
@@ -112,10 +117,6 @@ export async function openSecret(
   const params = { name: "AES-GCM", iv: sealed.iv, additionalData: additionalData(project, name, sealed.keyId) };
   return new TextDecoder().decode(await crypto.subtle.decrypt(params, key, sealed.ciphertext));
 }
-
-/** The pipelines a secret may be used in, in the order they're listed. */
-export const PIPELINES = ["default", "main"] as const;
-export type Pipeline = (typeof PIPELINES)[number];
 
 /** The shortest value: masking a shorter one would hide common words in logs. */
 export const MIN_SECRET_LENGTH = 8;

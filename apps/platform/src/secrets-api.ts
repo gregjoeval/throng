@@ -7,8 +7,9 @@ import type { AccessBindings } from "./access.ts";
 import { json, ProjectPathSchema, requestTaskService } from "./api-shared.ts";
 import type { AuthEnv, bearerOrForwarded } from "./auth.ts";
 import { errorBody, errorResponse } from "./errors.ts";
+import { PIPELINES } from "./pipelines.ts";
 import type { Repos } from "./repos.ts";
-import { MAX_SECRET_LENGTH, MIN_SECRET_LENGTH, PIPELINES, RESERVED_SECRET_PREFIX } from "./secrets.ts";
+import { MAX_SECRET_LENGTH, MIN_SECRET_LENGTH, RESERVED_SECRET_PREFIX } from "./secrets.ts";
 import type { TaskBackend } from "./tasks.ts";
 
 export interface SecretsOptions {

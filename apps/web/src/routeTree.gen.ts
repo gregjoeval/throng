@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as OwnerProjectIndexRouteImport } from './routes/$owner/$project/index'
+import { Route as OwnerProjectSettingsRouteImport } from './routes/$owner/$project/settings'
 import { Route as OwnerProjectCommitShaRouteImport } from './routes/$owner/$project/commit/$sha'
 import { Route as OwnerProjectCommitsRefRouteImport } from './routes/$owner/$project/commits/$ref'
 import { Route as OwnerProjectTasksIndexRouteImport } from './routes/$owner/$project/tasks/index'
@@ -27,6 +28,11 @@ const IndexRoute = IndexRouteImport.update({
 const OwnerProjectIndexRoute = OwnerProjectIndexRouteImport.update({
   id: '/$owner/$project/',
   path: '/$owner/$project/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const OwnerProjectSettingsRoute = OwnerProjectSettingsRouteImport.update({
+  id: '/$owner/$project/settings',
+  path: '/$owner/$project/settings',
   getParentRoute: () => rootRouteImport,
 } as any)
 const OwnerProjectCommitShaRoute = OwnerProjectCommitShaRouteImport.update({
@@ -69,6 +75,7 @@ const OwnerProjectTreeRefSplatRoute =
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/$owner/$project/settings': typeof OwnerProjectSettingsRoute
   '/$owner/$project/': typeof OwnerProjectIndexRoute
   '/$owner/$project/commit/$sha': typeof OwnerProjectCommitShaRoute
   '/$owner/$project/commits/$ref': typeof OwnerProjectCommitsRefRoute
@@ -80,6 +87,7 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/$owner/$project/settings': typeof OwnerProjectSettingsRoute
   '/$owner/$project': typeof OwnerProjectIndexRoute
   '/$owner/$project/commit/$sha': typeof OwnerProjectCommitShaRoute
   '/$owner/$project/commits/$ref': typeof OwnerProjectCommitsRefRoute
@@ -92,6 +100,7 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/$owner/$project/settings': typeof OwnerProjectSettingsRoute
   '/$owner/$project/': typeof OwnerProjectIndexRoute
   '/$owner/$project/commit/$sha': typeof OwnerProjectCommitShaRoute
   '/$owner/$project/commits/$ref': typeof OwnerProjectCommitsRefRoute
@@ -105,6 +114,7 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/$owner/$project/settings'
     | '/$owner/$project/'
     | '/$owner/$project/commit/$sha'
     | '/$owner/$project/commits/$ref'
@@ -116,6 +126,7 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/$owner/$project/settings'
     | '/$owner/$project'
     | '/$owner/$project/commit/$sha'
     | '/$owner/$project/commits/$ref'
@@ -127,6 +138,7 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/'
+    | '/$owner/$project/settings'
     | '/$owner/$project/'
     | '/$owner/$project/commit/$sha'
     | '/$owner/$project/commits/$ref'
@@ -139,6 +151,7 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  OwnerProjectSettingsRoute: typeof OwnerProjectSettingsRoute
   OwnerProjectIndexRoute: typeof OwnerProjectIndexRoute
   OwnerProjectCommitShaRoute: typeof OwnerProjectCommitShaRoute
   OwnerProjectCommitsRefRoute: typeof OwnerProjectCommitsRefRoute
@@ -163,6 +176,13 @@ declare module '@tanstack/react-router' {
       path: '/$owner/$project'
       fullPath: '/$owner/$project/'
       preLoaderRoute: typeof OwnerProjectIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/$owner/$project/settings': {
+      id: '/$owner/$project/settings'
+      path: '/$owner/$project/settings'
+      fullPath: '/$owner/$project/settings'
+      preLoaderRoute: typeof OwnerProjectSettingsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/$owner/$project/commit/$sha': {
@@ -219,6 +239,7 @@ declare module '@tanstack/react-router' {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  OwnerProjectSettingsRoute: OwnerProjectSettingsRoute,
   OwnerProjectIndexRoute: OwnerProjectIndexRoute,
   OwnerProjectCommitShaRoute: OwnerProjectCommitShaRoute,
   OwnerProjectCommitsRefRoute: OwnerProjectCommitsRefRoute,

@@ -12,6 +12,7 @@ import type { ReactNode } from "react";
 import { ClosedAttempts } from "@/components/closed-attempts";
 import { FileSection } from "@/components/commit-files";
 import { GatePill, Lane, laneCompareQuery, laneReference, VerdictCounts } from "@/components/lane";
+import { MetricValues } from "@/components/scorecard";
 import { useMaySelect, useSelect } from "@/components/selection";
 import { ErrorState, Loading } from "@/components/states";
 import { Button } from "@/components/ui/button";
@@ -413,8 +414,9 @@ const SCORING_LABELS: Partial<Record<ArenaAttempt["status"], string>> = {
 
 /**
  * One attempt's card: its ref, author, gate and scoring status, every metric (the best among passing
- * attempts marked), and its verdict counts. The whole card toggles its lane; `footer` sits below it,
- * outside the toggle, for actions of its own (Select, or the open vote's Vote).
+ * attempts marked), and its verdict counts. The whole card toggles its lane, apart from its `url`
+ * metrics: they sit below the toggle so each can be a link. `footer` sits below them, for actions of
+ * its own (Select, or the open vote's Vote).
  */
 export function RailCard({
   attempt,
@@ -432,6 +434,7 @@ export function RailCard({
   footer?: ReactNode;
 }) {
   const scoring = SCORING_LABELS[attempt.status];
+  const links = columns.filter((column) => column.format === "url");
   return (
     <div
       className={`relative flex flex-col rounded-xl border bg-card text-sm ${shown ? "border-primary shadow-[inset_3px_0_0_var(--color-primary)]" : ""}`}
@@ -463,18 +466,25 @@ export function RailCard({
           {attempt.forkedFrom ? <Badge>forked from {attempt.forkedFrom}</Badge> : null}
         </span>
         <dl className="grid grid-cols-[1fr_auto] gap-x-3 gap-y-0.5 text-xs">
-          {columns.map((column) => (
-            <MetricRow key={column.key} column={column} attempt={attempt} best={best} />
-          ))}
+          {columns
+            .filter((column) => column.format !== "url")
+            .map((column) => (
+              <MetricRow key={column.key} column={column} attempt={attempt} best={best} />
+            ))}
         </dl>
         <VerdictCounts verdicts={attempt.verdicts} />
       </button>
+      {links.length === 0 ? null : (
+        <div className="px-3 pb-2.5">
+          <MetricValues attempt={attempt} columns={links} />
+        </div>
+      )}
       {footer === undefined || footer === null ? null : <div className="border-t px-3 py-2">{footer}</div>}
     </div>
   );
 }
 
-/** A metric of a card, as text: the card is a button, so a URL isn't a link here. */
+/** A metric of a card, as text: the card is a button, so its `url` metrics sit outside it. */
 function MetricRow({
   column,
   attempt,

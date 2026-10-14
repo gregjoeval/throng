@@ -516,9 +516,9 @@ export function taskService({ db, repos, backend, origin }: TaskServiceDeps) {
     /** Scores an open attempt's head again. Its author, the task's creator or the project owner may. */
     rescore: scoringRequest("rescore"),
 
-    /** The R2 key of a run's log. An unknown run or log name is `notFound`. */
-    async runLogKey(actor: Actor, input: ProjectPath & { run: number; name: string }): Promise<string> {
-      return invoke("runLogKey", await project(input), actor, { run: input.run, name: input.name });
+    /** The R2 keys a run's log may be under, in the order to try. An unknown run or log name is `notFound`. */
+    async runLogKeys(actor: Actor, input: ProjectPath & { run: number; name: string }): Promise<string[]> {
+      return invoke("runLogKeys", await project(input), actor, { run: input.run, name: input.name });
     },
 
     /** The attempt's scoring status and current result. Any signed-in user may read it. */

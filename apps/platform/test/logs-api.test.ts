@@ -27,7 +27,7 @@ class MemoryLogs implements LogStore {
 async function setup() {
   const repos = new FakeRepos();
   const logs = new MemoryLogs();
-  const { backend } = testTaskBackends(repos, now);
+  const { backend, sql } = testTaskBackends(repos, now);
   const options = {
     verifierFor: () => verify,
     now,
@@ -61,8 +61,13 @@ async function setup() {
   await post("/projects/greg/throng/tasks/t1/attempts", ada);
   const scored = await post("/projects/greg/throng/attempts/t1a1/score", ada);
   const run = scored["run"]["id"] as number;
-  const prefix = `logs/${project["id"]}/t1a1/${run}`;
-  return { request, web, env, logs, greg, ada, run, prefix, base: "/projects/greg/throng" };
+  const sha = scored["run"]["sha"] as string;
+  const projectId = project["id"] as string;
+  const prefix = `logs/${projectId}/t1a1/${run}`;
+  /** Flags the run as migrated from before runs were keyed on their line; its logs are under `legacyPrefix`. */
+  const migrate = () => sql(projectId).exec("UPDATE pipeline_runs SET legacy_logs = 1 WHERE id = ?", run);
+  const legacyPrefix = `logs/${projectId}/t1a1/${sha}/${run}`;
+  return { request, web, env, logs, greg, ada, run, prefix, migrate, legacyPrefix, base: "/projects/greg/throng" };
 }
 
 describe("GET /projects/{owner}/{project}/runs/{runId}/logs/{name}", () => {
@@ -76,6 +81,18 @@ describe("GET /projects/{owner}/{project}/runs/{runId}/logs/{name}", () => {
     expect(res.headers.get("Content-Type")).toBe("text/plain; charset=utf-8");
     expect(await res.text()).toBe("ok\nall 3 passed\n");
     expect(await (await request(`${base}/runs/${run}/logs/setup.1`, ada)).text()).toBe("added 12 packages\n");
+  });
+
+  it("streams a migrated run's log from its old key, or from its line if it stored it after the migration", async () => {
+    const { request, logs, ada, run, prefix, migrate, legacyPrefix, base } = await setup();
+    migrate();
+    logs.objects.set(`${legacyPrefix}/test.log`, "old\n");
+    logs.objects.set(`${prefix}/test.log`, "shadowed\n");
+    logs.objects.set(`${prefix}/setup.1.log`, "new\n");
+
+    expect(await (await request(`${base}/runs/${run}/logs/test`, ada)).text()).toBe("old\n");
+    expect(await (await request(`${base}/runs/${run}/logs/setup.1`, ada)).text()).toBe("new\n");
+    expect((await request(`${base}/runs/${run}/logs/lint`, ada)).status).toBe(404);
   });
 
   it("is notFound for a log the run never stored, or one the lifecycle rule expired", async () => {

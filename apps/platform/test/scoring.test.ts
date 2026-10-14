@@ -819,7 +819,7 @@ describe("line-keyed runs", () => {
     ]);
   });
 
-  it("reads a migrated run's log under its old key, and a new run's under its line", () => {
+  it("reads a migrated run's log under its old key then its line, and a new run's under its line", () => {
     const sql = testSql();
     scoringTables(sql);
     sql.exec(
@@ -827,8 +827,11 @@ describe("line-keyed runs", () => {
        VALUES ('abc123', 1, 1, 'a', 'open', 'done', 'i', 0)`,
     );
     const store = new TaskStore({ sql, repos: new FakeRepos() });
-    expect(store.runLogKey(PROJECT, ada, { run: 1, name: "test" })).toBe("logs/abc123/t1a1/a/1/test.log");
+    expect(store.runLogKeys(PROJECT, ada, { run: 1, name: "test" })).toEqual([
+      "logs/abc123/t1a1/a/1/test.log",
+      "logs/abc123/t1a1/1/test.log",
+    ]);
     store.scoring.request({ project: PROJECT.id, line: "t1a1", sha: "b", trigger: "push", actor: ada });
-    expect(store.runLogKey(PROJECT, ada, { run: 2, name: "test" })).toBe("logs/abc123/t1a1/2/test.log");
+    expect(store.runLogKeys(PROJECT, ada, { run: 2, name: "test" })).toEqual(["logs/abc123/t1a1/2/test.log"]);
   });
 });

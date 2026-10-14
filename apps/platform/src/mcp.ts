@@ -32,7 +32,7 @@ import type { AuthEnv } from "./auth.ts";
 import { browseService } from "./browse.ts";
 import { DIFF_CAPS, diffCommit, unifiedPatch } from "./diff.ts";
 import { ServiceError } from "./errors.ts";
-import { missingLog } from "./logs.ts";
+import { firstLog, missingLog } from "./logs.ts";
 import { ATTEMPT_STATES, TASK_STATES } from "./task-store.ts";
 import { taskService } from "./tasks.ts";
 import type { MergeRequest, ScoringAnswer, Vote } from "./tasks.ts";
@@ -427,8 +427,8 @@ function mcpServer({ repos, tasks, logs, diffCache }: Deps, { actor, token, env,
       offset: z.number().int().min(0).optional().describe("The byte to start at; omit for the log's tail."),
     }),
     async ({ project, run, name, offset }) => {
-      const key = await service.runLogKey(actor, { ...projectPath(project), run, name });
-      const log = await logs(env).get(key);
+      const keys = await service.runLogKeys(actor, { ...projectPath(project), run, name });
+      const log = await firstLog(logs(env), keys);
       if (log === null) throw missingLog(run, name);
       const bytes = new Uint8Array(await new Response(log.body).arrayBuffer());
       const start = offset ?? Math.max(0, bytes.length - MAX_LOG_SLICE_BYTES);

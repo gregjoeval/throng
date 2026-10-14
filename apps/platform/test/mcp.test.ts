@@ -151,7 +151,7 @@ async function setup() {
     };
   };
 
-  return { repos, logs, store, storeCalls, env, app, fetchApp, tokenFor, connect, runPlatform };
+  return { repos, logs, store, sql, storeCalls, env, app, fetchApp, tokenFor, connect, runPlatform };
 }
 
 /** greg's project with one commit on `main` and a task t1, and clients for greg, ada, and ada as `claude`. */
@@ -589,6 +589,21 @@ describe("/mcp", () => {
     expect(tail.data["text"]).toBe(log.slice(100));
     const head = await call(ada, "get_log", { project, run, name: "test", offset: 0 });
     expect(head.data["text"]).toBe(log.slice(0, MAX_LOG_SLICE_BYTES));
+    expect((await call(ada, "get_log", { project, run, name: "lint" })).summary).toMatch(/^notFound: /u);
+  });
+
+  it("reads a migrated run's log under its old key, or under its line if it stored it after the migration", async () => {
+    const { ada, logs, sql, projectId, project } = await withProject();
+    await call(ada, "start_attempts", { project, task: "t1" });
+    const scored = await call(ada, "score_now", { project, attempt: "t1a1" });
+    const run = scored.data["run"]["id"] as number;
+    const sha = scored.data["run"]["sha"] as string;
+    sql(projectId).exec("UPDATE pipeline_runs SET legacy_logs = 1 WHERE id = ?", run);
+    logs.objects.set(`logs/${projectId}/t1a1/${sha}/${run}/test.log`, "old\n");
+    logs.objects.set(`logs/${projectId}/t1a1/${run}/setup.1.log`, "new\n");
+
+    expect((await call(ada, "get_log", { project, run, name: "test" })).data["text"]).toBe("old\n");
+    expect((await call(ada, "get_log", { project, run, name: "setup.1" })).data["text"]).toBe("new\n");
     expect((await call(ada, "get_log", { project, run, name: "lint" })).summary).toMatch(/^notFound: /u);
   });
 

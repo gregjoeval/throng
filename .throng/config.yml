@@ -4,13 +4,16 @@
 caches:
   # pnpm needs its metadata cache too: a store alone fails `pnpm install --offline` with ERR_PNPM_NO_OFFLINE_META.
   pnpm: { path: [~/.local/share/pnpm/store, ~/.cache/pnpm], key: pnpm-lock.yaml }
-  # The pnpm version `packageManager` pins, which corepack fetches.
-  corepack: { path: [~/.cache/node/corepack], key: package.json }
+  # npm's download cache, which holds the pinned pnpm.
+  npm: { path: [~/.npm], key: package.json }
 setup:
-  # The Sandbox image is plain Node, so corepack installs the pinned pnpm first.
+  # The Sandbox image is plain Node, so npm installs the pnpm `packageManager` pins first. Not corepack:
+  # its download through the Sandbox's egress proxy crashes Node's fetch (`assert(!this.paused)`).
   - name: deps
-    command: corepack enable pnpm && pnpm install --frozen-lockfile --prefer-offline
-    caches: [pnpm, corepack]
+    command: >-
+      npm install --global --prefer-offline "$(node -p 'require("./package.json").packageManager')"
+      && pnpm install --frozen-lockfile --prefer-offline
+    caches: [pnpm, npm]
 checks:
   - { name: typecheck, command: pnpm --filter @throng/web typecheck }
   - { name: test, command: pnpm --filter @throng/web test }

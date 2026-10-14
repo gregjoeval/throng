@@ -5,18 +5,18 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckIcon, CopyIcon } from "lucide-react";
 import { useState } from "react";
-import type { ReactNode } from "react";
+import { RelativeTime } from "@/components/commit-meta";
 import { EmptyState, ErrorState, Loading } from "@/components/states";
+import { Th } from "@/components/table";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { mintToken, revokeToken, tokensQuery } from "@/lib/api";
 import type { MintedToken, Token } from "@/lib/api";
-import { relativeDate } from "@/lib/commits";
 import { apiError } from "@/lib/errors";
 
 const DAY_SECONDS = 24 * 60 * 60;
-/** The platform's longest token lifetime, in days. */
+/** The platform's longest token lifetime (`MAX_TOKEN_TTL_SECONDS` in its `tokens.ts`), in days. */
 const MAX_DAYS = 7;
 
 export function TokensPage() {
@@ -165,35 +165,35 @@ function TokenRow({ token }: { token: Token }) {
         {token.alias === null ? <span className="text-muted-foreground">You</span> : token.alias}
       </td>
       <td className="px-2 py-2 text-muted-foreground">
-        <Time iso={token.createdAt} />
+        <RelativeTime date={token.createdAt} />
       </td>
       <td className="px-2 py-2 text-muted-foreground">
-        <Time iso={token.expiresAt} />
+        <RelativeTime date={token.expiresAt} />
       </td>
       <td className={status === "Active" ? "px-2 py-2" : "px-2 py-2 text-muted-foreground"}>{status}</td>
       <td className="px-2 py-2">
         <div className="flex justify-end gap-2">
-          {status === "Active" && confirming && (
-            <>
-              <Button
-                size="sm"
-                variant="destructive"
-                aria-label={`Confirm revoke ${name}`}
-                disabled={revoke.isPending}
-                onClick={() => revoke.mutate()}
-              >
+          {status === "Active" &&
+            (confirming ? (
+              <>
+                <Button
+                  size="sm"
+                  variant="destructive"
+                  aria-label={`Confirm revoke ${name}`}
+                  disabled={revoke.isPending}
+                  onClick={() => revoke.mutate()}
+                >
+                  Revoke
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>
+                  Cancel
+                </Button>
+              </>
+            ) : (
+              <Button size="sm" variant="ghost" aria-label={`Revoke ${name}`} onClick={() => setConfirming(true)}>
                 Revoke
               </Button>
-              <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>
-                Cancel
-              </Button>
-            </>
-          )}
-          {status === "Active" && !confirming && (
-            <Button size="sm" variant="ghost" aria-label={`Revoke ${name}`} onClick={() => setConfirming(true)}>
-              Revoke
-            </Button>
-          )}
+            ))}
         </div>
         {revoke.isError && (
           <p role="alert" className="text-right text-sm text-destructive">
@@ -202,14 +202,6 @@ function TokenRow({ token }: { token: Token }) {
         )}
       </td>
     </tr>
-  );
-}
-
-function Time({ iso }: { iso: string }) {
-  return (
-    <time dateTime={iso} title={iso}>
-      {relativeDate(iso)}
-    </time>
   );
 }
 
@@ -236,8 +228,4 @@ function Snippet({ label, text }: { label: string; text: string }) {
       </div>
     </div>
   );
-}
-
-function Th({ children }: { children: ReactNode }) {
-  return <th className="px-2 py-2 font-medium">{children}</th>;
 }

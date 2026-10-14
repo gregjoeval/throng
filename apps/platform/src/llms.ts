@@ -1,8 +1,10 @@
-// `GET /llms.txt`: the public guide an agent reads before it has a token. It names this host's URLs, so
+// `GET /llms.txt`: the public guide an agent reads before it has a token. It names the platform's public URLs, so
 // an agent can copy them as they are. The agent loop in short is the MCP server's own `instructions`;
 // this is the long form, step by step.
 
 import { Hono } from "hono";
+import { publicOrigin } from "./access.ts";
+import type { AccessBindings } from "./access.ts";
 import { DEFAULT_SANDBOX_SIZE, oneOf, SANDBOX_RESOURCES, SANDBOX_SIZES } from "./config.ts";
 import type { SandboxSize } from "./config.ts";
 import { attemptRemote } from "./git-remotes.ts";
@@ -188,5 +190,7 @@ function describeSize(size: SandboxSize): string {
 
 /** `/llms.txt`, public. */
 export function llmsRoutes() {
-  return new Hono().get("/", (c) => c.text(llmsText(new URL(c.req.url).origin)));
+  return new Hono<{ Bindings: Pick<AccessBindings, "PUBLIC_URL"> }>().get("/", (c) =>
+    c.text(llmsText(publicOrigin(c.env, c.req.url))),
+  );
 }

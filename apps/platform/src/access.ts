@@ -14,11 +14,17 @@ export interface AccessBindings {
   ACCESS_TEAM_DOMAIN: string;
   /** The Access application's audience tag. */
   ACCESS_AUD: string;
-  /**
-   * The platform's public URL, e.g. `https://throng.example.workers.dev`, for setup an agent pastes.
-   * Unset, it's the origin the request came in on, which over throng-web's binding is throng-web's.
-   */
+  /** The platform's public URL, e.g. `https://throng.example.workers.dev`: see `publicOrigin`. */
   PUBLIC_URL?: string;
+}
+
+/**
+ * The origin agents and git reach the platform at, for the URLs it hands out: `PUBLIC_URL`, or when
+ * that's unset (tests, a bare local run), the origin `url` came in on. Over throng-web's binding the
+ * request's origin is throng-web's, which serves only `/api`, so deployed environments set it.
+ */
+export function publicOrigin(env: { PUBLIC_URL?: string | undefined }, url: string): string {
+  return env.PUBLIC_URL ?? new URL(url).origin;
 }
 
 export interface AccessEnv {

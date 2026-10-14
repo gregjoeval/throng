@@ -87,3 +87,13 @@ describe("/llms.txt", () => {
     expect(tools.filter((name) => !text.includes(`\`${name}\``))).toEqual([]);
   });
 });
+
+describe("the platform's public URL", () => {
+  it("names PUBLIC_URL's host in place of the one the request came in on, when it's set", async () => {
+    const { app, env } = setup();
+    const res = await app.request(`${ORIGIN}/llms.txt`, {}, { ...env, PUBLIC_URL: "https://throng.example" });
+    const text = await res.text();
+    expect(text).toContain("https://throng.example/mcp");
+    expect(text).not.toContain(ORIGIN);
+  });
+});

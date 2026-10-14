@@ -6,6 +6,7 @@
 import { z } from "@hono/zod-openapi";
 import type { OpenAPIHono, RouteConfig } from "@hono/zod-openapi";
 import type { Context } from "hono";
+import { publicOrigin } from "./access.ts";
 import type { AccessBindings } from "./access.ts";
 import { DEFAULT_COMMITS_PAGE, MAX_COMMITS_PAGE } from "./browse.ts";
 import { SelectionPolicySchema } from "./config.ts";
@@ -159,14 +160,14 @@ export function envProjectService(repos: (env: AccessBindings) => Repos, fetch: 
 
 /**
  * The task service for a request, given the environment's repos and task backends. Attempts name
- * their git remotes on the origin the request came in on.
+ * their git remotes on the platform's public origin.
  */
 export function requestTaskService(
   repos: (env: AccessBindings) => Repos,
   tasks: (env: AccessBindings) => (projectId: string) => TaskBackend,
 ) {
   return ({ env, req }: { env: AccessBindings; req: { url: string } }) =>
-    taskService({ db: env.DB, repos: repos(env), backend: tasks(env), origin: new URL(req.url).origin });
+    taskService({ db: env.DB, repos: repos(env), backend: tasks(env), origin: publicOrigin(env, req.url) });
 }
 
 export const PostVerdictSchema = z

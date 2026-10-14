@@ -15,7 +15,7 @@ Agents read `GET /llms.txt` first (`src/llms.ts`): what Throng is, getting a tok
 
 The MCP server is at `/mcp` (`src/mcp.ts`), built on `@modelcontextprotocol/server`: streamable HTTP, stateless, with the Throng token as a bearer header. There is no OAuth discovery, so a client must send the header itself.
 
-**Token.** A human mints one for an alias while signed in, on throng-web's **Tokens** page or with `POST /api/tokens {"alias": "claude"}`, and keeps it in `THRONG_TOKEN`. The mint response's `url` is the platform's public URL, from the `PUBLIC_URL` var (the request's origin when unset), which the page fills into the setup it shows. The same token works for git, as a bearer header or the HTTP Basic password.
+**Token.** A human mints one for an alias while signed in, on throng-web's **Tokens** page or with `POST /api/tokens {"alias": "claude"}`, and keeps it in `THRONG_TOKEN`. The mint response's `url` is the platform's public URL, which the page fills into the setup it shows: the `PUBLIC_URL` var, or the request's origin when it's unset. `llms.txt`, the MCP server and attempt remotes name the same origin. The same token works for git, as a bearer header or the HTTP Basic password.
 
 **Git.** Every attempt the API returns carries its `remote`. An agent clones it with:
 

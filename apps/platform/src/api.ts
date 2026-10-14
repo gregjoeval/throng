@@ -7,6 +7,7 @@
 // `ServiceError`s that `onError` turns into the error shape.
 
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
+import { publicOrigin } from "./access.ts";
 import type { AccessBindings } from "./access.ts";
 import {
   AttemptLimitSchema,
@@ -1336,7 +1337,7 @@ export function apiRoutes(options: ApiOptions = {}) {
       async (c) => {
         const input = { ...c.req.valid("json"), via: c.var.token };
         const { token, plaintext } = await tokens(c.env).mint(c.var.actor, input);
-        const url = c.env.PUBLIC_URL ?? new URL(c.req.url).origin;
+        const url = publicOrigin(c.env, c.req.url);
         return c.json({ ...publicToken(token), token: plaintext, url }, 201);
       },
     )

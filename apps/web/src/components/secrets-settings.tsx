@@ -7,14 +7,14 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { PIPELINES } from "@throng/platform/pipelines";
 import { PlusIcon } from "lucide-react";
 import { useState } from "react";
-import type { ReactNode } from "react";
+import { RelativeTime } from "@/components/commit-meta";
 import { EmptyState, ErrorState, Loading } from "@/components/states";
+import { Th } from "@/components/table";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { deleteSecret, putSecret, secretsQuery } from "@/lib/api";
 import type { Pipeline, ProjectRef, Secret, SecretUse } from "@/lib/api";
-import { relativeDate } from "@/lib/commits";
 import { apiError } from "@/lib/errors";
 
 /** Shown while a change allows a secret in `default` that wasn't before. */
@@ -139,9 +139,7 @@ function SecretRow({
         )}
       </td>
       <td className="px-2 py-2 text-muted-foreground">
-        <time dateTime={secret.changedAt} title={secret.changedAt}>
-          {relativeDate(secret.changedAt)}
-        </time>
+        <RelativeTime date={secret.changedAt} />
       </td>
       <td className="px-2 py-2">
         {use === undefined ? (
@@ -301,8 +299,4 @@ function SecretForm({
       </div>
     </form>
   );
-}
-
-function Th({ children }: { children: ReactNode }) {
-  return <th className="px-2 py-2 font-medium">{children}</th>;
 }

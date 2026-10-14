@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { cleanup, screen, waitFor, within } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
 import { renderApp } from "./app";
@@ -13,7 +13,7 @@ interface Token {
 }
 
 const PLAINTEXT = "thr_0123456789abcdefghijklmnopqrstuvwxyzABCDEFG";
-const URL = "https://throng.example";
+const PLATFORM_URL = "https://throng.example";
 const DAY = 24 * 60 * 60;
 
 /**
@@ -30,7 +30,7 @@ function serveTokens(tokens: Token[], mints: unknown[] = []) {
       const expiresAt = new Date(Date.now() + body.expiresIn * 1000).toISOString();
       const token: Token = { id: `tok${tokens.length + 1}`, alias: body.alias, expiresAt, revokedAt: null, createdAt };
       tokens.unshift(token);
-      return HttpResponse.json({ ...token, token: PLAINTEXT, url: URL }, { status: 201 });
+      return HttpResponse.json({ ...token, token: PLAINTEXT, url: PLATFORM_URL }, { status: 201 });
     }),
     http.delete("*/api/tokens/:id", ({ params }) => {
       const found = tokens.find((t) => t.id === params["id"]);
@@ -65,14 +65,14 @@ describe("the tokens page", () => {
     expect(within(minted).getByText(PLAINTEXT)).toBeInTheDocument();
     expect(
       within(minted).getByText(
-        `claude mcp add --transport http throng ${URL}/mcp --header "Authorization: Bearer ${PLAINTEXT}"`,
+        `claude mcp add --transport http throng ${PLATFORM_URL}/mcp --header "Authorization: Bearer ${PLAINTEXT}"`,
       ),
     ).toBeInTheDocument();
-    expect(within(minted).getByText(`${URL}/llms.txt`)).toBeInTheDocument();
+    expect(within(minted).getByText(`${PLATFORM_URL}/llms.txt`)).toBeInTheDocument();
     const json = within(minted).getByText(/"mcpServers"/u).textContent ?? "";
     expect(JSON.parse(json)).toEqual({
       mcpServers: {
-        throng: { type: "http", url: `${URL}/mcp`, headers: { Authorization: `Bearer ${PLAINTEXT}` } },
+        throng: { type: "http", url: `${PLATFORM_URL}/mcp`, headers: { Authorization: `Bearer ${PLAINTEXT}` } },
       },
     });
   });
@@ -97,6 +97,17 @@ describe("the tokens page", () => {
     expect(await screen.findByRole("form", { name: "New token" })).toBeInTheDocument();
     expect(screen.queryByText(PLAINTEXT)).toBeNull();
     expect(screen.queryByRole("region", { name: "Your new token" })).toBeNull();
+  });
+
+  it("shows the token only once: not after a reload", async () => {
+    server.use(...serveTokens([]));
+    const { user } = await renderApp("/tokens");
+    await user.click(within(mintForm()).getByRole("button", { name: "Mint token" }));
+    expect(await screen.findByText(PLAINTEXT)).toBeInTheDocument();
+    cleanup();
+    await renderApp("/tokens");
+    expect(await screen.findByRole("row", { name: /claude/u })).toBeInTheDocument();
+    expect(screen.queryByText(PLAINTEXT)).toBeNull();
   });
 
   it("mints for the user themselves when the alias is empty, for the days chosen", async () => {

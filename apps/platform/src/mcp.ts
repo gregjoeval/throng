@@ -8,6 +8,7 @@ import { z } from "@hono/zod-openapi";
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import type { CallToolResult, ToolCallback } from "@modelcontextprotocol/server";
 import { Hono } from "hono";
+import { publicOrigin } from "./access.ts";
 import type { AccessBindings } from "./access.ts";
 import {
   AttemptQuerySchema,
@@ -92,7 +93,7 @@ export function mcpRoutes(options: ApiOptions = {}) {
         actor: c.var.actor,
         token: c.var.token,
         env: c.env,
-        origin: new URL(c.req.url).origin,
+        origin: publicOrigin(c.env, c.req.url),
       };
       const handler = createMcpHandler(() => mcpServer(deps, context));
       return handler.fetch(c.req.raw);

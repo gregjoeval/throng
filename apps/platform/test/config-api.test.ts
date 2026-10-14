@@ -39,7 +39,7 @@ describe("POST /api/config/validate", () => {
           config: {
             setup: [],
             network: { allow: [] },
-            checks: [{ name: "test", command: "pnpm test", required: true, timeoutMs: 600_000, source: "project" }],
+            checks: [{ name: "test", command: "pnpm test", timeoutMs: 600_000, source: "project" }],
             metrics: [],
             preview: null,
             attempts: { limit: null },

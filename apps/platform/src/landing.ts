@@ -3,7 +3,6 @@
 
 import type { ConfigResult } from "./config.ts";
 import type { ConflictDetails } from "./conflicts.ts";
-import { parseFrom } from "./metric-values.ts";
 import { CHECK_OUTCOMES } from "./results.ts";
 import type { CheckOutcome, ScoringResult } from "./results.ts";
 import { attemptRef, taskRef } from "./task-refs.ts";
@@ -88,8 +87,8 @@ export function actedAlias(acted: { alias?: string | null; agent?: string | null
 }
 
 /**
- * How a required check can fail to pass: every outcome but `passed` and `errored`, as only `_preview`
- * errors, and it is never required.
+ * How a check can fail to pass: every outcome but `passed` and `errored`, as only `_preview` errors,
+ * and Throng's own checks never gate.
  */
 export type FailedCheckOutcome = Exclude<CheckOutcome, "passed" | "errored">;
 
@@ -100,7 +99,7 @@ function isFailedCheckOutcome(outcome: CheckOutcome): outcome is FailedCheckOutc
 /** The outcomes a failed check can have, in `CHECK_OUTCOMES`'s order. */
 export const FAILED_CHECK_OUTCOMES = CHECK_OUTCOMES.filter(isFailedCheckOutcome);
 
-/** A required check that didn't pass on the merged tree, and the name of its stored log, if any. */
+/** A check that didn't pass on the merged tree, and the name of its stored log, if any. */
 export interface FailedCheck {
   name: string;
   outcome: FailedCheckOutcome;
@@ -128,22 +127,18 @@ export type LandingOutcome =
   | { kind: "errored"; details: ErroredDetails };
 
 /**
- * The config the retest runs under: the merged tree's, with only its required checks and the metrics
- * read from them. Null skips the retest: no config, or no required checks. An invalid config is kept,
- * and fails (see `buildResult`).
+ * The config the retest runs under: the merged tree's, as every check that runs must pass. Null skips
+ * the retest: no config, or no checks. An invalid config is kept, and fails (see `buildResult`).
  */
 export function retestConfig(config: ConfigResult): ConfigResult | null {
   if (config.kind === "none") return null;
   if (config.kind === "invalid") return config;
-  const checks = config.config.checks.filter((check) => check.required);
-  const kept = new Set(checks.map((check) => check.name));
-  const metrics = config.config.metrics.filter((metric) => kept.has(parseFrom(metric.from).check));
-  return checks.length === 0 ? null : { kind: "valid", config: { ...config.config, checks, metrics } };
+  return config.config.checks.length === 0 ? null : config;
 }
 
 /**
- * The required checks the retest's result didn't pass, each with its log when one was stored. Throng's
- * own checks are left out: the retest doesn't diff or deploy, and neither is ever required.
+ * The checks the retest's result didn't pass, each with its log when one was stored. Throng's own
+ * checks are left out: the retest doesn't diff or deploy, and neither ever gates.
  */
 export function failedChecks(result: ScoringResult, stored: string[]): FailedChecksDetails {
   const checks = result.checks.flatMap(({ name, source, outcome }): FailedCheck[] =>

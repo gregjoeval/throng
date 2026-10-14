@@ -83,8 +83,6 @@ export type MetricConfig = {
 export interface CheckConfig {
   name: string;
   command: string;
-  /** Whether the gate needs it to pass. */
-  required: boolean;
   timeoutMs: number;
   source: ConfigLayer;
 }
@@ -261,12 +259,11 @@ export function metricConfig(metric: z.infer<typeof MetricSchema>, source: Confi
   }
 }
 
-/** A parsed check as stored, as the layer `source` defined it: required, with a 10m timeout, by default. */
+/** A parsed check as stored, as the layer `source` defined it: with a 10m timeout by default. */
 export function checkConfig(check: z.infer<typeof CheckSchema>, source: ConfigLayer): CheckConfig {
   return {
     name: check.name,
     command: check.command,
-    required: check.required ?? true,
     timeoutMs: check.timeout ?? DEFAULT_CHECK_TIMEOUT_MS,
     source,
   };
@@ -285,7 +282,12 @@ const TimeoutSchema = z
 export const CheckSchema = z.strictObject({
   name: name("check name"),
   command,
-  required: z.boolean({ error: "required must be true or false" }).optional(),
+  required: z
+    .never({
+      error: "required is gone: every check that runs must pass; to report without blocking, exit 0 and write a metric",
+    })
+    .optional(),
+  needs: z.never({ error: "needs is gone: a check names the checks it waits for with after" }).optional(),
   timeout: TimeoutSchema.optional(),
   metrics: z
     .never({

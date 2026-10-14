@@ -74,20 +74,20 @@ describe("actedAlias", () => {
 });
 
 describe("retestConfig", () => {
-  it("skips the retest with no config, or with no required checks", () => {
+  it("skips the retest with no config, or with no checks", () => {
     expect(retestConfig(parseConfig(null))).toBeNull();
-    expect(retestConfig(parseConfig("checks:\n  - name: lint\n    command: x\n    required: false\n"))).toBeNull();
+    expect(retestConfig(parseConfig("setup: [npm ci]\n"))).toBeNull();
   });
 
-  it("keeps only the required checks and the metrics read from them, with setup", () => {
+  it("runs every check, with setup and every metric, as every check that runs must pass", () => {
     const config = parseConfig(
-      "setup: [npm ci]\nchecks:\n  - name: lint\n    command: a\n    required: false\n  - name: test\n    command: b\n" +
+      "setup: [npm ci]\nchecks:\n  - name: lint\n    command: a\n  - name: test\n    command: b\n" +
         "metrics:\n  - { name: errors, from: lint.out.errors, type: number }\n" +
         "  - { name: tests, from: test.out.tests, type: number }\n",
     );
     const retest = retestConfig(config);
-    expect(retest?.kind === "valid" && retest.config.checks.map((c) => c.name)).toEqual(["test"]);
-    expect(retest?.kind === "valid" && retest.config.metrics.map((m) => m.name)).toEqual(["tests"]);
+    expect(retest?.kind === "valid" && retest.config.checks.map((c) => c.name)).toEqual(["lint", "test"]);
+    expect(retest?.kind === "valid" && retest.config.metrics.map((m) => m.name)).toEqual(["errors", "tests"]);
     expect(retest?.kind === "valid" && retest.config.setup).toEqual(["npm ci"]);
   });
 

@@ -229,16 +229,18 @@ export class Secrets {
       const sealed = await sealSecret(this.#keyring, project, name, value);
       [row] = this.#sql.exec<StoredSecret>(
         `INSERT INTO secrets (name, ciphertext, iv, key_id, pipelines, changed_at)
-         VALUES (?1, ?2, ?3, ?4, coalesce(?5, '[]'), ?6)
-         ON CONFLICT (name) DO UPDATE SET ciphertext = ?2, iv = ?3, key_id = ?4,
-           pipelines = coalesce(?5, pipelines), changed_at = ?6
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT (name) DO UPDATE SET ciphertext = excluded.ciphertext, iv = excluded.iv,
+           key_id = excluded.key_id, pipelines = CASE WHEN ? THEN excluded.pipelines ELSE pipelines END,
+           changed_at = excluded.changed_at
          RETURNING *`,
         name,
         encodeBase64(sealed.ciphertext),
         encodeBase64(sealed.iv),
         sealed.keyId,
-        allowed,
+        allowed ?? "[]",
         changedAt,
+        allowed === null ? 0 : 1,
       );
     }
     if (row === undefined) throw new ServiceError("notFound", `no secret ${name}; give it a value first`);

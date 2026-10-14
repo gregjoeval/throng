@@ -5,6 +5,7 @@
 
 import { ServiceError } from "./errors.ts";
 import { advertisedHead, concat, ProtocolError } from "./pkt-line.ts";
+import { artifactsErrorCode } from "./repos.ts";
 
 /** The longest source URL a project may name. */
 export const MAX_SOURCE_URL = 2048;
@@ -18,14 +19,20 @@ const PROBE_TIMEOUT_MS = 15_000;
 const MAX_PROBE_BYTES = 70 * 1024;
 const ADVERTISEMENT_TYPE = "application/x-git-upload-pack-advertisement";
 
+/** A source URL `checkSourceUrl` accepted, normalized (`new URL(…).href`). */
+export type SourceUrl = string & { readonly __brand: "SourceUrl" };
+
 /**
- * Throws `invalidRequest` unless `url` is a source a project may import: an `https:` URL of at most
+ * `url` normalized, if it is a source a project may import: an `https:` URL of at most
  * `MAX_SOURCE_URL` characters, with no credentials (Artifacts stores the URL as the repo's source,
- * so a token in it would leak), query or fragment.
+ * so a token in it would leak), query or fragment. Its host must be a name with a dot in it, not an
+ * IP address or a single label like `localhost`, so the probe can't be aimed at a private network.
+ * Throws `invalidRequest` otherwise.
  */
-export function checkSourceUrl(url: string): void {
-  const problem = sourceUrlProblem(url);
-  if (problem !== null) throw new ServiceError("invalidRequest", `source url ${problem}`);
+export function checkSourceUrl(url: string): SourceUrl {
+  const parsed = parseSourceUrl(url);
+  if (typeof parsed === "string") throw new ServiceError("invalidRequest", `source url ${parsed}`);
+  return parsed.href as SourceUrl;
 }
 
 /**
@@ -34,19 +41,24 @@ export function checkSourceUrl(url: string): void {
  * (GitHub answers both with 401), `invalidRequest` when the URL serves no git repository or doesn't
  * say which branch is the default, and `unavailable` when the host can't be reached.
  */
-export async function sourceDefaultBranch(fetcher: typeof fetch, url: string): Promise<string> {
+export async function sourceDefaultBranch(fetcher: typeof fetch, url: SourceUrl): Promise<string> {
   let response: Response;
   try {
     response = await fetcher(advertisementUrl(url), {
       headers: { "User-Agent": "throng" },
+      // A redirect isn't followed, so the probe only ever asks the host `checkSourceUrl` accepted.
+      redirect: "manual",
       signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
     });
   } catch {
     throw unreachable(url);
   }
-  if (response.status === 401 || response.status === 404) throw notFound(url);
+  // A redirect is how some hosts send an anonymous client to sign in to a private repo.
+  if (response.status === 401 || response.status === 404 || isRedirect(response.status)) throw notFound(url);
   if (!response.ok) throw unreachable(url);
-  if (response.headers.get("Content-Type") !== ADVERTISEMENT_TYPE || response.body === null) throw notGit(url);
+  if (mediaType(response.headers.get("Content-Type")) !== ADVERTISEMENT_TYPE || response.body === null) {
+    throw notGit(url);
+  }
   let branch: string | null;
   try {
     branch = advertisedHead(await readPrefix(response.body, MAX_PROBE_BYTES));
@@ -56,6 +68,15 @@ export async function sourceDefaultBranch(fetcher: typeof fetch, url: string): P
   }
   if (branch === null) throw new ServiceError("invalidRequest", `${url} doesn't name its default branch`);
   return branch;
+}
+
+function isRedirect(status: number): boolean {
+  return status >= 300 && status < 400;
+}
+
+/** A Content-Type's media type, without its parameters (`; charset=…`) and lowercased. */
+function mediaType(contentType: string | null): string | undefined {
+  return contentType?.split(";")[0]?.trim().toLowerCase();
 }
 
 /** Where a smart-HTTP host advertises a repo's refs: the repo URL, ending `.git`, then `info/refs`. */
@@ -87,7 +108,7 @@ async function readPrefix(body: ReadableStream<Uint8Array>, max: number): Promis
  * about it; `error` itself when it isn't one the caller can act on.
  */
 export function importError(error: unknown, url: string): unknown {
-  switch ((error as { code?: unknown } | null)?.code) {
+  switch (artifactsErrorCode(error)) {
     case "REMOTE_AUTH_REQUIRED":
     case "NOT_FOUND": {
       return notFound(url);
@@ -120,7 +141,16 @@ function unreachable(url: string): ServiceError {
   return new ServiceError("unavailable", `couldn't reach ${new URL(url).host}; try again`);
 }
 
-function sourceUrlProblem(url: string): string | null {
+/**
+ * Whether `hostname` is an IP address. The URL parser has already normalized IPv4 written any other
+ * way (`0x7f.1`, `2130706433`) to dotted decimal, and brackets IPv6.
+ */
+function isIpLiteral(hostname: string): boolean {
+  return hostname.startsWith("[") || /^\d+\.\d+\.\d+\.\d+$/u.test(hostname);
+}
+
+/** `url` parsed, or what is wrong with it. */
+function parseSourceUrl(url: string): URL | string {
   if (url.length > MAX_SOURCE_URL) return `is over ${MAX_SOURCE_URL} characters`;
   let parsed: URL;
   try {
@@ -129,7 +159,9 @@ function sourceUrlProblem(url: string): string | null {
     return "isn't a URL";
   }
   if (parsed.protocol !== "https:") return "must be https";
+  if (isIpLiteral(parsed.hostname)) return "must name its host, not an IP address";
+  if (!parsed.hostname.replace(/\.$/u, "").includes(".")) return "must name a public host, not one like localhost";
   if (parsed.username !== "" || parsed.password !== "") return "may not carry credentials";
   if (url.includes("?") || url.includes("#")) return "may not have a query or a fragment";
-  return null;
+  return parsed;
 }

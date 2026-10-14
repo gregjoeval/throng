@@ -16,6 +16,7 @@ import {
   CreateProjectSchema,
   CreateTaskSchema,
   EditAttemptSchema,
+  envProjectService,
   HandOffSchema,
   json,
   OpenVoteSchema,
@@ -60,7 +61,6 @@ import { METRIC_FORMATS, METRIC_TYPES } from "./metric-values.ts";
 import { DEFAULT_LISTING_PAGE, MAX_LISTING_PAGE, myListings } from "./my-listings.ts";
 import type { PreviewWorkers } from "./preview-workers.ts";
 import { MAX_PROJECTION_RETRY_MS } from "./projection.ts";
-import { projectService } from "./projects.ts";
 import type { Repos } from "./repos.ts";
 import { CHECK_OUTCOMES, GATES } from "./results.ts";
 import { ATTEMPT_SCORING_STATUSES, RUN_STATUSES, SCORING_TRIGGERS } from "./scoring.ts";
@@ -996,13 +996,7 @@ export function apiRoutes(options: ApiOptions = {}) {
   const webRoute: RouteAuth = { middleware: browser, security: bearerOrWeb };
   const reposFor = options.repos ?? noRepos;
   const previewWorkersFor = options.previewWorkers ?? noPreviewWorkers;
-  const projects = (env: AccessBindings) =>
-    projectService({
-      db: env.DB,
-      repos: reposFor(env),
-      previewWorkers: previewWorkersFor(env),
-      ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
-    });
+  const projects = envProjectService(reposFor, previewWorkersFor, options.fetch);
   const backendFor = options.tasks ?? noTasks;
   const logsFor = options.logs ?? noLogs;
   const tasks = requestTaskService(reposFor, backendFor);

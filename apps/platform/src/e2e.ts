@@ -10,7 +10,7 @@ import { camelKeys } from "./casing.ts";
 import { LOG_PREFIX } from "./logs.ts";
 import type { PreviewWorkers } from "./preview-workers.ts";
 import { projectService } from "./projects.ts";
-import type { Project, ProjectSource } from "./projects.ts";
+import type { Project } from "./projects.ts";
 import { forkRepo, originRepo, parseRepoName } from "./repos.ts";
 import type { Repos } from "./repos.ts";
 import { mintToken, revokeToken } from "./tokens.ts";
@@ -64,16 +64,13 @@ export async function e2eProject(
   repos: Repos,
   previewWorkers: PreviewWorkers,
   id: string,
-  { source, fetch }: { source?: ProjectSource | undefined; fetch?: typeof globalThis.fetch | undefined } = {},
+  { source, fetch }: { source?: { url: string } | undefined; fetch?: typeof globalThis.fetch | undefined } = {},
 ): Promise<{ project: Project; remote: string; token: string }> {
   const user = await userForEmail(db, E2E_EMAIL);
-  const project = await projectService({
-    db,
-    repos,
-    previewWorkers,
-    newId: () => id,
-    ...(fetch === undefined ? {} : { fetch }),
-  }).create({ user, alias: null }, { handle: id, source });
+  const project = await projectService({ db, repos, previewWorkers, fetch, newId: () => id }).create(
+    { user, alias: null },
+    { handle: id, source },
+  );
   const [origin, { token }] = await Promise.all([
     repos.get(originRepo(id)),
     repos.mintToken(originRepo(id), "write", ORIGIN_TOKEN_TTL_SECONDS),

@@ -12,7 +12,8 @@ import { SelectionPolicySchema } from "./config.ts";
 import { DIFF_FLAGS, FILE_STATUSES } from "./diff.ts";
 import type { DiffCache } from "./diff.ts";
 import { MAX_SOURCE_URL } from "./import-source.ts";
-import { MAX_PROJECT_HANDLE, PROJECT_HANDLE } from "./projects.ts";
+import type { PreviewWorkers } from "./preview-workers.ts";
+import { MAX_PROJECT_HANDLE, PROJECT_HANDLE, projectService } from "./projects.ts";
 import type { Repos } from "./repos.ts";
 import { taskService } from "./tasks.ts";
 import type { TaskBackend } from "./tasks.ts";
@@ -102,6 +103,19 @@ export function diffResponse(c: Context, patch: () => string, body: () => unknow
 /** Whether the client asked for the unified patch rather than JSON. */
 export function wantsPatch(accept: string | undefined): boolean {
   return accept?.split(",").some((t) => t.split(";")[0]?.trim().toLowerCase() === "text/x-diff") ?? false;
+}
+
+/**
+ * The project service for an environment, given its repos, its preview Workers and how an import
+ * source's host is reached (the global `fetch` when undefined).
+ */
+export function envProjectService(
+  repos: (env: AccessBindings) => Repos,
+  previewWorkers: (env: AccessBindings) => PreviewWorkers,
+  fetch: typeof globalThis.fetch | undefined,
+) {
+  return (env: AccessBindings) =>
+    projectService({ db: env.DB, repos: repos(env), previewWorkers: previewWorkers(env), fetch });
 }
 
 /**

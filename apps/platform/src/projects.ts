@@ -6,8 +6,9 @@
 
 import { ServiceError } from "./errors.ts";
 import { checkSourceUrl, importError, sourceDefaultBranch } from "./import-source.ts";
+import type { SourceUrl } from "./import-source.ts";
 import type { PreviewWorkers } from "./preview-workers.ts";
-import { originRepo, stagingRepo } from "./repos.ts";
+import { artifactsErrorCode, originRepo, stagingRepo } from "./repos.ts";
 import type { Repos } from "./repos.ts";
 import type { Actor } from "./tokens.ts";
 import { randomId } from "./users.ts";
@@ -30,14 +31,9 @@ export interface Project {
   createdAt: string;
 }
 
-/** What a new project imports: the HTTPS URL of a public git repository. */
-export interface ProjectSource {
-  url: string;
-}
-
-/** A source and the default branch its host advertised, which the origin's `main` starts from. */
-interface ImportSource {
-  url: string;
+/** A checked source and the default branch its host advertised, which the origin's `main` starts from. */
+interface ResolvedSource {
+  url: SourceUrl;
   branch: string;
 }
 
@@ -47,7 +43,7 @@ export interface ProjectDeps {
   /** Each project's own preview Worker, created with the project. */
   previewWorkers: PreviewWorkers;
   /** Asks a source's host for its default branch; the global `fetch` by default. */
-  fetch?: typeof fetch;
+  fetch?: typeof fetch | undefined;
   /** Draws a project id; tests pass their own to force collisions. */
   newId?: () => string;
 }
@@ -123,13 +119,12 @@ export function projectService({
      * project behind. With a `source`, the origin starts as a copy of the source's default branch,
      * renamed `main`, with its full history. The copy is made once, inline, and never refreshed.
      */
-    async create(actor: Actor, input: { handle: string; source?: ProjectSource | undefined }): Promise<Project> {
+    async create(actor: Actor, input: { handle: string; source?: { url: string } | undefined }): Promise<Project> {
       const owner = actor.user;
       if (!isProjectHandle(input.handle)) throw new ServiceError("invalidRequest", `invalid project handle`);
-      if (input.source !== undefined) checkSourceUrl(input.source.url);
+      const url = input.source === undefined ? null : checkSourceUrl(input.source.url);
       if ((await resolveProject(db, owner.handle, input.handle)) !== null) throw duplicate(owner.handle, input.handle);
 
-      const url = input.source?.url ?? null;
       // Before anything is created, so a private or missing source fails with nothing to undo.
       const source = url === null ? null : { url, branch: await sourceDefaultBranch(fetcher, url) };
       const id = await createOrigin(db, repos, newId, source);
@@ -195,7 +190,7 @@ async function createOrigin(
   db: Database,
   repos: Repos,
   newId: () => string,
-  source: ImportSource | null,
+  source: ResolvedSource | null,
 ): Promise<string> {
   for (let attempt = 0; attempt < MAX_ID_ATTEMPTS; attempt++) {
     const id = newId();
@@ -217,8 +212,12 @@ async function createOrigin(
  * default isn't `main` lands in a staging repo, and its branch is copied to `main` in an origin
  * created empty. The staging repo is deleted whatever happens. On failure nothing of the import is
  * left; `ALREADY_EXISTS` on the origin's name is thrown as is, for the caller to draw another id.
+ *
+ * A staging repo already there is a leftover of an earlier creation under this id that died before
+ * deleting it: this call now holds the id (it just created the origin, and no project row has it), so
+ * the leftover is deleted rather than letting it fail the import and waste the id.
  */
-async function importOrigin(repos: Repos, id: string, source: ImportSource): Promise<void> {
+async function importOrigin(repos: Repos, id: string, source: ResolvedSource): Promise<void> {
   const origin = originRepo(id);
   if (source.branch === MAIN) {
     try {
@@ -232,6 +231,7 @@ async function importOrigin(repos: Repos, id: string, source: ImportSource): Pro
   }
   await repos.create(origin, { defaultBranch: MAIN });
   const staging = stagingRepo(id);
+  await repos.delete(staging).catch(() => false);
   try {
     try {
       await repos.import(staging, source);
@@ -250,7 +250,7 @@ async function importOrigin(repos: Repos, id: string, source: ImportSource): Pro
 }
 
 function alreadyExists(error: unknown): boolean {
-  return (error as { code?: unknown } | null)?.code === "ALREADY_EXISTS";
+  return artifactsErrorCode(error) === "ALREADY_EXISTS";
 }
 
 /** Deletes a repo no project keeps, made by this call. A failure is logged, never thrown. */

@@ -17,6 +17,7 @@ import {
   CreateProjectSchema,
   CreateTaskSchema,
   EditAttemptSchema,
+  envProjectService,
   HandOffSchema,
   OpenVoteSchema,
   PageQuerySchema,
@@ -34,7 +35,7 @@ import { browseService } from "./browse.ts";
 import { DIFF_CAPS, diffCommit, unifiedPatch } from "./diff.ts";
 import { ServiceError } from "./errors.ts";
 import { missingLog } from "./logs.ts";
-import { projectService } from "./projects.ts";
+import type { ProjectService } from "./projects.ts";
 import { ATTEMPT_STATES, TASK_STATES } from "./task-store.ts";
 import { taskService } from "./tasks.ts";
 import type { MergeRequest, ScoringAnswer, Vote } from "./tasks.ts";
@@ -63,8 +64,9 @@ export const MCP_INSTRUCTIONS = [
     "and push; its head then needs approving again.",
 ].join("\n");
 
-type Deps = Required<Pick<ApiOptions, "repos" | "previewWorkers" | "tasks" | "logs" | "diffCache">> &
-  Pick<ApiOptions, "fetch">;
+type Deps = Required<Pick<ApiOptions, "repos" | "tasks" | "logs" | "diffCache">> & {
+  projects: (env: AccessBindings) => ProjectService;
+};
 
 /** A dependency this server was built without; using it is a bug. */
 function missing(what: string): () => never {
@@ -77,11 +79,14 @@ function missing(what: string): () => never {
 export function mcpRoutes(options: ApiOptions = {}) {
   const deps: Deps = {
     repos: options.repos ?? missing("repos"),
-    previewWorkers: options.previewWorkers ?? missing("preview Workers"),
+    projects: envProjectService(
+      options.repos ?? missing("repos"),
+      options.previewWorkers ?? missing("preview Workers"),
+      options.fetch,
+    ),
     tasks: options.tasks ?? missing("a task backend"),
     logs: options.logs ?? missing("a logs bucket"),
     diffCache: options.diffCache ?? workersCache,
-    ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
   };
   return new Hono<AuthEnv>()
     .use(bearerAuth(options.now === undefined ? {} : { now: options.now }))
@@ -182,7 +187,7 @@ function sliceBytes(bytes: Uint8Array, start: number, max: number): string {
 }
 
 function mcpServer(
-  { repos, previewWorkers, fetch, tasks, logs, diffCache }: Deps,
+  { repos, projects, tasks, logs, diffCache }: Deps,
   { actor, token, env, origin }: ToolContext,
 ): McpServer {
   const service = taskService({ db: env.DB, repos: repos(env), backend: tasks(env), origin });
@@ -221,13 +226,7 @@ function mcpServer(
       sourceUrl: CreateProjectSchema.shape.source.unwrap().shape.url.optional(),
     }),
     async ({ handle, sourceUrl }) => {
-      const projects = projectService({
-        db: env.DB,
-        repos: repos(env),
-        previewWorkers: previewWorkers(env),
-        ...(fetch === undefined ? {} : { fetch }),
-      });
-      const created = await projects.create(actor, {
+      const created = await projects(env).create(actor, {
         handle,
         ...(sourceUrl === undefined ? {} : { source: { url: sourceUrl } }),
       });

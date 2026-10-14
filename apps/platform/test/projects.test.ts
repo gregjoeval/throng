@@ -204,6 +204,27 @@ describe("projectService.create with a source", () => {
     ]);
   });
 
+  it("imports and keeps the source URL normalized, not as typed", async () => {
+    const { repos, greg, service } = await importSetup("main");
+    const project = await service.create(greg, {
+      handle: "hello",
+      source: { url: "HTTPS://GitHub.com:443/octocat/Hello-World" },
+    });
+    expect(project.source).toBe(SOURCE);
+    expect(repos.calls.filter((c) => c.method === "import")).toEqual([
+      { method: "import", args: ["aaaaaa-main", { url: SOURCE, branch: "main" }] },
+    ]);
+  });
+
+  it("deletes a staging repo left over under the drawn id instead of drawing another", async () => {
+    const { repos, greg, service, tip } = await importSetup("master");
+    await repos.create("aaaaaa-import");
+    const project = await service.create(greg, { handle: "hello", source: { url: SOURCE } });
+    expect(project.id).toBe("aaaaaa");
+    expect(repos.ref("aaaaaa-main", "refs/heads/main")).toBe(tip.hash);
+    expect(await repos.list("aaaaaa")).toEqual(["aaaaaa-main"]);
+  });
+
   it("reads the source back with the project", async () => {
     const { db, greg, ada, service } = await importSetup("main");
     const created = await service.create(greg, { handle: "hello", source: { url: SOURCE } });

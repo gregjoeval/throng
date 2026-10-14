@@ -31,7 +31,7 @@ import type {
 } from "./merge-requests.ts";
 import { isZeroId } from "./pkt-line.ts";
 import { migrateProjection, Projection } from "./projection.ts";
-import { forkRepo, originRepo } from "./repos.ts";
+import { artifactsErrorCode, forkRepo, originRepo } from "./repos.ts";
 import type { Repos } from "./repos.ts";
 import { GATES } from "./results.ts";
 import type { Gate } from "./results.ts";
@@ -2695,7 +2695,7 @@ export class TaskStore {
     try {
       await this.#repos.fork(origin, fork);
     } catch (error) {
-      if ((error as { code?: unknown }).code === "ALREADY_EXISTS") return false;
+      if (artifactsErrorCode(error) === "ALREADY_EXISTS") return false;
       throw error;
     }
     if (attempt.archived_sha === null) return true;
@@ -2723,7 +2723,7 @@ export class TaskStore {
       try {
         return await work();
       } catch (error) {
-        const code = (error as { code?: unknown }).code;
+        const code = artifactsErrorCode(error);
         if (attempt >= FORK_READY_RETRIES || (code !== "FORK_IN_PROGRESS" && code !== "NOT_FOUND")) throw error;
         await new Promise((resolve) => setTimeout(resolve, FORK_READY_BACKOFF_MS * 2 ** attempt));
       }

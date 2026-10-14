@@ -56,6 +56,27 @@ describe("checkSourceUrl", () => {
     }
   });
 
+  it("rejects an IP address or a single-label host, so the probe can't reach a private network", () => {
+    for (const url of [
+      "https://127.0.0.1/o/r",
+      "https://10.0.0.1/o/r",
+      "https://0x7f.1/o/r",
+      "https://2130706433/o/r",
+      "https://[::1]/o/r",
+      "https://[fd00::1]/o/r",
+      "https://localhost/o/r",
+      "https://localhost./o/r",
+      "https://metadata/o/r",
+    ]) {
+      expect(rejection(url).code, url).toBe("invalidRequest");
+    }
+  });
+
+  it("returns the URL normalized", () => {
+    expect(checkSourceUrl("HTTPS://GitHub.com/octocat/Hello-World")).toBe("https://github.com/octocat/Hello-World");
+    expect(checkSourceUrl("https://github.com:443/o/r")).toBe("https://github.com/o/r");
+  });
+
   it("rejects a URL over 2048 characters", () => {
     const base = "https://github.com/o/";
     expect(() => checkSourceUrl(base + "r".repeat(2048 - base.length))).not.toThrow();
@@ -76,7 +97,7 @@ function host(answer: (url: string) => Response) {
   return { fetcher, asked };
 }
 
-function advertising(branch: string | null): Response {
+function advertising(branch: string | null, type = "application/x-git-upload-pack-advertisement"): Response {
   const capabilities = branch === null ? "multi_ack" : `multi_ack symref=HEAD:refs/heads/${branch}`;
   const body = concat([
     pktLine("# service=git-upload-pack\n"),
@@ -84,7 +105,7 @@ function advertising(branch: string | null): Response {
     pktLine(`${SHA} HEAD\0${capabilities}\n`),
     flushPkt(),
   ]);
-  return new Response(body, { headers: { "Content-Type": "application/x-git-upload-pack-advertisement" } });
+  return new Response(body, { headers: { "Content-Type": type } });
 }
 
 /** A host the network can't reach, as `fetch` reports it. */
@@ -93,7 +114,7 @@ const unreachableHost: typeof fetch = async () => {
 };
 
 async function probeFailure(fetcher: typeof fetch, url = "https://github.com/o/r"): Promise<ServiceError> {
-  const err = await sourceDefaultBranch(fetcher, url).then(
+  const err = await sourceDefaultBranch(fetcher, checkSourceUrl(url)).then(
     () => null,
     (error: unknown) => error,
   );
@@ -104,9 +125,13 @@ async function probeFailure(fetcher: typeof fetch, url = "https://github.com/o/r
 describe("sourceDefaultBranch", () => {
   it("asks the source's upload-pack advertisement, adding .git when the URL lacks it", async () => {
     const { fetcher, asked } = host(() => advertising("master"));
-    expect(await sourceDefaultBranch(fetcher, "https://github.com/octocat/Hello-World")).toBe("master");
-    expect(await sourceDefaultBranch(fetcher, "https://codeberg.org/o/r.git")).toBe("master");
-    expect(await sourceDefaultBranch(fetcher, "https://gitlab.com/o/r/")).toBe("master");
+    for (const url of [
+      "https://github.com/octocat/Hello-World",
+      "https://codeberg.org/o/r.git",
+      "https://gitlab.com/o/r/",
+    ]) {
+      expect(await sourceDefaultBranch(fetcher, checkSourceUrl(url))).toBe("master");
+    }
     expect(asked.map((a) => a.url)).toEqual([
       "https://github.com/octocat/Hello-World.git/info/refs?service=git-upload-pack",
       "https://codeberg.org/o/r.git/info/refs?service=git-upload-pack",
@@ -114,6 +139,28 @@ describe("sourceDefaultBranch", () => {
     ]);
     // Anonymously: no credential of any kind goes to the source's host.
     expect(asked.filter((a) => a.headers.has("Authorization"))).toEqual([]);
+  });
+
+  it("reads a Content-Type with parameters or in another case by its media type", async () => {
+    for (const type of [
+      "application/x-git-upload-pack-advertisement; charset=utf-8",
+      "Application/X-Git-Upload-Pack-Advertisement",
+    ]) {
+      const { fetcher } = host(() => advertising("trunk", type));
+      expect(await sourceDefaultBranch(fetcher, checkSourceUrl("https://github.com/o/r")), type).toBe("trunk");
+    }
+  });
+
+  it("doesn't follow a redirect, and takes one as a private repo's sign-in", async () => {
+    const inits: (RequestInit | undefined)[] = [];
+    const fetcher: typeof fetch = async (_input, init) => {
+      inits.push(init);
+      return new Response(null, { status: 302, headers: { Location: "http://169.254.169.254/latest" } });
+    };
+    const err = await probeFailure(fetcher);
+    expect(err.code).toBe("notFound");
+    expect(err.message).toContain("only public repositories can be imported");
+    expect(inits.map((init) => init?.redirect)).toEqual(["manual"]);
   });
 
   it("is notFound when the host wants credentials or has no such repo", async () => {

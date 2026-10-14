@@ -31,7 +31,7 @@ export function errorBody(code: ErrorCode, message: string): ErrorBody {
   return { error: { code, message } };
 }
 
-const STATUS: Record<ErrorCode, 400 | 401 | 403 | 404 | 409 | 500 | 503> = {
+const STATUS = {
   invalidRequest: 400,
   unauthorized: 401,
   forbidden: 403,
@@ -42,7 +42,10 @@ const STATUS: Record<ErrorCode, 400 | 401 | 403 | 404 | 409 | 500 | 503> = {
   internal: 500,
   /** Something Throng depends on outside Cloudflare failed; trying again may work. */
   unavailable: 503,
-};
+} as const satisfies Record<ErrorCode, number>;
+
+/** The HTTP statuses the API answers errors with. */
+export type ErrorStatus = (typeof STATUS)[ErrorCode];
 
 /**
  * A failure a service reports to its caller, e.g. a duplicate handle. Services throw it without
@@ -58,7 +61,7 @@ export class ServiceError extends Error {
     super(message);
   }
 
-  get status(): 400 | 401 | 403 | 404 | 409 | 500 | 503 {
+  get status(): ErrorStatus {
     return STATUS[this.code];
   }
 }

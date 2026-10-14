@@ -299,6 +299,25 @@ describe("the scoring queue", () => {
     expect(workflow.terminated).toHaveLength(1);
   });
 
+  it("stops every run of a project being deleted: cancels the queued, and stops the running, starting none", async () => {
+    const { store, workflow, tornDown, runs, drafts, journal } = setup();
+    const refs = await drafts(RUN_CAP + 1);
+    for (const ref of refs) await store.openAttempt(PROJECT, ada, ref);
+    await store.runs.drain();
+    const running = refs.slice(0, RUN_CAP).map((ref) => at(runs(ref), 0));
+    const containers = [`${at(running, 0).instance_id}/setup`];
+    store.runs.planned(at(running, 0).id, containers);
+
+    await store.runs.stopAll();
+
+    expect(refs.map((ref) => at(runs(ref), 0).status)).toEqual(refs.map(() => "cancelled"));
+    expect(workflow.terminated.toSorted()).toEqual(running.map((run) => run.instance_id).toSorted());
+    expect(tornDown).toContainEqual([at(running, 0).instance_id, containers]);
+    expect(workflow.created).toHaveLength(RUN_CAP);
+    expect(journal().filter((e) => e.kind === "runCancelled")).toHaveLength(RUN_CAP + 1);
+    expect(journal().find((e) => e.kind === "runCancelled")).toMatchObject({ reason: "project deleted" });
+  });
+
   it(`runs at most ${RUN_CAP} at once and starts the oldest waiting run as one finishes`, async () => {
     const { store, workflow, runs, drafts, journal } = setup();
     const refs = await drafts(RUN_CAP + 2);

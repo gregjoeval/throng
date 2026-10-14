@@ -117,6 +117,17 @@ setup:
 - **Errors.** A private or missing source is `notFound` (GitHub answers both with 401, so they can't be told apart), one that isn't a git repository or is too large (Artifacts' `MEMORY_LIMIT`) is `invalidRequest`, and an unreachable host is `unavailable` (503). A failed import leaves no project row, origin or staging repo.
 - **Killed mid-import.** The import is synchronous, so a request killed while it runs (the client gives up, the Worker is evicted) skips the rollback and can leave the empty origin and the staging repo behind with no project row. Nothing reads them; they are orphans until removed by hand. A later creation that draws the same id reuses neither: it draws another id when the origin is taken, and deletes a leftover staging repo.
 
+## Deleting a project
+
+`DELETE /api/projects/{owner}/{project}` (and the Danger zone on the web app's Settings page) deletes a project and everything it holds, for good. Only its owner, acting as themselves, may; there is no MCP tool. `src/project-deletion.ts` deletes in this order, and the e2e cleanup deletes through it too:
+
+1. The project Durable Object cancels every run and follow not yet ended, terminates the Workflows of those that started and destroys their containers, then deletes all of its storage. It takes no other call meanwhile (`blockConcurrencyWhile`), so a push or a Workflow's report can't start new work halfway.
+2. Its logs and cache entries in R2, under `logs/<id>/` and `caches/<id>/`.
+3. Every repo named `<id>-…`: the origin, forks and any staging repo.
+4. Its id goes in D1's `deleted_projects`, so no new project ever draws it, and its row is deleted, last; its projected tasks and attempts go with it.
+
+Every step can run again, and the row goes last, so a delete that fails partway answers an error, leaves the project in place, and a second call finishes it. Until then the project is half gone: a failure after step 1 leaves it with no tasks, runs or secrets, and one after step 3 with no repos. Until the row goes, the alarm may still publish rows to the projection; they go with it. The handle is free again at once.
+
 ## Scoring logs
 
 Each pipeline run copies the log of every setup and check to the `LOGS` R2 bucket at `logs/<projectId>/<line>/<runId>/<name>.log` (`src/logs.ts`); runs from before runs were keyed on their line keep theirs at `logs/<projectId>/<t42a3>/<sha>/<runId>/<name>.log` until they expire. The nth setup's log is named `setup.<n>` and a check's is its name; check names can't contain a dot, so they never collide. Logs over 5 MB keep their head and tail with a `[throng: truncated …]` marker between them. The run's result lists the logs it stored, and `GET /api/projects/{owner}/{project}/runs/{runId}/logs/{step}` streams one as text, or answers `notFound` once it's missing or expired.

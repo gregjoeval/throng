@@ -50,6 +50,11 @@ export const projectQuery = (projectRef: ProjectRef) =>
 
 const projectApi = client.api.projects[":owner"][":project"];
 
+/** Deletes a project and everything it holds, for good. Rejects with hono's `DetailedError` on failure. */
+export async function deleteProject(projectRef: ProjectRef) {
+  return parseResponse(projectApi.$delete({ param: projectRef }));
+}
+
 /**
  * One page of first-parent history from a ref, newest first. `attempt` is the fork to look a sha up
  * in; `offset` is how many commits to skip.

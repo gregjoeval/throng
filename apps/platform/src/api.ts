@@ -70,6 +70,7 @@ import { DEQUEUE_REASONS, MERGE_REQUEST_STATES } from "./merge-requests.ts";
 import { METRIC_FORMATS, METRIC_TYPES } from "./metric-values.ts";
 import { DEFAULT_LISTING_PAGE, MAX_LISTING_PAGE, myListings } from "./my-listings.ts";
 import { PIPELINES } from "./pipelines.ts";
+import type { ProjectStorage } from "./project-deletion.ts";
 import { MAX_PROJECTION_RETRY_MS } from "./projection.ts";
 import { publicOrigin } from "./public-origin.ts";
 import type { Repos } from "./repos.ts";
@@ -1013,6 +1014,8 @@ export interface ApiOptions extends AuthOptions {
   tasks?: (env: AccessBindings) => (projectId: string) => TaskBackend;
   /** The environment's logs bucket: production passes its R2 binding, tests one in memory. */
   logs?: (env: AccessBindings) => LogStore;
+  /** Where a project's data lives outside D1 and its repos, for deleting it: production passes its bindings. */
+  storage?: (env: AccessBindings) => ProjectStorage;
   /** Where commit diffs and blob sizes are cached: the Workers Cache API by default, none outside a Worker. */
   diffCache?: (env: AccessBindings) => DiffCache | undefined;
 }
@@ -1204,7 +1207,7 @@ export function apiRoutes(options: ApiOptions = {}) {
   const bearerRoute: RouteAuth = { middleware: bearer, security: bearerOnly };
   const webRoute: RouteAuth = { middleware: browser, security: bearerOrWeb };
   const reposFor = options.repos ?? noRepos;
-  const projects = envProjectService(reposFor, options.fetch);
+  const projects = envProjectService(reposFor, options.fetch, options.storage);
   const backendFor = options.tasks ?? noTasks;
   const logsFor = options.logs ?? noLogs;
   const tasks = requestTaskService(reposFor, backendFor);
@@ -1459,6 +1462,32 @@ export function apiRoutes(options: ApiOptions = {}) {
       async (c) => {
         const project = await projects(c.env).get(c.var.actor, c.req.valid("param"));
         return c.json(project, 200);
+      },
+    )
+    .openapi(
+      createRoute({
+        method: "delete",
+        path: "/projects/{owner}/{project}",
+        operationId: "deleteProject",
+        tags: ["Projects"],
+        summary: "Delete a project for good",
+        description:
+          "Stops the project's runs, then removes everything it holds: its repos, tasks, attempts, runs, " +
+          "secrets, logs and caches. It can't be undone, and the handle is free to use again at once. If it " +
+          "fails partway, the project stays; call it again to finish.",
+        security: bearerOrWeb,
+        middleware: [browser] as const,
+        request: { params: ProjectPathSchema },
+        responses: {
+          204: { description: "Deleted." },
+          401: unauthorizedBearer,
+          403: errorResponse(OWNER_AS_THEMSELVES),
+          404: errorResponse("No such owner, or the owner has no project with this handle."),
+        },
+      }),
+      async (c) => {
+        await projects(c.env).delete(c.var.actor, c.req.valid("param"));
+        return c.body(null, 204);
       },
     )
     .openapi(

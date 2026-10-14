@@ -47,10 +47,13 @@ export type FollowOutcome = FollowResult | { kind: "errored"; step: string; erro
 /** The part of the Follow Workflow binding the DO uses; tests pass a fake. */
 export interface FollowWorkflowBinding {
   create: (options: { id: string; params: FollowParams }) => Promise<unknown>;
+  get: (id: string) => Promise<{ terminate: () => Promise<void> }>;
 }
 
 export interface FollowRunner {
   workflow: FollowWorkflowBinding;
+  /** Destroys a terminated follow's container, which its own last step would have. */
+  teardown: (instanceId: string) => Promise<void>;
 }
 
 /** The merge commit's message: `Merge t42's task branch into t42a3` with the Throng trailers. */
@@ -152,6 +155,18 @@ export class Follows {
       id,
     );
     return this.get(id) as StoredFollow;
+  }
+
+  /** Ends every follow not yet ended as `stopped`, and returns those that had started. */
+  stopAll(): StoredFollow[] {
+    return this.#sql
+      .exec<FollowRow>(
+        `UPDATE follows SET status = 'stopped', finished_at = ? WHERE status IN ('queued', 'running')
+         RETURNING *`,
+        this.#now().getTime(),
+      )
+      .map(toFollow)
+      .filter((follow) => follow.instance_id !== null);
   }
 
   /** Ends a follow as `done` or `stopped`. */

@@ -6,9 +6,9 @@
 
 import { Hono } from "hono";
 import type { Context } from "hono";
-import { CACHE_PREFIX } from "./caches.ts";
 import { camelKeys } from "./casing.ts";
-import { LOG_PREFIX } from "./logs.ts";
+import { deleteProject } from "./project-deletion.ts";
+import type { ProjectStorage } from "./project-deletion.ts";
 import { projectService } from "./projects.ts";
 import type { Project } from "./projects.ts";
 import { forkRepo, originRepo, parseRepoName } from "./repos.ts";
@@ -28,8 +28,6 @@ const E2E_TOKEN_TTL_SECONDS = 6 * 60 * 60;
 const ORIGIN_TOKEN_TTL_SECONDS = 60 * 60;
 const PUSH_TOKEN_TTL_SECONDS = 60 * 60;
 const FORK_READY_TIMEOUT_MS = 60_000;
-/** R2 deletes at most this many keys per call. */
-const R2_DELETE_BATCH = 1000;
 
 /** The aliases the e2e routes mint tokens for: a plain lowercase name. */
 const E2E_ALIAS = /^[a-z0-9-]{1,40}$/u;
@@ -88,15 +86,6 @@ function e2eRepo(name: string): boolean {
   return parsed !== null && isE2eName(parsed.project);
 }
 
-/** The part of the logs and caches R2 buckets cleanup needs. */
-export interface LogBucket {
-  list: (options: {
-    prefix: string;
-    cursor?: string;
-  }) => Promise<{ objects: { key: string }[]; truncated: boolean; cursor?: string }>;
-  delete: (keys: string[]) => Promise<void>;
-}
-
 /** The project Durable Object's calls the e2e routes make. */
 export interface E2eProjectStub {
   note: (kind: string, detail: Record<string, unknown>) => Promise<void> | void;
@@ -105,8 +94,6 @@ export interface E2eProjectStub {
   score: (project: string, attempt: string, sha: string) => Promise<unknown>;
   /** One scoring run, or null. */
   run: (id: number) => Promise<unknown>;
-  /** Deletes all of the project's Durable Object storage. */
-  destroy: () => Promise<void>;
 }
 
 export interface E2eDeps<E> {
@@ -114,47 +101,26 @@ export interface E2eDeps<E> {
   repos: (env: E) => Repos;
   /** How an imported project's source is reached: the global `fetch` by default, tests a fake host. */
   fetch?: typeof fetch;
-  logs: (env: E) => LogBucket;
-  caches: (env: E) => LogBucket;
+  /** Where a project's data lives outside D1 and its repos, for deleting it. */
+  storage: (env: E) => ProjectStorage;
   project: (env: E, id: string) => E2eProjectStub;
   /** The bearer secret every route needs (the Worker's `E2E_TOKEN`); unset or empty, every request is refused. */
   secret: (env: E) => string | undefined;
 }
 
 /**
- * Deletes everything an e2e project made: its D1 row (its projected tasks and attempts go with it), its
- * Durable Object's storage, its logs and cache entries in R2 and its repos.
+ * Deletes an e2e project and everything it made, as deleting any project does (`deleteProject`), and
+ * says whether it did: one another user owns is left alone. One with no row left (a creation that
+ * died before inserting it) still has its leftovers deleted.
  */
-export async function deleteE2eProject<E>(deps: E2eDeps<E>, env: E, id: string): Promise<void> {
+export async function deleteE2eProject<E>(deps: E2eDeps<E>, env: E, id: string): Promise<boolean> {
   if (!isE2eName(id)) throw new Error(`not an e2e project: ${id}`);
-  const repos = deps.repos(env);
-  const owner = await userForEmail(deps.db(env), E2E_EMAIL);
-  await deps
-    .db(env)
-    .prepare("DELETE FROM projects WHERE id = ? AND owner_id = ? RETURNING id")
-    .bind(id, owner.id)
-    .first();
-  // The project's alarm can still publish between the delete above and `destroy()`. D1 refuses its
-  // rows (their project is gone, and foreign keys are enforced), so the delivery fails whole and
-  // backs off until `destroy()` clears the alarm. Had one landed, no listing would show it: listings
-  // join `projects`.
-  await deps.project(env, id).destroy();
-  await deleteLogs(deps.logs(env), `${LOG_PREFIX}${id}/`);
-  await deleteLogs(deps.caches(env), `${CACHE_PREFIX}${id}/`);
-  const names = await repos.list(`${id}-`);
-  await Promise.all(names.filter((name) => parseRepoName(name)?.project === id).map((name) => repos.delete(name)));
-}
-
-async function deleteLogs(logs: LogBucket, prefix: string): Promise<void> {
-  // Listed in full first, so deleting never shifts a page still to be listed.
-  const keys: string[] = [];
-  let cursor: string | undefined;
-  do {
-    const page = await logs.list(cursor === undefined ? { prefix } : { prefix, cursor });
-    keys.push(...page.objects.map((o) => o.key));
-    cursor = page.truncated ? page.cursor : undefined;
-  } while (cursor !== undefined);
-  for (let i = 0; i < keys.length; i += R2_DELETE_BATCH) await logs.delete(keys.slice(i, i + R2_DELETE_BATCH));
+  const db = deps.db(env);
+  const owner = await userForEmail(db, E2E_EMAIL);
+  const row = await db.prepare("SELECT owner_id FROM projects WHERE id = ?").bind(id).first<{ owner_id: string }>();
+  if (row !== null && row.owner_id !== owner.id) return false;
+  await deleteProject(db, deps.repos(env), deps.storage(env), id);
+  return true;
 }
 
 /** The e2e project ids under `prefix`: those with a D1 row, and those with repos left. */
@@ -255,7 +221,8 @@ export function e2eRoutes<E extends object>(deps: E2eDeps<E>) {
   app.delete("/projects/:project", async (c) => {
     const project = c.req.param("project");
     if (!isE2eName(project)) return refused(c, "the project");
-    await deleteE2eProject(deps, c.env, project);
+    if (!(await deleteE2eProject(deps, c.env, project)))
+      return c.json({ error: `${project} isn't the e2e user's` }, 400);
     return c.json({ deleted: [project] });
   });
 
@@ -263,9 +230,11 @@ export function e2eRoutes<E extends object>(deps: E2eDeps<E>) {
   app.delete("/projects", async (c) => {
     const prefix = c.req.query("prefix") ?? "";
     if (!isE2eName(prefix)) return refused(c, "the prefix");
-    const ids = await e2eProjectsUnder(deps, c.env, prefix);
-    for (const id of ids) await deleteE2eProject(deps, c.env, id);
-    return c.json({ deleted: ids });
+    const deleted: string[] = [];
+    for (const id of await e2eProjectsUnder(deps, c.env, prefix)) {
+      if (await deleteE2eProject(deps, c.env, id)) deleted.push(id);
+    }
+    return c.json({ deleted });
   });
 
   /** Forks the origin for an attempt (`t1a1`), waits until the fork is usable, and mints a write token. */

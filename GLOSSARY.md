@@ -32,6 +32,10 @@ _Avoid_: Repo (when meaning the project as a whole)
 A project's own repo, the one every fork starts from; its default branch is written `origin/main`.
 _Avoid_: Canonical repo, upstream, "main" (when meaning the repo rather than its branch)
 
+**Deleting a project**:
+Removing a project and everything it holds for good, which only its owner, acting as themselves, can do. Unlike an obsolete task, a deleted project can't be restored, and its handle is free to use again.
+_Avoid_: Obsolete, archived (when meaning a deleted project)
+
 **Source**:
 The public git repository a project was imported from, named by its HTTPS URL. It records where the code came from; the project never reads it again.
 _Avoid_: Upstream, remote, parent

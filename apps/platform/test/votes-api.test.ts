@@ -14,7 +14,7 @@ import { testDatabase } from "./support/d1.ts";
 import { at } from "./support/defined.ts";
 import type { Json } from "./support/json.ts";
 import { PASSED } from "./support/results.ts";
-import { testTaskBackends } from "./support/task-backend.ts";
+import { fakeFollowRunner, testTaskBackends } from "./support/task-backend.ts";
 
 /** Access sessions are `as:<email>`. */
 const verify: AccessVerifier = async (token) => (token.startsWith("as:") ? { email: token.slice(3) } : null);
@@ -35,14 +35,7 @@ async function setup(selection = "selection: { policy: vote }\n") {
       workflow: { create: async () => ({}), get: async () => ({ terminate: async () => {} }) },
       teardown: async () => {},
     },
-    {
-      workflow: {
-        create: async ({ params }) => {
-          follows.push(params);
-          return {};
-        },
-      },
-    },
+    fakeFollowRunner(follows),
   );
   const api = apiRoutes({
     verifierFor: () => verify,

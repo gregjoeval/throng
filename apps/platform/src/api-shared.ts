@@ -13,6 +13,7 @@ import { DIFF_FLAGS, diffFile, FILE_STATUSES } from "./diff.ts";
 import type { DiffCache, FileSide } from "./diff.ts";
 import { ServiceError } from "./errors.ts";
 import { MAX_SOURCE_URL } from "./import-source.ts";
+import type { ProjectStorage } from "./project-deletion.ts";
 import { MAX_PROJECT_HANDLE, PROJECT_HANDLE, projectService } from "./projects.ts";
 import { publicOrigin } from "./public-origin.ts";
 import type { PublicOriginBindings } from "./public-origin.ts";
@@ -155,8 +156,18 @@ export function wantsPatch(accept: string | undefined): boolean {
  * The project service for an environment, given its repos and how an import source's host is
  * reached (the global `fetch` when undefined).
  */
-export function envProjectService(repos: (env: AccessBindings) => Repos, fetch: typeof globalThis.fetch | undefined) {
-  return (env: AccessBindings) => projectService({ db: env.DB, repos: repos(env), fetch });
+export function envProjectService(
+  repos: (env: AccessBindings) => Repos,
+  fetch: typeof globalThis.fetch | undefined,
+  storage?: (env: AccessBindings) => ProjectStorage,
+) {
+  return (env: AccessBindings) =>
+    projectService({
+      db: env.DB,
+      repos: repos(env),
+      fetch,
+      ...(storage === undefined ? {} : { storage: storage(env) }),
+    });
 }
 
 /**

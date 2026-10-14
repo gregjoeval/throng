@@ -1,6 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 import type { SQLInputValue } from "node:sqlite";
-import type { FollowRunner } from "../../src/follows.ts";
+import type { FollowParams, FollowRunner } from "../../src/follows.ts";
 import type { Repos } from "../../src/repos.ts";
 import type { PipelineRunner } from "../../src/scoring.ts";
 import { keyringFrom } from "../../src/secrets.ts";
@@ -70,4 +70,15 @@ export function testTaskBackends(repos: Repos, now?: () => Date, scoring?: Pipel
     call: async (method, args) => structuredClone(await runTaskMethod(store(projectId), method, structuredClone(args))),
   });
   return { backend, store, sql };
+}
+
+/** A Follow runner that records the params of each follow it starts in `started`, and runs none. */
+export function fakeFollowRunner(started: FollowParams[] = []): FollowRunner {
+  return {
+    workflow: {
+      create: async ({ params }) => started.push(params),
+      get: async () => ({ terminate: async () => {} }),
+    },
+    teardown: async () => {},
+  };
 }

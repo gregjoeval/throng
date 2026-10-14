@@ -48,6 +48,9 @@ class FakeFollows {
     this.created.push(params);
     return {};
   }
+  async get(): Promise<{ terminate: () => Promise<void> }> {
+    return { terminate: async () => {} };
+  }
 }
 
 function result(gate: Gate): ScoringResult {
@@ -79,7 +82,7 @@ async function setup(selection = "selection: { policy: vote }\n") {
     repos,
     now: () => new Date((clock += 1000)),
     runner: { workflow: new FakeWorkflow(), teardown: async () => {} },
-    follow: { workflow: follows },
+    follow: { workflow: follows, teardown: async () => {} },
   });
   const journal = () =>
     (

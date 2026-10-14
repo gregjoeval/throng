@@ -13,7 +13,7 @@ import type { User } from "../src/users.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
 import type { Json } from "./support/json.ts";
-import { testTaskBackends } from "./support/task-backend.ts";
+import { fakeFollowRunner, testTaskBackends } from "./support/task-backend.ts";
 
 /** Access sessions are `as:<email>`. */
 const verify: AccessVerifier = async (token) => (token.startsWith("as:") ? { email: token.slice(3) } : null);
@@ -56,7 +56,7 @@ async function setup() {
     teardown: async () => {},
   };
   const followed: FollowParams[] = [];
-  const follow = { workflow: { create: async ({ params }: { params: FollowParams }) => followed.push(params) } };
+  const follow = fakeFollowRunner(followed);
   const { backend, store, sql } = testTaskBackends(repos, now, runner, follow);
   const api = apiRoutes({
     verifierFor: () => verify,

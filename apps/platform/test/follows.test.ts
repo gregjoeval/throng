@@ -29,12 +29,13 @@ const bob = actor("bob00001");
 /** A Workflow binding that records what it was asked to start. */
 class FakeWorkflows<P> {
   created: { id: string; params: P }[] = [];
+  terminated: string[] = [];
   async create(options: { id: string; params: P }): Promise<unknown> {
     this.created.push(options);
     return {};
   }
-  async get(_id: string): Promise<{ terminate: () => Promise<void> }> {
-    return { terminate: async () => {} };
+  async get(id: string): Promise<{ terminate: () => Promise<void> }> {
+    return { terminate: async () => void this.terminated.push(id) };
   }
 }
 
@@ -62,13 +63,14 @@ async function setup({ landing = true } = {}) {
   let clock = Date.parse("2026-10-10T12:00:00.000Z");
   const scoringWorkflow = new FakeWorkflows<PipelineParams | LandingRunParams>();
   const followWorkflow = new FakeWorkflows<FollowParams>();
+  const followsTornDown: string[] = [];
   const store = new TaskStore({
     sql,
     repos,
     now: () => new Date((clock += 1000)),
     runner: { workflow: scoringWorkflow, teardown: async () => {} },
     lands: landing,
-    follow: { workflow: followWorkflow },
+    follow: { workflow: followWorkflow, teardown: async (id) => void followsTornDown.push(id) },
   });
   const drain = () => store.drain(PROJECT.id);
   const journal = () =>
@@ -138,6 +140,7 @@ async function setup({ landing = true } = {}) {
     base,
     store,
     drain,
+    followsTornDown,
     journal,
     t1a1,
     t1a2,
@@ -196,6 +199,28 @@ describe("a task branch push", () => {
 
     await follow(t1a1, merged(t1a1, first));
     expect(started(t1a1)?.params.taskHead).toBe(third);
+  });
+});
+
+describe("deleting the project", () => {
+  it("stops every follow: terminates the running ones and destroys their containers, and starts none after", async () => {
+    const { store, drain, moveTaskBranch, followWorkflow, followsTornDown } = await setup();
+    await store.createAttempts(PROJECT, bob, { task: 1, count: 3 });
+    moveTaskBranch();
+    await drain();
+    const running = followWorkflow.created.map((c) => c.id);
+    expect(running.length).toBeGreaterThan(0);
+    expect(store.follows.startable().length).toBeGreaterThan(0);
+
+    await store.stopAll();
+    await drain();
+
+    expect(followWorkflow.terminated.toSorted()).toEqual(running.toSorted());
+    expect(followsTornDown.toSorted()).toEqual(running.toSorted());
+    expect(store.follows.running()).toBe(0);
+    expect(store.follows.startable()).toEqual([]);
+    expect(followWorkflow.created.map((c) => c.id)).toEqual(running);
+    expect(store.runs.running()).toBe(0);
   });
 });
 

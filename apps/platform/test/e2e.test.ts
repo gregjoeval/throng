@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { e2eProject, e2eRoutes, e2eToken } from "../src/e2e.ts";
-import type { LogBucket } from "../src/e2e.ts";
-import { resolveProject } from "../src/projects.ts";
+import { projectService, resolveProject } from "../src/projects.ts";
 import { forkRepo, originRepo } from "../src/repos.ts";
 import { authenticateToken, mintToken } from "../src/tokens.ts";
 import { userForEmail } from "../src/users.ts";
@@ -9,6 +8,7 @@ import type { Database } from "../src/users.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
 import type { Json } from "./support/json.ts";
+import { FakeBucket } from "./support/object-bucket.ts";
 
 const NOW = new Date("2026-10-10T12:00:00.000Z");
 const SECRET = "s3cret";
@@ -41,40 +41,23 @@ describe("e2eProject", () => {
   });
 });
 
-/** An R2 bucket's list and delete, in memory. */
-class FakeLogs implements LogBucket {
-  readonly keys = new Set<string>();
-  async list({ prefix, cursor }: { prefix: string; cursor?: string }) {
-    const all = [...this.keys].filter((k) => k.startsWith(prefix)).toSorted();
-    const start = cursor === undefined ? 0 : Number(cursor);
-    const page = all.slice(start, start + 2);
-    const truncated = start + 2 < all.length;
-    return { objects: page.map((key) => ({ key })), truncated, ...(truncated ? { cursor: String(start + 2) } : {}) };
-  }
-  async delete(keys: string[]) {
-    for (const key of keys) this.keys.delete(key);
-  }
-}
-
 /** The e2e routes over fakes, called with `bindings` (the e2e secret set by default). */
 function setup(bindings: { E2E_TOKEN?: string } = { E2E_TOKEN: SECRET }) {
   const db = testDatabase();
   const repos = new FakeRepos();
-  const logs = new FakeLogs();
-  const caches = new FakeLogs();
+  const logs = new FakeBucket();
+  const caches = new FakeBucket();
   const destroyed: string[] = [];
   const app = e2eRoutes<{ E2E_TOKEN?: string }>({
     db: () => db,
     repos: () => repos,
     fetch: repos.sourceFetch,
-    logs: () => logs,
-    caches: () => caches,
-    project: (_env, id) => ({
+    storage: () => ({ logs, caches, destroy: async (id) => void destroyed.push(id) }),
+    project: () => ({
       note: async () => {},
       journal: async () => [],
       score: async () => ({}),
       run: async () => null,
-      destroy: async () => void destroyed.push(id),
     }),
     secret: (env) => env.E2E_TOKEN,
   });
@@ -172,6 +155,19 @@ describe("the e2e routes", () => {
     expect([...logs.keys]).toEqual(["logs/e2erun1ab/t1a1/s/1/test.log"]);
     expect([...caches.keys]).toEqual(["caches/e2erun1ab/main/pnpm/f00.tar.zst"]);
     expect(await repos.list("e2erun1a")).toEqual(["e2erun1ab-main"]);
+  });
+
+  it("leave alone a project with the e2e prefix that another user owns, its row and its repos", async () => {
+    const { db, repos, destroyed, call } = setup();
+    const ada = await userForEmail(db, "ada@example.com");
+    await projectService({ db, repos, newId: () => "e2erun1z" }).create({ user: ada, alias: null }, { handle: "x" });
+
+    expect(await call("DELETE", "/e2e/projects/e2erun1z")).toMatchObject({ status: 400 });
+    expect(await call("DELETE", "/e2e/projects?prefix=e2erun1")).toEqual({ status: 200, body: { deleted: [] } });
+
+    expect(await projectIds(db)).toEqual(["e2erun1z"]);
+    expect(destroyed).toEqual([]);
+    expect(await repos.list("e2erun1z")).toEqual(["e2erun1z-main"]);
   });
 
   it("sweep every project under a run's prefix, including one whose repos are already gone", async () => {

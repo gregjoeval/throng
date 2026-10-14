@@ -222,3 +222,50 @@ describe("the secrets settings", () => {
     expect(await screen.findByText("No secrets yet")).toBeInTheDocument();
   });
 });
+
+describe("the danger zone", () => {
+  it("deletes the project once the owner types its name, and goes home", async () => {
+    const deleted: string[] = [];
+    server.use(
+      ...serveSecrets([]),
+      http.delete("*/api/projects/ada/alpha", () => {
+        deleted.push("ada/alpha");
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+    const { user, path } = await renderApp("/ada/alpha/settings");
+    const zone = await screen.findByRole("region", { name: "Danger zone" });
+
+    await user.click(within(zone).getByRole("button", { name: "Delete project" }));
+    const dialog = await screen.findByRole("dialog");
+    const confirm = within(dialog).getByRole("button", { name: "Delete this project" });
+    const name = within(dialog).getByLabelText(/Type ada\/alpha to confirm/u);
+    expect(confirm).toBeDisabled();
+    await user.type(name, "ada/alph");
+    expect(confirm).toBeDisabled();
+    await user.type(name, "a");
+    expect(confirm).toBeEnabled();
+
+    await user.click(confirm);
+    await waitFor(() => expect(path()).toBe("/"));
+    expect(deleted).toEqual(["ada/alpha"]);
+  });
+
+  it("says why when the platform refuses, and keeps the owner on the page", async () => {
+    server.use(
+      ...serveSecrets([]),
+      http.delete("*/api/projects/ada/alpha", () =>
+        HttpResponse.json({ error: { code: "internal", message: "internal error" } }, { status: 500 }),
+      ),
+    );
+    const { user, path } = await renderApp("/ada/alpha/settings");
+    const zone = await screen.findByRole("region", { name: "Danger zone" });
+    await user.click(within(zone).getByRole("button", { name: "Delete project" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.type(within(dialog).getByLabelText(/Type ada\/alpha to confirm/u), "ada/alpha");
+    await user.click(within(dialog).getByRole("button", { name: "Delete this project" }));
+
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("internal error");
+    expect(path()).toBe("/ada/alpha/settings");
+  });
+});

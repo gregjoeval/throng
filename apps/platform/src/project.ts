@@ -4,6 +4,7 @@ import type { CacheEntry, CacheKey, CacheLookup } from "./caches";
 import { camelKeys } from "./casing";
 import type { NamedSecrets } from "./config";
 import type { FollowOutcome } from "./follows";
+import { FOLLOW_ROLES, sandboxName } from "./grants";
 import type { LegacyLandingOutcome } from "./landing";
 import { teardownPipeline } from "./pipeline-workflow";
 import type { PlanVerdict, RunReport, ScoringOutcome, ScoringRequest, StoredRun } from "./scoring";
@@ -65,7 +66,12 @@ export class ProjectCoordinator extends DurableObject<Env> {
         workflow: env.PIPELINE,
         teardown: (instanceId, containers) => teardownPipeline(env.SANDBOX, instanceId, containers),
       },
-      follow: { workflow: env.FOLLOW },
+      follow: {
+        workflow: env.FOLLOW,
+        teardown: async (instanceId) => {
+          await Promise.all(FOLLOW_ROLES.map((role) => env.SANDBOX.getByName(sandboxName(instanceId, role)).destroy()));
+        },
+      },
       keyring: keyringFrom(env.SECRETS_KEYRING),
       cacheObjects: env.CACHES,
     });
@@ -289,10 +295,16 @@ export class ProjectCoordinator extends DurableObject<Env> {
     if (due.length > 0) await this.ctx.storage.setAlarm(Math.max(Date.now(), Math.min(...due)));
   }
 
-  /** E2e cleanup only: deletes all of this project's storage, so nothing of an e2e run is left. */
+  /**
+   * Deleting the project: stops its runs and follows, their Workflows and Sandboxes, then deletes
+   * all of its storage. No other call runs in between, so none can start new work.
+   */
   async destroy(): Promise<void> {
-    await this.ctx.storage.deleteAlarm();
-    await this.ctx.storage.deleteAll();
+    await this.ctx.blockConcurrencyWhile(async () => {
+      await this.#tasks.stopAll();
+      await this.ctx.storage.deleteAlarm();
+      await this.ctx.storage.deleteAll();
+    });
   }
 
   /** Records a hop the caller observed (repo created, fork ready) so one journal holds the whole run. */

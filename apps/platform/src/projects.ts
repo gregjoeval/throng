@@ -7,8 +7,11 @@
 import { ServiceError } from "./errors.ts";
 import { checkSourceUrl, importError, resolveSource } from "./import-source.ts";
 import type { SourceUrl } from "./import-source.ts";
+import { deleteProject, NO_PROJECT_STORAGE } from "./project-deletion.ts";
+import type { ProjectStorage } from "./project-deletion.ts";
 import { artifactsErrorCode, originRepo, stagingRepo } from "./repos.ts";
 import type { Repos } from "./repos.ts";
+import { mayGrant } from "./task-store.ts";
 import type { Actor } from "./tokens.ts";
 import { randomId } from "./users.ts";
 import type { Database } from "./users.ts";
@@ -43,6 +46,8 @@ export interface ProjectDeps {
   fetch?: typeof fetch | undefined;
   /** Draws a project id; tests pass their own to force collisions. */
   newId?: () => string;
+  /** Where a project's data lives outside D1 and its repos, for deleting it; none by default. */
+  storage?: ProjectStorage;
 }
 
 /** An opaque project id: 6 lowercase alphanumeric characters. */
@@ -107,6 +112,7 @@ export function projectService({
   repos,
   fetch: fetcher = (input, init) => fetch(input, init),
   newId = randomProjectId,
+  storage = NO_PROJECT_STORAGE,
 }: ProjectDeps) {
   return {
     /**
@@ -163,6 +169,18 @@ export function projectService({
       if (found === null) throw new ServiceError("notFound", `no project ${input.owner}/${input.project}`);
       return found;
     },
+
+    /**
+     * Deletes the project at `owner/project` and everything it holds for good. Only its owner, acting
+     * as themselves, may. A call that fails partway leaves the project for another to finish.
+     */
+    async delete(actor: Actor, input: { owner: string; project: string }): Promise<void> {
+      const found = await resolveProject(db, input.owner, input.project);
+      if (found === null) throw new ServiceError("notFound", `no project ${input.owner}/${input.project}`);
+      mayGrant({ id: found.id, owner: found.owner.id }, actor);
+      await deleteProject(db, repos, storage, found.id);
+      console.log({ event: "project.deleted", project: found.id, owner: actor.user.id });
+    },
   };
 }
 
@@ -184,7 +202,11 @@ async function createOrigin(
 ): Promise<string> {
   for (let attempt = 0; attempt < MAX_ID_ATTEMPTS; attempt++) {
     const id = newId();
-    if ((await db.prepare("SELECT 1 FROM projects WHERE id = ?").bind(id).first()) !== null) continue;
+    const taken = await db
+      .prepare("SELECT 1 FROM projects WHERE id = ? UNION ALL SELECT 1 FROM deleted_projects WHERE id = ?")
+      .bind(id, id)
+      .first();
+    if (taken !== null) continue;
     try {
       if (source === null) await repos.create(originRepo(id), { defaultBranch: MAIN });
       else await importOrigin(repos, id, source);

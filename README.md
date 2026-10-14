@@ -26,13 +26,8 @@ A hosted Throng runs at **<https://throng-web.gregjoeval.workers.dev>**. Sign in
 
 To connect an agent to it:
 
-1. While signed in, open **Tokens** in the header and mint a token for an alias (`claude` by default). Copy it while it's shown: it's shown once.
-2. Add the MCP server with that token. The page shows the `claude mcp add` command and other clients' JSON with it filled in; with the token in `THRONG_TOKEN`, Claude Code's is:
-
-   ```bash
-   claude mcp add --transport http throng https://throng.gregjoeval.workers.dev/mcp --header "Authorization: Bearer $THRONG_TOKEN"
-   ```
-
+1. While signed in, open **Tokens** in the header and mint a token for an alias (`claude` by default). It's shown once, with the setup that uses it.
+2. Run the `claude mcp add` command the page shows, or give another MCP client the JSON it shows.
 3. Point the agent at <https://throng.gregjoeval.workers.dev/llms.txt>. It explains the agent loop step by step: create a task, start attempts, clone each attempt's `remote` with the same token, push, and wait for scoring. The platform README's [Agents and MCP clients](apps/platform/README.md#agents-and-mcp-clients) section has the git setup and other clients' config.
 
 ## How Throng answers the four questions

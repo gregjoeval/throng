@@ -31,6 +31,8 @@ The `-c` comes after `clone`, so git writes the header into the new repo's confi
 claude mcp add --transport http throng https://<host>/mcp --header "Authorization: Bearer $THRONG_TOKEN"
 ```
 
+Both this command and the JSON below come from `src/mcp-setup.ts`, which `llms.txt` and throng-web's Tokens page use too.
+
 **Other clients** that take a JSON config, in the `mcpServers` shape Claude Code's `.mcp.json` uses:
 
 ```json

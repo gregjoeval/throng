@@ -2,12 +2,11 @@
 // The plaintext `thr_<random>` is returned once at mint time; only its SHA-256 hash is stored.
 
 import { ServiceError } from "./errors.ts";
+import { DEFAULT_TOKEN_TTL_SECONDS } from "./token-ttl.ts";
 import { randomId } from "./users.ts";
 import type { Database, User } from "./users.ts";
 
 export const TOKEN_PREFIX = "thr_";
-export const DEFAULT_TOKEN_TTL_SECONDS = 24 * 60 * 60;
-export const MAX_TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 const TOKEN_ID_LENGTH = 12;
 const TOKEN_SECRET_BYTES = 32;

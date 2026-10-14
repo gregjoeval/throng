@@ -9,6 +9,7 @@ import { apiRoutes } from "./api.ts";
 import type { ApiOptions } from "./api.ts";
 import { rejectForwardedIdentity } from "./auth.ts";
 import { llmsRoutes } from "./llms.ts";
+import { LLMS_PATH, MCP_PATH } from "./mcp-setup.ts";
 import { mcpRoutes } from "./mcp.ts";
 
 type Options = Omit<ApiOptions, "trustForwardedIdentity">;
@@ -21,8 +22,8 @@ export function publicApp<B extends AccessBindings>(options: Options = {}) {
   const app = new Hono<{ Bindings: B }>();
   app.use(rejectForwardedIdentity());
   app.route("/api", apiRoutes(options));
-  app.route("/mcp", mcpRoutes(options));
-  app.route("/llms.txt", llmsRoutes());
+  app.route(MCP_PATH, mcpRoutes(options));
+  app.route(LLMS_PATH, llmsRoutes());
   return app;
 }
 

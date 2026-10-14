@@ -1,16 +1,9 @@
 import { cleanup, screen, waitFor, within } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
+import type { Token } from "@/lib/api";
 import { renderApp } from "./app";
 import { server } from "./server";
-
-interface Token {
-  id: string;
-  alias: string | null;
-  expiresAt: string;
-  revokedAt: string | null;
-  createdAt: string;
-}
 
 const PLAINTEXT = "thr_0123456789abcdefghijklmnopqrstuvwxyzABCDEFG";
 const PLATFORM_URL = "https://throng.example";

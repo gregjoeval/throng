@@ -6,6 +6,7 @@ import { Hono } from "hono";
 import { DEFAULT_SANDBOX_SIZE, oneOf, SANDBOX_RESOURCES, SANDBOX_SIZES } from "./config.ts";
 import type { SandboxSize } from "./config.ts";
 import { attemptRemote } from "./git-remotes.ts";
+import { claudeMcpAdd, MCP_PATH } from "./mcp-setup.ts";
 import { CLONE_RECIPE, MAX_FILE_BYTES, MAX_LOG_SLICE_BYTES, MCP_INSTRUCTIONS } from "./mcp.ts";
 import { NPM_REGISTRY_HOST } from "./network.ts";
 import { publicOrigin } from "./public-origin.ts";
@@ -29,9 +30,9 @@ a token acts as and when it expires.
 
 ## MCP
 
-- URL: ${origin}/mcp (streamable HTTP, stateless)
+- URL: ${origin}${MCP_PATH} (streamable HTTP, stateless)
 - Header: \`Authorization: Bearer $THRONG_TOKEN\`. No token, or a bad one, is a 401. There is no OAuth.
-- Claude Code: \`claude mcp add --transport http throng ${origin}/mcp --header "Authorization: Bearer $THRONG_TOKEN"\`
+- Claude Code: \`${claudeMcpAdd(origin, "$THRONG_TOKEN")}\`
 
 Every tool but \`whoami\` and \`create_project\` takes \`project\` as \`owner/project\`. Tasks are \`t42\` (or \`42\`),
 attempts \`t42a3\`. A tool answers with a one-line summary and the data as JSON; a refusal is a tool error,

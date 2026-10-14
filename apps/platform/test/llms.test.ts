@@ -97,3 +97,11 @@ describe("the platform's public URL", () => {
     expect(text).not.toContain(ORIGIN);
   });
 });
+
+describe("an empty PUBLIC_URL", () => {
+  it("counts as unset: the guide names the origin the request came in on", async () => {
+    const { app, env } = setup();
+    const res = await app.request(`${ORIGIN}/llms.txt`, {}, { ...env, PUBLIC_URL: "" });
+    expect(await res.text()).toContain(`${ORIGIN}/mcp`);
+  });
+});

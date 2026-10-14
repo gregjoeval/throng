@@ -3,9 +3,12 @@
 // plaintext lives only in this page's state, so leaving or reloading the page drops it for good.
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { claudeMcpAdd, LLMS_PATH, mcpServersConfig } from "@throng/platform/mcp-setup";
+import { DEFAULT_TOKEN_TTL_SECONDS, MAX_TOKEN_TTL_SECONDS } from "@throng/platform/token-ttl";
 import { CheckIcon, CopyIcon } from "lucide-react";
 import { useState } from "react";
 import { RelativeTime } from "@/components/commit-meta";
+import { ConfirmAction } from "@/components/confirm-action";
 import { EmptyState, ErrorState, Loading } from "@/components/states";
 import { Th } from "@/components/table";
 import { Button } from "@/components/ui/button";
@@ -16,8 +19,8 @@ import type { MintedToken, Token } from "@/lib/api";
 import { apiError } from "@/lib/errors";
 
 const DAY_SECONDS = 24 * 60 * 60;
-/** The platform's longest token lifetime (`MAX_TOKEN_TTL_SECONDS` in its `tokens.ts`), in days. */
-const MAX_DAYS = 7;
+/** The platform's longest token lifetime, in days. */
+const MAX_DAYS = MAX_TOKEN_TTL_SECONDS / DAY_SECONDS;
 
 export function TokensPage() {
   const [minted, setMinted] = useState<MintedToken | null>(null);
@@ -37,10 +40,10 @@ export function TokensPage() {
   );
 }
 
-/** Mints a token for an alias (empty: the user as themselves) that expires in 1 to 7 days. */
+/** Mints a token for an alias (empty: the user as themselves) that expires in 1 to `MAX_DAYS` days. */
 function MintForm({ onMinted }: { onMinted: (minted: MintedToken) => void }) {
   const [alias, setAlias] = useState("claude");
-  const [days, setDays] = useState("1");
+  const [days, setDays] = useState(String(DEFAULT_TOKEN_TTL_SECONDS / DAY_SECONDS));
   const queryClient = useQueryClient();
   const mint = useMutation({
     mutationFn: () =>
@@ -95,9 +98,6 @@ function MintForm({ onMinted }: { onMinted: (minted: MintedToken) => void }) {
 
 /** A just-minted token's plaintext, shown this once, and the setup that uses it. */
 function NewToken({ minted }: { minted: MintedToken }) {
-  const mcpUrl = `${minted.url}/mcp`;
-  const bearer = `Bearer ${minted.token}`;
-  const config = { mcpServers: { throng: { type: "http", url: mcpUrl, headers: { Authorization: bearer } } } };
   return (
     <section aria-labelledby="new-token-heading" className="flex flex-col gap-3 rounded-xl border p-4">
       <div>
@@ -107,12 +107,9 @@ function NewToken({ minted }: { minted: MintedToken }) {
         <p className="text-sm text-amber-700 dark:text-amber-400">It won't be shown again: copy it now.</p>
       </div>
       <Snippet label="Token" text={minted.token} />
-      <Snippet
-        label="Claude Code"
-        text={`claude mcp add --transport http throng ${mcpUrl} --header "Authorization: ${bearer}"`}
-      />
-      <Snippet label="Other MCP clients" text={JSON.stringify(config, null, 2)} />
-      <Snippet label="Point the agent at" text={`${minted.url}/llms.txt`} />
+      <Snippet label="Claude Code" text={claudeMcpAdd(minted.url, minted.token)} />
+      <Snippet label="Other MCP clients" text={JSON.stringify(mcpServersConfig(minted.url, minted.token), null, 2)} />
+      <Snippet label="Point the agent at" text={`${minted.url}${LLMS_PATH}`} />
     </section>
   );
 }
@@ -156,13 +153,11 @@ function tokenStatus(token: Token): TokenStatus {
 
 function TokenRow({ token }: { token: Token }) {
   const queryClient = useQueryClient();
-  const [confirming, setConfirming] = useState(false);
   const revoke = useMutation({
     mutationFn: () => revokeToken(token.id),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: tokensQuery.queryKey }),
   });
   const status = tokenStatus(token);
-  const label = `${token.alias ?? "your"} token ${token.id}`;
   return (
     <tr>
       <td className="px-2 py-2">
@@ -178,33 +173,8 @@ function TokenRow({ token }: { token: Token }) {
         {TOKEN_STATUS_LABELS[status]}
       </td>
       <td className="px-2 py-2">
-        <div className="flex justify-end gap-2">
-          {status === "active" &&
-            (confirming ? (
-              <>
-                <Button
-                  size="sm"
-                  variant="destructive"
-                  aria-label={`Confirm revoke ${label}`}
-                  disabled={revoke.isPending}
-                  onClick={() => revoke.mutate()}
-                >
-                  Revoke
-                </Button>
-                <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>
-                  Cancel
-                </Button>
-              </>
-            ) : (
-              <Button size="sm" variant="ghost" aria-label={`Revoke ${label}`} onClick={() => setConfirming(true)}>
-                Revoke
-              </Button>
-            ))}
-        </div>
-        {revoke.isError && (
-          <p role="alert" className="text-right text-sm text-destructive">
-            {apiError(revoke.error).message}
-          </p>
+        {status === "active" && (
+          <ConfirmAction verb="Revoke" subject={`${token.alias ?? "your"} token ${token.id}`} action={revoke} />
         )}
       </td>
     </tr>

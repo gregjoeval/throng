@@ -361,6 +361,27 @@ export function addedFile(path: string): FileDiff {
   };
 }
 
+export type ProjectStats = InferResponseType<(typeof client.api.projects)[":owner"][":project"]["stats"]["$get"], 200>;
+
+/** A project's stats with nothing to count: `main` at `sha`, unless `fields` say otherwise. */
+export function stats(fields: Partial<ProjectStats> = {}, sha: string | null = MAIN): ProjectStats {
+  return {
+    ref: "main",
+    sha,
+    source: null,
+    description: null,
+    contributors: [],
+    languages: [],
+    truncated: false,
+    ...fields,
+  };
+}
+
+/** A handler serving the project's About stats. */
+export function serveStats(served: ProjectStats) {
+  return http.get("*/api/projects/:owner/:project/stats", () => HttpResponse.json(served));
+}
+
 /** Default platform API handlers; override per test with `server.use(...)`. */
 export const handlers = [
   http.get("*/api/me", () => HttpResponse.json(me)),
@@ -373,6 +394,7 @@ export const handlers = [
   }),
   // No project has run anything unless a test says so.
   http.get("*/api/projects/:owner/:project/runs", () => HttpResponse.json({ runs: [], next: null })),
+  serveStats(stats()),
 ];
 
 export const server = setupServer(...handlers);

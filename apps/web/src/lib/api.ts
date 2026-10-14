@@ -314,6 +314,12 @@ export const mainHeadQuery = (projectRef: ProjectRef) => ({
   refetchInterval: TASK_POLL_MS,
 });
 
+/** The About box's stats at `main`: contributors, languages, a description and where the project came from. */
+export const statsQuery = (projectRef: ProjectRef) =>
+  apiQuery([...projectKey(projectRef), "stats"], (init) => projectApi.stats.$get({ param: projectRef }, { init }));
+
+export type ProjectStats = InferResponseType<typeof projectApi.stats.$get, 200>;
+
 /** Where a browse read looks: a ref, a path in it (`""` for the root), and the fork to find a sha in. */
 export interface BrowseAt {
   ref: string;

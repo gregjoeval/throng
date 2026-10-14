@@ -1,6 +1,7 @@
 // A directory's README, rendered below its entries.
 
 import { useQuery } from "@tanstack/react-query";
+import { isReadme } from "@throng/platform/readme";
 import { Markdown } from "@/components/markdown";
 import { ErrorState, Loading } from "@/components/states";
 import { blobQuery } from "@/lib/api";
@@ -8,11 +9,9 @@ import type { TreeEntry } from "@/lib/api";
 import { isMarkdown, markdownLinks, projectRefOf } from "@/lib/paths";
 import type { BrowseLocation } from "@/lib/paths";
 
-const README = /^readme(?:\.md)?$/iu;
-
 /** The entry that's a directory's README (`README.md` or `README`, in any case), if there is one. */
 export function findReadme(entries: TreeEntry[]): TreeEntry | undefined {
-  return entries.find((entry) => entry.type !== "tree" && README.test(entry.name));
+  return entries.find((entry) => entry.type !== "tree" && isReadme(entry.name));
 }
 
 /** The README `entry` of the directory at `at`, rendered. */

@@ -10,6 +10,7 @@
     "./landing": "./src/landing.ts",
     "./mcp-setup": "./src/mcp-setup.ts",
     "./pipelines": "./src/pipelines.ts",
+    "./readme": "./src/readme.ts",
     "./run-status": "./src/run-status.ts",
     "./task-refs": "./src/task-refs.ts",
     "./token-ttl": "./src/token-ttl.ts",

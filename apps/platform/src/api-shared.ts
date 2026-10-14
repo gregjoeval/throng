@@ -1,7 +1,7 @@
 // HTTP plumbing more than one route module shares (the REST routes in `api.ts`, `browse-api.ts` and
 // `dequeue-api.ts`, and the MCP tools in `mcp.ts`): the project path, multi-segment `{path}` routes,
 // the public shape of a file or commit diff with its `text/x-diff` answer, a landing's conflicting
-// file diffed to either side, the request schemas the MCP tools reuse, and the task service for a request.
+// file diffed to either side, the request schemas the MCP tools reuse, and the project and task services.
 
 import { z } from "@hono/zod-openapi";
 import type { OpenAPIHono, RouteConfig } from "@hono/zod-openapi";
@@ -12,6 +12,8 @@ import { SelectionPolicySchema } from "./config.ts";
 import { DIFF_FLAGS, diffFile, FILE_STATUSES } from "./diff.ts";
 import type { DiffCache, FileSide } from "./diff.ts";
 import { ServiceError } from "./errors.ts";
+import { MAX_SOURCE_URL } from "./import-source.ts";
+import { MAX_PROJECT_HANDLE, PROJECT_HANDLE, projectService } from "./projects.ts";
 import type { Repos } from "./repos.ts";
 import { DEFAULT_RUNS_PAGE, isLineFilter, MAX_RUNS_PAGE, RUN_STATUSES } from "./scoring.ts";
 import { taskService } from "./tasks.ts";
@@ -148,6 +150,14 @@ export function wantsPatch(accept: string | undefined): boolean {
 }
 
 /**
+ * The project service for an environment, given its repos and how an import source's host is
+ * reached (the global `fetch` when undefined).
+ */
+export function envProjectService(repos: (env: AccessBindings) => Repos, fetch: typeof globalThis.fetch | undefined) {
+  return (env: AccessBindings) => projectService({ db: env.DB, repos: repos(env), fetch });
+}
+
+/**
  * The task service for a request, given the environment's repos and task backends. Attempts name
  * their git remotes on the origin the request came in on.
  */
@@ -235,6 +245,34 @@ export const TaskMetricsInputSchema = z.array(z.unknown()).openapi({
     "checks, and each `from` must name one of the project's or the task's checks. Replaces the task's metrics.",
   example: [{ name: "lines", from: "test.coverage-summary.total.lines.total", type: "number", order: "asc" }],
 });
+
+export const CreateProjectSchema = z
+  .object({
+    handle: z
+      .string()
+      .max(MAX_PROJECT_HANDLE)
+      .regex(PROJECT_HANDLE, "handle must be lowercase letters and digits, joined by single dashes")
+      .openapi({ description: "The project's handle, unique among the owner's projects.", example: "throng" }),
+    source: z
+      .object({
+        url: z
+          .string()
+          .max(MAX_SOURCE_URL)
+          .openapi({
+            description:
+              "The HTTPS URL of a public git repository on any smart-HTTP host: `https:` only, with no " +
+              "credentials, query or fragment.",
+            example: "https://github.com/octocat/Hello-World",
+          }),
+      })
+      .optional()
+      .openapi({
+        description:
+          "A repository to import. Its default branch becomes the origin's `main`, whatever its name, with " +
+          "its full history. The copy is made once, before the call returns, and never refreshed.",
+      }),
+  })
+  .openapi("CreateProject");
 
 export const CreateTaskSchema = z
   .object({

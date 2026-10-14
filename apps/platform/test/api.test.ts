@@ -27,6 +27,7 @@ function setup() {
     verifierFor: () => verify,
     now: () => clock,
     repos: () => repos,
+    fetch: repos.sourceFetch,
   });
   const env = { DB: testDatabase(), ACCESS_TEAM_DOMAIN: "throng.cloudflareaccess.com", ACCESS_AUD: "aud" };
 
@@ -223,9 +224,42 @@ describe("POST /api/projects", () => {
       id: expect.stringMatching(/^[a-z0-9]{6}$/u),
       handle: "throng",
       owner: { id: expect.any(String), handle: "greg" },
+      source: null,
       createdAt: expect.any(String),
     });
     expect(await repos.list(res.body["id"])).toEqual([`${res.body["id"]}-main`]);
+  });
+
+  it("imports a public git source as the project's main, and shows where it came from", async () => {
+    const { call, mint, repos } = setup();
+    await repos.create("upstream");
+    const head = repos.commit("upstream", { branch: "master", files: { README: "Hello\n" } });
+    const url = "https://github.com/octocat/Hello-World";
+    repos.serveSource(url, "upstream", "master");
+    const bearer = { bearer: (await mint())["token"] };
+    const res = await call("POST", "/projects", bearer, { handle: "hello", source: { url } });
+    expect(res.status).toBe(201);
+    expect(res.body["source"]).toBe(url);
+    expect(repos.ref(`${res.body["id"]}-main`, "refs/heads/main")).toBe(head.hash);
+    expect((await call("GET", "/projects/greg/hello", bearer)).body["source"]).toBe(url);
+  });
+
+  it("says why a source can't be imported", async () => {
+    const { call, mint, repos } = setup();
+    const bearer = { bearer: (await mint())["token"] };
+    const cases: [unknown, number, string][] = [
+      [{ url: "http://github.com/o/r" }, 400, "invalidRequest"],
+      [{ url: "https://token@github.com/o/r" }, 400, "invalidRequest"],
+      [{ url: 42 }, 400, "invalidRequest"],
+      [{}, 400, "invalidRequest"],
+      [{ url: "https://github.com/octocat/private" }, 404, "notFound"],
+    ];
+    for (const [source, status, code] of cases) {
+      const res = await call("POST", "/projects", bearer, { handle: "hello", source });
+      expect(res.status, JSON.stringify(source)).toBe(status);
+      expect(res.body["error"]["code"]).toBe(code);
+    }
+    expect(repos.calls.filter((c) => c.method === "import" || c.method === "create")).toEqual([]);
   });
 
   it("is 409 for a handle the caller already uses", async () => {

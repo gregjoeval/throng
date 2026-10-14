@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { forkRepo, originMainRef, originRepo, parseRepoName, readOriginFile } from "../src/repos.ts";
+import { forkRepo, originMainRef, originRepo, parseRepoName, readOriginFile, stagingRepo } from "../src/repos.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { UnreadableRepos } from "./support/unreadable-repos.ts";
 
@@ -12,6 +12,7 @@ describe("repo names", () => {
   it("parses origin and fork names back", () => {
     expect(parseRepoName("k3x9q2-main")).toEqual({ kind: "origin", project: "k3x9q2" });
     expect(parseRepoName("k3x9q2-t42a3")).toEqual({ kind: "fork", project: "k3x9q2", attempt: "t42a3" });
+    expect(parseRepoName(stagingRepo("k3x9q2"))).toEqual({ kind: "staging", project: "k3x9q2" });
   });
 
   it("rejects names that are neither", () => {

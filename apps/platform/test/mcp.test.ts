@@ -30,6 +30,7 @@ const ORIGIN = "https://throng.test";
 /** The spec's tool table, in its order. */
 const TOOLS = [
   "whoami",
+  "create_project",
   "list_tasks",
   "get_task",
   "create_task",
@@ -103,6 +104,7 @@ async function setup() {
     verifierFor: () => verify,
     now,
     repos: () => repos,
+    fetch: repos.sourceFetch,
     tasks: () => recording,
     logs: () => logs,
   });
@@ -247,6 +249,32 @@ describe("/mcp", () => {
       alias: "claude",
       token: { expiresAt: expect.any(String) },
     });
+  });
+
+  it("creates a project owned by the token's user, empty or imported from a public git URL", async () => {
+    const { tokenFor, connect, repos } = await setup();
+    await repos.create("upstream");
+    const head = repos.commit("upstream", { branch: "trunk", files: { README: "hi\n" } });
+    const url = "https://codeberg.org/o/r";
+    repos.serveSource(url, "upstream", "trunk");
+    const claude = await connect(await tokenFor("ada@example.com", "claude"));
+
+    const empty = await call(claude, "create_project", { handle: "empty" });
+    expect(empty.isError).toBeFalsy();
+    expect(empty.summary).toBe("created ada/empty");
+    expect(empty.data["project"]).toMatchObject({ handle: "empty", owner: { handle: "ada" }, source: null });
+
+    const imported = await call(claude, "create_project", { handle: "imported", source: { url } });
+    expect(imported.summary).toBe(`created ada/imported, imported from ${url}`);
+    const id = (imported.data["project"] as Json)["id"] as string;
+    expect(repos.ref(`${id}-main`, "refs/heads/main")).toBe(head.hash);
+
+    const refused = await call(claude, "create_project", {
+      handle: "nope",
+      source: { url: "https://codeberg.org/o/gone" },
+    });
+    expect(refused.isError).toBeTruthy();
+    expect(refused.summary).toMatch(/^notFound: .*only public repositories can be imported/u);
   });
 
   it("calls each tool family's services as the token's user and alias", async () => {

@@ -155,6 +155,11 @@ export class LocalGitHost implements Repos {
     return { ...(await this.get(name)), token };
   }
 
+  /** No test imports through real git; `FakeRepos` plays the import. */
+  async import(): Promise<void> {
+    throw new Error("LocalGitHost doesn't import");
+  }
+
   async get(name: string): Promise<RepoInfo> {
     if (!(await this.#exists(name))) throw repoError("NOT_FOUND", name);
     return { name, remote: `${this.origin}/${name}.git`, defaultBranch: "main", parent: null };

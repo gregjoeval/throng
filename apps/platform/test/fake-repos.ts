@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { concat, flushPkt, pktLine } from "../src/pkt-line.ts";
 import type { Commit, CopyRef, RepoInfo, Repos, RepoToken, TokenScope, TreeEntry } from "../src/repos.ts";
 
 /** One call made through the fake, in order. */
@@ -59,6 +60,8 @@ export class FakeRepos implements Repos {
   readonly calls: RepoCall[] = [];
   readonly #repos = new Map<string, FakeRepo>();
   readonly #files = new Map<string, string>();
+  /** Public git sources by URL: the fake repo each one serves, and the branch its HEAD points at. */
+  readonly #sources = new Map<string, { name: string; head: string }>();
   #minted = 0;
   #commits = 0;
 
@@ -104,6 +107,52 @@ export class FakeRepos implements Repos {
     const target = this.#repo(to);
     for (const [hash, object] of source.objects) target.objects.set(hash, object);
     target.refs.set(ref, sha);
+  }
+
+  /**
+   * Serves repo `name` as a public git source at `url`, its HEAD at `head`: `import` copies from it,
+   * and `sourceFetch` advertises it as the source's host would.
+   */
+  serveSource(url: string, name: string, head = "main"): void {
+    this.#repo(name);
+    this.#sources.set(url, { name, head });
+  }
+
+  /**
+   * The served sources' hosts over HTTP: `GET <url>.git/info/refs?service=git-upload-pack` answers
+   * with an upload-pack advertisement naming HEAD's branch. Anything else is a 401, as GitHub answers
+   * for a repo that is private or missing.
+   */
+  readonly sourceFetch: typeof fetch = async (input) => {
+    const url = input instanceof Request ? input.url : String(input);
+    const served = [...this.#sources].find(([source]) =>
+      url.startsWith(`${source.replace(/\.git$/u, "")}.git/info/refs`),
+    );
+    if (served === undefined) return new Response("Authentication required", { status: 401 });
+    const [, { name, head }] = served;
+    const sha = this.#repo(name).refs.get(`refs/heads/${head}`) ?? "0".repeat(40);
+    const body = concat([
+      pktLine("# service=git-upload-pack\n"),
+      flushPkt(),
+      pktLine(`${sha} HEAD\0multi_ack side-band-64k symref=HEAD:refs/heads/${head} agent=fake\n`),
+      pktLine(`${sha} refs/heads/${head}\n`),
+      flushPkt(),
+    ]);
+    return new Response(body, { headers: { "Content-Type": "application/x-git-upload-pack-advertisement" } });
+  };
+
+  async import(name: string, source: { url: string; branch: string }): Promise<void> {
+    this.#record("import", name, source);
+    const served = this.#sources.get(source.url);
+    if (served === undefined) throw repoError("REMOTE_AUTH_REQUIRED", source.url);
+    const from = this.#repo(served.name);
+    const ref = `refs/heads/${source.branch}`;
+    const head = from.refs.get(ref);
+    if (head === undefined) throw repoError("NOT_FOUND", `${source.url} ${ref}`);
+    // Artifacts reports `main` as the default branch whatever it imported (#223 §2).
+    const repo = this.#add(name, "main", null);
+    for (const [hash, object] of from.objects) repo.objects.set(hash, object);
+    repo.refs.set(ref, head);
   }
 
   async create(name: string, opts: { defaultBranch?: string } = {}): Promise<RepoInfo & { token: string }> {
@@ -321,6 +370,9 @@ function info({ name, remote, defaultBranch, parent }: RepoInfo): RepoInfo {
 }
 
 /** Shaped like the binding's `ArtifactsError`, so callers can match on `code` either way. */
-function repoError(code: "NOT_FOUND" | "ALREADY_EXISTS" | "INVALID_INPUT", name: string): Error & { code: string } {
+function repoError(
+  code: "NOT_FOUND" | "ALREADY_EXISTS" | "INVALID_INPUT" | "REMOTE_AUTH_REQUIRED",
+  name: string,
+): Error & { code: string } {
   return Object.assign(new Error(`${code}: ${name}`), { name: "ArtifactsError", code });
 }

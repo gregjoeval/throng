@@ -22,6 +22,10 @@ class ArtifactsRepos implements Repos {
     return { name: repo.name, remote: repo.remote, defaultBranch: repo.defaultBranch, parent: null, token: repo.token };
   }
 
+  async import(name: string, { url, branch }: { url: string; branch: string }): Promise<void> {
+    await this.#artifacts.import({ source: { url, branch }, target: { name } });
+  }
+
   async get(name: string): Promise<RepoInfo> {
     using repo = await this.#artifacts.get(name);
     const info = await repo.info();

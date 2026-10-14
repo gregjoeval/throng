@@ -1,5 +1,5 @@
-// The frame every project view shares: the project's name, the view tabs, breadcrumbs for a path,
-// and the loading and error states of looking the project up.
+// The frame every project view shares: the project's name, the view tabs, where an imported project
+// came from, breadcrumbs for a path, and the loading and error states of looking the project up.
 
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
@@ -35,6 +35,8 @@ export function ProjectView({ location, children }: { location: ProjectLocation;
   const ref = "ref" in location ? location.ref : "main";
   const home = buildPath({ view: "home", owner, project: location.project });
   const section = SECTIONS[location.view];
+  // Where an imported project came from; the platform only accepts https URLs, so it's safe as a link.
+  const source = project.data?.source ?? null;
 
   return (
     <div className="flex flex-col gap-4">
@@ -66,6 +68,14 @@ export function ProjectView({ location, children }: { location: ProjectLocation;
             </Tab>
           )}
         </nav>
+        {source === null ? null : (
+          <p className="text-sm text-muted-foreground">
+            Imported from{" "}
+            <a href={source} target="_blank" rel="noreferrer" className="underline underline-offset-3">
+              {source}
+            </a>
+          </p>
+        )}
       </div>
       {project.isPending && <Loading />}
       {project.isError && <ErrorState error={project.error} />}

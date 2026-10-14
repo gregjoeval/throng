@@ -80,6 +80,79 @@ describe("create project", () => {
     }
   });
 
+  it("imports from a public git URL, showing that it's working until the import is done", async () => {
+    const url = "https://github.com/octocat/Hello-World";
+    const created = project("hello", me.user, url);
+    let body: unknown;
+    const { promise: done, resolve: finish } = Promise.withResolvers<void>();
+    server.use(
+      http.post("*/api/projects", async ({ request }) => {
+        body = await request.json();
+        await done;
+        projects.push(created);
+        return HttpResponse.json(created, { status: 201 });
+      }),
+    );
+    try {
+      const { user, path } = await renderApp("/");
+      await user.click(await within(screen.getByRole("main")).findByRole("button", { name: "Create project" }));
+      const dialog = await screen.findByRole("dialog");
+      await user.type(within(dialog).getByLabelText("Handle"), "hello");
+      await user.type(within(dialog).getByLabelText("Import from a public git URL (optional)"), ` ${url} `);
+      await user.click(within(dialog).getByRole("button", { name: "Create" }));
+      expect(await within(dialog).findByRole("button", { name: "Importing…" })).toBeDisabled();
+      finish();
+      await waitFor(() => expect(path()).toBe("/ada/hello"));
+      expect(body).toEqual({ handle: "hello", source: { url } });
+    } finally {
+      projects.pop();
+    }
+  });
+
+  it("shows why an import failed and stays open", async () => {
+    server.use(
+      http.post("*/api/projects", () =>
+        HttpResponse.json(
+          {
+            error: {
+              code: "notFound",
+              message:
+                "https://github.com/o/secret was not found, or is private: only public repositories can be imported",
+            },
+          },
+          { status: 404 },
+        ),
+      ),
+    );
+    const { user } = await renderApp("/");
+    await user.click(await within(screen.getByRole("main")).findByRole("button", { name: "Create project" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.type(within(dialog).getByLabelText("Handle"), "secret");
+    await user.type(
+      within(dialog).getByLabelText("Import from a public git URL (optional)"),
+      "https://github.com/o/secret",
+    );
+    await user.click(within(dialog).getByRole("button", { name: "Create" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("only public repositories can be imported");
+  });
+
+  it("shows where an imported project came from in its header, and nothing for one that started empty", async () => {
+    serveRepo({ main: { "README.md": "# Hello\n" } });
+    const url = "https://github.com/octocat/Hello-World";
+    projects.push(project("hello", me.user, url));
+    try {
+      await renderApp("/ada/hello");
+      const link = await screen.findByRole("link", { name: url });
+      expect(link).toHaveAttribute("href", url);
+      expect(link.parentElement).toHaveTextContent(`Imported from ${url}`);
+    } finally {
+      projects.pop();
+    }
+    await renderApp("/ada/alpha");
+    await screen.findByRole("heading", { name: "ada/alpha" });
+    expect(screen.queryByText(/Imported from/u)).toBeNull();
+  });
+
   it("shows the platform's error and stays open when the handle is taken", async () => {
     server.use(
       http.post("*/api/projects", () =>

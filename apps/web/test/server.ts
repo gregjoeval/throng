@@ -16,8 +16,14 @@ export const me: InferResponseType<typeof client.api.me.$get, 200> = {
 type Project = InferResponseType<typeof client.api.projects.$get, 200>["projects"][number];
 
 /** A project owned by `ada`, as the platform returns it. */
-export function project(handle: string, owner = me.user): Project {
-  return { id: `id-${handle}`, handle, owner: { id: owner.id, handle: owner.handle }, createdAt: me.user.createdAt };
+export function project(handle: string, owner = me.user, source: string | null = null): Project {
+  return {
+    id: `id-${handle}`,
+    handle,
+    owner: { id: owner.id, handle: owner.handle },
+    source,
+    createdAt: me.user.createdAt,
+  };
 }
 
 /** `ada`'s projects in the default handlers. */

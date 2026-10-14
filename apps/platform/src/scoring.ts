@@ -547,7 +547,7 @@ export class ScoringQueue {
    * owner did.
    */
   requestLanding(input: LandingRequest & { trusted: boolean }): StoredRun {
-    const run = this.#insertLanding(input, input.trusted ? "trusted" : "untrusted");
+    const run = this.#insertLanding(input, { trusted: input.trusted, status: "queued" });
     this.#journal("scoringQueued", run, { trigger: "merge" });
     return run;
   }
@@ -558,7 +558,7 @@ export class ScoringQueue {
    * joins the queue. It holds no slot, and has no Workflow until it starts.
    */
   holdLanding(input: LandingRequest & { secrets: readonly string[] }): StoredRun {
-    const run = this.#insertLanding(input, "waiting");
+    const run = this.#insertLanding(input, { trusted: false, status: "waiting" });
     this.#sql.exec("UPDATE pipeline_runs SET secrets = ? WHERE id = ?", JSON.stringify(input.secrets), run.id);
     this.#journal("scoringWaiting", run, { mergeRequest: input.mergeRequest, secrets: input.secrets });
     return { ...run, secrets: [...input.secrets] };
@@ -571,7 +571,10 @@ export class ScoringQueue {
       .map(toRun);
   }
 
-  #insertLanding(input: LandingRequest, as: "trusted" | "untrusted" | "waiting"): StoredRun {
+  #insertLanding(
+    input: LandingRequest,
+    { trusted, status }: { trusted: boolean; status: "queued" | "waiting" },
+  ): StoredRun {
     const [row] = this.#sql.exec<RunRow>(
       `INSERT INTO pipeline_runs
          (project, line, sha, pipeline, trigger, merge_request, merge_head, merge_attempt, user_id, alias, trusted,
@@ -584,8 +587,8 @@ export class ScoringQueue {
       input.attempt,
       input.approver.user,
       input.approver.alias,
-      as === "trusted" ? 1 : 0,
-      as === "waiting" ? "waiting" : "queued",
+      trusted ? 1 : 0,
+      status,
       this.#ms(),
     );
     if (row === undefined) throw new Error("pipeline run insert returned no row");

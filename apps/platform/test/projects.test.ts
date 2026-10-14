@@ -5,6 +5,7 @@ import type { Actor } from "../src/tokens.ts";
 import { userForEmail } from "../src/users.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
+import { FakeBucket } from "./support/object-bucket.ts";
 
 async function setup(newId?: () => string) {
   const db = testDatabase();
@@ -82,6 +83,20 @@ describe("projectService.create", () => {
     expect((await service.create(greg, { handle: "one" })).id).toBe("aaaaaa");
     await repos.create("bbbbbb-main");
     expect((await service.create(greg, { handle: "two" })).id).toBe("cccccc");
+  });
+
+  it("never draws a deleted project's id again", async () => {
+    const { db, repos, greg } = await setup();
+    const storage = { logs: new FakeBucket(), caches: new FakeBucket(), destroy: async () => {} };
+    const first = projectService({ db, repos, storage, newId: ids("aaaaaa") });
+    await first.create(greg, { handle: "throng" });
+    await first.delete(greg, { owner: "greg", project: "throng" });
+
+    const again = await projectService({ db, repos, newId: ids("aaaaaa", "bbbbbb") }).create(greg, {
+      handle: "throng",
+    });
+
+    expect(again.id).toBe("bbbbbb");
   });
 
   it("leaves no project row when creating the repo fails", async () => {

@@ -2550,6 +2550,29 @@ export class TaskStore {
   // the merge request), then runs the post-gate steps; a conflict, a failed gate or an error
   // dequeues the merge request instead, naming the run (`pipelineFinished`).
 
+  /**
+   * Deleting the project: cancels every run and follow not yet ended, terminating the Workflows of
+   * those that had started and destroying their containers.
+   */
+  async stopAll(): Promise<void> {
+    await this.runs.stopAll();
+    const runner = this.#follow;
+    const started = this.#sql.transaction(() => this.follows.stopAll());
+    if (runner === null) return;
+    await Promise.all(
+      started.map(async (follow) => {
+        const id = follow.instance_id ?? "";
+        try {
+          await (await runner.workflow.get(id)).terminate();
+          await runner.teardown(id);
+        } catch (error) {
+          // It may already have finished, its container torn down by its own last step.
+          console.warn({ event: "follow.stop_failed", instance_id: id, error: String(error) });
+        }
+      }),
+    );
+  }
+
   /** Cancels stale landings, queues the next one, starts queued follows, then drains the run queue. */
   async drain(project: string): Promise<void> {
     try {
@@ -3707,14 +3730,14 @@ function mainSecrets(project: string, config: ConfigResult): Extract<MainSecrets
 
 /**
  * Whether `actor` is the project owner acting as themselves, never under an alias: who may grant a
- * secret or start a waiting run, and whose selection or approval trusts a landing.
+ * secret, start a waiting run or delete the project, and whose selection or approval trusts a landing.
  */
 function isOwnerAsThemselves(project: ProjectContext, actor: Actor): boolean {
   return actor.user.id === project.owner && actor.alias === null;
 }
 
 /** Throws unless `actor` is the project owner acting as themselves (see `isOwnerAsThemselves`). */
-function mayGrant(project: ProjectContext, actor: Actor): void {
+export function mayGrant(project: ProjectContext, actor: Actor): void {
   if (!isOwnerAsThemselves(project, actor)) {
     throw new ServiceError("forbidden", "only the project owner, acting as themselves, may");
   }

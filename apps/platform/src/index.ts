@@ -5,6 +5,7 @@ import { reposFor } from "./artifacts";
 import { e2eRoutes } from "./e2e";
 import { gitRoutes } from "./git-proxy";
 import type { GitProxyOptions } from "./git-proxy";
+import type { ProjectStorage } from "./project-deletion";
 
 export { ProjectCoordinator } from "./project";
 export { RunSandbox, OutboundAuth } from "./sandbox";
@@ -12,13 +13,23 @@ export { PipelineWorkflow } from "./pipeline-workflow";
 export { FollowWorkflow } from "./follow-workflow";
 
 // The API and the git proxy are typed against the bindings they read; at runtime their env is this Worker's.
-const apiOptions: GitProxyOptions & Pick<ApiOptions, "logs"> = {
+const apiOptions: GitProxyOptions & Pick<ApiOptions, "logs" | "storage"> = {
   repos: (env) => reposFor(env as Env),
   tasks: (env) => (projectId) => ({
     call: (method, args) => (env as Env).PROJECT.getByName(projectId).tasks(method, args),
   }),
   logs: (env) => (env as Env).LOGS,
+  storage: (env) => projectStorage(env as Env),
 };
+
+/** Where a project's data lives outside D1 and its repos, for deleting it. */
+function projectStorage(env: Env): ProjectStorage {
+  return {
+    logs: { list: (options) => env.LOGS.list(options), delete: (keys) => env.LOGS.delete(keys) },
+    caches: { list: (options) => env.CACHES.list(options), delete: (keys) => env.CACHES.delete(keys) },
+    destroy: (projectId) => env.PROJECT.getByName(projectId).destroy(),
+  };
+}
 
 // The public hostname. It refuses forwarded identities; see `./app.ts`.
 const app = publicApp<Env>(apiOptions);
@@ -43,14 +54,7 @@ app.route(
   e2eRoutes<Env>({
     db: (env) => env.DB,
     repos: (env) => reposFor(env),
-    logs: (env) => ({
-      list: (options) => env.LOGS.list(options),
-      delete: (keys) => env.LOGS.delete(keys),
-    }),
-    caches: (env) => ({
-      list: (options) => env.CACHES.list(options),
-      delete: (keys) => env.CACHES.delete(keys),
-    }),
+    storage: (env) => projectStorage(env),
     project: (env, id) => {
       const stub = env.PROJECT.getByName(id);
       return {
@@ -58,7 +62,6 @@ app.route(
         journal: (since) => stub.journal(since),
         score: (project, attempt, sha) => stub.e2eScore(project, attempt, sha),
         run: (run) => stub.e2eRun(run),
-        destroy: () => stub.destroy(),
       };
     },
     secret: (env) => env.E2E_TOKEN,

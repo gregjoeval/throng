@@ -700,9 +700,23 @@ export class PipelineRuns {
    * is no longer considered; the next `drain` stops any that had started.
    */
   cancelLine(line: string, reason: string): void {
+    this.#cancelLive(reason, "AND line = ?", line);
+  }
+
+  /** Deleting the project: cancels every run not yet ended, then stops those that had started. */
+  async stopAll(): Promise<void> {
+    this.#cancelLive("project deleted");
+    await this.drain();
+  }
+
+  /** Cancels the runs not yet ended, of those `where` narrows to. */
+  #cancelLive(reason: string, where = "", ...bindings: unknown[]): void {
     this.#sql.transaction(() => {
       const live = this.#sql
-        .exec<RunRow>("SELECT * FROM pipeline_runs WHERE line = ? AND status IN ('queued', 'waiting', 'running')", line)
+        .exec<RunRow>(
+          `SELECT * FROM pipeline_runs WHERE status IN ('queued', 'waiting', 'running') ${where}`,
+          ...bindings,
+        )
         .map(toRun);
       for (const run of live) this.#cancel(run, { reason });
     });

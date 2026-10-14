@@ -62,7 +62,7 @@ async function setup() {
   const created = await api.request("/projects", { method: "POST", headers, body: '{"handle":"throng"}' }, env);
   const projectId = ((await created.json()) as Json)["id"] as string;
   const me = (await call("GET", "/me", ada)).body as { user: User };
-  const queue = () => store(projectId).scoring;
+  const queue = () => store(projectId).runs;
 
   /**
    * Queues a run on `line` at `sha` (a new head unless given), as ada; returns its id. Only attempt

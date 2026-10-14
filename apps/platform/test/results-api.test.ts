@@ -86,7 +86,7 @@ async function setup() {
   const projectId = (await call("POST", "/projects", greg, { handle: "throng" })).body["id"] as string;
   const root = repos.commit(`${projectId}-main`, { files: { "README.md": "hi\n" } }).hash;
   const base = "/projects/greg/throng";
-  const scoring = () => store(projectId).scoring;
+  const scoring = () => store(projectId).runs;
 
   /** A task by ada with `count` draft attempts by ada. */
   const drafts = async (count = 1) => {

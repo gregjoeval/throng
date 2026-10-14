@@ -100,7 +100,7 @@ function setup({ lands = true, from }: { lands?: boolean; from?: Kept } = {}) {
     sql,
     repos,
     now: () => new Date((clock += 1000)),
-    scoring: { workflow, teardown: async (id, containers) => void tornDown.push([id, containers]) },
+    runner: { workflow, teardown: async (id, containers) => void tornDown.push([id, containers]) },
     lands,
     keyring: TEST_KEYRING,
   });
@@ -116,7 +116,7 @@ function setup({ lands = true, from }: { lands?: boolean; from?: Kept } = {}) {
   };
   /** Finishes the attempt's latest run with a passing gate; the run must be running. */
   const score = (ref: AttemptInput) => {
-    const run = at(store.scoring.listRuns(`t${ref.task}a${ref.number}`), -1);
+    const run = at(store.runs.listRuns(`t${ref.task}a${ref.number}`), -1);
     expect(store.scoringFinished(run.id, { status: "done", result: passed })).toBeTruthy();
   };
   /** An attempt whose head passed, selected by `by`: its merge request is queued. */
@@ -128,10 +128,10 @@ function setup({ lands = true, from }: { lands?: boolean; from?: Kept } = {}) {
     return ref;
   };
   const runStates = (refs: AttemptInput[]) =>
-    refs.map((r) => at(store.scoring.listRuns(`t${r.task}a${r.number}`), -1).status);
+    refs.map((r) => at(store.runs.listRuns(`t${r.task}a${r.number}`), -1).status);
   const mr = (task: number) => store.getMergeRequest(PROJECT, owner, { task });
   /** The `main` runs, oldest first. */
-  const mainRuns = () => store.scoring.listRuns("main");
+  const mainRuns = () => store.runs.listRuns("main");
   /** The latest landing's run. */
   const landing = () => {
     const runs = mainRuns().filter((r) => r.merge_request !== null);
@@ -289,7 +289,7 @@ describe("starting a landing", () => {
     const held = landing();
     const verdict = store.pipelinePlanned(held.id, [], [{ step: "check deploy", secrets: ["DEPLOY"] }]);
     expect(verdict).toEqual({ kind: "waiting" });
-    expect(store.scoring.getRun(held.id)).toMatchObject({ status: "waiting", trusted: false, secrets: ["DEPLOY"] });
+    expect(store.runs.getRun(held.id)).toMatchObject({ status: "waiting", trusted: false, secrets: ["DEPLOY"] });
     expect(mr(t1.task)).toMatchObject({ state: "pending", position: null, last_dequeue: null });
     expect(() => store.sealedSecretsFor(held.id, ["DEPLOY"])).toThrow(/may hold no secrets/u);
     // The queue moves on without it, and asking again doesn't queue it.
@@ -357,10 +357,10 @@ describe("a landing held for the owner", () => {
       user_id: ada.user.id,
     });
     expect(workflow.created.filter((c) => c.params.line === "main")).toEqual([]);
-    expect(store.scoring.running()).toBe(0);
+    expect(store.runs.running()).toBe(0);
     // Asking again holds it once.
     await store.approveMergeRequest(PROJECT, ada, { task: t1.task });
-    expect(store.scoring.heldLandings()).toHaveLength(1);
+    expect(store.runs.heldLandings()).toHaveLength(1);
   });
 
   it("holds one an owner's alias selected, as it would a non-owner's", async () => {
@@ -391,7 +391,7 @@ describe("a landing held for the owner", () => {
     const p = await prod();
     const t2 = await p.queued("Owner's");
     expect(p.mr(t2.task).state).toBe("queued");
-    expect(p.store.scoring.heldLandings()).toEqual([]);
+    expect(p.store.runs.heldLandings()).toEqual([]);
   });
 
   it("holds one once its head's run passes, when it was selected before", async () => {
@@ -400,7 +400,7 @@ describe("a landing held for the owner", () => {
     await store.selectAttempt(PROJECT, ada, ref);
     await drain();
     expect(mainRuns()).toEqual([]);
-    const run = at(store.scoring.listRuns("t1a1"), -1);
+    const run = at(store.runs.listRuns("t1a1"), -1);
     const passing = {
       status: "done" as const,
       outcome: landingOutcome({ ...failedGate, gate: "passed", steps: [] }, null),
@@ -451,7 +451,7 @@ describe("a landing held for the owner", () => {
       [mr(t1.task).id, "running"],
       [mr(t2.task).id, "queued"],
     ]);
-    expect(store.scoring.mainStartable()).toBeFalsy();
+    expect(store.runs.mainStartable()).toBeFalsy();
 
     // `land` lands the running landing: the first, then the one the owner started.
     const first = mainRuns()[0];
@@ -482,7 +482,7 @@ describe("a landing held for the owner", () => {
     push(t1);
     await drain();
     expect(mr(t1.task).state).toBe("needsReview");
-    expect(store.scoring.getRun(held.id)?.status).toBe("cancelled");
+    expect(store.runs.getRun(held.id)?.status).toBe("cancelled");
     await expect(store.startRun(PROJECT, owner, { run: held.id, sha })).rejects.toThrow(/is cancelled/u);
   });
 
@@ -493,7 +493,7 @@ describe("a landing held for the owner", () => {
     repos.commit("abc123-main", { files: { ".throng/config.yml": "checks: []\n" } });
     await store.approveMergeRequest(PROJECT, ada, { task: t1.task });
     expect(mr(t1.task).state).toBe("queued");
-    expect(store.scoring.getRun(held.id)?.status).toBe("cancelled");
+    expect(store.runs.getRun(held.id)?.status).toBe("cancelled");
   });
 
   it("lets go of the hold when the owner approves it instead, which trusts it", async () => {
@@ -502,7 +502,7 @@ describe("a landing held for the owner", () => {
     const held = landing();
     await store.approveMergeRequest(PROJECT, owner, { task: t1.task });
     expect(mr(t1.task).state).toBe("queued");
-    expect(store.scoring.getRun(held.id)?.status).toBe("cancelled");
+    expect(store.runs.getRun(held.id)?.status).toBe("cancelled");
     await drain();
     expect(landing()).toMatchObject({ status: "running", trusted: true, user_id: owner.user.id });
   });
@@ -521,7 +521,7 @@ describe("a landing that lands", () => {
     expect(store.getAttempt(PROJECT, owner, t1).state).toBe("merged");
     expect(store.getTask(PROJECT, owner, { task: t1.task }).state).toBe("closed");
     expect(landing()).toMatchObject({ sha: SHA, status: "running" });
-    expect(store.scoring.statusFor("main")).toEqual({ status: "running", sha: SHA });
+    expect(store.runs.statusFor("main")).toEqual({ status: "running", sha: SHA });
     expect(journalKinds().filter((k) => k === "mainAdvanced")).toHaveLength(1);
     // A retried step records nothing again.
     expect(await store.pipelineLanded(run, SHA)).toBeFalsy();
@@ -534,7 +534,7 @@ describe("a landing that lands", () => {
     const run = await land();
     expect(mainRuns().map((r) => r.id)).toEqual([run]);
     expect(landing()).toMatchObject({ status: "done", sha: SHA, outcome: { landed: { sha: SHA } } });
-    const again = store.scoring.request({
+    const again = store.runs.request({
       project: PROJECT.id,
       line: "main",
       sha: SHA,
@@ -705,7 +705,7 @@ describe("cancelling a landing", () => {
     await drain();
 
     expect(mr(t1.task)).toMatchObject({ state: "needsReview", last_dequeue: { reason: "newPush" } });
-    expect(store.scoring.getRun(run.id)?.status).toBe("cancelled");
+    expect(store.runs.getRun(run.id)?.status).toBe("cancelled");
     expect(workflow.terminated).toEqual([run.instance_id]);
     expect(tornDown).toEqual([
       [
@@ -759,7 +759,7 @@ describe("cancelling a landing", () => {
       .then(() => store.cancelRun(PROJECT, owner, { run: run.id }))
       .catch((error: unknown) => error);
     expect((err as ServiceError).code).toBe("invalidState");
-    store.scoring.request({
+    store.runs.request({
       project: PROJECT.id,
       line: "main",
       sha: "f".repeat(40),
@@ -767,7 +767,7 @@ describe("cancelling a landing", () => {
       actor: null,
       pushedBy: { kind: "maintainer" },
     });
-    expect(store.scoring.getRun(run.id)?.status).toBe("running");
+    expect(store.runs.getRun(run.id)?.status).toBe("running");
   });
 });
 
@@ -908,7 +908,7 @@ describe("landings from before landings were runs", () => {
     });
     const old = after.landing();
     await after.store.legacyLandingResumed(1);
-    expect(after.store.scoring.getRun(old.id)?.status).toBe("cancelled");
+    expect(after.store.runs.getRun(old.id)?.status).toBe("cancelled");
     await after.drain();
     expect(after.mr(1).state).toBe("landing");
     expect(after.landing()).toMatchObject({ status: "running", sha: null, trigger: "merge" });

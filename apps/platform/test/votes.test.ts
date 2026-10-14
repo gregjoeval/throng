@@ -78,7 +78,7 @@ async function setup(selection = "selection: { policy: vote }\n") {
     sql,
     repos,
     now: () => new Date((clock += 1000)),
-    scoring: { workflow: new FakeWorkflow(), teardown: async () => {} },
+    runner: { workflow: new FakeWorkflow(), teardown: async () => {} },
     follow: { workflow: follows },
   });
   const journal = () =>
@@ -102,13 +102,13 @@ async function setup(selection = "selection: { policy: vote }\n") {
   const author = (ref: AttemptInput) => at(authors, ref.number - 1);
 
   const score = async (ref: AttemptInput, outcome: ScoringOutcome = done()) => {
-    await store.scoring.drain();
+    await store.runs.drain();
     // A task branch push runs on the task branch's line too, holding a slot until it ends.
-    for (const run of store.scoring.listRuns(`t${ref.task}`).filter((r) => r.status === "running")) {
+    for (const run of store.runs.listRuns(`t${ref.task}`).filter((r) => r.status === "running")) {
       store.scoringFinished(run.id, done());
-      await store.scoring.drain();
+      await store.runs.drain();
     }
-    const run = at(store.scoring.listRuns(`t${ref.task}a${ref.number}`), -1);
+    const run = at(store.runs.listRuns(`t${ref.task}a${ref.number}`), -1);
     store.scoringFinished(run.id, outcome);
   };
   let n = 0;
@@ -456,7 +456,7 @@ describe("candidates", () => {
     store.castVote(PROJECT, dan, t1a2);
     await store.rescore(PROJECT, cat, t1a1);
     await score(t1a1, { status: "errored", error: "sandbox lost" });
-    const errored = at(store.scoring.listRuns("t1a1"), -1).id;
+    const errored = at(store.runs.listRuns("t1a1"), -1).id;
     expect(vote().candidates[0]).toMatchObject({
       attempt: 1,
       votes: 0,
@@ -675,7 +675,7 @@ describe("closing a vote", () => {
     store.castVote(PROJECT, eve, t1a1);
     store.castVote(PROJECT, dan, t1a2);
     push(t1a1);
-    await store.scoring.drain();
+    await store.runs.drain();
     expect(store.getAttempt(PROJECT, owner, t1a1).scoring.status).not.toBe("done");
     expect(vote().candidates[0]).toMatchObject({ withdrawn: true, being_scored: false });
     expect((await store.closeVote(PROJECT, cat, { task: 1 })).vote.winner).toBe(2);

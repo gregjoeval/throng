@@ -40,10 +40,11 @@ import { forkRepo, originRepo } from "./repos.ts";
 import type { Repos } from "./repos.ts";
 import { GATES } from "./results.ts";
 import type { Gate } from "./results.ts";
-import { cancellable, pushBy, runReport, runSettled, SCORING_CAP, ScoringQueue } from "./scoring.ts";
+import { cancellable, PipelineRuns, pushBy, RUN_CAP, runReport, runSettled } from "./scoring.ts";
 import type {
   AttemptScoring,
   LandingRequest,
+  PipelineRunner,
   PlanVerdict,
   PushedBy,
   RunReport,
@@ -51,7 +52,6 @@ import type {
   RunsQuery,
   ScoringOutcome,
   ScoringRequest,
-  ScoringRunner,
   ScoringTrigger,
   StoredRun,
 } from "./scoring.ts";
@@ -501,7 +501,7 @@ export interface TaskStoreDeps {
   repos: Repos;
   now?: () => Date;
   /** Starts and stops pipeline runs, landings included; without one, runs stay queued and nothing lands on its own. */
-  scoring?: ScoringRunner | null | undefined;
+  runner?: PipelineRunner | null | undefined;
   /**
    * Whether the merge queue lands its front merge request on its own, which it does whenever there's
    * a runner; false holds merge requests in the queue, as a test needs to.
@@ -535,8 +535,8 @@ export class TaskStore {
   readonly #now: () => Date;
   /** Attempts being created per task, counted toward the cap while their forks are made. */
   readonly #reserved = new Map<number, number>();
-  /** The project's scoring runs. Its caller runs `scoring.drain()` after every store call. */
-  readonly scoring: ScoringQueue;
+  /** The project's pipeline runs. Its caller runs `runs.drain()` after every store call. */
+  readonly runs: PipelineRuns;
   /** The project's merge requests and merge queue. */
   readonly mergeRequests: MergeRequests;
   /** The project's verdicts. */
@@ -563,8 +563,8 @@ export class TaskStore {
     sql,
     repos,
     now = () => new Date(),
-    scoring = null,
-    lands = scoring !== null,
+    runner = null,
+    lands = runner !== null,
     follow = null,
     keyring = keyringFrom(undefined),
     cacheObjects = null,
@@ -586,11 +586,11 @@ export class TaskStore {
       sql,
       index: this.caches,
       objects: cacheObjects,
-      run: (id) => this.scoring.getRun(id),
+      run: (id) => this.runs.getRun(id),
     });
-    this.scoring = new ScoringQueue({
+    this.runs = new PipelineRuns({
       sql,
-      runner: scoring,
+      runner,
       now,
       reserved: () => this.follows.running(),
       landing: (run) => this.#landingParams(run),
@@ -665,7 +665,7 @@ export class TaskStore {
         listedStates(ATTEMPT_STATES, undefined),
       )
       .map((row) => toAttempt(row));
-    const gates = attempts.map((a) => this.scoring.currentRun(attemptLine(a))?.result?.gate);
+    const gates = attempts.map((a) => this.runs.currentRun(attemptLine(a))?.result?.gate);
     // `passed` is best, then `failed`; GATES lists them in that order.
     return {
       ...task,
@@ -951,24 +951,24 @@ export class TaskStore {
 
   /** The attempt's scoring status, with the run holding its current result. */
   #scoringDetail(attempt: StoredAttempt): AttemptScoringDetail {
-    return { ...attempt.scoring, current: this.scoring.currentRun(attemptLine(attempt)) };
+    return { ...attempt.scoring, current: this.runs.currentRun(attemptLine(attempt)) };
   }
 
   /** The attempt's scoring runs, newest first, superseded and cancelled ones included. */
   listScoringRuns(_project: ProjectContext, _actor: Actor, input: AttemptInput): StoredRun[] {
-    return this.scoring.listRuns(attemptLine(this.#attempt(input))).toReversed();
+    return this.runs.listRuns(attemptLine(this.#attempt(input))).toReversed();
   }
 
   /** One scoring run of the project, by id. */
   getScoringRun(_project: ProjectContext, _actor: Actor, input: { run: number }): StoredRun {
-    const run = this.scoring.getRun(input.run);
+    const run = this.runs.getRun(input.run);
     if (run === null) throw new ServiceError("notFound", `no run ${input.run}`);
     return run;
   }
 
   /** A page of the project's runs on every line, newest first. Anyone signed in may read them. */
   listRuns(_project: ProjectContext, _actor: Actor, input: RunsQuery): RunsPage {
-    return this.scoring.listPage(input);
+    return this.runs.listPage(input);
   }
 
   /**
@@ -996,7 +996,7 @@ export class TaskStore {
       const run = this.getScoringRun(project, actor, input);
       if (!cancellable(run))
         throw new ServiceError("invalidState", `run ${run.id} is ${run.status}; it can't be cancelled`);
-      this.scoring.cancel(run, "cancelled by the owner");
+      this.runs.cancel(run, "cancelled by the owner");
       return this.getScoringRun(project, actor, input);
     });
   }
@@ -1023,7 +1023,7 @@ export class TaskStore {
         const refused = this.#secrets.sealedFor(secrets, run.pipeline);
         if ("error" in refused) throw invalidState(`can't start run ${run.id}: ${step}: ${refused.error}`);
       }
-      const started = this.scoring.start(run, actor);
+      const started = this.runs.start(run, actor);
       const mr = this.#landingMergeRequest(run);
       if (mr !== null) this.mergeRequests.enqueue(actor, mr);
       return started;
@@ -1038,7 +1038,7 @@ export class TaskStore {
     if (head !== sha) throw invalidState(`run ${run.id} waits on ${head ?? "no head"}, not ${sha}`);
     const mr = this.#landingMergeRequest(run);
     if (mr === null) {
-      const now = this.scoring.statusFor(run.line).sha;
+      const now = this.runs.statusFor(run.line).sha;
       if (now !== sha)
         throw invalidState(`${run.line} moved on to ${now ?? "no head"} since run ${run.id} began to wait`);
     } else if (mr.approved_head !== sha || !this.#queueable(mr)) {
@@ -1157,7 +1157,7 @@ export class TaskStore {
     const run = this.getScoringRun(project, actor, input);
     if (!isLogName(input.name)) throw missingLog(input.run, input.name);
     const key = { project: project.id, line: run.line, run: run.id };
-    const landing = this.scoring.legacyLandingId(run.id);
+    const landing = this.runs.legacyLandingId(run.id);
     if (landing !== null && run.merge_attempt !== null && run.merge_head !== null) {
       const legacy = { project: project.id, attempt: run.merge_attempt, head: run.merge_head, landing };
       return [legacyLandingLogKey(legacy, input.name), logKey(key, input.name)];
@@ -1170,7 +1170,7 @@ export class TaskStore {
   draftAttempt(_project: ProjectContext, actor: Actor, input: AttemptInput): StoredAttempt {
     return this.#sql.transaction(() => {
       const drafted = this.#authorMoves(actor, input, ["open"], "draft", "returnedToDraft");
-      this.scoring.cancelLine(attemptLine(drafted), "returned to draft");
+      this.runs.cancelLine(attemptLine(drafted), "returned to draft");
       return drafted;
     });
   }
@@ -1340,7 +1340,7 @@ export class TaskStore {
   /**
    * Journals a `pushed` event for each ref a push through the git proxy updated on an attempt's
    * fork, with the old and new ids so force-pushes show up afterwards, and queues scoring when the
-   * attempt is open and its head moved; the scoring queue skips a head it already covers. The
+   * attempt is open and its head moved; `PipelineRuns` skips a head it already covers. The
    * proxy checked the claim before forwarding the push, and the push has landed, so this checks
    * nothing, and leaves checking whether the new head dropped the task branch to `followIfDropped`.
    * Returns the scoring request, or null when the push asked for none, and the new head.
@@ -1355,7 +1355,7 @@ export class TaskStore {
       if (head === null) return { scoring: null, mergeRequest, head };
       // A draft isn't scored, but its old result no longer describes its head.
       if (current.state !== "open") {
-        this.scoring.moveHead(attemptLine(current), head, pushBy(isMaintainer(project, actor)));
+        this.runs.moveHead(attemptLine(current), head, pushBy(isMaintainer(project, actor)));
         return { scoring: null, mergeRequest, head };
       }
       return {
@@ -1408,7 +1408,7 @@ export class TaskStore {
       this.#sql.exec("UPDATE tasks SET task_head = ? WHERE number = ?", input.head, input.task);
       this.#sql.exec("UPDATE attempts SET contains_task_head = NULL WHERE task = ?", input.task);
       this.#journal(actor, "taskBranchPushed", input.task, null, { head: input.head });
-      this.scoring.request({
+      this.runs.request({
         project: project.id,
         line: taskRef(input.task),
         sha: input.head,
@@ -1475,7 +1475,7 @@ export class TaskStore {
         case "merged":
         case "current": {
           const { head } = outcome;
-          const recorded = this.scoring.statusFor(attemptLine(attempt)).sha;
+          const recorded = this.runs.statusFor(attemptLine(attempt)).sha;
           this.#setFollow(attempt, { needs_update: null });
           if (current.task_head === this.#taskHead(attempt.task))
             this.#setFollow(attempt, { contains_task_head: head });
@@ -1534,12 +1534,12 @@ export class TaskStore {
       taskBranch: taskHead,
     });
     const vote = this.votes.open(attempt.task);
-    const recorded = this.scoring.statusFor(attemptLine(attempt)).sha;
+    const recorded = this.runs.statusFor(attemptLine(attempt)).sha;
     if (vote !== null && recorded !== null) this.votes.repin(vote.id, attempt.number, { from: recorded, to: after });
     this.#setFollow(attempt, { followed_head: after });
     this.#pushedToSource(null, attempt, after);
     if (attempt.state === "open") this.#request(project, null, attempt, after, "push", pushBy(false));
-    else this.scoring.moveHead(attemptLine(attempt), after, pushBy(false));
+    else this.runs.moveHead(attemptLine(attempt), after, pushBy(false));
   }
 
   #setFollow(
@@ -1609,7 +1609,7 @@ export class TaskStore {
   #toCheck(input: AttemptInput, head: string): { taskHead: string; known: string | null } | null {
     const row = this.#attemptRow(input);
     if (row === undefined || !isActive(row.state) || row.needs_update !== null) return null;
-    if (this.scoring.statusFor(attemptLine(row)).sha !== head) return null;
+    if (this.runs.statusFor(attemptLine(row)).sha !== head) return null;
     const taskHead = this.#taskHead(row.task);
     return taskHead === null ? null : { taskHead, known: row.contains_task_head };
   }
@@ -1645,8 +1645,8 @@ export class TaskStore {
         }
         if (this.#landingHolds(attempt)) continue;
         // A `main` run about to start goes before any follow.
-        const main = this.scoring.mainStartable() ? 1 : 0;
-        if (SCORING_CAP - this.scoring.running() - this.follows.running() - main <= 0) break;
+        const main = this.runs.mainStartable() ? 1 : 0;
+        if (RUN_CAP - this.runs.running() - this.follows.running() - main <= 0) break;
         const running = this.follows.start(
           follow.id,
           (id) => `${forkRepo(project, attemptRef(follow.task, follow.attempt))}-follow-${id}`,
@@ -1991,7 +1991,7 @@ export class TaskStore {
 
   /** A dequeue's details, from its landing's run. */
   #dequeueDetails(dequeue: Dequeue): DequeueDetails | null {
-    return dequeueDetails(dequeue, dequeue.run === null ? null : this.scoring.getRun(dequeue.run));
+    return dequeueDetails(dequeue, dequeue.run === null ? null : this.runs.getRun(dequeue.run));
   }
 
   /** The project's merge queue: the landing merge request first, then the queued ones, first in first out. */
@@ -2033,7 +2033,7 @@ export class TaskStore {
 
   /**
    * For a running run's Workflow, before it starts any container: records the containers its plan
-   * may start (`ScoringQueue.planned`), then checks the secrets each of its setups and checks names
+   * may start (`PipelineRuns.planned`), then checks the secrets each of its setups and checks names
    * (`named`) against the settings. A secret with no value or not allowed in the run's pipeline
    * refuses the run, naming the step and the secret. An untrusted run that names any secret waits
    * for the owner instead of starting, and a landing's merge request leaves the queue meanwhile; one
@@ -2041,8 +2041,8 @@ export class TaskStore {
    */
   pipelinePlanned(id: number, containers: readonly string[], named: readonly NamedSecrets[]): PlanVerdict {
     const verdict = this.#sql.transaction((): PlanVerdict => {
-      this.scoring.planned(id, containers);
-      const run = this.scoring.getRun(id);
+      this.runs.planned(id, containers);
+      const run = this.runs.getRun(id);
       if (run === null) throw new Error(`no run ${id}`);
       // A newer head may have cancelled it meanwhile: it starts nothing.
       if (run.status !== "running") return { kind: "refused", error: `run ${id} is ${run.status}, not running` };
@@ -2052,7 +2052,7 @@ export class TaskStore {
       }
       const names = [...new Set(named.flatMap((n) => n.secrets))];
       if (names.length === 0 || run.trusted) return { kind: "start" };
-      if (!this.scoring.wait(run, names)) return { kind: "refused", error: `run ${id} is no longer running` };
+      if (!this.runs.wait(run, names)) return { kind: "refused", error: `run ${id} is no longer running` };
       // A landing no owner approved that names a secret was held for the owner before it joined the
       // queue, unless only its merged tree's config names one: it leaves the queue to wait for the
       // owner there, so it holds up no other landing.
@@ -2071,7 +2071,7 @@ export class TaskStore {
    * pipeline. Throws for a run that isn't trusted or running, which may hold none.
    */
   sealedSecretsFor(id: number, names: readonly string[]): ReturnType<Secrets["sealedFor"]> {
-    const run = this.scoring.getRun(id);
+    const run = this.runs.getRun(id);
     if (run?.status !== "running" || !run.trusted) throw new Error(`run ${id} may hold no secrets`);
     return this.#secrets.sealedFor(names, run.pipeline);
   }
@@ -2353,7 +2353,7 @@ export class TaskStore {
       if (scored.status === "queued" || scored.status === "waiting" || scored.status === "running") {
         return { state: "scoring" };
       }
-      const errored = scored.status === "errored" ? this.scoring.scoredRun(attemptRef(task, attempt)) : null;
+      const errored = scored.status === "errored" ? this.runs.scoredRun(attemptRef(task, attempt)) : null;
       return errored === null ? { state: "withdrawn" } : { state: "errored", run: errored };
     };
   }
@@ -2372,22 +2372,22 @@ export class TaskStore {
     attempt: AttemptInput & Pick<StoredAttempt, "state">,
   ): { sha: string; status: AttemptScoring["status"]; passed: boolean } | null {
     if (attempt.state !== "open") return null;
-    const { sha, status } = this.scoring.statusFor(attemptLine(attempt));
+    const { sha, status } = this.runs.statusFor(attemptLine(attempt));
     if (sha === null) return null;
-    const passed = status === "done" && this.scoring.currentRun(attemptLine(attempt))?.result?.gate === "passed";
+    const passed = status === "done" && this.runs.currentRun(attemptLine(attempt))?.result?.gate === "passed";
     return { sha, status, passed };
   }
 
   /**
-   * Records how a pipeline run ended (see `ScoringQueue.finish`), then checks whether the merge
+   * Records how a pipeline run ended (see `PipelineRuns.finish`), then checks whether the merge
    * request its attempt is the source of can enter the queue. A landing's run that didn't land
    * dequeues its merge request instead. Returns whether the run was recorded.
    */
   pipelineFinished(run: number, report: RunReport, main: MainSecrets = UNKNOWN_MAIN): boolean {
     try {
       return this.#sql.transaction(() => {
-        if (!this.scoring.finish(run, report)) return false;
-        const finished = this.scoring.getRun(run);
+        if (!this.runs.finish(run, report)) return false;
+        const finished = this.runs.getRun(run);
         if (finished?.merge_request != null) {
           this.#landingEnded(finished);
           return true;
@@ -2416,7 +2416,7 @@ export class TaskStore {
    * landed first, so its merge request is merged, and never returns to `pending` to land twice.
    */
   async pipelineReported(run: number, report: RunReport): Promise<boolean> {
-    const current = this.scoring.getRun(run);
+    const current = this.runs.getRun(run);
     const unrecorded = current?.status === "running" && current.land_claimed && current.sha === null;
     if (report.status === "errored" && unrecorded) {
       const sha = await this.landedOnMain(run);
@@ -2509,10 +2509,10 @@ export class TaskStore {
     try {
       this.#sql.transaction(() => this.#drainLandings(project));
       await this.#drainFollows(project);
-      await this.scoring.drain();
+      await this.runs.drain();
       // A landing whose Workflow couldn't be started errored: its merge request leaves the queue, and
       // the next one's landing starts.
-      if (this.#sql.transaction(() => this.#drainLandings(project))) await this.scoring.drain();
+      if (this.#sql.transaction(() => this.#drainLandings(project))) await this.runs.drain();
       await this.#evictCachesSafely(project);
     } finally {
       this.wakeWaiters();
@@ -2535,10 +2535,10 @@ export class TaskStore {
    */
   claimLandingPush(run: number): boolean {
     return this.#sql.transaction(() => {
-      const current = this.scoring.getRun(run);
+      const current = this.runs.getRun(run);
       if (current?.merge_request == null || current.status !== "running") return false;
       if (!this.#landingCurrent(current)) return false;
-      this.scoring.claimLand(run);
+      this.runs.claimLand(run);
       return true;
     });
   }
@@ -2553,13 +2553,13 @@ export class TaskStore {
   async pipelineLanded(run: number, sha: string): Promise<boolean> {
     try {
       const landed = this.#sql.transaction(() => {
-        const current = this.scoring.getRun(run);
+        const current = this.runs.getRun(run);
         if (current?.merge_request == null || current.status !== "running" || !current.land_claimed) return null;
         if (current.sha !== null) return null;
         const mr = this.mergeRequests.get(current.merge_request);
         if (mr?.state !== "landing") return null;
         const { source } = this.#landRows(null, { task: mr.task, sha });
-        this.scoring.landed(current, sha);
+        this.runs.landed(current, sha);
         this.#journal(null, "mainAdvanced", mr.task, mr.attempt, {
           mergeRequest: taskRef(mr.task),
           head: mr.approved_head,
@@ -2583,7 +2583,7 @@ export class TaskStore {
    * so nothing else can have put it there. A failed read throws, so the caller tries again.
    */
   async landedOnMain(run: number): Promise<string | null> {
-    const current = this.scoring.getRun(run);
+    const current = this.runs.getRun(run);
     const mr = current?.merge_request == null ? null : this.mergeRequests.get(current.merge_request);
     if (current === null || mr === null) return null;
     const [tip] = await this.#repos.listCommits(originRepo(current.project), { ref: "main", limit: 1 });
@@ -2605,7 +2605,7 @@ export class TaskStore {
     if (run.status === "done" && run.outcome?.landed === "conflict") reason = "conflict";
     else if (run.status === "done" && run.outcome?.gate !== "passed") reason = "failedChecks";
     const source = this.#attempt(sourceOf(mr));
-    const moved = this.scoring.statusFor(attemptLine(source)).sha !== mr.approved_head;
+    const moved = this.runs.statusFor(attemptLine(source)).sha !== mr.approved_head;
     this.mergeRequests.dequeue(null, mr, { reason, run: run.id }, moved ? "needsReview" : "pending");
   }
 
@@ -2629,7 +2629,7 @@ export class TaskStore {
   /** Whether the merge request's landing has claimed its push to main. */
   #pushing(mr: StoredMergeRequest): boolean {
     if (mr.state !== "landing") return false;
-    const run = this.scoring.latestLanding(mr.id);
+    const run = this.runs.latestLanding(mr.id);
     return run?.status === "running" && run.land_claimed;
   }
 
@@ -2645,15 +2645,15 @@ export class TaskStore {
   #drainLandings(project: string): boolean {
     let changed = this.#releaseHeld();
     if (!this.#lands) return changed;
-    for (const run of this.scoring.liveLandings()) {
+    for (const run of this.runs.liveLandings()) {
       if (run.land_claimed || this.#inQueue(run)) continue;
-      this.scoring.cancel(run, "its merge request left the queue");
+      this.runs.cancel(run, "its merge request left the queue");
       changed = true;
     }
     // A landing the owner started waits in the queue behind the one landing, and holds up none.
-    if (this.scoring.liveLandings().some((run) => run.sha === null && this.#landingCurrent(run))) return changed;
+    if (this.runs.liveLandings().some((run) => run.sha === null && this.#landingCurrent(run))) return changed;
     for (const front of this.mergeRequests.queue()) {
-      const last = front.state === "landing" ? this.scoring.latestLanding(front.id) : null;
+      const last = front.state === "landing" ? this.runs.latestLanding(front.id) : null;
       if (last?.status === "errored") {
         this.#landingEnded(last);
         changed = true;
@@ -2662,8 +2662,8 @@ export class TaskStore {
       // A merge request already landing with no run (one whose Landing Workflow was retired) gets one.
       const mr = front.state === "queued" ? this.mergeRequests.startLanding(null, front) : front;
       // One the owner started is its landing already.
-      if (this.scoring.latestLanding(mr.id)?.status === "queued") return true;
-      this.scoring.requestLanding({
+      if (this.runs.latestLanding(mr.id)?.status === "queued") return true;
+      this.runs.requestLanding({
         ...this.#landingRequest(project, mr),
         trusted: mr.approved_by_owner,
       });
@@ -2699,7 +2699,7 @@ export class TaskStore {
 
   /** For a Landing Workflow's land step, under its old code: `claimLandingPush` for its run. */
   claimLegacyLandingPush(landing: number): boolean {
-    const run = this.scoring.legacyLanding(landing);
+    const run = this.runs.legacyLanding(landing);
     return run !== null && this.claimLandingPush(run.id);
   }
 
@@ -2709,7 +2709,7 @@ export class TaskStore {
    * it was recorded.
    */
   async legacyLandingFinished(landing: number, reported: LegacyLandingOutcome): Promise<boolean> {
-    const run = this.scoring.legacyLanding(landing);
+    const run = this.runs.legacyLanding(landing);
     if (run?.status !== "running") return false;
     // A Workflow started before values were camelCase may still report `failedChecks`.
     const outcome = normaliseLandingOutcome(reported);
@@ -2744,7 +2744,7 @@ export class TaskStore {
    * and its merge request, still landing, gets a new landing's run at the next drain.
    */
   async legacyLandingResumed(landing: number): Promise<void> {
-    const run = this.scoring.legacyLanding(landing);
+    const run = this.runs.legacyLanding(landing);
     if (run?.status !== "running") return;
     const sha = run.land_claimed ? await this.landedOnMain(run.id) : null;
     if (sha !== null) {
@@ -2752,9 +2752,7 @@ export class TaskStore {
       this.pipelineFinished(run.id, { status: "done", outcome: landedOutcome(sha) });
       return;
     }
-    this.#sql.transaction(() =>
-      this.scoring.abandon(run, "its Landing Workflow was retired; the landing starts again"),
-    );
+    this.#sql.transaction(() => this.runs.abandon(run, "its Landing Workflow was retired; the landing starts again"));
   }
 
   // --- internals -------------------------------------------------------------------------------
@@ -2823,10 +2821,10 @@ export class TaskStore {
         // Nothing says what `main` names, or its merged tree's config already said: the hold stands.
         if (held !== null) return mr;
       } else if (main.names.length > 0) {
-        if (held === null) this.scoring.holdLanding({ ...this.#landingRequest(main.project, mr), secrets: main.names });
+        if (held === null) this.runs.holdLanding({ ...this.#landingRequest(main.project, mr), secrets: main.names });
         return mr;
       }
-      if (held !== null) this.scoring.cancel(held, "main names no secret any more");
+      if (held !== null) this.runs.cancel(held, "main names no secret any more");
     }
     return this.mergeRequests.enqueue(actor, mr);
   }
@@ -2840,14 +2838,14 @@ export class TaskStore {
     if (mr.state !== "pending" || this.mergeRequests.held(mr)) return false;
     const source = this.#attempt(sourceOf(mr));
     if (source.state !== "open") return false;
-    const { status, sha } = this.scoring.statusFor(attemptLine(source));
+    const { status, sha } = this.runs.statusFor(attemptLine(source));
     if (sha !== mr.approved_head || status !== "done") return false;
-    return this.scoring.currentRun(attemptLine(source))?.result?.gate === "passed";
+    return this.runs.currentRun(attemptLine(source))?.result?.gate === "passed";
   }
 
   /** The merge request's landing held for the owner at its approved head, if it has one. */
   #heldLanding(mr: StoredMergeRequest): StoredRun | null {
-    const run = this.scoring.latestLanding(mr.id);
+    const run = this.runs.latestLanding(mr.id);
     return run?.status === "waiting" && run.merge_head === mr.approved_head ? run : null;
   }
 
@@ -2858,12 +2856,12 @@ export class TaskStore {
    */
   #releaseHeld(): boolean {
     let changed = false;
-    for (const run of this.scoring.heldLandings()) {
+    for (const run of this.runs.heldLandings()) {
       const mr = this.#landingMergeRequest(run);
       const current =
         mr !== null && this.#queueable(mr) && !mr.approved_by_owner && mr.approved_head === run.merge_head;
       if (current) continue;
-      this.scoring.cancel(run, "its merge request moved on");
+      this.runs.cancel(run, "its merge request moved on");
       changed = true;
     }
     return changed;
@@ -2919,7 +2917,7 @@ export class TaskStore {
    * `main`. An attempt with no commits has none to approve.
    */
   async #currentHead(project: ProjectContext, attempt: StoredAttempt): Promise<string> {
-    const known = this.scoring.statusFor(attemptLine(attempt)).sha;
+    const known = this.runs.statusFor(attemptLine(attempt)).sha;
     if (known !== null) return known;
     const [commit] = await this.#repos.listCommits(forkRepo(project.id, attempt.fork), { ref: "main", limit: 1 });
     if (commit === undefined) throw invalidState(`${attempt.fork} has no head to approve; push a commit first`);
@@ -2940,7 +2938,7 @@ export class TaskStore {
       attempt.number,
     );
     this.#journal(actor, "merged", attempt.task, attempt.number, { sha });
-    this.scoring.cancelLine(attemptLine(attempt), "attempt merged");
+    this.runs.cancelLine(attemptLine(attempt), "attempt merged");
     this.#endTask(actor, attempt.task, "closed");
   }
 
@@ -2957,7 +2955,7 @@ export class TaskStore {
 
   #toAttempt(row: AttemptRow): StoredAttempt {
     const mr = this.mergeRequests.forAttempt(row.task, row.number);
-    const scoring = this.scoring.statusFor(attemptLine(row));
+    const scoring = this.runs.statusFor(attemptLine(row));
     return {
       ...toAttempt(row),
       scoring,
@@ -2975,7 +2973,7 @@ export class TaskStore {
     const mr = this.mergeRequests.forAttempt(input.task, input.number);
     return {
       state,
-      scoredRun: this.scoring.settledRun(attemptLine(input)),
+      scoredRun: this.runs.settledRun(attemptLine(input)),
       mergeRequest: mr === null ? null : { id: mr.id, state: mr.state, dequeuedAt: mr.last_dequeue?.at ?? null },
     };
   }
@@ -3026,7 +3024,7 @@ export class TaskStore {
     attempt: StoredAttempt,
     trigger: ScoringTrigger,
   ): Promise<ScoringRequest | null> {
-    const readSince = this.scoring.latestRunId(attemptLine(attempt));
+    const readSince = this.runs.latestRunId(attemptLine(attempt));
     let head: string | null;
     try {
       const [commit] = await this.#repos.listCommits(forkRepo(project.id, attempt.fork), { ref: "main", limit: 1 });
@@ -3050,7 +3048,7 @@ export class TaskStore {
     pushedBy: PushedBy,
     readSince?: number,
   ): ScoringRequest {
-    return this.scoring.request({
+    return this.runs.request({
       project: project.id,
       line: attemptLine(attempt),
       sha,
@@ -3117,7 +3115,7 @@ export class TaskStore {
       current.number,
     );
     this.#journal(actor, to === "closed" ? "closed" : "madeObsolete", current.task, current.number);
-    this.scoring.cancelLine(attemptLine(current), `attempt ${to}`);
+    this.runs.cancelLine(attemptLine(current), `attempt ${to}`);
     const mr = this.mergeRequests.open(current.task);
     if (mr !== null && mr.attempt === current.number) this.#cancel(actor, mr);
   }

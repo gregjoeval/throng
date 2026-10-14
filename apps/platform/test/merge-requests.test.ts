@@ -59,7 +59,7 @@ async function setup() {
     sql,
     repos,
     now: () => new Date((clock += 1000)),
-    scoring: { workflow: new FakeWorkflow(), teardown: async () => {} },
+    runner: { workflow: new FakeWorkflow(), teardown: async () => {} },
   });
   const journal = () =>
     (sql.db.prepare("SELECT kind, detail FROM journal ORDER BY id").all() as { kind: string; detail: string }[]).map(
@@ -80,8 +80,8 @@ async function setup() {
   const open = async (ref: AttemptInput) => store.openAttempt(PROJECT, author(ref), ref);
   /** Finishes the attempt's latest run with `outcome`, starting it first. */
   const score = async (ref: AttemptInput, outcome: ScoringOutcome = done()) => {
-    await store.scoring.drain();
-    const run = at(store.scoring.listRuns(`t${ref.task}a${ref.number}`), -1);
+    await store.runs.drain();
+    const run = at(store.runs.listRuns(`t${ref.task}a${ref.number}`), -1);
     store.scoringFinished(run.id, outcome);
   };
   let n = 0;

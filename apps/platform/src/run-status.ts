@@ -1,4 +1,4 @@
-// A pipeline run's statuses, and which of them it rests in. Kept apart from the scoring queue so
+// A pipeline run's statuses, and which of them it rests in. Kept apart from `PipelineRuns` so
 // throng-web can read them without importing it.
 
 /** A run is `waiting` while it needs the owner to start it, and holds no slot meanwhile. */

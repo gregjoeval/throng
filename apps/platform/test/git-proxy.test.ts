@@ -11,7 +11,7 @@ import { gitRoutes, UPSTREAM_TOKEN_TTL_SECONDS } from "../src/git-proxy.ts";
 import { projectService } from "../src/projects.ts";
 import { forkRepo, originRepo } from "../src/repos.ts";
 import type { ScoringResult } from "../src/results.ts";
-import type { ScoringRunner } from "../src/scoring.ts";
+import type { PipelineRunner } from "../src/scoring.ts";
 import type { ProjectContext } from "../src/task-store.ts";
 import { mintToken } from "../src/tokens.ts";
 import type { Actor } from "../src/tokens.ts";
@@ -40,7 +40,7 @@ async function setup() {
 
   const db = testDatabase();
   // Runs start but never finish on their own: a test finishes one with `scoringFinished`.
-  const scoring: ScoringRunner = {
+  const scoring: PipelineRunner = {
     workflow: { create: async () => ({}), get: async () => ({ terminate: async () => {} }) },
     teardown: async () => {},
   };
@@ -178,7 +178,7 @@ describe("git proxy", () => {
     expect(pushed.stderr).toMatch(/HEAD -> main/u);
     expect(
       store(project.id)
-        .scoring.listRuns("t1a1")
+        .runs.listRuns("t1a1")
         .map((r) => [r.trigger, r.sha, r.status]),
     ).toEqual([
       ["open", expect.any(String), "cancelled"],
@@ -357,8 +357,8 @@ describe("merge request notices on a push to the source attempt", () => {
     const ref = { task: 1, number: 1 };
     await store(project.id).openAttempt(project, ada.actor, ref);
     await store(project.id).selectAttempt(project, ada.actor, ref);
-    await store(project.id).scoring.drain();
-    const run = at(store(project.id).scoring.listRuns("t1a1"), -1);
+    await store(project.id).runs.drain();
+    const run = at(store(project.id).runs.listRuns("t1a1"), -1);
     store(project.id).scoringFinished(run.id, { status: "done", result: passed });
     expect(store(project.id).getMergeRequest(project, ada.actor, { task: 1 }).state).toBe("queued");
     const dir = await clone("throng/t1a1.git", ada.token);

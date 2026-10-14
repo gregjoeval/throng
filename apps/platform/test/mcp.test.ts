@@ -451,10 +451,10 @@ describe("/mcp", () => {
       await call(ada, "update_attempt", { project, attempt: `t1a${number}`, state: "open" });
     }
     const tasks = store(projectId);
-    await tasks.scoring.drain();
+    await tasks.runs.drain();
     /** Finishes the attempt's latest run with `gate`. */
     const finish = (number: number, gate: "passed" | "failed") => {
-      const run = tasks.scoring.listRuns(`t${1}a${number}`).at(-1)?.id ?? 0;
+      const run = tasks.runs.listRuns(`t${1}a${number}`).at(-1)?.id ?? 0;
       tasks.scoringFinished(run, { status: "done", result: { ...PASSED, gate } });
     };
     finish(1, "passed");
@@ -466,7 +466,7 @@ describe("/mcp", () => {
     expect((await call(ada, "cast_vote", { project, task: "t1", attempt: "t1a1" })).summary).toMatch(/^forbidden: /u);
 
     await pushTo(2, "ada@example.com");
-    await tasks.scoring.drain();
+    await tasks.runs.drain();
     finish(2, "passed");
     const added = await call(greg, "add_vote_candidate", { project, task: "t1", attempt: "t1a2" });
     expect(added.summary).toBe("t1's vote is open: t1a1 0, t1a2 0");
@@ -490,8 +490,8 @@ describe("/mcp", () => {
     const tasks = store(projectId);
     /** Ends t1a1's latest run with `outcome`; returns its id. */
     const finish = async (outcome: ScoringOutcome) => {
-      await tasks.scoring.drain();
-      const run = tasks.scoring.listRuns("t1a1").at(-1)?.id ?? 0;
+      await tasks.runs.drain();
+      const run = tasks.runs.listRuns("t1a1").at(-1)?.id ?? 0;
       tasks.scoringFinished(run, outcome);
       return run;
     };
@@ -519,8 +519,8 @@ describe("/mcp", () => {
     await pushTo(1, "bob@example.com");
     await call(bob, "update_attempt", { project, attempt: "t1a1", state: "open" });
     const tasks = store(projectId);
-    await tasks.scoring.drain();
-    const run = tasks.scoring.listRuns("t1a1").at(-1)?.id ?? 0;
+    await tasks.runs.drain();
+    const run = tasks.runs.listRuns("t1a1").at(-1)?.id ?? 0;
     tasks.scoringFinished(run, { status: "done", result: PASSED });
     await call(greg, "open_vote", { project, task: "t1" });
 
@@ -625,7 +625,7 @@ describe("/mcp", () => {
     await call(ada, "start_attempts", { project, task: "t1", count: 2 });
     const first = (await call(ada, "score_now", { project, attempt: "t1a1" })).data["run"]["id"] as number;
     const second = (await call(ada, "score_now", { project, attempt: "t1a2" })).data["run"]["id"] as number;
-    await store(projectId).scoring.drain();
+    await store(projectId).runs.drain();
     store(projectId).scoringFinished(first, { status: "done", result: { ...PASSED, logs: ["setup.1"] } });
 
     const all = await call(ada, "list_runs", { project });
@@ -654,7 +654,7 @@ describe("/mcp", () => {
     const { ada, project, projectId, store, sql } = await withProject();
     await call(ada, "start_attempts", { project, task: "t1", count: 2 });
     const run = (await call(ada, "score_now", { project, attempt: "t1a1" })).data["run"]["id"] as number;
-    await store(projectId).scoring.drain();
+    await store(projectId).runs.drain();
 
     const waiting = call(ada, "wait_for_run", { project, run, wait: 5 });
     await new Promise((r) => setTimeout(r, 20));

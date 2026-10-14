@@ -66,7 +66,7 @@ async function setup({ landing = true } = {}) {
     sql,
     repos,
     now: () => new Date((clock += 1000)),
-    scoring: { workflow: scoringWorkflow, teardown: async () => {} },
+    runner: { workflow: scoringWorkflow, teardown: async () => {} },
     lands: landing,
     follow: { workflow: followWorkflow },
   });
@@ -126,12 +126,12 @@ async function setup({ landing = true } = {}) {
     return { kind: "merged" as const, before, head: sha.hash };
   };
   const scoreLatest = (ref: AttemptInput) => {
-    const run = at(store.scoring.listRuns(`t${ref.task}a${ref.number}`), -1);
+    const run = at(store.runs.listRuns(`t${ref.task}a${ref.number}`), -1);
     expect(store.scoringFinished(run.id, { status: "done", result: passed })).toBeTruthy();
   };
   const mr = () => store.getMergeRequest(PROJECT, owner, { task: 1 });
   /** The merge request's landing: the latest `main` run. */
-  const landingRun = () => at(store.scoring.listRuns("main"), -1).id;
+  const landingRun = () => at(store.runs.listRuns("main"), -1).id;
 
   return {
     repos,
@@ -205,7 +205,7 @@ describe("the Sandbox cap", () => {
     await store.createAttempts(PROJECT, bob, { task: 1, count: 2 });
     await drain();
     // t1a1's first run holds one of the three slots.
-    expect(store.scoring.running()).toBe(1);
+    expect(store.runs.running()).toBe(1);
     moveTaskBranch();
     await drain();
     expect(followWorkflow.created.map((c) => c.params.attempt)).toEqual([1, 2]);
@@ -218,7 +218,7 @@ describe("the Sandbox cap", () => {
     const { store, drain, t1a1, moveTaskBranch, scoreLatest, followWorkflow } = await setup();
     await store.createAttempts(PROJECT, bob, { task: 1, count: 2 });
     await drain();
-    store.scoring.request({
+    store.runs.request({
       project: PROJECT.id,
       line: "main",
       sha: "1".repeat(40),
@@ -229,14 +229,14 @@ describe("the Sandbox cap", () => {
     moveTaskBranch();
     await drain();
     // t1a1's run and `main`'s hold two slots; one follow takes the third, and the task branch waits.
-    expect(store.scoring.listRuns("main").map((r) => r.status)).toEqual(["running"]);
+    expect(store.runs.listRuns("main").map((r) => r.status)).toEqual(["running"]);
     expect(followWorkflow.created.map((c) => c.params.attempt)).toEqual([1]);
-    expect(store.scoring.listRuns("t1").map((r) => r.status)).toEqual(["queued"]);
+    expect(store.runs.listRuns("t1").map((r) => r.status)).toEqual(["queued"]);
 
     scoreLatest(t1a1);
     await drain();
     expect(followWorkflow.created.map((c) => c.params.attempt)).toEqual([1, 2]);
-    expect(store.scoring.listRuns("t1").map((r) => r.status)).toEqual(["queued"]);
+    expect(store.runs.listRuns("t1").map((r) => r.status)).toEqual(["queued"]);
   });
 });
 
@@ -250,7 +250,7 @@ describe("a clean update", () => {
 
     const open = attempt(t1a1);
     expect(open).toMatchObject({ needs_update: false, scoring: { status: "running" } });
-    expect(at(store.scoring.listRuns("t1a1"), -1)).toMatchObject({ sha: open.scoring.sha });
+    expect(at(store.runs.listRuns("t1a1"), -1)).toMatchObject({ sha: open.scoring.sha });
     expect(attempt(t1a2)).toMatchObject({ needs_update: false, scoring: { status: "none", sha: head } });
     expect(journal().filter((e) => e.kind === "pushed" && e.attempt === 1)).toEqual([
       {
@@ -408,7 +408,7 @@ describe("an author's push that drops the task branch", () => {
 async function selected({ passed: pass = false, landing = true } = {}) {
   const s = await setup({ landing });
   if (pass) {
-    await s.store.scoring.drain();
+    await s.store.runs.drain();
     s.scoreLatest(s.t1a1);
   }
   await s.store.selectAttempt(PROJECT, cat, s.t1a1);

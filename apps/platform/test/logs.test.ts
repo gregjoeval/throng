@@ -11,7 +11,6 @@ import {
   logNames,
   MAX_LOG_BYTES,
   MISSING_LOG_EXIT,
-  PREVIEW_LOG,
   readLogScript,
   setupLogName,
   withNotes,
@@ -24,7 +23,6 @@ describe("logKey", () => {
     const run = { project: "p123", line: "t42a3", run: 7 };
     expect(logKey(run, "test")).toBe("logs/p123/t42a3/7/test.log");
     expect(logKey(run, setupLogName(2))).toBe("logs/p123/t42a3/7/setup.2.log");
-    expect(logKey(run, PREVIEW_LOG)).toBe("logs/p123/t42a3/7/preview.deploy.log");
   });
 });
 
@@ -48,8 +46,8 @@ describe("log names", () => {
     expect(logNames(plan)).toEqual(["setup.1", "setup.2", "test", "setup-1"]);
   });
 
-  it("can't collide: setup and preview logs use a dot, which check names can't", () => {
-    for (const name of [setupLogName(1), PREVIEW_LOG, "test", "bundle_kb", "a-b"]) expect(isLogName(name)).toBeTruthy();
+  it("can't collide: setup logs use a dot, which check names can't", () => {
+    for (const name of [setupLogName(1), "test", "bundle_kb", "a-b"]) expect(isLogName(name)).toBeTruthy();
     for (const name of ["", "../x", "a/b", ".hidden", "Test", "a b"]) expect(isLogName(name)).toBeFalsy();
   });
 });

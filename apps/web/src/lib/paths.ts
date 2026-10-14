@@ -25,6 +25,7 @@ export function projectRefOf({ owner, project }: InProject): InProject {
 export type ProjectLocation =
   | (InProject & { view: "home" })
   | (InProject & { view: "tasks" })
+  | (InProject & { view: "settings" })
   | (InProject & { view: "task"; task: string })
   | (InProject & { view: "tree" | "blob" | "raw"; ref: string; path: string; attempt?: string })
   | (InProject & { view: "commits"; ref: string; attempt?: string; offset?: number })
@@ -50,6 +51,9 @@ export function buildPath(location: ProjectLocation): string {
     }
     case "tasks": {
       return `${base}/tasks`;
+    }
+    case "settings": {
+      return `${base}/settings`;
     }
     case "task": {
       return `${base}/tasks/${segment(location.task)}`;
@@ -93,7 +97,7 @@ export function parsePath(href: string): ProjectLocation | null {
   const attempt = url.searchParams.get("attempt");
   const hint = attemptHint(attempt ?? undefined);
   if (view === undefined) return { owner, project, view: "home" };
-  if (view === "tasks" && ref === undefined) return { owner, project, view };
+  if ((view === "tasks" || view === "settings") && ref === undefined) return { owner, project, view };
   if (!ref) return null;
   if (view === "tasks" && rest.length === 0) return { owner, project, view: "task", task: ref };
   if (view === "commit" && rest.length === 0) return { owner, project, view, sha: ref, ...hint };

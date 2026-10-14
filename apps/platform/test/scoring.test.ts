@@ -525,7 +525,6 @@ describe("results", () => {
       { name: "_diff", source: "platform", outcome: "passed", durationMs: 2, notes: [] },
       { name: "test", source: "project", outcome: "passed", durationMs: 9, notes: [] },
       { name: "lint", source: "project", outcome: "failed", durationMs: 1, notes: [] },
-      { name: "_preview", source: "platform", outcome: "skipped", durationMs: 0, notes: [] },
     ];
     expect(store.scoring.finish(at(runs(ref), 0).id, done({ config: { kind: "valid" }, checks }))).toBeTruthy();
 
@@ -541,7 +540,7 @@ describe("results", () => {
     expect(migratedRun(older).result).toEqual(result({ logs: [] }));
   });
 
-  it("reads a result stored with builtin and preview in the current shape", () => {
+  it("reads a result stored with builtin and preview in the current shape, without the preview", () => {
     const legacy: LegacyResult = {
       base: null,
       config: { kind: "valid" },
@@ -557,13 +556,12 @@ describe("results", () => {
     expect(read?.checks.map((c) => [c.name, c.source, c.outcome])).toEqual([
       ["_diff", "platform", "passed"],
       ["test", "project", "passed"],
-      ["_preview", "platform", "passed"],
     ]);
     expect(read?.metrics).toMatchObject({
       "_diff.filesChanged": { value: 2 },
       coverage: { source: "project", type: "number", value: 80 },
-      "_preview.url": { value: "https://x.workers.dev" },
     });
+    expect(Object.keys(read?.metrics ?? {})).not.toContain("_preview.url");
     expect(read).not.toHaveProperty("builtin");
     expect(read).not.toHaveProperty("preview");
   });
@@ -724,11 +722,7 @@ describe("line-keyed runs", () => {
       },
       { id: 7, line: "t1a2", pipeline: "default", sha: "b", status: "running", superseded: false },
     ]);
-    expect(at(store.scoring.listRuns("t1a2"), 0).outcome?.steps.map((s) => s.name)).toEqual([
-      "_diff",
-      "test",
-      "_preview",
-    ]);
+    expect(at(store.scoring.listRuns("t1a2"), 0).outcome?.steps.map((s) => s.name)).toEqual(["_diff", "test"]);
     expect(store.scoring.statusFor("t1a2")).toEqual({ status: "running", sha: "b" });
     const next = store.scoring.request({ project: PROJECT.id, line: "t1a2", sha: "c", trigger: "push", actor: ada });
     expect(next.run.id).toBe(8);
@@ -746,13 +740,13 @@ describe("line-keyed runs", () => {
       checks: [
         { name: "_diff", source: "platform", outcome: "passed", durationMs: 2, notes: [] },
         { name: "test", source: "project", outcome: "timed_out", durationMs: 9, notes: [] },
-        { name: "_preview", source: "platform", outcome: "skipped", durationMs: 0, notes: ["the gate failed"] },
+        { name: "_preview", source: "platform", outcome: "failed", durationMs: 4, notes: ["its deploy step failed"] },
       ],
       metrics: {
         _diff: { source: "platform", type: "enum", value: "passed", values: ["passed"] },
         test: { source: "project", type: "enum", value: "timedOut", values: ["passed", "timedOut"] },
       },
-      logs: ["setup.1", "test"],
+      logs: ["setup.1", "test", "preview.deploy"],
     };
     const run = migratedRun(stored);
 
@@ -766,17 +760,18 @@ describe("line-keyed runs", () => {
         name: "_preview",
         kind: "check",
         source: "platform",
-        outcome: "skipped",
-        notes: ["the gate failed"],
-        log: null,
+        outcome: "failed",
+        durationMs: 4,
+        notes: ["its deploy step failed"],
+        log: "preview.deploy",
       },
     ]);
     expect(run.result?.checks.map((c) => [c.name, c.outcome])).toEqual([
       ["_diff", "passed"],
       ["test", "timedOut"],
-      ["_preview", "skipped"],
+      ["_preview", "failed"],
     ]);
-    expect(run.result?.logs).toEqual(["setup.1", "test"]);
+    expect(run.result?.logs).toEqual(["setup.1", "test", "preview.deploy"]);
   });
 
   it("stores a run's outcome as steps, with the setup that failed", async () => {

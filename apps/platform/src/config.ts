@@ -1,4 +1,4 @@
-// A project's `.throng/config.yml`: its setup, checks, metrics, preview, attempt cap and Sandbox size. `parseConfig`
+// A project's `.throng/config.yml`: its setup, checks, metrics, attempt cap and Sandbox size. `parseConfig`
 // is pure, so the API's validate endpoint, the attempt cap and scoring all read a config the same
 // way. `loadConfig` always reads it from the origin's `main`, so an attempt can't change its own
 // checks.
@@ -96,13 +96,11 @@ export interface Config {
   checks: CheckConfig[];
   /** Read from the checks' output files, in order. */
   metrics: MetricConfig[];
-  /** Null when the project doesn't deploy previews; `command` is null when it needs no build. */
-  preview: { command: string | null } | null;
   /** Null to use the default cap on active attempts per task. */
   attempts: { limit: number | null };
   /** Who makes each task's selection, unless a task overrides it. */
   selection: SelectionPolicy;
-  /** The size of the containers that run the repository's code: `score`, `check` and `preview`. */
+  /** The size of the containers that run the repository's code: `score` and `check`. */
   sandbox: { size: SandboxSize };
 }
 
@@ -344,7 +342,11 @@ const ConfigSchema = z
         .optional(),
       checks: z.array(CheckSchema, { error: "checks must be a list" }).optional(),
       metrics: z.array(MetricSchema, { error: "metrics must be a list" }).optional(),
-      preview: z.strictObject({ command: command.optional() }, { error: "preview must be a mapping" }).optional(),
+      preview: z
+        .never({
+          error: "previews are now a check: move it under `checks`, with `after` naming the checks it waits for",
+        })
+        .optional(),
       attempts: z
         .strictObject({
           limit: z
@@ -403,7 +405,6 @@ export function parseConfig(text: string | null): ConfigResult {
       network: { allow: config.network?.allow ?? [] },
       checks: (config.checks ?? []).map((check) => checkConfig(check, "project")),
       metrics: (config.metrics ?? []).map((metric) => metricConfig(metric, "project")),
-      preview: config.preview === undefined ? null : { command: config.preview.command ?? null },
       attempts: { limit: config.attempts?.limit ?? null },
       selection: config.selection ?? CREATOR_SELECTS,
       sandbox: { size: config.sandbox?.size ?? DEFAULT_SANDBOX_SIZE },

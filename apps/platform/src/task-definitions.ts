@@ -89,7 +89,6 @@ export function withTask(project: ConfigResult, task: TaskDefinitions): ConfigRe
     network: { allow: [] },
     checks: [],
     metrics: [],
-    preview: null,
     attempts: { limit: null },
     selection: CREATOR_SELECTS,
     sandbox: { size: DEFAULT_SANDBOX_SIZE },

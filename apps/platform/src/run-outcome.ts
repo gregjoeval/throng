@@ -3,8 +3,7 @@
 // lanes, the arena and votes have always read.
 
 import type { Source } from "./config.ts";
-import { PREVIEW_LOG } from "./logs.ts";
-import { DIFF_CHECK, PREVIEW_CHECK } from "./results.ts";
+import { DIFF_CHECK } from "./results.ts";
 import type { CheckOutcome, ScoringResult } from "./results.ts";
 
 export const STEP_KINDS = ["setup", "check", "step"] as const;
@@ -30,7 +29,7 @@ export interface RunStep {
 }
 
 export interface RunOutcome extends Pick<ScoringResult, "base" | "config" | "gate" | "metrics"> {
-  /** Every step in run order: `_diff`, the setups, the checks, then `_preview`. */
+  /** Every step in run order: `_diff`, the setups, then the checks. */
   steps: RunStep[];
 }
 
@@ -48,9 +47,12 @@ const STEP_OUTCOME: Record<CheckOutcome, StepOutcome> = {
 
 const SETUP_LOG = /^setup\.\d+$/u;
 
-/** The log a check stores: its own name, except the Preview's. */
+/** The check results kept for a Preview before previews became a check, and the log it stored. */
+const LEGACY_PREVIEW = { check: "_preview", log: "preview.deploy" };
+
+/** The log a check stores: its own name, except a legacy Preview's. */
 function checkLog(check: string): string {
-  return check === PREVIEW_CHECK ? PREVIEW_LOG : check;
+  return check === LEGACY_PREVIEW.check ? LEGACY_PREVIEW.log : check;
 }
 
 /**

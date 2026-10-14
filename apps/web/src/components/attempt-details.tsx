@@ -1,5 +1,5 @@
 // An attempt's details, in a side sheet opened from its lane's menu: its checks and their logs, its
-// metrics, its preview and run history, and its verdicts with the form to post one.
+// metrics and run history, and its verdicts with the form to post one.
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
@@ -21,7 +21,7 @@ import {
   verdictsQuery,
 } from "@/lib/api";
 import type { ProjectRef, RunDetail, Verdict } from "@/lib/api";
-import { metricColumns, previewUrl, taskOf } from "@/lib/arena";
+import { metricColumns, taskOf } from "@/lib/arena";
 import type { ArenaAttempt } from "@/lib/arena";
 import { shortSha } from "@/lib/commits";
 import { apiError } from "@/lib/errors";
@@ -124,19 +124,13 @@ function LogText({ name, text, streaming }: { name: string; text: string; stream
   );
 }
 
-/** Every metric the config declares and the built-in measures, with units, then the preview link. */
+/** Every metric the config declares and the built-in measures, with units; a `url` metric as a link. */
 function Metrics({ projectRef, attempt }: InProject & { attempt: ArenaAttempt }) {
   // The task's arena is already loaded (and polled) by the page this sheet opens from.
   const arena = useQuery(taskArenaQuery(projectRef, taskOf(attempt)));
-  const preview = previewUrl(attempt.result);
   return (
     <DetailsSection title="Metrics">
       <MetricValues attempt={attempt} columns={metricColumns(arena.data?.metrics ?? [])} />
-      {preview === null ? null : (
-        <a href={preview} target="_blank" rel="noreferrer" className="text-sm underline underline-offset-3">
-          Open preview
-        </a>
-      )}
     </DetailsSection>
   );
 }

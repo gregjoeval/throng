@@ -7,7 +7,6 @@ import { userForEmail } from "../src/users.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
 import type { Json } from "./support/json.ts";
-import { FakePreviewWorkers } from "./support/preview-workers.ts";
 
 const verify: AccessVerifier = async (token) => (token === "valid" ? { email: "greg@example.com" } : null);
 
@@ -28,7 +27,6 @@ function setup() {
     verifierFor: () => verify,
     now: () => clock,
     repos: () => repos,
-    previewWorkers: () => new FakePreviewWorkers(),
   });
   const env = { DB: testDatabase(), ACCESS_TEAM_DOMAIN: "throng.cloudflareaccess.com", ACCESS_AUD: "aud" };
 

@@ -121,13 +121,19 @@ describe("an attempt's details", () => {
     expect(within(sheet).getByRole("log", { name: "lint" })).toHaveTextContent("tail of it");
   });
 
-  it("shows its metrics with their units, its preview, and its run history with superseded runs dimmed", async () => {
+  it("shows its metrics with their units, its url metrics as links, and its run history with superseded runs dimmed", async () => {
     const head = scored({
-      result: result({ metrics: scoredMetrics({ values: { coverage: 81.5 }, preview: "https://t1a1.preview.test" }) }),
+      result: result({
+        metrics: scoredMetrics({
+          values: { coverage: 81.5 },
+          urls: { preview_url: "https://t1a1.preview.test/" },
+        }),
+      }),
     });
     const { sheet } = await openDetails([head, arenaAttempt(1, 2)], {
       metrics: [
         { name: "coverage", from: "test.coverage.pct", type: "number", unit: "%", order: "desc", source: "project" },
+        { name: "preview_url", from: "preview.out.url", type: "string", format: "url", source: "project" },
       ],
       runs: [
         run(9, String(head.sha), { trigger: "rescore", status: "running", finishedAt: null, result: null }),
@@ -138,10 +144,11 @@ describe("an attempt's details", () => {
     const section = within(sheet).getByRole("region", { name: "Metrics" });
     expect(section).toHaveTextContent("coverage81.5%");
     expect(section).toHaveTextContent("Files changed1");
-    expect(within(sheet).getByRole("link", { name: "Open preview" })).toHaveAttribute(
+    expect(within(section).getByRole("link", { name: "https://t1a1.preview.test/" })).toHaveAttribute(
       "href",
-      "https://t1a1.preview.test",
+      "https://t1a1.preview.test/",
     );
+    expect(within(sheet).queryByRole("link", { name: "Open preview" })).toBeNull();
     const runs = await within(sheet).findByRole("list", { name: "Runs" });
     const items = within(runs).getAllByRole("listitem");
     expect(items.map((item) => item.getAttribute("aria-label"))).toEqual(["Run 9", "Run 8", "Run 5"]);

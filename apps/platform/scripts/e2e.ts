@@ -22,11 +22,11 @@
 // files, and selecting one there lands its merge request and closes the task.
 //
 // Scoring scenarios, through the e2e routes (`/e2e/*`): metrics (a check writes two JSON files into $THRONG_OUTPUT and exits 0; metrics are read from both), taskmetrics (a task adds a metric over a project check, scored with source task; a clash main later adds makes the next run invalid; through `/api`), taskchecks (a task adds a metric over a project check and a check of its own; the gate follows the task check; making the check only report rescores the open attempts; through `/api`), failing (a failing check fails the gate, whatever the others do),
-// invalid (an invalid config fails the gate with a config entry), preview (a passing gate deploys a
-// Worker Preview built with `preview.command` under the project's own Worker, and its URL serves it; the
-// build's DELETE on its own Worker is refused), coalesce (two quick pushes; the first
-// run is cancelled and only the newest sha is scored), intrusion (an attempt's checks try to push to
-// the origin and call the Cloudflare API; both fail), deps (setup installs an npm dependency from the
+// invalid (an invalid config fails the gate with a config entry), preview (a check writes a fake
+// preview URL to $THRONG_OUTPUT and a `url` metric reads it; nothing deploys), coalesce (two quick
+// pushes; the first run is cancelled and only the newest sha is scored), intrusion (an attempt's checks
+// try to push to the origin and call the Cloudflare API, which `network.allow` doesn't list; both
+// fail), deps (setup installs an npm dependency from the
 // registry), refs (attempt archive refs: pushable, listed, kept across pushes to main, and copied by
 // the Worker).
 //
@@ -37,7 +37,7 @@
 //
 // Every project id starts with E2E_PROJECT_PREFIX (default `e2e`; lowercase alphanumeric, starting
 // with `e2e`, which the Worker's e2e routes insist on). Each scenario deletes what its projects made
-// (D1 rows, Durable Object storage, logs, repos and preview Workers), and the run revokes its tokens when it ends.
+// (D1 rows, Durable Object storage, logs and repos), and the run revokes its tokens when it ends.
 // `pnpm e2e cleanup` deletes every project under an explicitly set E2E_PROJECT_PREFIX, including those
 // a failed or cancelled run left behind.
 
@@ -51,7 +51,6 @@ import { ARCHIVE_REF_PREFIX, archiveRef } from "../src/archive.ts";
 import { DEFAULT_SANDBOX_SIZE } from "../src/config.ts";
 import { sandboxNote } from "../src/logs.ts";
 import { CLONE_RECIPE } from "../src/mcp.ts";
-import { previewName, previewWorkerName } from "../src/preview.ts";
 import { originRepo } from "../src/repos.ts";
 import { openBrowser } from "./e2e-browser.ts";
 import type { BrowserSession } from "./e2e-browser.ts";
@@ -63,7 +62,6 @@ import { connectionErrorCode, isIdempotent, withRetry } from "./e2e-retry.ts";
 
 const run = promisify(execFile);
 const FIXTURE = new URL("../fixtures/fixture-worker/", import.meta.url).pathname;
-const WRANGLER_CONFIG = new URL("../wrangler.jsonc", import.meta.url).pathname;
 const POLL_MS = 1000;
 /** The fixture's own tests, as a check. */
 const TEST_CHECK = `checks:
@@ -117,7 +115,7 @@ class Timeline {
   }
 }
 
-/** A check in a run's result: Throng's own (`_diff`, `_preview`) are `platform`, the config's `project`. */
+/** A check in a run's result: Throng's own (`_diff`) is `platform`, the config's `project`. */
 interface Check {
   name: string;
   source: "platform" | "project" | "task";
@@ -130,6 +128,8 @@ interface Check {
 interface Metric {
   source: "platform" | "project" | "task";
   type: "boolean" | "number" | "string" | "enum";
+  /** A string's `url` format: shown as a link. */
+  format?: "url";
   value: boolean | number | string | null;
   note?: string;
 }
@@ -328,8 +328,8 @@ async function zeroconfig(): Promise<void> {
   assert(result.config.kind === "none", `expected no config, got ${JSON.stringify(result.config)}`);
   assert(result.gate === "passed" && configChecks(result).length === 0, "expected a passing gate with no checks");
   assert(
-    JSON.stringify(result.checks.map((c) => [c.name, c.outcome])) === '[["_diff","passed"],["_preview","skipped"]]',
-    `expected only Throng's own checks, _preview skipped: ${JSON.stringify(result.checks)}`,
+    JSON.stringify(result.checks.map((c) => [c.name, c.outcome])) === '[["_diff","passed"]]',
+    `expected only Throng's own _diff: ${JSON.stringify(result.checks)}`,
   );
   assert(diffSize(result).join() === "1,1,1", `unexpected diff size ${JSON.stringify(diffSize(result))}`);
 
@@ -1050,41 +1050,28 @@ async function invalid(): Promise<void> {
     `expected the config's error, got ${JSON.stringify(result.config)}`,
   );
   assert(configChecks(result).length === 0, `expected no config checks, got ${JSON.stringify(result.checks)}`);
-  assert(
-    result.checks.find((c) => c.name === "_preview")?.notes.join() === "skipped: the config is invalid",
-    `expected _preview skipped for the invalid config: ${JSON.stringify(result.checks)}`,
-  );
   assert(diffSize(result)[0] === 1, `_diff was not recorded: ${JSON.stringify(result.metrics)}`);
   await finish(project, work, timeline);
 }
 
 /**
- * A project with `preview` configured: once the gate passes, the head is built with
- * `preview.command` and deployed as a Worker Preview under the project's own Worker, `p<projectId>`,
- * so its host label is `<forkName>-p<projectId>`, and its URL serves the built attempt. The build's
- * DELETE on its own Worker is refused, so an attempt can't delete the other attempts' Previews.
+ * A preview is an ordinary check: after `test`, a `preview` check writes its URL (a fake one; nothing
+ * deploys) to `$THRONG_OUTPUT`, and the config declares a `url` metric from it, so the attempt's result
+ * carries the link the web app shows.
  */
 async function preview(): Promise<void> {
   const timeline = new Timeline();
+  const url = "https://t1a1.preview.example.test/";
   const { project, work } = await setUpProject(timeline, {
-    ".throng/config.yml": `${TEST_CHECK}preview:
-  command: node no-delete.mjs && sed -i 's/hello from a1/hello from a1, built/' src/greeting.js
+    "scripts/preview.js": `import { writeFileSync } from "node:fs";
+writeFileSync(process.env.THRONG_OUTPUT + "/out.json", JSON.stringify({ url: ${JSON.stringify(url)} }));
+`,
+    ".throng/config.yml": `${TEST_CHECK}  - name: preview
+    command: node scripts/preview.js
+metrics:
+  - { name: preview_url, from: preview.out.url, type: string, format: url }
 `,
   });
-  const accountId = await cfAccountId();
-  // The build first tries a DELETE under its own Worker, which the proxy must refuse with its own 403
-  // or the build (and so the Preview) fails. It names a secret that doesn't exist, so even a DELETE
-  // that got through would delete nothing.
-  const missing = `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/${previewWorkerName(project)}/secrets/throng-e2e-missing`;
-  const noDelete = `const response = await fetch(${JSON.stringify(missing)}, { method: "DELETE" });
-const body = await response.text();
-if (response.status !== 403 || !body.startsWith("no grant for")) {
-  console.error(\`the DELETE was not refused: \${response.status} \${body}\`);
-  process.exit(1);
-}
-`;
-  await writeFile(join(work, "no-delete.mjs"), noDelete);
-  await git(work, "add", "no-delete.mjs");
   const fork = await createAttempt(project, "t1a1", timeline);
   const sha = await commitAndPush(work, fork, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
   timeline.mark("attempt pushed");
@@ -1092,36 +1079,16 @@ if (response.status !== 403 || !body.startsWith("no grant for")) {
   const result = await scored(project, sha);
   timeline.mark("scored");
   assert(result.gate === "passed", `expected the gate to pass: ${JSON.stringify(result.checks)}`);
-  const check = result.checks.find((c) => c.name === "_preview");
   assert(
-    check?.source === "platform" && check.outcome === "passed" && result.metrics["_preview"]?.value === "passed",
-    `expected _preview to pass, got ${JSON.stringify(check)}`,
+    JSON.stringify(result.checks.map((c) => [c.name, c.outcome])) ===
+      '[["_diff","passed"],["test","passed"],["preview","passed"]]',
+    `expected the preview check to run as an ordinary check, and no _preview: ${JSON.stringify(result.checks)}`,
   );
-  const deployed = result.metrics["_preview.url"];
+  const link = result.metrics["preview_url"];
   assert(
-    deployed?.type === "string" && typeof deployed.value === "string",
-    `expected _preview.url, got ${JSON.stringify(deployed)}`,
+    link?.source === "project" && link.type === "string" && link.format === "url" && link.value === url,
+    `expected preview_url to link to ${url}, got ${JSON.stringify(link)}`,
   );
-  const previewUrl = deployed.value;
-  const label = `${previewName({ project, attempt: "t1a1" })}-${previewWorkerName(project)}`;
-  assert(
-    new URL(previewUrl).hostname.split(".")[0] === label,
-    `the Preview is not ${label}, under the project's own Worker: ${previewUrl}`,
-  );
-  assert(result.logs.includes("preview.deploy"), `expected the Preview's log stored: ${JSON.stringify(result.logs)}`);
-
-  // A new Preview's hostname can take a moment to answer.
-  const url = `${previewUrl}?name=e2e`;
-  const deadline = Date.now() + 2 * 60 * 1000;
-  let last = "";
-  while (Date.now() < deadline) {
-    const response = await fetch(url).catch((error: unknown) => error);
-    last = response instanceof Response ? `${response.status} ${await response.text()}` : String(response);
-    if (last === "200 hello from a1, built, e2e") break;
-    await new Promise((r) => setTimeout(r, 2000));
-  }
-  timeline.mark("preview answered");
-  assert(last === "200 hello from a1, built, e2e", `the Preview at ${url} answered ${last}`);
   await finish(project, work, timeline);
 }
 
@@ -1165,13 +1132,13 @@ async function coalesce(): Promise<void> {
 
 /**
  * The attempt's own test tries to push a forged commit to the origin's main and to reach the
- * Cloudflare API. The test passes only if both are blocked, so a leak fails the gate.
+ * Cloudflare API, which the config's `network.allow` doesn't list. The test passes only if both are
+ * blocked, so a leak fails the gate.
  */
 async function intrusion(): Promise<void> {
   const timeline = new Timeline();
   const { project, work } = await setUpProject(timeline, { ".throng/config.yml": TEST_CHECK });
   const origin = (await git(work, "remote", "get-url", "origin")).trim();
-  const accountId = await cfAccountId();
   const fork = await createAttempt(project, "t1a1", timeline);
 
   const probe = `import assert from "node:assert/strict";
@@ -1187,7 +1154,7 @@ test("cannot push to the origin", () => {
 });
 
 test("cannot reach the Cloudflare API", async () => {
-  const url = "https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/${previewWorkerName(project)}";
+  const url = "https://api.cloudflare.com/client/v4/user/tokens/verify";
   const status = await fetch(url, { signal: AbortSignal.timeout(5_000) }).then((r) => r.status, () => "blocked");
   assert.notEqual(status, 200);
 });
@@ -1390,13 +1357,6 @@ async function lsRemote(work: string, remote: Grant, ref: string): Promise<strin
   const listed = await git(work, ...auth(remote.token), "ls-remote", remote.remote, ref);
   const line = listed.split("\n").find((l) => l.endsWith(`\t${ref}`));
   return line?.split("\t")[0] ?? null;
-}
-
-/** The Cloudflare account the deployed platform Worker uses, from `wrangler.jsonc`. */
-async function cfAccountId(): Promise<string> {
-  const accountId = /"CF_ACCOUNT_ID":\s*"(\w+)"/u.exec(await readFile(WRANGLER_CONFIG, "utf8"))?.[1];
-  assert(accountId !== undefined, "CF_ACCOUNT_ID not found in wrangler.jsonc");
-  return accountId;
 }
 
 /** A new project whose origin's `main` is the fixture plus `files` (a config, helper scripts). */
@@ -1752,7 +1712,7 @@ async function waitFor(project: string, match: (e: JournalEntry) => boolean): Pr
   throw new Error(`timed out waiting on ${project}'s journal`);
 }
 
-/** Deletes everything the project made: its rows, its Durable Object's storage, its logs, its repos and its preview Worker. */
+/** Deletes everything the project made: its rows, its Durable Object's storage, its logs and its repos. */
 async function cleanUp(project: string, work: string): Promise<void> {
   if (process.env.E2E_KEEP === "1") return;
   await api("DELETE", `/e2e/projects/${project}`).catch((error) => console.warn(`could not delete ${project}`, error));

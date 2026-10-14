@@ -409,3 +409,26 @@ export const runLogQuery = (projectRef: ProjectRef, run: number, name: string) =
       initialValue: "",
     }),
   });
+
+const secretsApi = projectApi.secrets;
+
+/** The project's secrets by name: each one's pipelines and last change, never its value. Only maintainers may read them. */
+export const secretsQuery = (projectRef: ProjectRef) =>
+  apiQuery([...projectKey(projectRef), "secrets"], (init) => secretsApi.$get({ param: projectRef }, { init }));
+
+export type Secret = InferResponseType<typeof secretsApi.$get, 200>["secrets"][number];
+export type Pipeline = Secret["pipelines"][number];
+
+/** Sets a secret's value, its pipelines, or both; what's left out is kept. Rejects with hono's `DetailedError`. */
+export async function putSecret(
+  projectRef: ProjectRef,
+  name: string,
+  change: { value?: string; pipelines?: Pipeline[] },
+) {
+  return parseResponse(secretsApi[":name"].$put({ param: { ...projectRef, name }, json: change }));
+}
+
+/** Deletes a secret. Rejects with hono's `DetailedError` on failure. */
+export async function deleteSecret(projectRef: ProjectRef, name: string) {
+  return parseResponse(secretsApi[":name"].$delete({ param: { ...projectRef, name } }));
+}

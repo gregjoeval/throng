@@ -55,6 +55,12 @@ jobs:
           token=$(openssl rand -hex 32)
           echo "::add-mask::$token"
           echo "E2E_TOKEN=$token" >> "$GITHUB_ENV"
+      # A fresh keyring per run is enough: every project a run makes, and so every secret, is deleted at its end.
+      - name: Generate this run's SECRETS_KEYRING
+        run: |
+          keyring=$(printf '{"current":"e2e","keys":{"e2e":"%s"}}' "$(openssl rand -base64 32)")
+          echo "::add-mask::$keyring"
+          echo "SECRETS_KEYRING=$keyring" >> "$GITHUB_ENV"
       - name: Apply D1 migrations
         if: hashFiles('apps/platform/migrations/*.sql') != ''
         run: pnpm exec wrangler d1 migrations apply throng-ci --remote
@@ -68,8 +74,7 @@ jobs:
           pnpm exec vite build
           secrets="$RUNNER_TEMP/throng-ci-secrets.env"
           trap 'rm -f "$secrets"' EXIT
-          # The Worker uses CF_PREVIEW_TOKEN to upload Worker Previews; the deploy token covers that.
-          printf 'E2E_TOKEN=%s\nCF_PREVIEW_TOKEN=%s\n' "$E2E_TOKEN" "$CLOUDFLARE_API_TOKEN" > "$secrets"
+          printf 'E2E_TOKEN=%s\nSECRETS_KEYRING=%s\n' "$E2E_TOKEN" "$SECRETS_KEYRING" > "$secrets"
           # The build already resolved the `ci` environment into dist/; with CLOUDFLARE_ENV still set,
           # wrangler would apply it again and deploy `throng-ci-ci`.
           env -u CLOUDFLARE_ENV pnpm exec wrangler deploy --config dist/throng/wrangler.json --secrets-file "$secrets" | tee "$RUNNER_TEMP/deploy.log"

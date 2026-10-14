@@ -57,12 +57,12 @@ import type { LogStore } from "./logs.ts";
 import { DEQUEUE_REASONS, MERGE_REQUEST_STATES } from "./merge-requests.ts";
 import { METRIC_FORMATS, METRIC_TYPES } from "./metric-values.ts";
 import { DEFAULT_LISTING_PAGE, MAX_LISTING_PAGE, myListings } from "./my-listings.ts";
-import type { PreviewWorkers } from "./preview-workers.ts";
 import { MAX_PROJECTION_RETRY_MS } from "./projection.ts";
 import { MAX_PROJECT_HANDLE, PROJECT_HANDLE, projectService } from "./projects.ts";
 import type { Repos } from "./repos.ts";
 import { CHECK_OUTCOMES, GATES } from "./results.ts";
 import { ATTEMPT_SCORING_STATUSES, RUN_STATUSES, SCORING_TRIGGERS } from "./scoring.ts";
+import { secretsRoutes } from "./secrets-api.ts";
 import { ATTEMPT_STATES, TASK_STATES } from "./task-store.ts";
 import type { TaskBackend } from "./tasks.ts";
 import { DEFAULT_TOKEN_TTL_SECONDS, MAX_TOKEN_TTL_SECONDS, tokenService } from "./tokens.ts";
@@ -560,23 +560,19 @@ const ScoringResultSchema = z
             outcome: z.enum(CHECK_OUTCOMES),
             durationMs: z.number(),
             notes: z.array(z.string()).openapi({
-              description:
-                "What the run noticed about it, such as why it was skipped or why the Preview didn't deploy.",
+              description: "What the run noticed about it, such as why it was skipped.",
             }),
           })
           .openapi("CheckResult"),
       )
       .openapi({
         description:
-          "Every check in run order: Throng's `_diff` (finding the base and diffing), the config's checks, then " +
-          "`_preview` (deploying the Preview). `_preview` is `skipped` without a `preview` section or a passing gate, " +
-          "`failed` when its build or deploy failed and `errored` when the infrastructure kept failing; it never " +
-          "changes the gate.",
+          "Every check in run order: Throng's `_diff` (finding the base and diffing), then the config's checks.",
       }),
     metrics: z.record(z.string(), MetricResultSchema).openapi({
       description:
         "Every metric by name: each check's outcome metric (an enum named after the check), followed by that " +
-        "check's own metrics, such as `_diff.filesChanged` and `_preview.url`.",
+        "check's own metrics, such as `_diff.filesChanged`.",
     }),
     logs: z.array(z.string()).openapi({
       description:
@@ -744,7 +740,7 @@ const WaitedAttemptSchema = AttemptSchema.extend({
 
 const RunLogPathSchema = RunPathSchema.extend({
   name: z.string().openapi({
-    description: "The log's name: a check's name, `setup.<n>` for the nth setup command, or `preview.deploy`.",
+    description: "The log's name: a check's name, or `setup.<n>` for the nth setup command.",
     example: "test",
   }),
 });
@@ -757,10 +753,6 @@ const ConfigSchema = z
     }),
     checks: z.array(ConfigCheckSchema).openapi({ description: "Run in order." }),
     metrics: z.array(MetricSchema).openapi({ description: "Read from the checks' output files, in order." }),
-    preview: z
-      .object({ command: z.string().nullable().openapi({ description: "Builds before the preview deploys." }) })
-      .nullable()
-      .openapi({ description: "Null when the project doesn't deploy previews." }),
     attempts: z.object({
       limit: z.number().int().nullable().openapi({ description: "Null to use the default cap on active attempts." }),
     }),
@@ -795,8 +787,6 @@ const unauthorizedBearer = errorResponse("No valid bearer token.");
 export interface ApiOptions extends AuthOptions {
   /** The environment's repos: production passes the Artifacts-backed `reposFor`, tests a fake. */
   repos?: (env: AccessBindings) => Repos;
-  /** Projects' preview Workers: production passes the Cloudflare API's, tests a fake. */
-  previewWorkers?: (env: AccessBindings) => PreviewWorkers;
   /** A project's task backend: production passes its Durable Object, tests an in-process store. */
   tasks?: (env: AccessBindings) => (projectId: string) => TaskBackend;
   /** The environment's logs bucket: production passes its R2 binding, tests one in memory. */
@@ -810,15 +800,6 @@ const myListingsFor = (env: AccessBindings) => myListings({ db: env.DB });
 
 function noRepos(): Repos {
   throw new Error("this API was built without repos");
-}
-
-/** Only creating a project needs preview Workers, so reading projects works without them. */
-function noPreviewWorkers(): PreviewWorkers {
-  return { ensure: refusePreviewWorkers, delete: refusePreviewWorkers };
-}
-
-async function refusePreviewWorkers(): Promise<never> {
-  throw new Error("this API was built without preview Workers");
 }
 
 function noTasks(): (projectId: string) => TaskBackend {
@@ -1001,9 +982,7 @@ export function apiRoutes(options: ApiOptions = {}) {
   const bearerRoute: RouteAuth = { middleware: bearer, security: bearerOnly };
   const webRoute: RouteAuth = { middleware: browser, security: bearerOrWeb };
   const reposFor = options.repos ?? noRepos;
-  const previewWorkersFor = options.previewWorkers ?? noPreviewWorkers;
-  const projects = (env: AccessBindings) =>
-    projectService({ db: env.DB, repos: reposFor(env), previewWorkers: previewWorkersFor(env) });
+  const projects = (env: AccessBindings) => projectService({ db: env.DB, repos: reposFor(env) });
   const backendFor = options.tasks ?? noTasks;
   const logsFor = options.logs ?? noLogs;
   const tasks = requestTaskService(reposFor, backendFor);
@@ -1730,7 +1709,7 @@ export function apiRoutes(options: ApiOptions = {}) {
         tags: ["Scoring"],
         summary: "Stream one log of a scoring run",
         description:
-          "Each setup command, check and preview of a run writes a log. Logs over " +
+          "Each setup command and check of a run writes a log. Logs over " +
           `${MAX_LOG_BYTES / (1024 * 1024)} MB keep their head and tail, with a marker between them. Logs are ` +
           `deleted ${LOG_RETENTION_DAYS} days after the run; an expired log is \`notFound\`, like a missing one.`,
         security: bearerOrWeb,
@@ -2035,7 +2014,8 @@ export function apiRoutes(options: ApiOptions = {}) {
       "/",
       browseRoutes({ auth: browser, repos: reposFor, tasks: backendFor, diffCache: options.diffCache ?? workersCache }),
     )
-    .route("/", dequeueRoutes({ auth: browser, repos: reposFor, tasks: backendFor, logs: logsFor }));
+    .route("/", dequeueRoutes({ auth: browser, repos: reposFor, tasks: backendFor, logs: logsFor }))
+    .route("/", secretsRoutes({ auth: browser, repos: reposFor, tasks: backendFor }));
 
   api.doc31("/openapi.json", { openapi: "3.1.0", info: { title: "Throng API", version: "0.0.0" } });
 

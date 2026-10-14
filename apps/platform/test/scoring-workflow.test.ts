@@ -1,6 +1,6 @@
 // The Scoring Workflow's steps against fake bindings: the size each container starts at, and the
-// size its stored logs record. `cloudflare:workers`, the Artifacts binding, the base lookup and the
-// preview Workers are stubbed; each step runs once.
+// size its stored logs record. `cloudflare:workers`, the Artifacts binding and the base lookup are
+// stubbed; each step runs once.
 
 import { describe, expect, it, vi } from "vitest";
 import type { SandboxSize } from "../src/config.ts";
@@ -11,8 +11,8 @@ import { PASSED, result, runOnce } from "./support/workflow-runs.ts";
 vi.mock("cloudflare:workers", () => import("./support/cloudflare-workers.ts"));
 
 /** The config on the origin's `main`, and on the attempt's own head, which scoring must never read. */
-const MAIN_CONFIG = "sandbox: { size: standard-2 }\npreview: {}\nchecks:\n  - { name: test, command: npm test }\n";
-const HEAD_CONFIG = "sandbox: { size: standard-4 }\npreview: {}\nchecks:\n  - { name: test, command: npm test }\n";
+const MAIN_CONFIG = "sandbox: { size: standard-2 }\nchecks:\n  - { name: test, command: npm test }\n";
+const HEAD_CONFIG = "sandbox: { size: standard-4 }\nchecks:\n  - { name: test, command: npm test }\n";
 /** What `main` holds for the scoring run under way. */
 const configs = { main: MAIN_CONFIG };
 
@@ -26,7 +26,6 @@ vi.mock("../src/artifacts", () => ({
   }),
 }));
 vi.mock("../src/base", () => ({ attemptBase: async () => null }));
-vi.mock("../src/preview-workers", () => ({ previewWorkersFor: () => ({ ensure: async () => {} }) }));
 
 const { ScoringWorkflow } = await importWorkerModule<{
   ScoringWorkflow: new (
@@ -41,7 +40,7 @@ const params: ScoringParams = { project: "abc123", attempt: "t1a1", sha: "a".rep
 const CLASHING = { checks: [{ name: "test", command: "npm test", timeoutMs: 1000, source: "task" }] };
 
 /**
- * Scores a head whose one check passes and whose Preview deploys, under `main`'s config and the
+ * Scores a head whose one check passes, under `main`'s config and the
  * task's definitions, recording the size each script ran at (log reads apart) and the stored logs.
  */
 async function score({ main = MAIN_CONFIG, definitions = {} }: { main?: string; definitions?: object } = {}) {
@@ -51,7 +50,6 @@ async function score({ main = MAIN_CONFIG, definitions = {} }: { main?: string; 
   const stored = new Map<string, string>();
   const keys: string[] = [];
   const env = {
-    CF_ACCOUNT_ID: "acct",
     SANDBOX: {
       getByName: (name: string) => {
         const role = name.split("/").at(-1);
@@ -62,7 +60,7 @@ async function score({ main = MAIN_CONFIG, definitions = {} }: { main?: string; 
               return { exitCode: 0, stdout: `${role} log\n`, stderr: "" };
             }
             sizes.push([role, size]);
-            return role === "score" ? result(PASSED) : result({ ok: true, url: "https://preview.invalid" });
+            return result(PASSED);
           },
           destroy: async () => {},
         };
@@ -86,11 +84,10 @@ async function score({ main = MAIN_CONFIG, definitions = {} }: { main?: string; 
 }
 
 describe("ScoringWorkflow", () => {
-  it("starts the score and preview containers at main's Sandbox size, never the head's", async () => {
+  it("starts only the score container, at main's Sandbox size, never the head's", async () => {
     const { sizes, outcome } = await score();
     expect(outcome.status).toBe("done");
-    expect(new Set(sizes.map(([role]) => role))).toEqual(new Set(["score", "preview"]));
-    expect(new Set(sizes.map(([, size]) => size))).toEqual(new Set(["standard-2"]));
+    expect(sizes).toEqual([["score", "standard-2"]]);
   });
 
   it("starts at main's Sandbox size when the task's definitions clash with main's config", async () => {
@@ -102,21 +99,17 @@ describe("ScoringWorkflow", () => {
 
   it("reads each log back at lite, so a lost container isn't restarted at the project's size", async () => {
     const { logReads } = await score();
-    expect(logReads).toEqual([
-      ["score", "lite"],
-      ["preview", "lite"],
-    ]);
+    expect(logReads).toEqual([["score", "lite"]]);
   });
 
   it("stores each log under the run's line and id", async () => {
     const { keys } = await score();
-    expect(keys).toEqual(["logs/abc123/t1a1/7/test.log", "logs/abc123/t1a1/7/preview.deploy.log"]);
+    expect(keys).toEqual(["logs/abc123/t1a1/7/test.log"]);
   });
 
   it("records the size in each log it stores", async () => {
     const { stored, outcome } = await score();
-    expect(outcome.status === "done" ? outcome.result.logs : []).toEqual(["test", "preview.deploy"]);
+    expect(outcome.status === "done" ? outcome.result.logs : []).toEqual(["test"]);
     expect(stored.get("test.log")).toBe("score log\n== throng ==\nsandbox: standard-2\n");
-    expect(stored.get("preview.deploy.log")).toBe("preview log\n== throng ==\nsandbox: standard-2\n");
   });
 });

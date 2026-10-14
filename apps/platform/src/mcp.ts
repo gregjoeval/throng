@@ -418,7 +418,7 @@ function mcpServer({ repos, tasks, logs, diffCache }: Deps, { actor, token, env,
 
   tool(
     "get_log",
-    `Read a scoring run's log: a check's name, \`setup.<n>\`, or \`preview.deploy\`. Returns the last ` +
+    `Read a scoring run's log: a check's name, or \`setup.<n>\`. Returns the last ` +
       `${MAX_LOG_SLICE_BYTES / 1024} KB by default; pass \`offset\` (bytes) to read ${MAX_LOG_SLICE_BYTES / 1024} ` +
       "KB from there instead.",
     onProject.extend({
@@ -546,6 +546,19 @@ function mcpServer({ repos, tasks, logs, diffCache }: Deps, { actor, token, env,
     "The task's latest vote: each candidate's tally, your own ballot, and its winner once closed.",
     onTask,
     async ({ project, task }) => voteAnswer(await service.getVote(actor, { ...projectPath(project), task })),
+  );
+
+  tool(
+    "list_secrets",
+    "The project's secrets: each one's name, the pipelines it may be used in (`default`, `main`) and when it last " +
+      "changed, never its value, for naming them in `.throng/config.yml`. Only the project's maintainers may. " +
+      "Only the owner, acting as themselves in the UI or REST API, can set them.",
+    onProject,
+    async ({ project }) => {
+      const secrets = await service.listSecrets(actor, projectPath(project));
+      const named = secrets.map((s) => `${s.name} (${s.pipelines.join(", ") || "no pipeline"})`).join(", ");
+      return answer(`${secrets.length} secrets${named === "" ? "" : `: ${named}`}`, { secrets });
+    },
   );
 
   return server;

@@ -56,6 +56,7 @@ const TOOLS = [
   "add_vote_candidate",
   "close_vote",
   "get_vote",
+  "list_secrets",
 ];
 
 /** An R2 bucket in memory. */
@@ -591,5 +592,25 @@ describe("/mcp", () => {
     const head = await call(ada, "get_log", { project, run, name: "test", offset: 0 });
     expect(head.data["text"]).toBe(log.slice(0, MAX_LOG_SLICE_BYTES));
     expect((await call(ada, "get_log", { project, run, name: "lint" })).summary).toMatch(/^notFound: /u);
+  });
+
+  it("lists secrets' names and pipelines to the owner's aliases, never their values", async () => {
+    const { ada, connect, env, project, projectId, store, tokenFor } = await withProject();
+    const greg = await userForEmail(env.DB, "greg@example.com");
+    const value = "cf-token-0123456789";
+    await store(projectId).putSecret(
+      { id: projectId, owner: greg.id },
+      { user: greg, alias: null },
+      { name: "DEPLOY_TOKEN", value, pipelines: ["main"] },
+    );
+    const gregClaude = await connect(await tokenFor("greg@example.com", "claude"));
+    const listed = await call(gregClaude, "list_secrets", { project });
+    expect(listed.isError).toBeFalsy();
+    expect(listed.summary).toBe("1 secrets: DEPLOY_TOKEN (main)");
+    expect(listed.data).toEqual({
+      secrets: [{ name: "DEPLOY_TOKEN", pipelines: ["main"], changedAt: "2026-10-10T12:00:00.000Z" }],
+    });
+    expect(JSON.stringify(listed)).not.toContain(value);
+    expect((await call(ada, "list_secrets", { project })).summary).toMatch(/^forbidden: /u);
   });
 });

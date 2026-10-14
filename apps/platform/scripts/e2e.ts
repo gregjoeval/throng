@@ -1270,12 +1270,10 @@ console.log("sha256 " + createHash("sha256").update(process.env.E2E_SECRET ?? ""
     return runs.find((r) => r.sha === head) ?? null;
   });
   timeline.mark(`run ${held.id} waiting`);
+  // It waits from its Workflow's plan step, so it keeps that start time; the running list shows it holds no slot.
   assert(
-    !held.trusted &&
-      held.startedAt === null &&
-      held.waiting?.head === head &&
-      held.waiting.secrets.includes("E2E_SECRET"),
-    `expected an untrusted run waiting on ${head} for E2E_SECRET, holding no slot: ${JSON.stringify(held)}`,
+    !held.trusted && held.waiting?.head === head && held.waiting.secrets.includes("E2E_SECRET"),
+    `expected an untrusted run waiting on ${head} for E2E_SECRET: ${JSON.stringify(held)}`,
   );
   const { runs: running } = await throng<{ runs: ListedRun[] }>(p, "GET", "/runs?status=running");
   assert(!running.some((r) => r.id === held.id), "expected the waiting run to hold no slot");

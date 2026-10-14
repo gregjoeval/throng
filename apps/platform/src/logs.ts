@@ -38,6 +38,11 @@ export function setupLogName(step: number): string {
   return `setup.${step}`;
 }
 
+/** The log name of post-gate step `step`: `step.<name>`, apart from the checks' names. */
+export function stepLogName(step: string): string {
+  return `step.${step}`;
+}
+
 /** Whether `name` could name a run's log, so a request can't build a key outside the run. */
 export function isLogName(name: string): boolean {
   return LOG_NAME.test(name);

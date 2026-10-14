@@ -210,6 +210,42 @@ describe("after each outcome", () => {
     expect(landingWorkflow.created.map((c) => c.params.task)).toEqual([t1.task, t2.task]);
   });
 
+  it("runs main on the landed commit, trusted as the owner's merge", async () => {
+    const { store, drain, queued, scoringWorkflow } = await setup();
+    await queued("First");
+    await drain();
+    expect(await store.landingFinished(1, landed())).toBeTruthy();
+    await drain();
+    const [run] = store.scoring.listRuns("main");
+    expect(run).toMatchObject({
+      line: "main",
+      sha: "e".repeat(40),
+      pipeline: "main",
+      status: "running",
+      trusted: true,
+    });
+    expect(scoringWorkflow.created.at(-1)?.params).toEqual({
+      project: PROJECT.id,
+      line: "main",
+      sha: "e".repeat(40),
+      run: run?.id,
+    });
+  });
+
+  it("runs main untrusted when someone other than the owner approved the merge", async () => {
+    const { store, drain, score } = await setup();
+    // ada creates the task, so she selects its merge request.
+    const task = store.createTask(PROJECT, ada, { title: "Ada's" });
+    const own = at(await store.createAttempts(PROJECT, ada, { task: task.number }), 0);
+    await store.openAttempt(PROJECT, ada, own);
+    await drain();
+    score(own);
+    await store.selectAttempt(PROJECT, ada, own);
+    await drain();
+    expect(await store.landingFinished(1, landed())).toBeTruthy();
+    expect(store.scoring.listRuns("main")).toMatchObject([{ trusted: false }]);
+  });
+
   it("dequeues a conflict with its details, then starts the next landing", async () => {
     const { store, drain, queued, mr, landingWorkflow, base } = await setup();
     const t1 = await queued("First");

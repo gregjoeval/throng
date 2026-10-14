@@ -49,27 +49,36 @@ Clients differ in the details: some omit `type` or call it `streamable-http`, an
 
 ## Runs
 
-Every run on a project, on every line, is in the project Durable Object's `pipeline_runs` table, migrated scoring runs included. `GET /api/projects/{owner}/{project}/runs` lists them newest first, with each one's line, pipeline, trigger, head, status, gate and who triggered it. `line` filters to one line, `main`, or `tasks` (every line but `main`); `status` to one status (`waiting` lists the runs waiting for the owner). Pages are cursor-paged by run id: a page's `next` is the next page's `cursor`, so a run queued meanwhile never shifts one. `GET …/runs/{runId}` adds the run's outcome: its steps in run order, each with its kind, group, `after`, outcome, duration, notes and log name, and its metrics. `POST …/runs/{runId}/cancel` is the owner's, aliases included, and only while the run is `cancellable`: queued, waiting, or running on any line but `main`, which may be deploying. The MCP tools `list_runs`, `get_run`, `get_log` (by run and step) and `wait_for_run` read the same; `wait_for_run` holds until the run is done or waiting, with the same per-user cap as `wait_for_attempt`. There is no MCP tool to cancel or start a run.
+Every run on a project, on every line, is in the project Durable Object's `pipeline_runs` table, migrated scoring runs included. At most `SCORING_CAP` runs hold a Sandbox at once across the project: a landing first, then a `main` run, then follows, then task-branch and attempt runs oldest first; a waiting run holds none. One run per line runs at a time. A newer head on an attempt or task branch cancels the line's queued or running run; on `main` it replaces only a queued run, and the running one, which may be deploying, runs to its end. A run of `main` is trusted when the owner (as themselves or under an alias) approved the merge request that landed it. `GET /api/projects/{owner}/{project}/runs` lists them newest first, with each one's line, pipeline, trigger, head, status, gate and who triggered it. `line` filters to one line, `main`, or `tasks` (every line but `main`); `status` to one status (`waiting` lists the runs waiting for the owner). Pages are cursor-paged by run id: a page's `next` is the next page's `cursor`, so a run queued meanwhile never shifts one. `GET …/runs/{runId}` adds the run's outcome: its steps in run order, each with its kind, group, `after`, outcome, duration, notes and log name, and its metrics. `POST …/runs/{runId}/cancel` is the owner's, aliases included, and only while the run is `cancellable`: queued, waiting, or running on any line but `main`, which may be deploying. The MCP tools `list_runs`, `get_run`, `get_log` (by run and step) and `wait_for_run` read the same; `wait_for_run` holds until the run is done or waiting, with the same per-user cap as `wait_for_attempt`. There is no MCP tool to cancel or start a run.
 
 ### How a run runs
 
-`PipelineWorkflow` (`src/pipeline-workflow.ts`) runs an attempt line's `default` pipeline in fixed stages, under the config and `.npmrc` it reads from one commit of the origin's `main`:
+Every ref move requests a run on its line: a push to an attempt's fork (`t42a3`) or to a task branch (`t42`) runs `default`, and `main` moving (a landing) runs `main`. The pipeline comes from the line, never the tree. `PipelineWorkflow` (`src/pipeline-workflow.ts`) runs it in fixed stages, under the config and `.npmrc` it reads from one commit of the origin's `main`:
 
 ```yaml
 setup: # in order, in one container; a failed setup stops the run
   - { name: deps, command: npm ci }
 checks: # in parallel, each in its own container; every one that runs must pass
-  - { name: lint, command: npm run lint }
-  - { name: test, command: npm test }
+  - { name: lint, command: npm run lint, group: verify } # at most one group
+  - { name: test, command: npm test, group: verify }
   - { name: build, command: npm run build, after: [lint, test] } # one check or a list
+pipelines:
+  main:
+    groups: [verify] # main runs only these groups' checks; default names none, so it runs every check
+    steps: # in order, once the gate passes
+      - { name: deploy, command: npm run deploy }
 ```
 
 1. **Setups.** One container, `<instance>/setup`, fetches the head, records the diff from the attempt's base (`_diff`), and runs the setups in order. When they all pass it is snapshotted (`snapshotContainer`), its logs are stored, and it stops.
 2. **Checks.** Each check runs in its own container, `<instance>/check:<name>`, started from that snapshot, all in parallel, except that a check waits until every check it names in `after` has passed. A check whose wait didn't pass is `skipped`, saying which check it waited for. A failed restore is retried once; then the container starts from the image and runs the setups again first, noting it on the check. There are no snapshots under `wrangler dev`, so there every check's container runs the setups itself.
 
-`after` names checks only: naming a setup, an unknown check or the check itself, or making a circle, is a config error. A task's checks take `after` too, and may wait for the project's checks; a project's check can't wait for a task's, which only some attempts have. Setups, checks and metrics share one set of names.
+3. **Post-gate steps.** Once the gate passes, `main`'s `steps` run in order, each in its own container, `<instance>/step:<name>`, started from the snapshot the same way, stopping at the first that doesn't pass. Every step after it, or every step when the gate failed, is `skipped`, saying why. The gate is the setups' and checks' alone. A step's container is readied (restored, or the setups re-run) in one Workflow step that retries like any other; its command then runs in the next, which never retries, so a deploy never runs twice by itself: an infrastructure error once the command started ends the run `errored`.
 
-Every container gets one read grant on the attempt's fork and no write grant, reaches only `main`'s `network.allow` and `.npmrc` registries, and gets `THRONG_PROJECT`, `THRONG_PIPELINE`, `THRONG_LINE`, `THRONG_SHA` and `THRONG_RUN`. Before starting any, the Workflow tells the project Durable Object every container its plan may start. When the run ends, or a newer head cancels it (the Workflow is terminated), every one of them is destroyed and the snapshot released. Containers can't delete a snapshot yet: Cloudflare deletes it 30 days after it was taken or last restored. Each step's outcome, duration, notes and log go to the Durable Object as the run's outcome, from which scoring takes the attempt's score and verdict.
+`after` names checks only: naming a setup, an unknown check or the check itself, or making a circle, is a config error. A task's checks take `after` too, and may wait for the project's checks; a project's check can't wait for a task's, which only some attempts have. Setups, checks, post-gate steps and metrics share one set of names.
+
+A check is in at most one `group`. A pipeline that lists `groups` runs only the checks in them, and one that lists none runs every check, so adding a check with no group never changes what `main` runs. A task's checks take no group, and always run on its attempts. Only `default` and `main` exist, and only `main` has steps. Config errors: `groups` on a check, a group on a setup or step, an empty `groups` or one no check is in, a check a pipeline runs waiting for one it doesn't, an unknown pipeline, and `skip`.
+
+Every container gets one read grant on its line's repo (the attempt's fork, or the origin for a task branch or `main`), fetching its branches and `refs/tasks/*`, and no write grant, reaches only `main`'s `network.allow` and `.npmrc` registries, and gets `THRONG_PROJECT`, `THRONG_PIPELINE`, `THRONG_LINE`, `THRONG_SHA` and `THRONG_RUN`. Before starting any, the Workflow tells the project Durable Object every container its plan may start. When the run ends, or a newer head cancels it (the Workflow is terminated), every one of them is destroyed and the snapshot released. Containers can't delete a snapshot yet: Cloudflare deletes it 30 days after it was taken or last restored. Each step's outcome, duration, notes and log go to the Durable Object as the run's outcome, from which scoring takes the attempt's score and verdict.
 
 ## Scoring logs
 

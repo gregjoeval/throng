@@ -2,11 +2,11 @@
 // on the same container or a fresh one. The last stdout line is the result: `THRONG_RESULT <json>`.
 
 import { CONFIG_PATH, MAX_CONFIG_BYTES } from "./config.ts";
-import type { SetupConfig } from "./config.ts";
+import type { SetupConfig, StepConfig } from "./config.ts";
 import { CONFLICT_CAPS, MERGE_LABELS } from "./conflicts.ts";
 import type { ConflictCaps, Remerge } from "./conflicts.ts";
 import { THRONG_COMMITTER } from "./landing.ts";
-import { setupLogName } from "./logs.ts";
+import { setupLogName, stepLogName } from "./logs.ts";
 import { METRIC_VALUES_SOURCE, metricValue, parseFrom } from "./metric-values.ts";
 import type { MetricValue } from "./metric-values.ts";
 import { checkOrder, MAX_OUTPUT_BYTES, SETUP_TIMEOUT_MS } from "./results.ts";
@@ -28,17 +28,38 @@ result() { printf '${RESULT_PREFIX}%s\\n' "$1"; exit 0; }
 /** The file a setup container leaves once every setup passed, so a container restored from its snapshot skips them. */
 const SETUP_DONE = "setup.done";
 
-/** Exit code: a setup that passed in the setup container failed when re-run in a check's container. */
+/** The file a post-gate step's container leaves once it is ready for the step's command. */
+const STEP_READY = "step.ready";
+
+/** Exit code: a setup that passed in the setup container failed when re-run in a check's or step's container. */
 export const RERUN_SETUP_FAILED_EXIT = 17;
 
+/** Exit code: a post-gate step's container wasn't readied for its command (`stepReadyScript`). */
+export const STEP_NOT_READY_EXIT = 18;
+
 /**
- * Bash that fetches the head `sha` from the fork into `tree` and checks it out, in a clean
- * `/workspace` with `logs` and `out` beside it. Needs `PRELUDE`.
+ * Bash that fetches the head `sha` from the line's repo into `tree` and checks it out, in a clean
+ * `/workspace` with `logs` and `out` beside it. It fetches the repo's branches and its task branches
+ * (`refs/tasks/*`), as a task branch's head is only under the latter. Needs `PRELUDE`.
  */
-function checkoutTree(forkRemote: string, sha: string): string {
-  return `rm -rf tree logs out ${SETUP_DONE} && mkdir logs out && git init -q tree && cd tree
-git fetch -q ${quote(forkRemote)} '+refs/heads/*:refs/remotes/fork/*' || exit 10
+function checkoutTree(remote: string, sha: string): string {
+  return `rm -rf tree logs out ${SETUP_DONE} ${STEP_READY} && mkdir logs out && git init -q tree && cd tree
+git fetch -q ${quote(remote)} '+refs/heads/*:refs/remotes/line/*' '+refs/tasks/*:refs/remotes/tasks/*' || exit 10
 git checkout -q --detach ${quote(sha)} || exit 11`;
+}
+
+/**
+ * Bash that runs every setup again in the checked-out tree, its output appended to `log` under a
+ * header each, for a container that couldn't start from the setups' snapshot. A setup that fails
+ * here passed in the setup container, so it's an infrastructure failure.
+ */
+function rerunSetups(setups: readonly SetupConfig[], log: string): string {
+  return setups
+    .map(
+      ({ name, command }) => `printf '== throng: setup %s ==\\n' ${quote(name)} >> ${log}
+timeout -k 10s ${seconds(SETUP_TIMEOUT_MS)} bash -c ${quote(command)} < /dev/null >> ${log} 2>&1 || exit ${RERUN_SETUP_FAILED_EXIT}`,
+    )
+    .join("\n");
 }
 
 /** What the setup container reports: the diff from the base, and how each setup went. */
@@ -53,14 +74,14 @@ export interface SetupResult {
 }
 
 /**
- * A pipeline run's setup container: fetches the head `sha` from the fork and records the diff size
+ * A pipeline run's setup container: fetches the head `sha` from the line's repo and records the diff size
  * from `base`, the attempt's base as `attemptBase` derived it (an ancestor of the head, so the fork
  * has it), or from the empty tree when it has none. Then it runs each setup in order under `timeout`,
  * each logging to `logs/<setup.n>.log`, and stops at the first that fails. When every one passed it
  * leaves `setup.done`, so the snapshot taken of it next carries both the setups' work and the mark.
  */
 export function setupScript(
-  forkRemote: string,
+  remote: string,
   { sha, base }: { sha: string; base: string | null },
   setups: readonly SetupConfig[],
 ): string {
@@ -75,7 +96,7 @@ printf '%s %s\\n' "$code" "$(( $(now) - t0 ))" > ../out/${setupLogName(i + 1)}.s
     .map((step) => `if [ -z "$setup_failed" ]; then\n${step}\nfi`)
     .join("\n");
   return `${PRELUDE}
-${checkoutTree(forkRemote, sha)}
+${checkoutTree(remote, sha)}
 now() { date +%s%3N; }
 t0=$(now)
 base=${quote(base ?? "")}
@@ -121,26 +142,20 @@ export interface CheckRun {
  * its outcome, `readValues` reads its metrics from that directory.
  */
 export function checkScript(
-  forkRemote: string,
+  remote: string,
   sha: string,
   setups: readonly SetupConfig[],
   check: Pick<PlannedCheck, "name" | "command" | "timeoutMs" | "metrics">,
 ): string {
   const log = `../logs/${check.name}.log`;
   const output = `"$PWD/../out/${check.name}"`;
-  const rerun = setups
-    .map(
-      ({ name, command }) => `printf '== throng: setup %s ==\\n' ${quote(name)} >> ${log}
-timeout -k 10s ${seconds(SETUP_TIMEOUT_MS)} bash -c ${quote(command)} < /dev/null >> ${log} 2>&1 || exit ${RERUN_SETUP_FAILED_EXIT}`,
-    )
-    .join("\n");
   return `${PRELUDE}
 now() { date +%s%3N; }
 setups_rerun=false
 if [ ! -f ${SETUP_DONE} ]; then
   setups_rerun=true
-  ${checkoutTree(forkRemote, sha).replaceAll("\n", "\n  ")}
-${rerun}
+  ${checkoutTree(remote, sha).replaceAll("\n", "\n  ")}
+${rerunSetups(setups, log)}
   touch ../${SETUP_DONE}
 else
   rm -rf out/${check.name} logs/${check.name}.log && cd tree
@@ -152,6 +167,57 @@ code=$?
 duration=$(( $(now) - t0 ))
 ${check.metrics.length === 0 ? "printf '{}' > ../out/values.json" : readValues(output, check.metrics, "../out/values.json")}
 result "{\\"exit\\":$code,\\"durationMs\\":$duration,\\"setupsRerun\\":$setups_rerun,\\"metrics\\":$(cat ../out/values.json)}"
+`;
+}
+
+/** What a post-gate step's container reports once it is ready: whether it re-ran the setups. */
+export interface StepReady {
+  setupsRerun: boolean;
+}
+
+/**
+ * Readies a pipeline run's container for one post-gate step, without starting the step's command:
+ * restored from the setups' snapshot it finds `setup.done`; otherwise it fetches the head and runs
+ * the setups itself, their output at the top of the step's log. Then it leaves `step.ready` for
+ * `stepScript`. Safe to retry: the step's command hasn't started.
+ */
+export function stepReadyScript(remote: string, sha: string, setups: readonly SetupConfig[], step: StepConfig): string {
+  const log = `../logs/${stepLogName(step.name)}.log`;
+  return `${PRELUDE}
+setups_rerun=false
+if [ ! -f ${SETUP_DONE} ]; then
+  setups_rerun=true
+  ${checkoutTree(remote, sha).replaceAll("\n", "\n  ")}
+${rerunSetups(setups, log)}
+  touch ../${SETUP_DONE}
+  cd ..
+fi
+touch ${STEP_READY}
+result "{\\"setupsRerun\\":$setups_rerun}"
+`;
+}
+
+/** What a post-gate step's container reports once its command ran. */
+export interface StepRun {
+  exit: number;
+  durationMs: number;
+}
+
+/**
+ * Runs one post-gate step's command, once, in the container `stepReadyScript` readied, under
+ * `timeout`, logging to `logs/step.<name>.log`. It takes the `step.ready` mark before starting the
+ * command, so a container that isn't ready (it was lost, say), or one whose command already started,
+ * is an infrastructure failure (`STEP_NOT_READY_EXIT`), and the command never starts (again).
+ */
+export function stepScript(step: StepConfig, timeoutMs: number): string {
+  return `${PRELUDE}
+now() { date +%s%3N; }
+rm ${STEP_READY} 2> /dev/null || exit ${STEP_NOT_READY_EXIT}
+cd tree
+t0=$(now)
+timeout -k 10s ${seconds(timeoutMs)} bash -c ${quote(step.command)} < /dev/null >> ../logs/${stepLogName(step.name)}.log 2>&1
+code=$?
+result "{\\"exit\\":$code,\\"durationMs\\":$(( $(now) - t0 ))}"
 `;
 }
 

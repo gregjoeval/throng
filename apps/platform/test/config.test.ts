@@ -7,9 +7,11 @@ import {
   MAX_CONFIG_BYTES,
   namedSecrets,
   parseConfig,
+  pipelineConfig,
   sandboxSize,
 } from "../src/config.ts";
-import type { Config } from "../src/config.ts";
+import type { CheckConfig, Config, ConfigResult } from "../src/config.ts";
+import { withTask } from "../src/task-definitions.ts";
 import { FakeRepos } from "./fake-repos.ts";
 
 const EMPTY: Config = {
@@ -20,6 +22,7 @@ const EMPTY: Config = {
   attempts: { limit: null },
   selection: { policy: "creator" },
   sandbox: { size: "standard-1" },
+  pipelines: { default: { groups: null, steps: [] }, main: { groups: null, steps: [] } },
 };
 
 const FULL = `
@@ -88,6 +91,7 @@ describe("parseConfig", () => {
             timeoutMs: 10 * 60_000,
             after: [],
             secrets: [],
+            group: null,
             source: "project",
           },
           {
@@ -96,6 +100,7 @@ describe("parseConfig", () => {
             timeoutMs: 90_000,
             after: ["test"],
             secrets: [],
+            group: null,
             source: "project",
           },
         ],
@@ -127,6 +132,7 @@ describe("parseConfig", () => {
         attempts: { limit: 4 },
         selection: { policy: "creator" },
         sandbox: { size: "standard-2" },
+        pipelines: { default: { groups: null, steps: [] }, main: { groups: null, steps: [] } },
       },
     });
   });
@@ -174,6 +180,7 @@ describe("parseConfig", () => {
             timeoutMs: DEFAULT_CHECK_TIMEOUT_MS,
             after: [],
             secrets: [],
+            group: null,
             source: "project",
           },
         ],
@@ -519,6 +526,110 @@ describe("parseConfig", () => {
     ]);
   });
 
+  it("reads each check's group, each pipeline's groups and main's post-gate steps, in order", () => {
+    const result = parseConfig(`checks:
+  - { name: lint, command: x, group: verify }
+  - { name: test, command: x, group: verify }
+  - { name: preview, command: x, after: [lint, test] }
+pipelines:
+  default: {}
+  main:
+    groups: [verify]
+    steps:
+      - { name: migrate, command: pnpm db:migrate }
+      - { name: deploy, command: pnpm deploy }
+`);
+    expect(result.kind === "valid" && result.config.checks.map((c) => [c.name, c.group])).toEqual([
+      ["lint", "verify"],
+      ["test", "verify"],
+      ["preview", null],
+    ]);
+    expect(result.kind === "valid" && result.config.pipelines).toEqual({
+      default: { groups: null, steps: [] },
+      main: {
+        groups: ["verify"],
+        steps: [
+          { name: "migrate", command: "pnpm db:migrate" },
+          { name: "deploy", command: "pnpm deploy" },
+        ],
+      },
+    });
+  });
+
+  it.each([
+    ["groups on a check", check("groups: [a, b]"), "checks[0].groups: a check is in at most one group: use group"],
+    [
+      "a group on a setup",
+      "setup:\n  - { name: deps, command: x, group: verify }\n",
+      "setup[0].group: only checks take a group; a pipeline's groups choose which checks it runs",
+    ],
+    [
+      "a group on a step",
+      "pipelines:\n  main:\n    steps:\n      - { name: deploy, command: x, group: verify }\n",
+      "pipelines.main.steps[0].group: only checks take a group; a pipeline's groups choose which checks it runs",
+    ],
+    [
+      "after on a step",
+      "checks:\n  - { name: test, command: x }\npipelines:\n  main:\n    steps:\n      - { name: deploy, command: x, after: test }\n",
+      "pipelines.main.steps[0].after: only checks take after; steps run in order",
+    ],
+    [
+      "a group no check is in",
+      `${check("group: verify")}pipelines:\n  main: { groups: [verify, smoke] }\n`,
+      "pipelines.main.groups: no check is in the group smoke",
+    ],
+    [
+      "an empty groups list",
+      `${check("group: verify")}pipelines:\n  default: { groups: [] }\n`,
+      "pipelines.default.groups: groups must name at least one group; leave groups out to run every check",
+    ],
+    [
+      "a pipeline's check waiting for one it doesn't run",
+      "checks:\n  - { name: test, command: x }\n  - { name: preview, command: x, group: deploy, after: test }\n" +
+        "pipelines:\n  main: { groups: [deploy] }\n",
+      "pipelines.main.groups: preview runs here and waits for test, which doesn't; put them in a group together",
+    ],
+    [
+      "an unknown pipeline",
+      "pipelines:\n  staging: {}\n",
+      "pipelines.staging: unknown pipeline; the pipelines are default and main",
+    ],
+    [
+      "a pipeline's skip",
+      "pipelines:\n  default: { skip: [preview] }\n",
+      "pipelines.default.skip: skip is gone: give checks groups, and list the groups this pipeline runs under groups",
+    ],
+    [
+      "steps on default",
+      "pipelines:\n  default:\n    steps: [{ name: deploy, command: x }]\n",
+      "pipelines.default.steps: only main has post-gate steps; default runs on attempts and task branches",
+    ],
+    [
+      "a step named like a check",
+      `${check("")}pipelines:\n  main:\n    steps: [{ name: test, command: x }]\n`,
+      "pipelines.main.steps[0].name: step name test is also a check's name",
+    ],
+    [
+      "a step named like a setup",
+      "setup: [{ name: deps, command: x }]\npipelines:\n  main:\n    steps: [{ name: deps, command: x }]\n",
+      "pipelines.main.steps[0].name: step name deps is also a setup's name",
+    ],
+    [
+      "two steps of one name",
+      "pipelines:\n  main:\n    steps: [{ name: deploy, command: x }, { name: deploy, command: y }]\n",
+      "pipelines.main.steps[1].name: duplicate step name deploy",
+    ],
+  ])("rejects %s", (_, text, error) => {
+    expect(parseConfig(text)).toEqual({ kind: "invalid", error });
+  });
+
+  it("allows a check waiting for one in another group the pipeline also runs", () => {
+    const text =
+      "checks:\n  - { name: test, command: x, group: verify }\n  - { name: preview, command: x, group: deploy, after: test }\n" +
+      "pipelines:\n  main: { groups: [verify, deploy] }\n";
+    expect(parseConfig(text)).toMatchObject({ kind: "valid" });
+  });
+
   it("reads after as one check or a list of them", () => {
     const result = parseConfig(
       "checks:\n  - { name: a, command: x }\n  - { name: b, command: x, after: a }\n  - { name: c, command: x, after: [a, b] }\n",
@@ -571,8 +682,24 @@ checks:
       config: {
         ...EMPTY,
         checks: [
-          { name: "unit", command: "pnpm test", timeoutMs: 120_000, after: [], secrets: [], source: "project" },
-          { name: "e2e", command: "pnpm e2e", timeoutMs: 300_000, after: [], secrets: [], source: "project" },
+          {
+            name: "unit",
+            command: "pnpm test",
+            timeoutMs: 120_000,
+            after: [],
+            secrets: [],
+            group: null,
+            source: "project",
+          },
+          {
+            name: "e2e",
+            command: "pnpm e2e",
+            timeoutMs: 300_000,
+            after: [],
+            secrets: [],
+            group: null,
+            source: "project",
+          },
         ],
       },
     });
@@ -625,5 +752,66 @@ describe("sandboxSize", () => {
     expect(sandboxSize(parseConfig(""))).toBe("standard-1");
     expect(sandboxSize({ kind: "none" })).toBe(DEFAULT_SANDBOX_SIZE);
     expect(sandboxSize({ kind: "invalid", error: "x" })).toBe(DEFAULT_SANDBOX_SIZE);
+  });
+});
+
+/** A task's check `smoke`, waiting for `after`. */
+const smoke = (after: string[]): CheckConfig => ({
+  name: "smoke",
+  command: "./smoke.sh",
+  timeoutMs: 60_000,
+  after,
+  secrets: [],
+  group: null,
+  source: "task",
+});
+
+/** The checks a config runs, by name, or the config when it isn't valid. */
+const checkNames = (config: ConfigResult) =>
+  config.kind === "valid" ? config.config.checks.map((c) => c.name) : config;
+
+describe("pipelineConfig", () => {
+  const GROUPED = parseConfig(`checks:
+  - { name: lint, command: x, group: verify }
+  - { name: test, command: x, group: verify }
+  - { name: preview, command: x, after: [lint, test] }
+metrics:
+  - { name: coverage, from: test.report.pct, type: number }
+  - { name: preview_url, from: preview.out.url, type: string, format: url }
+pipelines:
+  main:
+    groups: [verify]
+    steps: [{ name: deploy, command: pnpm deploy }]
+`);
+  const VERIFY_ONLY = parseConfig(
+    "checks:\n  - { name: lint, command: x, group: verify }\n  - { name: test, command: x }\n" +
+      "pipelines:\n  default: { groups: [verify] }\n",
+  );
+  it("runs only the checks in a pipeline's groups, and the metrics read from them", () => {
+    const main = pipelineConfig(GROUPED, "main");
+    expect(checkNames(main)).toEqual(["lint", "test"]);
+    expect(main.kind === "valid" && main.config.metrics.map((m) => m.name)).toEqual(["coverage"]);
+  });
+
+  it("runs every check in a pipeline that names no groups", () => {
+    expect(checkNames(pipelineConfig(GROUPED, "default"))).toEqual(["lint", "test", "preview"]);
+  });
+
+  it("always runs a task's checks, whatever groups the pipeline names", () => {
+    const config = withTask(VERIFY_ONLY, { checks: [smoke(["lint"])], metrics: [] });
+    expect(checkNames(pipelineConfig(config, "default"))).toEqual(["lint", "smoke"]);
+  });
+
+  it("is invalid when a task's check waits for a check the pipeline doesn't run", () => {
+    const config = withTask(VERIFY_ONLY, { checks: [smoke(["test"])], metrics: [] });
+    expect(pipelineConfig(config, "default")).toEqual({
+      kind: "invalid",
+      error: "smoke waits for test, which the default pipeline doesn't run",
+    });
+  });
+
+  it("leaves a config that isn't valid as it is", () => {
+    expect(pipelineConfig({ kind: "none" }, "main")).toEqual({ kind: "none" });
+    expect(pipelineConfig({ kind: "invalid", error: "x" }, "main")).toEqual({ kind: "invalid", error: "x" });
   });
 });

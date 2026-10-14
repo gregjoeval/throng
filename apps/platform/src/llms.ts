@@ -114,7 +114,10 @@ human, since no tool can. Only the owner can cancel a run, through the UI or RES
 
 The setups run in order in one container; each check then runs in its own container, started from a
 snapshot of the setups' work, in parallel, except that a check waits for the checks its \`after\` names
-and is skipped unless they all passed. Each container gets \`THRONG_PROJECT\`, \`THRONG_PIPELINE\`,
+and is skipped unless they all passed. A check may be in one \`group\`; \`pipelines.main.groups\` (or
+\`pipelines.default.groups\`) runs only those groups' checks, and a pipeline listing none runs every check.
+A task's checks always run on its attempts. \`pipelines.main.steps\` run in order once \`main\`'s gate
+passes, each in its own container, stopping at the first that fails. Each container gets \`THRONG_PROJECT\`, \`THRONG_PIPELINE\`,
 \`THRONG_LINE\`, \`THRONG_SHA\` and \`THRONG_RUN\`, and starts at the size the project's
 \`.throng/config.yml\` sets, as in \`sandbox: {size: standard-2}\`. The sizes are ${oneOf(SANDBOX_SIZES.map(describeSize))}.
 The default is ${DEFAULT_SANDBOX_SIZE}. Like the rest of the config, it is read from the origin's \`main\`: an

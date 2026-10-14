@@ -14,6 +14,7 @@ import {
   bob,
   me,
   result,
+  runDetail,
   serveCompare,
   server,
   serveTasks,
@@ -108,6 +109,24 @@ describe("the merge request view", () => {
   ])("says the merge request is %#", async (mr, text) => {
     await openMergeRequest(mr);
     expect(await banner()).toHaveTextContent(text);
+  });
+
+  it("shows the task branch's runs beside the banner", async () => {
+    const { error: _e, outcome: _o, result: _r, ...run } = runDetail(4, HEAD, { line: "t1", status: "running" });
+    server.use(
+      http.get("*/api/projects/:owner/:project/runs", ({ request }) =>
+        HttpResponse.json({ runs: new URL(request.url).searchParams.get("line") === "t1" ? [run] : [], next: null }),
+      ),
+    );
+    await openMergeRequest(mergeRequest());
+    const runs = await within(view()).findByRole("region", { name: "Task branch runs" });
+    expect(within(runs).getByRole("listitem", { name: "Run 4" })).toHaveTextContent(`Run 4${HEAD.slice(0, 7)}Running`);
+  });
+
+  it("shows no task branch runs while the task branch has none", async () => {
+    await openMergeRequest(mergeRequest());
+    await banner();
+    expect(within(view()).queryByRole("region", { name: "Task branch runs" })).toBeNull();
   });
 
   it("names the alias an approval came through", async () => {

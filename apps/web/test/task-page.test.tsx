@@ -3,7 +3,7 @@ import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
 import type { Attempt, ListedTask } from "@/lib/tasks";
 import { renderApp } from "./app";
-import { attempt, bob, me, server, serveTasks, task } from "./server";
+import { attempt, bob, me, runDetail, server, serveTasks, task } from "./server";
 
 const SHA = "c0ffee".padEnd(40, "0");
 const ARCHIVED = "a1".padEnd(40, "0");
@@ -148,6 +148,33 @@ describe("the task page body", () => {
       `/ada/alpha/commit/${SHA}`,
     );
     expect(within(body()).getByRole("link", { name: "t1a1" })).toHaveAttribute("href", `/ada/alpha/tree/${ARCHIVED}`);
+  });
+
+  it("shows the task branch's latest runs beside a merged merge request's banner, each linking to its page", async () => {
+    const asked: string[] = [];
+    serveMergeRequest({ state: "merged", mergeSha: SHA, mergedAt: me.user.createdAt });
+    server.use(
+      http.get("*/api/projects/:owner/:project/runs", ({ request }) => {
+        asked.push(new URL(request.url).search);
+        const { error: _e, outcome: _o, result: _r, ...run } = runDetail(9, SHA, { line: "t1" });
+        const older = { ...run, id: 8, status: "cancelled" as const, gate: null, superseded: true };
+        return HttpResponse.json({ runs: [run, older], next: null });
+      }),
+    );
+    await openTask(task(1, { state: "closed", closedBy: bob }), [
+      attempt(1, 2, { state: "merged", mergedSha: SHA, mergeRequest: { state: "merged", lastDequeue: null } }),
+    ]);
+    const runs = await within(body()).findByRole("region", { name: "Task branch runs" });
+    expect(asked).toContain("?line=t1");
+    expect(within(runs).getByRole("listitem", { name: "Run 9" })).toHaveTextContent(
+      `Run 9${SHA.slice(0, 7)}DoneGate passed`,
+    );
+    expect(within(runs).getByRole("listitem", { name: "Run 8" })).toHaveAttribute("data-superseded", "true");
+    expect(within(runs).getByRole("link", { name: "Run 9" })).toHaveAttribute("href", "/ada/alpha/runs/9");
+    expect(within(runs).getByRole("link", { name: "All runs on t1" })).toHaveAttribute(
+      "href",
+      "/ada/alpha/runs?line=t1",
+    );
   });
 
   it("says when a closed task never merged", async () => {

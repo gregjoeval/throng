@@ -40,12 +40,21 @@ describe("POST /api/config/validate", () => {
             setup: [],
             network: { allow: [] },
             checks: [
-              { name: "test", command: "pnpm test", timeoutMs: 600_000, after: [], secrets: [], source: "project" },
+              {
+                name: "test",
+                command: "pnpm test",
+                timeoutMs: 600_000,
+                after: [],
+                secrets: [],
+                group: null,
+                source: "project",
+              },
             ],
             metrics: [],
             attempts: { limit: null },
             selection: { policy: "creator" },
             sandbox: { size: "standard-1" },
+            pipelines: { default: { groups: null, steps: [] }, main: { groups: null, steps: [] } },
           },
         },
       });

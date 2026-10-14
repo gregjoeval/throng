@@ -35,7 +35,7 @@ import { forkRepo, originRepo } from "./repos.ts";
 import type { Repos } from "./repos.ts";
 import { GATES } from "./results.ts";
 import type { Gate } from "./results.ts";
-import { cancellable, runReport, runSettled, SCORING_CAP, ScoringQueue } from "./scoring.ts";
+import { cancellable, MAIN_LINE, runReport, runSettled, SCORING_CAP, ScoringQueue } from "./scoring.ts";
 import type {
   AttemptScoring,
   PlanVerdict,
@@ -1302,8 +1302,9 @@ export class TaskStore {
 
   /**
    * Records a push of task `task`'s task branch to `head`, which the git proxy authorized
-   * (`authorizeTaskBranchPush`) and the origin accepted, and queues a follow of it for each active
-   * attempt. Returns those attempts' references.
+   * (`authorizeTaskBranchPush`) and the origin accepted, asks for a `default` run of it on the task
+   * branch's line (`t42`), and queues a follow of it for each active attempt. Returns those attempts'
+   * references.
    */
   recordTaskBranchPush(project: ProjectContext, actor: Actor, input: { task: number; head: string }): string[] {
     return this.#sql.transaction(() => {
@@ -1311,6 +1312,14 @@ export class TaskStore {
       this.#sql.exec("UPDATE tasks SET task_head = ? WHERE number = ?", input.head, input.task);
       this.#sql.exec("UPDATE attempts SET contains_task_head = NULL WHERE task = ?", input.task);
       this.#journal(actor, "taskBranchPushed", input.task, null, { head: input.head });
+      this.scoring.request({
+        project: project.id,
+        line: taskRef(input.task),
+        sha: input.head,
+        trigger: "push",
+        actor,
+        ownersPush: isOwnersPush(project, actor),
+      });
       const active = this.#activeAttempts(input.task);
       for (const attempt of active) {
         this.#queueFollow(project, attempt, input.head);
@@ -1524,8 +1533,8 @@ export class TaskStore {
 
   /**
    * Starts a Follow Workflow for each queued follow whose attempt has none running, while a Sandbox
-   * slot is free; a landing goes first, and scoring waits for both. A follow whose attempt ended is
-   * dropped, and one a claimed landing holds back waits.
+   * slot is free: a landing goes first, then a `main` run, and task-branch and attempt runs wait for
+   * follows. A follow whose attempt ended is dropped, and one a claimed landing holds back waits.
    */
   async #drainFollows(project: string): Promise<void> {
     const runner = this.#follow;
@@ -1539,7 +1548,9 @@ export class TaskStore {
           continue;
         }
         if (this.#landingHolds(attempt)) continue;
-        if (SCORING_CAP - this.scoring.running() - this.#landingSlots() - this.follows.running() <= 0) break;
+        // A `main` run about to start goes before any follow.
+        const main = this.scoring.mainStartable() ? 1 : 0;
+        if (SCORING_CAP - this.scoring.running() - this.#landingSlots() - this.follows.running() - main <= 0) break;
         const running = this.follows.start(
           follow.id,
           (id) => `${forkRepo(project, attemptRef(follow.task, follow.attempt))}-follow-${id}`,
@@ -1788,7 +1799,7 @@ export class TaskStore {
     const { mr, closed } = this.#sql.transaction(() => {
       // The attempt, the task or its merge requests may have moved while the head was read.
       this.#checkSelectable(this.#attempt(current));
-      return this.#select(actor, current, head);
+      return this.#select(project, actor, current, head);
     });
     await this.#archive(project, closed);
     return mr;
@@ -1798,8 +1809,18 @@ export class TaskStore {
    * Selection's row changes, in the caller's transaction: the merge request approving `head`, and
    * the task's other active attempts closed. The caller archives `closed` once it commits.
    */
-  #select(actor: Actor, attempt: StoredAttempt, head: string): { mr: StoredMergeRequest; closed: StoredAttempt[] } {
-    const created = this.mergeRequests.select(actor, { task: attempt.task, attempt: attempt.number, head });
+  #select(
+    project: ProjectContext,
+    actor: Actor,
+    attempt: StoredAttempt,
+    head: string,
+  ): { mr: StoredMergeRequest; closed: StoredAttempt[] } {
+    const created = this.mergeRequests.select(actor, {
+      task: attempt.task,
+      attempt: attempt.number,
+      head,
+      byOwner: isOwnersPush(project, actor),
+    });
     const others = this.#activeAttempts(attempt.task).filter((a) => a.number !== attempt.number);
     for (const other of others) this.#endAttempt(actor, other, "closed");
     return { mr: this.#evaluate(actor, created), closed: others };
@@ -1826,7 +1847,7 @@ export class TaskStore {
       if (now.id !== mr.id || now.state !== mr.state) {
         throw invalidState(`${taskRef(task.number)}'s merge request moved; try again`);
       }
-      return this.#evaluate(actor, this.mergeRequests.approve(actor, now, head));
+      return this.#evaluate(actor, this.mergeRequests.approve(actor, now, head, isOwnersPush(project, actor)));
     });
   }
 
@@ -2101,7 +2122,7 @@ export class TaskStore {
       if (winner === null) return { vote: ended, mr: null, closed: [] };
       const source = this.#attempt({ task: task.number, number: winner.attempt });
       this.#checkSelectable(source);
-      return { vote: ended, ...this.#select(actor, source, winner.head) };
+      return { vote: ended, ...this.#select(project, actor, source, winner.head) };
     });
     await this.#archive(project, closed);
     return { vote: this.#voteDetail(vote, actor), selected: mr };
@@ -2352,9 +2373,20 @@ export class TaskStore {
     if (sha !== null) {
       const landedSha = sha;
       const { source } = this.#sql.transaction(() => {
+        // Read before landing it: the owner's approval makes the landing the owner's merge.
+        const ownersMerge = this.mergeRequests.ownerApproved(this.#openMergeRequest(task));
         const landed = this.#landRows(null, { task, sha: landedSha });
         this.landings.move(landing, "landed");
         this.#journal(null, "mainAdvanced", task, attempt, { mergeRequest: taskRef(task), head, sha: landedSha });
+        // `main` moved: it runs the `main` pipeline on what landed.
+        this.scoring.request({
+          project,
+          line: MAIN_LINE,
+          sha: landedSha,
+          trigger: "push",
+          actor: null,
+          ownersPush: ownersMerge,
+        });
         return landed;
       });
       await this.#archive({ id: project }, [source]);
@@ -3225,16 +3257,17 @@ function toTask(row: TaskRow): StoredTask {
 /**
  * A task's stored definitions, as JSON, in the current shape. Checks stored while a check could be
  * optional carry `required`, which is dropped: every check that runs must pass. Checks stored before
- * a check could wait for others have no `after`, and wait for none. A task's check names no secrets,
- * and was stored without `secrets`.
+ * a check could wait for others have no `after`, and wait for none. A task's check names no secrets
+ * and is in no group, and was stored without either.
  */
 function upgradeDefinitions(json: string): TaskDefinitions {
   const stored = { ...NO_TASK_DEFINITIONS, ...(JSON.parse(json) as Partial<TaskDefinitions>) };
-  type StoredCheck = Omit<CheckConfig, "after" | "secrets"> & { after?: string[]; required?: boolean };
+  type StoredCheck = Omit<CheckConfig, "after" | "secrets" | "group"> & { after?: string[]; required?: boolean };
   const checks = (stored.checks as StoredCheck[]).map(({ required: _required, after = [], ...check }): CheckConfig => ({
     ...check,
     after,
     secrets: [],
+    group: null,
   }));
   return { ...stored, checks };
 }

@@ -103,6 +103,11 @@ async function setup(selection = "selection: { policy: vote }\n") {
 
   const score = async (ref: AttemptInput, outcome: ScoringOutcome = done()) => {
     await store.scoring.drain();
+    // A task branch push runs on the task branch's line too, holding a slot until it ends.
+    for (const run of store.scoring.listRuns(`t${ref.task}`).filter((r) => r.status === "running")) {
+      store.scoringFinished(run.id, done());
+      await store.scoring.drain();
+    }
     const run = at(store.scoring.listRuns(`t${ref.task}a${ref.number}`), -1);
     store.scoringFinished(run.id, outcome);
   };

@@ -999,7 +999,7 @@ describe("migrate", () => {
     );
     const store = new TaskStore({ sql, repos });
     expect(store.getTask(PROJECT, ada, { task: 1 }).definitions.checks).toEqual([
-      { name: "smoke", command: "./smoke.sh", timeoutMs: 1000, after: [], secrets: [], source: "task" },
+      { name: "smoke", command: "./smoke.sh", timeoutMs: 1000, after: [], secrets: [], group: null, source: "task" },
     ]);
     expect(store.getScoringRun(PROJECT, ada, { run: 1 }).result?.checks).toEqual([
       { name: "smoke", source: "task", outcome: "failed", durationMs: 1, notes: [] },

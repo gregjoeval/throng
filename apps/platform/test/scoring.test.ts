@@ -968,3 +968,107 @@ describe("trust and secrets", () => {
     });
   });
 });
+
+/** Requests a run of `sha` on `main`, as `main` moving does. */
+const onMain = (t: ReturnType<typeof setup>, sha: string) =>
+  t.store.scoring.request({ project: PROJECT.id, line: "main", sha, trigger: "push", actor: null, ownersPush: true });
+
+describe("runs on task branches and main", () => {
+  /** Pushes task 1's task branch to a new commit as `who`, as the git proxy records it. */
+  let n = 0;
+  const pushTaskBranch = (t: ReturnType<typeof setup>, who: Actor, task = 1) => {
+    const head = t.repos.commit(ORIGIN, { files: { "test.txt": `test ${++n}\n` }, branch: `tasks-t${task}` }).hash;
+    t.store.recordTaskBranchPush(PROJECT, who, { task, head });
+    return head;
+  };
+
+  it("runs default on a task branch's line when it's pushed, trusted as the owner's push", () => {
+    const t = setup();
+    t.store.createTask(PROJECT, ada, { title: "Fix it" });
+    const head = pushTaskBranch(t, ada);
+    const theirs = at(t.store.scoring.listRuns("t1"), 0);
+    expect(theirs).toMatchObject({ line: "t1", sha: head, pipeline: "default", trigger: "push", trusted: false });
+    expect(theirs.instance_id).toBe(`abc123-t1-${head.slice(0, 12)}-${theirs.id}`);
+    expect(t.journal().find((e) => e.kind === "scoringQueued")).toMatchObject({ ref: "t1", sha: head });
+
+    const next = pushTaskBranch(t, owner);
+    expect(t.store.scoring.listRuns("t1").map((r) => [r.sha, r.status, r.trusted])).toEqual([
+      [head, "cancelled", false],
+      [next, "queued", true],
+    ]);
+  });
+
+  it("cancels a running task-branch run, tearing it down, when a newer head arrives", async () => {
+    const t = setup();
+    t.store.createTask(PROJECT, ada, { title: "Fix it" });
+    pushTaskBranch(t, ada);
+    await t.store.scoring.drain();
+    const running = at(t.store.scoring.listRuns("t1"), 0);
+    t.store.scoring.planned(running.id, [`${running.instance_id}/setup`]);
+    pushTaskBranch(t, ada);
+    await t.store.scoring.drain();
+    expect(t.workflow.terminated).toEqual([running.instance_id]);
+    expect(t.tornDown).toEqual([[running.instance_id, [`${running.instance_id}/setup`]]]);
+    expect(t.store.scoring.listRuns("t1").map((r) => r.status)).toEqual(["cancelled", "running"]);
+  });
+
+  it("runs main on main, and a newer head replaces a queued main run, never the running one", async () => {
+    const t = setup();
+    const [one, two, three] = ["1", "2", "3"].map((c) => c.repeat(40)) as [string, string, string];
+    const first = queued(onMain(t, one)).run;
+    expect(first).toMatchObject({ line: "main", pipeline: "main", trusted: true });
+    expect(first.instance_id).toBe(`abc123-main-${one.slice(0, 12)}-${first.id}`);
+    await t.store.scoring.drain();
+    expect(t.store.scoring.getRun(first.id)?.status).toBe("running");
+
+    // The running run may be deploying: newer heads queue behind it, the newest replacing the queued.
+    queued(onMain(t, two));
+    queued(onMain(t, three));
+    await t.store.scoring.drain();
+    expect(t.workflow.terminated).toEqual([]);
+    expect(t.store.scoring.listRuns("main").map((r) => [r.sha, r.status])).toEqual([
+      [one, "running"],
+      [two, "cancelled"],
+      [three, "queued"],
+    ]);
+    expect(t.store.scoring.getRun(first.id)?.superseded).toBeTruthy();
+
+    // Its report still counts, and the newest head runs next.
+    expect(t.store.scoring.finish(first.id, done())).toBeTruthy();
+    await t.store.scoring.drain();
+    expect(t.store.scoring.listRuns("main").map((r) => r.status)).toEqual(["done", "cancelled", "running"]);
+  });
+
+  it("lets the owner cancel a queued main run, but not the running one", async () => {
+    const t = setup();
+    const running = queued(onMain(t, "1".repeat(40))).run;
+    await t.store.scoring.drain();
+    expect(() => t.store.cancelRun(PROJECT, owner, { run: running.id })).toThrow(/can't be cancelled/u);
+    const waiting = queued(onMain(t, "2".repeat(40))).run;
+    expect(t.store.cancelRun(PROJECT, owner, { run: waiting.id }).status).toBe("cancelled");
+  });
+
+  it("starts a main run first when a slot frees, then task-branch and attempt runs oldest first", async () => {
+    const t = setup();
+    const refs = await t.drafts(SCORING_CAP);
+    for (const ref of refs) await t.store.openAttempt(PROJECT, ada, ref);
+    t.store.createTask(PROJECT, ada, { title: "Branch" });
+    pushTaskBranch(t, ada, 2);
+    const last = at(await t.drafts(), 0);
+    await t.store.openAttempt(PROJECT, ada, last);
+    await t.store.scoring.drain();
+    expect(t.workflow.created.map((c) => c.params.line)).toEqual(["t1a1", "t1a2", "t1a3"]);
+
+    // `main` is queued last, and takes the first free slot.
+    queued(onMain(t, "1".repeat(40)));
+    const finish = async (ref: AttemptInput) => {
+      t.store.scoring.finish(at(t.runs(ref), 0).id, done());
+      await t.store.scoring.drain();
+    };
+    await finish(at(refs, 0));
+    expect(t.workflow.created.map((c) => c.params.line).slice(3)).toEqual(["main"]);
+    await finish(at(refs, 1));
+    await finish(at(refs, 2));
+    expect(t.workflow.created.map((c) => c.params.line).slice(3)).toEqual(["main", "t2", "t3a1"]);
+  });
+});

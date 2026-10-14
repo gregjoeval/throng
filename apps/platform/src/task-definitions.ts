@@ -15,6 +15,7 @@ import {
   DEFAULT_SANDBOX_SIZE,
   describeIssue,
   describePath,
+  EVERY_CHECK,
   metricConfig,
   MetricSchema,
   nameProblems,
@@ -36,9 +37,10 @@ export interface TaskDefinitionsInput {
 
 export const NO_TASK_DEFINITIONS: TaskDefinitions = { checks: [], metrics: [] };
 
-/** A task's check: a config's, naming no secrets. */
+/** A task's check: a config's, naming no secrets and in no group, as it always runs on the task's attempts. */
 const TaskCheckSchema = CheckSchema.extend({
   secrets: z.never({ error: "a task's checks get no secrets: tasks aren't reviewed like main's config" }).optional(),
+  group: z.never({ error: "a task's checks take no group: they always run on the task's attempts" }).optional(),
 });
 
 const TaskSchema = z
@@ -63,7 +65,9 @@ export function taskDefinitionsFrom(
   const parsed = TaskSchema.safeParse(input);
   if (!parsed.success) return { error: parsed.error.issues.map(describeIssue).join("\n") };
   const definitions = {
-    checks: parsed.data.checks?.map((check) => checkConfig({ ...check, secrets: [] }, "task")) ?? current.checks,
+    checks:
+      parsed.data.checks?.map((check) => checkConfig({ ...check, secrets: [], group: undefined }, "task")) ??
+      current.checks,
     metrics: parsed.data.metrics?.map((metric) => metricConfig(metric, "task")) ?? current.metrics,
   };
   if (defines(definitions) && project.kind === "invalid") {
@@ -97,6 +101,7 @@ export function withTask(project: ConfigResult, task: TaskDefinitions): ConfigRe
     attempts: { limit: null },
     selection: CREATOR_SELECTS,
     sandbox: { size: DEFAULT_SANDBOX_SIZE },
+    pipelines: { default: EVERY_CHECK, main: EVERY_CHECK },
   };
   return {
     kind: "valid",
@@ -109,5 +114,6 @@ export function withTask(project: ConfigResult, task: TaskDefinitions): ConfigRe
  * line each: `metrics[0].from: no check is named lint`.
  */
 function clashes(project: Config | null, task: TaskDefinitions): string[] {
-  return nameProblems(task, project).map(({ path, message }) => `${describePath(path)}: ${message}`);
+  const layer = project === null ? null : { ...project, steps: project.pipelines.main.steps };
+  return nameProblems(task, layer).map(({ path, message }) => `${describePath(path)}: ${message}`);
 }

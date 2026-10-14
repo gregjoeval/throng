@@ -350,6 +350,8 @@ export const handlers = [
       ? notFound(`no project ${params["owner"]}/${params["project"]}`)
       : HttpResponse.json(found);
   }),
+  // No project has run anything unless a test says so.
+  http.get("*/api/projects/:owner/:project/runs", () => HttpResponse.json({ runs: [], next: null })),
 ];
 
 export const server = setupServer(...handlers);

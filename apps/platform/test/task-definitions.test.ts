@@ -31,6 +31,7 @@ const taskCheck = (check: Partial<CheckConfig> = {}): CheckConfig => ({
   timeoutMs: 60_000,
   after: [],
   secrets: [],
+  group: null,
   source: "task",
   ...check,
 });
@@ -195,6 +196,21 @@ describe("a task's definitions", () => {
     const input = { checks: [{ name: "smoke", command: "./smoke.sh", secrets: ["DEPLOY"] }] };
     expect(taskDefinitionsFrom(input, NO_TASK_DEFINITIONS, PROJECT)).toEqual({
       error: "checks[0].secrets: a task's checks get no secrets: tasks aren't reviewed like main's config",
+    });
+  });
+
+  it("refuses a task's check in a group: it always runs on the task's attempts", () => {
+    const input = { checks: [{ name: "smoke", command: "./smoke.sh", group: "verify" }] };
+    expect(taskDefinitionsFrom(input, NO_TASK_DEFINITIONS, PROJECT)).toEqual({
+      error: "checks[0].group: a task's checks take no group: they always run on the task's attempts",
+    });
+  });
+
+  it("refuses a task's check named like one of main's post-gate steps: they share one namespace", () => {
+    const project = parseConfig("pipelines:\n  main:\n    steps: [{ name: deploy, command: x }]\n");
+    const input = { checks: [{ name: "deploy", command: "./smoke.sh" }] };
+    expect(taskDefinitionsFrom(input, NO_TASK_DEFINITIONS, project)).toEqual({
+      error: "checks[0].name: deploy is also a post-gate step's name in .throng/config.yml",
     });
   });
 

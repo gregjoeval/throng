@@ -46,20 +46,27 @@ export interface RunGrants {
   originWrite: GitGrant;
   forkRead: GitGrant;
   forkWrite: GitGrant;
+  /** Read on the run's line's repo: an attempt's fork, or the origin for a task branch or `main`. */
+  lineRead: GitGrant;
 }
 
-/** Which repo each grant is for, and with what access. */
-export const GRANT_SOURCES: Record<keyof RunGrants, { repo: "origin" | "fork"; access: GitGrant["access"] }> = {
-  originRead: { repo: "origin", access: "read" },
-  originWrite: { repo: "origin", access: "write" },
-  forkRead: { repo: "fork", access: "read" },
-  forkWrite: { repo: "fork", access: "write" },
-};
+/**
+ * Which repo each grant is for, and with what access: the origin, an attempt's fork, or the repo the
+ * run's line is in (see `lineRepo`).
+ */
+export const GRANT_SOURCES: Record<keyof RunGrants, { repo: "origin" | "fork" | "line"; access: GitGrant["access"] }> =
+  {
+    originRead: { repo: "origin", access: "read" },
+    originWrite: { repo: "origin", access: "write" },
+    forkRead: { repo: "fork", access: "read" },
+    forkWrite: { repo: "fork", access: "write" },
+    lineRead: { repo: "line", access: "read" },
+  };
 
 /** The grants each role's container gets. */
 export const ROLE_GRANTS = {
-  // One read grant on the run's line: an attempt's fork.
-  pipeline: ["forkRead"],
+  // One read grant on the run's line: an attempt's fork, or the origin for a task branch or `main`.
+  pipeline: ["lineRead"],
   check: ["originRead", "forkRead"],
   land: ["originWrite", "forkRead"],
   follow: ["originRead", "forkWrite"],
@@ -79,15 +86,16 @@ export function sandboxName(instanceId: string, role: SandboxRole): string {
   return `${instanceId}/${role}`;
 }
 
-/** A pipeline run's container: the one its setups run in, or one check's. */
-export type PipelineContainer = { kind: "setup" } | { kind: "check"; name: string };
+/** A pipeline run's container: the one its setups run in, one check's, or one post-gate step's. */
+export type PipelineContainer = { kind: "setup" } | { kind: "check" | "step"; name: string };
 
 /**
- * A pipeline run's container's name: `<instance>/setup` or `<instance>/check:<name>`, so the run's
- * plan names every container it may start, and teardown can destroy them all.
+ * A pipeline run's container's name: `<instance>/setup`, `<instance>/check:<name>` or
+ * `<instance>/step:<name>`, so the run's plan names every container it may start, and teardown can
+ * destroy them all.
  */
 export function pipelineSandboxName(instanceId: string, container: PipelineContainer): string {
-  return container.kind === "setup" ? `${instanceId}/setup` : `${instanceId}/check:${container.name}`;
+  return container.kind === "setup" ? `${instanceId}/setup` : `${instanceId}/${container.kind}:${container.name}`;
 }
 
 /** The one container a run's Workflow scored in before each check got its own. */

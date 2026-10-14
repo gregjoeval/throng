@@ -1,23 +1,24 @@
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import { reposFor } from "./artifacts";
-import { attemptBase } from "./base";
-import { loadConfig, namedSecrets, networkAllow, sandboxSize } from "./config";
-import type { ConfigResult, SandboxSize } from "./config";
+import { lineBase } from "./base";
+import { loadConfig, namedSecrets, networkAllow, pipelineConfig, sandboxSize } from "./config";
+import type { ConfigResult, SandboxSize, StepConfig } from "./config";
 import { legacyScoreSandboxName, pipelineSandboxName } from "./grants";
-import { logKey, setupLogName } from "./logs";
+import { logKey, setupLogName, stepLogName } from "./logs";
+import { NO_NETWORK } from "./network";
 import type { NetworkAccess } from "./network";
 import { loadRegistries } from "./npmrc";
 import { originMainRef } from "./repos";
-import { checkOrder, scorePlan, setupTimeoutMs, STEP_SLACK_MS } from "./results";
+import { checkOrder, POST_GATE_STEP_TIMEOUT_MS, scorePlan, setupTimeoutMs, STEP_SLACK_MS } from "./results";
 import type { PlannedCheck, RawScore, ScorePlan } from "./results";
-import { pipelineOutcome } from "./run-outcome";
-import type { SetupRun } from "./run-outcome";
+import { pipelineOutcome, withPostGateSteps } from "./run-outcome";
+import type { PostGateRun, RunOutcome, SetupRun } from "./run-outcome";
 import type { SandboxSnapshot } from "./sandbox";
 import { pipelineFor } from "./scoring";
 import type { PipelineParams, PlanVerdict, RunReport } from "./scoring";
-import { checkScript, parseResult, setupScript } from "./scripts";
-import type { CheckRun, SetupResult } from "./scripts";
+import { checkScript, parseResult, setupScript, stepReadyScript, stepScript } from "./scripts";
+import type { CheckRun, SetupResult, StepReady, StepRun } from "./scripts";
 import { keyringFrom, maskedDeep, masking, openSealed } from "./secrets";
 import type { Keyring, SecretRefusal } from "./secrets";
 import { NO_TASK_DEFINITIONS, withTask } from "./task-definitions";
@@ -29,6 +30,12 @@ const SETUPS_RERUN = "setups re-run in this check's container: it couldn't start
 
 /** The note on a check whose container ran the setups itself, because the run took no snapshot. */
 const NO_SNAPSHOT = "setups re-run in this check's container: the run took no snapshot of them";
+
+/** The note on a post-gate step whose container ran the setups itself, as `SETUPS_RERUN` and `NO_SNAPSHOT` say for a check. */
+const STEP_SETUPS_RERUN = (snapshot: SandboxSnapshot | null) =>
+  snapshot === null
+    ? "setups re-run in this step's container: the run took no snapshot of them"
+    : "setups re-run in this step's container: it couldn't start from the setups' snapshot";
 
 /** The secrets a container holds, as its env, and how to mask them in what it reports. */
 interface Held {
@@ -63,19 +70,27 @@ interface CheckStage extends Omit<CheckRun, "setupsRerun" | "exit"> {
 
 /**
  * One pipeline run of a line's head, reported to the project's Durable Object as the run's outcome.
- * An attempt line (`t42a3`) runs `default`; the config and the `.npmrc` registry hosts are read from
- * one commit of the origin's `main`, so an attempt can't change its own checks or widen its own network
- * access, and the two always agree.
+ * The pipeline comes from the line, never the tree: `main` runs `main`, and an attempt's fork (`t42a3`)
+ * or a task branch (`t42`) runs `default`. The config and the `.npmrc` registry hosts are read from
+ * one commit of the origin's `main`, so a run can't change its own checks or widen its own network
+ * access, and the two always agree. The pipeline's groups choose which of the project's checks run;
+ * an attempt's task's checks always run on it.
  *
  * Its stages are fixed. One container runs the setups in order and stops at the first that fails; it
  * is then snapshotted. Each check runs in its own container started from that snapshot, in parallel,
  * once every check it waits for (`after`) passed; a check whose wait didn't pass is skipped. A failed
  * restore is retried once, then the check's container starts from the image and re-runs the setups.
- * There's no snapshot under `wrangler dev`, so every check's container re-runs them there.
+ * There's no snapshot under `wrangler dev`, so every check's container re-runs them there. Once the
+ * gate passes, `main`'s post-gate steps run in order, each in its own container started the same
+ * way, stopping at the first that doesn't pass; the rest are skipped. A post-gate step's container
+ * is readied in one Workflow step, retried like any other, and its command runs in the next, never
+ * retried, so a deploy never runs twice by itself: an infrastructure error once it started ends the
+ * run `errored`.
  *
- * Every container (`<instance>/setup`, `<instance>/check:<name>`) holds one read grant on the fork
- * and no write grant, reaches only `main`'s `network.allow` and `.npmrc` registries, and gets the
- * run's `THRONG_*` variables. Each copies its logs to R2 within its step, while it still runs, then
+ * Every container (`<instance>/setup`, `<instance>/check:<name>`, `<instance>/step:<name>`) holds one
+ * read grant on its line's repo (the fork for an attempt, the origin for a task branch or `main`, both
+ * fetched with `refs/tasks/*`) and no write grant, reaches only `main`'s `network.allow` and `.npmrc`
+ * registries, and gets the run's `THRONG_*` variables. Each copies its logs to R2 within its step, while it still runs, then
  * stops. When the run ends, or a newer head cancels it, every planned container is destroyed and
  * the snapshot released.
  *
@@ -104,7 +119,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, PipelineParams | S
     const instanceId = event.instanceId;
 
     let report: RunReport;
-    let plan: ScorePlan | null = null;
+    let plan: RunPlan | null = null;
     try {
       // Pinned once, so the config and the `.npmrc` are read from the same commit even if `main` moves.
       const main = await step.do("main", { retries: STEP_RETRIES, timeout: "1 minute" }, () =>
@@ -118,9 +133,9 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, PipelineParams | S
         loadRegistries(reposFor(this.env), params.project, main),
       );
       const base = await step.do("base", { retries: STEP_RETRIES, timeout: "1 minute" }, () =>
-        attemptBase(reposFor(this.env), params.project, { attempt: params.line, head: params.sha }),
+        lineBase(reposFor(this.env), params.project, { line: params.line, head: params.sha }),
       );
-      const planned = scorePlan(config);
+      const planned = { ...scorePlan(config), steps: postGateSteps(config, params) };
       plan = planned;
       // Before any container starts, so a cancel can name every one the run may start, and so the
       // secrets the run names are checked against the settings, by name, before anything runs.
@@ -155,7 +170,8 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, PipelineParams | S
       const checks = setup.setups.every((s) => s.exit === 0)
         ? await this.#checks(step, context, setup)
         : new Map<string, CheckStage>();
-      report = { status: "done", outcome: outcomeOf(config, planned, setup, checks) };
+      const scored = outcomeOf(config, planned, setup, checks);
+      report = { status: "done", outcome: await this.#postGate(step, context, setup.snapshot, scored) };
     } catch (error) {
       report = { status: "errored", error: String(error).slice(0, 4000) };
     }
@@ -182,7 +198,8 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, PipelineParams | S
       loadConfig(reposFor(this.env), params.project, main),
       task === undefined ? NO_TASK_DEFINITIONS : this.env.PROJECT.getByName(params.project).definitionsOf(task),
     ]);
-    return { config: withTask(project, definitions), size: sandboxSize(project) };
+    const config = pipelineConfig(withTask(project, definitions), pipelineFor(params.line));
+    return { config, size: sandboxSize(project) };
   }
 
   /**
@@ -199,9 +216,9 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, PipelineParams | S
       const run = await runInSandbox(
         this.env,
         instanceId,
-        { project: params.project, attempt: params.line },
+        { project: params.project, line: params.line },
         "pipeline",
-        (g) => setupScript(g.forkRead.remote, { sha: params.sha, base }, plan.setup),
+        (g) => setupScript(g.lineRead.remote, { sha: params.sha, base }, plan.setup),
         {
           network,
           size,
@@ -215,8 +232,8 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, PipelineParams | S
       const sandbox = this.env.SANDBOX.getByName(name);
       const passed = result.setups.every((s) => s.exit === 0);
       let snapshot: SandboxSnapshot | null = null;
-      // With no setups there's nothing to keep: each check's container just checks the head out.
-      if (passed && plan.setup.length > 0 && plan.checks.length > 0) {
+      // With no setups there's nothing to keep: each later container just checks the head out.
+      if (passed && plan.setup.length > 0 && (plan.checks.length > 0 || plan.steps.length > 0)) {
         try {
           snapshot = await sandbox.snapshot();
         } catch (error) {
@@ -287,9 +304,9 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, PipelineParams | S
       const run = await runInSandbox(
         this.env,
         instanceId,
-        { project: params.project, attempt: params.line },
+        { project: params.project, line: params.line },
         "pipeline",
-        (g) => checkScript(g.forkRead.remote, params.sha, plan.setup, check),
+        (g) => checkScript(g.lineRead.remote, params.sha, plan.setup, check),
         {
           network,
           size,
@@ -326,6 +343,97 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, PipelineParams | S
       await this.env.SANDBOX.getByName(name).destroy();
       return { exit: null, durationMs: 0, metrics: {}, logged: false, notes: [], error: error.message };
     }
+  }
+
+  /**
+   * Runs the post-gate steps in order once the gate passed, each in its own container, stopping at the
+   * first that doesn't pass, and adds them to `scored`, the rest skipped. Each step's container is
+   * readied (restored from the setups' snapshot, or the setups re-run) in a Workflow step retried like
+   * any other; its command then runs once, in the next, with no retry.
+   */
+  async #postGate(
+    step: WorkflowStep,
+    context: RunContext,
+    snapshot: SandboxSnapshot | null,
+    scored: RunOutcome,
+  ): Promise<RunOutcome> {
+    const { plan } = context;
+    const ran = new Map<string, PostGateRun>();
+    if (scored.gate === "passed") {
+      for (const postGate of plan.steps) {
+        const ready = await step.do(
+          `step ${postGate.name} ready`,
+          { retries: STEP_RETRIES, timeout: setupTimeoutMs(plan) + 2 * STEP_SLACK_MS },
+          () => this.#stepReady(context, snapshot, postGate),
+        );
+        const notes = ready.setupsRerun && plan.setup.length > 0 ? [STEP_SETUPS_RERUN(snapshot)] : [];
+        const run = await step.do(
+          `step ${postGate.name}`,
+          { retries: { limit: 0, delay: "1 second" }, timeout: POST_GATE_STEP_TIMEOUT_MS + 2 * STEP_SLACK_MS },
+          () => this.#stepRun(context, postGate, notes),
+        );
+        ran.set(postGate.name, run);
+        if (run.exit !== 0) break;
+      }
+    }
+    return withPostGateSteps(scored, plan.steps, ran);
+  }
+
+  /** Readies a post-gate step's container: restored from the snapshot, or with the setups re-run. */
+  async #stepReady(context: RunContext, snapshot: SandboxSnapshot | null, postGate: StepConfig): Promise<StepReady> {
+    const { instanceId, params, plan, size, network } = context;
+    const run = await runInSandbox(
+      this.env,
+      instanceId,
+      { project: params.project, line: params.line },
+      "pipeline",
+      (g) => stepReadyScript(g.lineRead.remote, params.sha, plan.setup, postGate),
+      {
+        network,
+        size,
+        sandbox: pipelineSandboxName(instanceId, { kind: "step", name: postGate.name }),
+        env: runContext(params),
+        snapshot,
+        timeoutMs: setupTimeoutMs(plan) + STEP_SLACK_MS,
+      },
+    );
+    const result = parseResult<StepReady>(run.stdout);
+    if (result === null) {
+      throw new Error(`step ${postGate.name} wasn't readied (exit ${run.exitCode}): ${run.stderr.slice(-2000)}`);
+    }
+    return result;
+  }
+
+  /**
+   * Runs a post-gate step's command once in the container its ready step left, then stores its log and
+   * stops the container. A container that was lost meanwhile is never started again: the command
+   * doesn't run, and the step throws, ending the run `errored`.
+   */
+  async #stepRun(context: RunContext, postGate: StepConfig, notes: string[]): Promise<PostGateRun> {
+    const { instanceId, params, size } = context;
+    const name = pipelineSandboxName(instanceId, { kind: "step", name: postGate.name });
+    const sandbox = this.env.SANDBOX.getByName(name);
+    // Running already, the container keeps the access it started with; one that has to start gets none.
+    const run = await sandbox.run(stepScript(postGate, POST_GATE_STEP_TIMEOUT_MS), {
+      access: { grants: [], ...NO_NETWORK },
+      size,
+      timeoutMs: POST_GATE_STEP_TIMEOUT_MS + STEP_SLACK_MS,
+      env: runContext(params),
+    });
+    const result = parseResult<StepRun>(run.stdout);
+    if (result === null) {
+      throw new Error(`step ${postGate.name} gave no result (exit ${run.exitCode}): ${run.stderr.slice(-2000)}`);
+    }
+    const log = stepLogName(postGate.name);
+    const logs = await storeLogs(this.env, {
+      sandbox: name,
+      names: [log],
+      key: (stored) => logKey({ project: params.project, line: params.line, run: params.run }, stored),
+      size,
+      notes: new Map([[log, notes]]),
+    });
+    await sandbox.destroy();
+    return { ...result, logged: logs.includes(log), notes };
   }
 
   /**
@@ -381,11 +489,21 @@ export interface ScoringParams extends Omit<PipelineParams, "line"> {
   attempt: string;
 }
 
+/** What the run plans to run: its setups and checks, and the post-gate steps after its gate. */
+interface RunPlan extends ScorePlan {
+  steps: StepConfig[];
+}
+
+/** The post-gate steps the run's pipeline has: only `main`'s, and none without a valid config. */
+function postGateSteps(config: ConfigResult, params: PipelineParams): StepConfig[] {
+  return config.kind === "valid" ? config.config.pipelines[pipelineFor(params.line)].steps : [];
+}
+
 /** What every step of a run's containers needs. */
 interface RunContext {
   instanceId: string;
   params: PipelineParams;
-  plan: ScorePlan;
+  plan: RunPlan;
   size: SandboxSize;
   network: NetworkAccess;
 }
@@ -413,11 +531,15 @@ export function runContext(params: PipelineParams): Record<string, string> {
   };
 }
 
-/** Every container the run may start: the setup container and one per check. */
-export function plannedContainers(instanceId: string, plan: Pick<ScorePlan, "checks">): string[] {
+/** Every container the run may start: the setup container, one per check and one per post-gate step. */
+export function plannedContainers(
+  instanceId: string,
+  plan: Pick<ScorePlan, "checks"> & { steps?: readonly StepConfig[] },
+): string[] {
   return [
     pipelineSandboxName(instanceId, { kind: "setup" }),
     ...plan.checks.map((check) => pipelineSandboxName(instanceId, { kind: "check", name: check.name })),
+    ...(plan.steps ?? []).map((step) => pipelineSandboxName(instanceId, { kind: "step", name: step.name })),
   ];
 }
 

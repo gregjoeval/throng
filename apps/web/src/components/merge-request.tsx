@@ -10,6 +10,7 @@ import { RelativeTime } from "@/components/commit-meta";
 import { Lane } from "@/components/lane";
 import { useMaySelect } from "@/components/selection";
 import { ErrorState, Loading } from "@/components/states";
+import { TaskBranchRuns } from "@/components/task-branch-runs";
 import { Button } from "@/components/ui/button";
 import {
   actOnMergeRequest,
@@ -54,6 +55,7 @@ export function MergeRequestView({ projectRef, task, source }: InTask & { source
         mr={mr.data}
         action={open && mayAct ? <CancelMergeRequest projectRef={projectRef} task={task} mr={mr.data} /> : null}
       />
+      <TaskBranchRuns projectRef={projectRef} task={task} />
       {state === "needsReview" ? (
         <ChangesSinceApproval projectRef={projectRef} task={task} mr={mr.data} attempt={attempt} mayApprove={mayAct} />
       ) : null}

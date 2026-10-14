@@ -2726,7 +2726,8 @@ export class TaskStore {
     let sha = outcome.kind === "landed" ? outcome.sha : null;
     if (outcome.kind === "errored" && run.land_claimed) sha = await this.landedOnMain(run.id);
     if (sha !== null) {
-      if (!run.land_claimed) this.claimLandingPush(run.id);
+      // A landing no longer current may not land: its outcome is not recorded.
+      if (!run.land_claimed && !this.claimLandingPush(run.id)) return false;
       await this.pipelineLanded(run.id, sha);
       return this.pipelineFinished(run.id, { status: "done", outcome: landedOutcome(sha) });
     }

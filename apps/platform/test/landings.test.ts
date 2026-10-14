@@ -867,6 +867,17 @@ describe("landings from before landings were runs", () => {
     expect(after.landing()).toMatchObject({ status: "done", sha: SHA });
   });
 
+  it("records no landing for a Landing Workflow whose merge request left landing before it claimed its push", async () => {
+    const { sql, after } = await migrated([{ status: "running", mr: 1 }], async (t) => {
+      await t.queued("One");
+      t.store.startLanding(PROJECT, null);
+    });
+    sql.exec("UPDATE merge_requests SET state = 'pending' WHERE id = 1");
+    const landed: LegacyLandingOutcome = { kind: "landed", sha: SHA };
+    expect(await after.store.legacyLandingFinished(1, landed)).toBeFalsy();
+    expect(after.landing()).toMatchObject({ status: "running", sha: null, land_claimed: false });
+  });
+
   it("records a Landing Workflow's other outcomes on its run, in its old shape", async () => {
     const { after } = await migrated([{ status: "running", mr: 1 }], async (t) => {
       await t.queued("One");

@@ -17,3 +17,10 @@ export function getRouter({ history, queryClient = new QueryClient() }: RouterOp
     Wrap: ({ children }) => <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>,
   });
 }
+
+declare module "@tanstack/react-router" {
+  interface StaticDataRouteOption {
+    /** The page spans the whole window, not the capped column most pages read in. */
+    wide?: boolean;
+  }
+}

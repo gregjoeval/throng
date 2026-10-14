@@ -13,10 +13,11 @@ import { meQuery } from "@/lib/api";
  */
 export const SIGN_OUT_URL = "/cdn-cgi/access/logout";
 
-export function AppHeader() {
+/** The header, its content lined up with the page's: capped like most pages, or wide like the task page. */
+export function AppHeader({ wide = false }: { wide?: boolean }) {
   return (
     <header className="border-b">
-      <div className="mx-auto flex h-14 max-w-6xl items-center gap-3 px-4">
+      <div className={`flex h-14 items-center gap-3 px-4 ${wide ? "" : "mx-auto max-w-6xl"}`}>
         <Link to="/" className="font-heading text-lg font-semibold">
           Throng
         </Link>

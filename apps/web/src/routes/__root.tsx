@@ -1,4 +1,4 @@
-import { createRootRoute, HeadContent, Outlet, ScriptOnce, Scripts } from "@tanstack/react-router";
+import { createRootRoute, HeadContent, Outlet, ScriptOnce, Scripts, useMatches } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 import { AppHeader } from "@/components/app-header";
 import { ErrorState, NotFound } from "@/components/states";
@@ -36,12 +36,13 @@ function Shell({ children }: { children: ReactNode }) {
   );
 }
 
-/** The app shell: the header, then the current view. */
+/** The app shell: the header, then the current view, in a capped column unless its route is wide. */
 export function Layout() {
+  const wide = useMatches({ select: (matches) => matches.some((match) => match.staticData.wide === true) });
   return (
     <>
-      <AppHeader />
-      <main className="mx-auto max-w-6xl p-4">
+      <AppHeader wide={wide} />
+      <main className={wide ? "p-4" : "mx-auto max-w-6xl p-4"}>
         <Outlet />
       </main>
     </>

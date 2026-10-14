@@ -5,8 +5,10 @@ The Throng UI: TanStack Start on a Cloudflare Worker. It reaches the platform Wo
 ## Develop
 
 ```bash
-pnpm --filter @throng/web dev
+CLOUDFLARE_ENV=ci THRONG_DEV_EMAIL=you@example.com pnpm --filter @throng/web dev
 ```
+
+Run the platform's `vite dev` beside it with the same `CLOUDFLARE_ENV`, and the `PLATFORM` binding reaches it. Access never fronts localhost, so `THRONG_DEV_EMAIL` stands in for it: `src/server.ts` forwards every `/api` call as that email (`devAccessVerifier`). `vite.config.ts` sets it only under `vite dev`; a build always gets `null`, so no deployed Worker can skip Access. Without it, local `/api` calls are 401.
 
 ## Deploy
 

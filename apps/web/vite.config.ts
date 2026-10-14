@@ -9,7 +9,12 @@ import { defineConfig } from "vite";
 // `throng-web-dev-<name>` and binds to the platform's `throng-dev-<name>`.
 const devName = process.env["THRONG_DEV_NAME"];
 
-export default defineConfig({
+// `vite dev` signs every `/api` call in as THRONG_DEV_EMAIL, standing in for Access, which never
+// fronts localhost. A build always gets null, so no deployed Worker can skip Access.
+export default defineConfig(({ command }) => ({
+  define: {
+    THRONG_DEV_EMAIL: JSON.stringify(command === "serve" ? (process.env["THRONG_DEV_EMAIL"] ?? null) : null),
+  },
   resolve: { tsconfigPaths: true },
   plugins: [
     cloudflare({
@@ -25,4 +30,4 @@ export default defineConfig({
     tanstackStart(),
     react(),
   ],
-});
+}));

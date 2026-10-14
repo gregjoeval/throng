@@ -11,11 +11,12 @@ export interface AccessConfig {
   aud: string;
 }
 
-/** Turns an Access JWT into the signed-in identity, or null when it isn't valid for us. */
-export type AccessVerifier = (token: string) => Promise<{ email: string } | null>;
+/** Turns an Access JWT into the signed-in identity, or null when it's missing or isn't valid for us. */
+export type AccessVerifier = (token: string | null) => Promise<{ email: string } | null>;
 
 export function accessVerifier(keys: JWTVerifyGetKey, { teamDomain, aud }: AccessConfig): AccessVerifier {
   return async (token) => {
+    if (token === null) return null;
     try {
       const { payload } = await jwtVerify(token, keys, { issuer: `https://${teamDomain}`, audience: aud });
       // Service tokens carry no email; they are not humans and get no user.
@@ -36,4 +37,10 @@ export function remoteAccessVerifier(config: AccessConfig): AccessVerifier {
     teamKeys.set(config.teamDomain, keys);
   }
   return accessVerifier(keys, config);
+}
+
+/** Local dev's stand-in for Access: every request is signed in as `email`, with or without a JWT. */
+export function devAccessVerifier(email: string): AccessVerifier {
+  const identity = { email: email.toLowerCase() };
+  return async () => identity;
 }

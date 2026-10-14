@@ -47,7 +47,14 @@ Artifacts has no local simulator, so local dev always reads and writes real repo
    curl -s -X POST -H "Authorization: Bearer $E2E_TOKEN" http://localhost:5173/e2e/token
    ```
 
-The UI runs with `pnpm --filter @throng/web dev`. Its `/api` calls need an Access session, so locally its pages load but their data is refused; [apps/web/README.md](apps/web/README.md) covers deploying it.
+4. For the UI, start throng-web beside the platform. Access never fronts localhost, so `THRONG_DEV_EMAIL` stands in for it: every `/api` call is signed in as that email, and its user is created on first sight. Open the URL Vite prints (port 5174 when the platform has 5173):
+
+   ```bash
+   cd apps/web
+   CLOUDFLARE_ENV=ci THRONG_DEV_EMAIL=you@example.com pnpm dev
+   ```
+
+   Only `vite dev` reads `THRONG_DEV_EMAIL`. A build never has a stand-in, so a deployed throng-web always requires Access.
 
 ## Deploy
 

@@ -516,6 +516,16 @@ export interface TaskStoreDeps {
 }
 
 /**
+ * What holds a merge request no owner approved for the owner (see `TaskStore.#evaluate`): the
+ * secrets the `main` pipeline names under `main`'s config, by name (`names`); nothing, as the owner
+ * acted (`owner`); or unknown, as the caller couldn't read them (`unknown`).
+ */
+type MainSecrets = { kind: "owner" } | { kind: "unknown" } | { kind: "names"; project: string; names: string[] };
+
+const OWNER_ACTS: MainSecrets = { kind: "owner" };
+const UNKNOWN_MAIN: MainSecrets = { kind: "unknown" };
+
+/**
  * The task and attempt state machine for one project. Every method takes the project, the actor
  * and an input, checks the actor may act, and throws `ServiceError`s for the API to report.
  */
@@ -1885,7 +1895,7 @@ export class TaskStore {
       throw invalidState(`${taskRef(task.number)} is selected by vote; open a vote and close it to select`);
     }
     const head = await this.#currentHead(project, current);
-    const main = isOwnerAsThemselves(project, actor) ? null : mainSecrets(project.id, config);
+    const main = isOwnerAsThemselves(project, actor) ? OWNER_ACTS : mainSecrets(project.id, config);
     const { mr, closed } = this.#sql.transaction(() => {
       // The attempt, the task or its merge requests may have moved while the head was read.
       this.#checkSelectable(this.#attempt(current));
@@ -1905,7 +1915,7 @@ export class TaskStore {
     actor: Actor,
     attempt: StoredAttempt,
     head: string,
-    main: MainSecrets | null,
+    main: MainSecrets,
   ): { mr: StoredMergeRequest; closed: StoredAttempt[] } {
     const created = this.mergeRequests.select(actor, {
       task: attempt.task,
@@ -1934,7 +1944,7 @@ export class TaskStore {
     this.#expectMergeRequest(mr, ["pending", "needsReview"], "approve");
     const head =
       mr.state === "pending" ? mr.approved_head : await this.#currentHead(project, this.#attempt(sourceOf(mr)));
-    const main = isOwnerAsThemselves(project, actor) ? null : await this.#mainSecrets(project.id);
+    const main = isOwnerAsThemselves(project, actor) ? OWNER_ACTS : await this.#mainSecrets(project.id);
     return this.#sql.transaction(() => {
       const now = this.#openMergeRequest(task.number);
       if (now.id !== mr.id || now.state !== mr.state) {
@@ -2244,7 +2254,7 @@ export class TaskStore {
   ): Promise<{ vote: VoteDetail; selected: StoredMergeRequest | null }> {
     const task = this.#task(input.task);
     this.#mayManageTask(project, actor, task);
-    const main = isOwnerAsThemselves(project, actor) ? null : await this.#mainSecrets(project.id);
+    const main = isOwnerAsThemselves(project, actor) ? OWNER_ACTS : await this.#mainSecrets(project.id);
     const { vote, mr, closed } = this.#sql.transaction(() => {
       const open = this.#openVote(task.number);
       const detail = this.#voteDetail(open, actor);
@@ -2373,7 +2383,7 @@ export class TaskStore {
    * request its attempt is the source of can enter the queue. A landing's run that didn't land
    * dequeues its merge request instead. Returns whether the run was recorded.
    */
-  pipelineFinished(run: number, report: RunReport, main: MainSecrets | null = null): boolean {
+  pipelineFinished(run: number, report: RunReport, main: MainSecrets = UNKNOWN_MAIN): boolean {
     try {
       return this.#sql.transaction(() => {
         if (!this.scoring.finish(run, report)) return false;
@@ -2414,8 +2424,9 @@ export class TaskStore {
     }
     // A merge request no owner approved may enter the queue once this run passes, unless `main` names secrets.
     const source = current === null ? null : this.#sourceOf(current);
-    const main =
-      current === null || source === null || source.approved_by_owner ? null : await this.#mainSecrets(current.project);
+    let main: MainSecrets = UNKNOWN_MAIN;
+    if (source?.approved_by_owner === true) main = OWNER_ACTS;
+    else if (current !== null && source !== null) main = await this.#mainSecrets(current.project);
     return this.pipelineFinished(run, report, main);
   }
 
@@ -2800,7 +2811,7 @@ export class TaskStore {
    * queue, and its landing's plan holds it for the owner if its merged tree names one; it stays held
    * at that head. Returns the merge request as it is afterwards.
    */
-  #evaluate(actor: Actor | null, mr: StoredMergeRequest, main: MainSecrets | null = null): StoredMergeRequest {
+  #evaluate(actor: Actor | null, mr: StoredMergeRequest, main: MainSecrets = UNKNOWN_MAIN): StoredMergeRequest {
     this.#releaseHeld();
     if (!this.#queueable(mr)) return mr;
     if (!mr.approved_by_owner) {
@@ -2808,8 +2819,8 @@ export class TaskStore {
       // and so does one whose plan found its merged tree's config names some (it began to run).
       const held = this.#heldLanding(mr);
       const heldAtPlan = held !== null && held.started_at !== null;
-      if (main === null || heldAtPlan) {
-        // What `main` names is unknown, or its merged tree's config already said: the hold stands.
+      if (main.kind !== "names" || heldAtPlan) {
+        // Nothing says what `main` names, or its merged tree's config already said: the hold stands.
         if (held !== null) return mr;
       } else if (main.names.length > 0) {
         if (held === null) this.scoring.holdLanding({ ...this.#landingRequest(main.project, mr), secrets: main.names });
@@ -2859,7 +2870,7 @@ export class TaskStore {
   }
 
   /** The secrets the `main` pipeline names under `main`'s config now (see `MainSecrets`). */
-  async #mainSecrets(project: string): Promise<MainSecrets> {
+  async #mainSecrets(project: string): Promise<Extract<MainSecrets, { kind: "names" }>> {
     return mainSecrets(project, await loadConfig(this.#repos, project));
   }
 
@@ -3637,17 +3648,12 @@ function mayMaintain(project: ProjectContext, actor: Actor): void {
   if (!isMaintainer(project, actor)) throw new ServiceError("forbidden", "only the project's maintainers may");
 }
 
-/**
- * The secrets the `main` pipeline names under `main`'s config, by name: what holds a merge request
- * no owner approved for the owner (see `TaskStore.#evaluate`).
- */
-interface MainSecrets {
-  project: string;
-  names: string[];
-}
-
-function mainSecrets(project: string, config: ConfigResult): MainSecrets {
-  return { project, names: [...new Set(pipelineSecrets(config, "main").flatMap((named) => named.secrets))] };
+function mainSecrets(project: string, config: ConfigResult): Extract<MainSecrets, { kind: "names" }> {
+  return {
+    kind: "names",
+    project,
+    names: [...new Set(pipelineSecrets(config, "main").flatMap((named) => named.secrets))],
+  };
 }
 
 /**

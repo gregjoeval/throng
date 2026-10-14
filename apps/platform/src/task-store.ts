@@ -1345,11 +1345,11 @@ export class TaskStore {
       if (head === null) return { scoring: null, mergeRequest, head };
       // A draft isn't scored, but its old result no longer describes its head.
       if (current.state !== "open") {
-        this.scoring.moveHead(attemptLine(current), head, isOwnersPush(project, actor));
+        this.scoring.moveHead(attemptLine(current), head, isMaintainer(project, actor));
         return { scoring: null, mergeRequest, head };
       }
       return {
-        scoring: this.#request(project, actor, current, head, "push", isOwnersPush(project, actor)),
+        scoring: this.#request(project, actor, current, head, "push", isMaintainer(project, actor)),
         mergeRequest,
         head,
       };
@@ -1404,7 +1404,7 @@ export class TaskStore {
         sha: input.head,
         trigger: "push",
         actor,
-        ownersPush: isOwnersPush(project, actor),
+        ownersPush: isMaintainer(project, actor),
       });
       const active = this.#activeAttempts(input.task);
       for (const attempt of active) {
@@ -1827,7 +1827,7 @@ export class TaskStore {
       const attempt = this.#attempt({ task: row.task, number: row.attempt });
       this.#recordPushed(actor, attempt, input.updates);
       this.#dropBranchPush(attempt);
-      const scoring = this.#request(project, actor, attempt, input.head, "open", isOwnersPush(project, actor));
+      const scoring = this.#request(project, actor, attempt, input.head, "open", isMaintainer(project, actor));
       return { task: this.#task(row.task), attempt: this.#attempt(attempt), scoring };
     });
     // The pushed head replaced the fork's `main`, which began at the task head; if its author didn't
@@ -3641,13 +3641,23 @@ function toAttempt(row: AttemptRow): Omit<StoredAttempt, "scoring" | "merge_requ
   };
 }
 
+/**
+ * Throws unless `actor` owns the project, as themselves or under an alias. Kept apart from
+ * `mayMaintain`: maintainers are only the owner for now, but owning stays the owner's alone once
+ * a project has others.
+ */
 function mayOwn(project: ProjectContext, actor: Actor): void {
   if (actor.user.id !== project.owner) throw new ServiceError("forbidden", "only the project owner may");
 }
 
-/** The project's maintainers, as themselves or under an alias: for now, only its owner. */
+/** Whether `actor` is one of the project's maintainers, as themselves or under an alias: for now, only its owner. */
+function isMaintainer(project: ProjectContext, actor: Actor): boolean {
+  return actor.user.id === project.owner;
+}
+
+/** Throws unless `actor` is one of the project's maintainers (see `isMaintainer`). */
 function mayMaintain(project: ProjectContext, actor: Actor): void {
-  if (actor.user.id !== project.owner) throw new ServiceError("forbidden", "only the project's maintainers may");
+  if (!isMaintainer(project, actor)) throw new ServiceError("forbidden", "only the project's maintainers may");
 }
 
 /**
@@ -3676,11 +3686,6 @@ function mayGrant(project: ProjectContext, actor: Actor): void {
   if (!isOwnerAsThemselves(project, actor)) {
     throw new ServiceError("forbidden", "only the project owner, acting as themselves, may");
   }
-}
-
-/** Whether `actor`'s push is the owner's, as themselves or under an alias: a run of what they pushed is trusted. */
-function isOwnersPush(project: ProjectContext, actor: Actor): boolean {
-  return actor.user.id === project.owner;
 }
 
 /** The attempt's author, or one of their aliases, holds its claim. */

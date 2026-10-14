@@ -127,7 +127,7 @@ async function setup({ landing = true } = {}) {
     return { kind: "merged" as const, before, head: sha.hash };
   };
   const scoreLatest = (ref: AttemptInput) => {
-    const run = at(store.scoring.listRuns({ task: ref.task, attempt: ref.number }), -1);
+    const run = at(store.scoring.listRuns(`t${ref.task}a${ref.number}`), -1);
     expect(store.scoringFinished(run.id, { status: "done", result: passed })).toBeTruthy();
   };
   const mr = () => store.getMergeRequest(PROJECT, owner, { task: 1 });
@@ -224,7 +224,7 @@ describe("a clean update", () => {
 
     const open = attempt(t1a1);
     expect(open).toMatchObject({ needs_update: false, scoring: { status: "running" } });
-    expect(at(store.scoring.listRuns({ task: 1, attempt: 1 }), -1)).toMatchObject({ sha: open.scoring.sha });
+    expect(at(store.scoring.listRuns("t1a1"), -1)).toMatchObject({ sha: open.scoring.sha });
     expect(attempt(t1a2)).toMatchObject({ needs_update: false, scoring: { status: "none", sha: head } });
     expect(journal().filter((e) => e.kind === "pushed" && e.attempt === 1)).toEqual([
       {

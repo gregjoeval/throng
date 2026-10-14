@@ -16,7 +16,6 @@ import { resolveProject } from "./projects.ts";
 import { forkRepo, originRepo } from "./repos.ts";
 import type { Repos } from "./repos.ts";
 import type { Gate, ScoringResult } from "./results.ts";
-import { headAttemptRef } from "./scoring.ts";
 import type { AttemptScoring, ScoringRequest, StoredRun } from "./scoring.ts";
 import type { SecretChange, SecretSummary } from "./secrets.ts";
 import { NO_TASK_DEFINITIONS, taskDefinitionsFrom, withTask } from "./task-definitions.ts";
@@ -898,7 +897,7 @@ function publicScoring(request: ScoringRequest, users: Map<string, string>): Sco
 function publicRun(run: StoredRun, users: Map<string, string>): ScoringRun {
   return {
     id: run.id,
-    ref: headAttemptRef(run),
+    ref: run.line,
     sha: run.sha,
     trigger: run.trigger,
     status: run.status,

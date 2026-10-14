@@ -19,7 +19,7 @@ import type { FollowOutcome, FollowParams, FollowRunner, StoredFollow } from "./
 import type { LandingOutcome, LandingParams, LandingRunner } from "./landing.ts";
 import { Landings } from "./landings.ts";
 import type { StoredLanding } from "./landings.ts";
-import { isLogName, landingLogKey, logKey, missingLog } from "./logs.ts";
+import { isLogName, landingLogKey, legacyLogKey, logKey, missingLog } from "./logs.ts";
 import { dequeueCause, MergeRequests } from "./merge-requests.ts";
 import type {
   Dequeue,
@@ -35,10 +35,9 @@ import { forkRepo, originRepo } from "./repos.ts";
 import type { Repos } from "./repos.ts";
 import { GATES } from "./results.ts";
 import type { Gate } from "./results.ts";
-import { headAttemptRef, SCORING_CAP, ScoringQueue } from "./scoring.ts";
+import { SCORING_CAP, ScoringQueue } from "./scoring.ts";
 import type {
   AttemptScoring,
-  ScoredAttempt,
   ScoringOutcome,
   ScoringRequest,
   ScoringRunner,
@@ -49,7 +48,7 @@ import { keyringFrom, Secrets } from "./secrets.ts";
 import type { Keyring, SecretChange, SecretSummary } from "./secrets.ts";
 import { NO_TASK_DEFINITIONS, taskDefinitionsFrom } from "./task-definitions.ts";
 import type { TaskDefinitions, TaskDefinitionsInput } from "./task-definitions.ts";
-import { attemptRef, reservedTask, taskBranchRef, taskRef } from "./task-refs.ts";
+import { attemptRef, parseAttemptRef, reservedTask, taskBranchRef, taskRef } from "./task-refs.ts";
 import type { Actor } from "./tokens.ts";
 import { Verdicts } from "./verdicts.ts";
 import type { StoredVerdict, VerdictRecommendation, VerdictSummary } from "./verdicts.ts";
@@ -230,9 +229,14 @@ function fileCount(dequeue: Dequeue): number | null {
   return dequeue.reason === "conflict" ? dequeue.details.files.length : null;
 }
 
-/** An attempt as the scoring queue keys it. */
-function scoredAttempt({ task, number }: AttemptInput): ScoredAttempt {
+/** An attempt as verdicts key it. */
+function attemptKey({ task, number }: AttemptInput): { task: number; attempt: number } {
   return { task, attempt: number };
+}
+
+/** An attempt's line, `t42a3`, which its runs are keyed on. */
+function attemptLine({ task, number }: AttemptInput): string {
+  return attemptRef(task, number);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -612,7 +616,7 @@ export class TaskStore {
         listedStates(ATTEMPT_STATES, undefined),
       )
       .map((row) => toAttempt(row));
-    const gates = attempts.map((a) => this.scoring.currentRun(scoredAttempt(a))?.result?.gate);
+    const gates = attempts.map((a) => this.scoring.currentRun(attemptLine(a))?.result?.gate);
     // `passed` is best, then `failed`; GATES lists them in that order.
     return {
       ...task,
@@ -898,12 +902,12 @@ export class TaskStore {
 
   /** The attempt's scoring status, with the run holding its current result. */
   #scoringDetail(attempt: StoredAttempt): AttemptScoringDetail {
-    return { ...attempt.scoring, current: this.scoring.currentRun(scoredAttempt(attempt)) };
+    return { ...attempt.scoring, current: this.scoring.currentRun(attemptLine(attempt)) };
   }
 
   /** The attempt's scoring runs, newest first, superseded and cancelled ones included. */
   listScoringRuns(_project: ProjectContext, _actor: Actor, input: AttemptInput): StoredRun[] {
-    return this.scoring.listRuns(scoredAttempt(this.#attempt(input))).toReversed();
+    return this.scoring.listRuns(attemptLine(this.#attempt(input))).toReversed();
   }
 
   /** One scoring run of the project, by id. */
@@ -949,9 +953,7 @@ export class TaskStore {
   /** The attempt's verdicts on every head, oldest first, each marked superseded once its head isn't current. */
   listVerdicts(_project: ProjectContext, _actor: Actor, input: AttemptInput): VerdictDetail[] {
     const current = this.#attempt(input);
-    return this.verdicts
-      .list(scoredAttempt(current))
-      .map((v) => ({ ...v, superseded: v.head !== current.scoring.sha }));
+    return this.verdicts.list(attemptKey(current)).map((v) => ({ ...v, superseded: v.head !== current.scoring.sha }));
   }
 
   /** Every attempt in the project, by task and then number, leaving out obsolete ones. For the ref list. */
@@ -1023,14 +1025,15 @@ export class TaskStore {
   runLogKey(project: ProjectContext, actor: Actor, input: { run: number; name: string }): string {
     const run = this.getScoringRun(project, actor, input);
     if (!isLogName(input.name)) throw missingLog(input.run, input.name);
-    return logKey({ project: project.id, attempt: headAttemptRef(run), sha: run.sha, run: run.id }, input.name);
+    const key = { project: project.id, line: run.line, sha: run.sha, run: run.id };
+    return run.legacy_logs ? legacyLogKey(key, input.name) : logKey(key, input.name);
   }
 
   /** open → draft: takes the attempt back out of consideration. Only its author may. */
   draftAttempt(_project: ProjectContext, actor: Actor, input: AttemptInput): StoredAttempt {
     return this.#sql.transaction(() => {
       const drafted = this.#authorMoves(actor, input, ["open"], "draft", "returnedToDraft");
-      this.scoring.cancelAttempt(scoredAttempt(drafted), "returned to draft");
+      this.scoring.cancelLine(attemptLine(drafted), "returned to draft");
       return drafted;
     });
   }
@@ -1215,7 +1218,7 @@ export class TaskStore {
       if (head === null) return { scoring: null, mergeRequest, head };
       // A draft isn't scored, but its old result no longer describes its head.
       if (current.state !== "open") {
-        this.scoring.moveHead({ ...scoredAttempt(current), sha: head });
+        this.scoring.moveHead(attemptLine(current), head);
         return { scoring: null, mergeRequest, head };
       }
       return { scoring: this.#request(project, actor, current, head, "push"), mergeRequest, head };
@@ -1322,7 +1325,7 @@ export class TaskStore {
         case "merged":
         case "current": {
           const { head } = outcome;
-          const recorded = this.scoring.statusFor(scoredAttempt(attempt)).sha;
+          const recorded = this.scoring.statusFor(attemptLine(attempt)).sha;
           this.#setFollow(attempt, { needs_update: null });
           if (current.task_head === this.#taskHead(attempt.task))
             this.#setFollow(attempt, { contains_task_head: head });
@@ -1381,12 +1384,12 @@ export class TaskStore {
       taskBranch: taskHead,
     });
     const vote = this.votes.open(attempt.task);
-    const recorded = this.scoring.statusFor(scoredAttempt(attempt)).sha;
+    const recorded = this.scoring.statusFor(attemptLine(attempt)).sha;
     if (vote !== null && recorded !== null) this.votes.repin(vote.id, attempt.number, { from: recorded, to: after });
     this.#setFollow(attempt, { followed_head: after });
     this.#pushedToSource(null, attempt, after);
     if (attempt.state === "open") this.#request(project, null, attempt, after, "push");
-    else this.scoring.moveHead({ ...scoredAttempt(attempt), sha: after });
+    else this.scoring.moveHead(attemptLine(attempt), after);
   }
 
   #setFollow(
@@ -1456,7 +1459,7 @@ export class TaskStore {
   #toCheck(input: AttemptInput, head: string): { taskHead: string; known: string | null } | null {
     const row = this.#attemptRow(input);
     if (row === undefined || !isActive(row.state) || row.needs_update !== null) return null;
-    if (this.scoring.statusFor(scoredAttempt(row)).sha !== head) return null;
+    if (this.scoring.statusFor(attemptLine(row)).sha !== head) return null;
     const taskHead = this.#taskHead(row.task);
     return taskHead === null ? null : { taskHead, known: row.contains_task_head };
   }
@@ -2088,7 +2091,7 @@ export class TaskStore {
       if (scored?.sha !== head) return { state: "withdrawn" };
       if (scored.passed) return { state: "standing" };
       if (scored.status === "queued" || scored.status === "running") return { state: "scoring" };
-      const errored = scored.status === "errored" ? this.scoring.scoredRun({ task, attempt }) : null;
+      const errored = scored.status === "errored" ? this.scoring.scoredRun(attemptRef(task, attempt)) : null;
       return errored === null ? { state: "withdrawn" } : { state: "errored", run: errored };
     };
   }
@@ -2107,9 +2110,9 @@ export class TaskStore {
     attempt: AttemptInput & Pick<StoredAttempt, "state">,
   ): { sha: string; status: AttemptScoring["status"]; passed: boolean } | null {
     if (attempt.state !== "open") return null;
-    const { sha, status } = this.scoring.statusFor(scoredAttempt(attempt));
+    const { sha, status } = this.scoring.statusFor(attemptLine(attempt));
     if (sha === null) return null;
-    const passed = status === "done" && this.scoring.currentRun(scoredAttempt(attempt))?.result?.gate === "passed";
+    const passed = status === "done" && this.scoring.currentRun(attemptLine(attempt))?.result?.gate === "passed";
     return { sha, status, passed };
   }
 
@@ -2121,10 +2124,10 @@ export class TaskStore {
     try {
       return this.#sql.transaction(() => {
         if (!this.scoring.finish(run, outcome)) return false;
-        const finished = this.scoring.getRun(run);
-        if (finished === null) return true;
-        const mr = this.mergeRequests.open(finished.task);
-        if (mr !== null && mr.attempt === finished.attempt) this.#evaluate(null, mr);
+        const attempt = parseAttemptRef(this.scoring.getRun(run)?.line ?? "");
+        if (attempt === null) return true;
+        const mr = this.mergeRequests.open(attempt.task);
+        if (mr !== null && mr.attempt === attempt.number) this.#evaluate(null, mr);
         return true;
       });
     } finally {
@@ -2274,7 +2277,7 @@ export class TaskStore {
       this.landings.move(landing, "dequeued");
       const mr = this.#openMergeRequest(task);
       const source = this.#attempt(sourceOf(mr));
-      const moved = this.scoring.statusFor(scoredAttempt(source)).sha !== mr.approved_head;
+      const moved = this.scoring.statusFor(attemptLine(source)).sha !== mr.approved_head;
       this.mergeRequests.dequeue(null, mr, dequeueCause(outcome), moved ? "needsReview" : "pending");
     });
     return true;
@@ -2456,9 +2459,9 @@ export class TaskStore {
     if (mr.state !== "pending" || this.mergeRequests.held(mr)) return mr;
     const source = this.#attempt(sourceOf(mr));
     if (source.state !== "open") return mr;
-    const { status, sha } = this.scoring.statusFor(scoredAttempt(source));
+    const { status, sha } = this.scoring.statusFor(attemptLine(source));
     if (sha !== mr.approved_head || status !== "done") return mr;
-    if (this.scoring.currentRun(scoredAttempt(source))?.result?.gate !== "passed") return mr;
+    if (this.scoring.currentRun(attemptLine(source))?.result?.gate !== "passed") return mr;
     return this.mergeRequests.enqueue(actor, mr);
   }
 
@@ -2496,7 +2499,7 @@ export class TaskStore {
    * `main`. An attempt with no commits has none to approve.
    */
   async #currentHead(project: ProjectContext, attempt: StoredAttempt): Promise<string> {
-    const known = this.scoring.statusFor(scoredAttempt(attempt)).sha;
+    const known = this.scoring.statusFor(attemptLine(attempt)).sha;
     if (known !== null) return known;
     const [commit] = await this.#repos.listCommits(forkRepo(project.id, attempt.fork), { ref: "main", limit: 1 });
     if (commit === undefined) throw invalidState(`${attempt.fork} has no head to approve; push a commit first`);
@@ -2517,7 +2520,7 @@ export class TaskStore {
       attempt.number,
     );
     this.#journal(actor, "merged", attempt.task, attempt.number, { sha });
-    this.scoring.cancelAttempt(scoredAttempt(attempt), "attempt merged");
+    this.scoring.cancelLine(attemptLine(attempt), "attempt merged");
     this.#endTask(actor, attempt.task, "closed");
   }
 
@@ -2534,11 +2537,11 @@ export class TaskStore {
 
   #toAttempt(row: AttemptRow): StoredAttempt {
     const mr = this.mergeRequests.forAttempt(row.task, row.number);
-    const scoring = this.scoring.statusFor(scoredAttempt(row));
+    const scoring = this.scoring.statusFor(attemptLine(row));
     return {
       ...toAttempt(row),
       scoring,
-      verdicts: this.verdicts.summary(scoredAttempt(row), scoring.sha),
+      verdicts: this.verdicts.summary(attemptKey(row), scoring.sha),
       merge_request:
         mr === null
           ? null
@@ -2552,7 +2555,7 @@ export class TaskStore {
     const mr = this.mergeRequests.forAttempt(input.task, input.number);
     return {
       state,
-      scoredRun: this.scoring.scoredRun({ task: input.task, attempt: input.number }),
+      scoredRun: this.scoring.scoredRun(attemptLine(input)),
       mergeRequest: mr === null ? null : { id: mr.id, state: mr.state, dequeuedAt: mr.last_dequeue?.at ?? null },
     };
   }
@@ -2603,7 +2606,7 @@ export class TaskStore {
     attempt: StoredAttempt,
     trigger: ScoringTrigger,
   ): Promise<ScoringRequest | null> {
-    const readSince = this.scoring.latestRunId(scoredAttempt(attempt));
+    const readSince = this.scoring.latestRunId(attemptLine(attempt));
     let head: string | null;
     try {
       const [commit] = await this.#repos.listCommits(forkRepo(project.id, attempt.fork), { ref: "main", limit: 1 });
@@ -2625,8 +2628,7 @@ export class TaskStore {
   ): ScoringRequest {
     return this.scoring.request({
       project: project.id,
-      task: attempt.task,
-      attempt: attempt.number,
+      line: attemptLine(attempt),
       sha,
       trigger,
       actor,
@@ -2688,7 +2690,7 @@ export class TaskStore {
       current.number,
     );
     this.#journal(actor, to === "closed" ? "closed" : "madeObsolete", current.task, current.number);
-    this.scoring.cancelAttempt(scoredAttempt(current), `attempt ${to}`);
+    this.scoring.cancelLine(attemptLine(current), `attempt ${to}`);
     const mr = this.mergeRequests.open(current.task);
     if (mr !== null && mr.attempt === current.number) this.#cancel(actor, mr);
   }

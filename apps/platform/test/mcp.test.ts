@@ -135,7 +135,7 @@ async function setup() {
       while (!stopped.signal.aborted) {
         const tasks = store(projectId);
         await tasks.drain(projectId);
-        const runs = sql(projectId).exec<{ id: number }>("SELECT id FROM scoring_runs WHERE status = 'running'");
+        const runs = sql(projectId).exec<{ id: number }>("SELECT id FROM pipeline_runs WHERE status = 'running'");
         for (const { id } of runs) tasks.scoringFinished(id, { status: "done", result: PASSED });
         const landing = tasks.landings.active();
         if (landing !== null) {
@@ -440,7 +440,7 @@ describe("/mcp", () => {
     await tasks.scoring.drain();
     /** Finishes the attempt's latest run with `gate`. */
     const finish = (number: number, gate: "passed" | "failed") => {
-      const run = tasks.scoring.listRuns({ task: 1, attempt: number }).at(-1)?.id ?? 0;
+      const run = tasks.scoring.listRuns(`t${1}a${number}`).at(-1)?.id ?? 0;
       tasks.scoringFinished(run, { status: "done", result: { ...PASSED, gate } });
     };
     finish(1, "passed");
@@ -477,7 +477,7 @@ describe("/mcp", () => {
     /** Ends t1a1's latest run with `outcome`; returns its id. */
     const finish = async (outcome: ScoringOutcome) => {
       await tasks.scoring.drain();
-      const run = tasks.scoring.listRuns({ task: 1, attempt: 1 }).at(-1)?.id ?? 0;
+      const run = tasks.scoring.listRuns("t1a1").at(-1)?.id ?? 0;
       tasks.scoringFinished(run, outcome);
       return run;
     };
@@ -506,7 +506,7 @@ describe("/mcp", () => {
     await call(bob, "update_attempt", { project, attempt: "t1a1", state: "open" });
     const tasks = store(projectId);
     await tasks.scoring.drain();
-    const run = tasks.scoring.listRuns({ task: 1, attempt: 1 }).at(-1)?.id ?? 0;
+    const run = tasks.scoring.listRuns("t1a1").at(-1)?.id ?? 0;
     tasks.scoringFinished(run, { status: "done", result: PASSED });
     await call(greg, "open_vote", { project, task: "t1" });
 
@@ -577,12 +577,12 @@ describe("/mcp", () => {
   });
 
   it("returns a log's last 64 KB by default, and another part from `offset`", async () => {
-    const { ada, logs, projectId, main, project } = await withProject();
+    const { ada, logs, projectId, project } = await withProject();
     await call(ada, "start_attempts", { project, task: "t1" });
     const scored = await call(ada, "score_now", { project, attempt: "t1a1" });
     const run = scored.data["run"]["id"] as number;
     const log = `${"a".repeat(MAX_LOG_SLICE_BYTES)}${"b".repeat(100)}`;
-    logs.objects.set(`logs/${projectId}/t1a1/${main}/${run}/test.log`, log);
+    logs.objects.set(`logs/${projectId}/t1a1/${run}/test.log`, log);
 
     const tail = await call(ada, "get_log", { project, run, name: "test" });
     expect(tail.data).toMatchObject({ size: log.length, offset: 100, hint: expect.any(String) });

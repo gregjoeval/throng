@@ -285,7 +285,7 @@ describe("the D1 projection of tasks and attempts", () => {
       const ref = { task: task.number, number: attempt.number };
       await store.openAttempt(PROJECT, ada, ref);
       await store.scoring.drain();
-      const run = defined(store.scoring.listRuns({ task: ref.task, attempt: ref.number }).at(-1), "a run");
+      const run = defined(store.scoring.listRuns(`t${ref.task}a${ref.number}`).at(-1), "a run");
       store.scoringFinished(run.id, { status: "done", result: PASSED });
     }
     await store.openVote(PROJECT, owner, { task: task.number });

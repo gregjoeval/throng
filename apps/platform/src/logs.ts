@@ -4,7 +4,6 @@
 
 import type { SandboxSize } from "./config.ts";
 import { ServiceError } from "./errors.ts";
-import type { ScoringParams } from "./scoring.ts";
 
 /** Logs over this many bytes are stored truncated, keeping their head and tail. */
 export const MAX_LOG_BYTES = 5 * 1024 * 1024;
@@ -35,9 +34,20 @@ export function isLogName(name: string): boolean {
   return LOG_NAME.test(name);
 }
 
-/** Where a run's log is stored: `logs/<projectId>/<t42a3>/<sha>/<runId>/<name>.log`. */
-export function logKey({ project, attempt, sha, run }: ScoringParams, name: string): string {
-  return `${LOG_PREFIX}${project}/${attempt}/${sha}/${run}/${name}.log`;
+/** Where a run's log is stored: `logs/<projectId>/<line>/<runId>/<name>.log`. */
+export function logKey({ project, line, run }: { project: string; line: string; run: number }, name: string): string {
+  return `${LOG_PREFIX}${project}/${line}/${run}/${name}.log`;
+}
+
+/**
+ * Where a run stored its log before runs were keyed on their line,
+ * `logs/<projectId>/<t42a3>/<sha>/<runId>/<name>.log`; read until the lifecycle rule expires them.
+ */
+export function legacyLogKey(
+  { project, line, sha, run }: { project: string; line: string; sha: string; run: number },
+  name: string,
+): string {
+  return `${LOG_PREFIX}${project}/${line}/${sha}/${run}/${name}.log`;
 }
 
 /**

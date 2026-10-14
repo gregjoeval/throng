@@ -177,7 +177,7 @@ describe("git proxy", () => {
     expect(pushed.stderr).toMatch(/HEAD -> main/u);
     expect(
       store(project.id)
-        .scoring.listRuns({ task: 1, attempt: 1 })
+        .scoring.listRuns("t1a1")
         .map((r) => [r.trigger, r.sha, r.status]),
     ).toEqual([
       ["open", expect.any(String), "cancelled"],
@@ -357,7 +357,7 @@ describe("merge request notices on a push to the source attempt", () => {
     await store(project.id).openAttempt(project, ada.actor, ref);
     await store(project.id).selectAttempt(project, ada.actor, ref);
     await store(project.id).scoring.drain();
-    const run = at(store(project.id).scoring.listRuns({ task: 1, attempt: 1 }), -1);
+    const run = at(store(project.id).scoring.listRuns("t1a1"), -1);
     store(project.id).scoringFinished(run.id, { status: "done", result: passed });
     expect(store(project.id).getMergeRequest(project, ada.actor, { task: 1 }).state).toBe("queued");
     const dir = await clone("throng/t1a1.git", ada.token);

@@ -19,7 +19,7 @@ export const MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
 const TIMED_OUT_EXITS = new Set([124, 137]);
 
 /** Throng's own check: finding the base and diffing. */
-const DIFF_CHECK = "_diff";
+export const DIFF_CHECK = "_diff";
 
 /** A check: a process the run ran, or skipped. Its outcome is also a metric named after it. */
 export interface CheckResult {

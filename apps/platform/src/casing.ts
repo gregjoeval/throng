@@ -54,7 +54,7 @@ export function normaliseResult<T extends { checks: unknown[] }>(result: T): T {
 /** Scalar columns whose stored values were snake_case, and the values to rewrite. */
 const VALUE_COLUMNS: { table: string; column: string; values: string[] }[] = [
   { table: "merge_requests", column: "state", values: ["needs_review"] },
-  { table: "scoring_runs", column: "trigger", values: ["score_now"] },
+  { table: "pipeline_runs", column: "trigger", values: ["score_now"] },
 ];
 
 /**

@@ -78,7 +78,7 @@ async function setup() {
   };
   /** Finishes the attempt's latest scoring run with a passing gate; the run must be running. */
   const score = (ref: AttemptInput) => {
-    const run = at(store.scoring.listRuns({ task: ref.task, attempt: ref.number }), -1);
+    const run = at(store.scoring.listRuns(`t${ref.task}a${ref.number}`), -1);
     expect(store.scoringFinished(run.id, { status: "done", result: passed })).toBeTruthy();
   };
   /** An attempt whose head passed, selected: its merge request is queued. */
@@ -90,7 +90,7 @@ async function setup() {
     return ref;
   };
   const runStates = (refs: AttemptInput[]) =>
-    refs.map((r) => at(store.scoring.listRuns({ task: r.task, attempt: r.number }), -1).status);
+    refs.map((r) => at(store.scoring.listRuns(`t${r.task}a${r.number}`), -1).status);
   const mr = (task: number) => store.getMergeRequest(PROJECT, owner, { task });
   let n = 0;
   const push = (ref: AttemptInput, as: Actor = ada) => {

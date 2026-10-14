@@ -48,6 +48,7 @@ async function score({ main = MAIN_CONFIG, definitions = {} }: { main?: string; 
   const sizes: [string | undefined, SandboxSize][] = [];
   const logReads: [string | undefined, SandboxSize][] = [];
   const stored = new Map<string, string>();
+  const keys: string[] = [];
   const env = {
     SANDBOX: {
       getByName: (name: string) => {
@@ -71,10 +72,15 @@ async function score({ main = MAIN_CONFIG, definitions = {} }: { main?: string; 
         scoringFinished: async () => {},
       }),
     },
-    LOGS: { put: async (key: string, value: string) => void stored.set(key.split("/").at(-1) ?? key, value) },
+    LOGS: {
+      put: async (key: string, value: string) => {
+        keys.push(key);
+        stored.set(key.split("/").at(-1) ?? key, value);
+      },
+    },
   };
   const outcome = await new ScoringWorkflow({}, env).run({ payload: params, instanceId: "abc123-t1a1-7" }, runOnce);
-  return { sizes, logReads, stored, outcome };
+  return { sizes, logReads, stored, keys, outcome };
 }
 
 describe("ScoringWorkflow", () => {
@@ -94,6 +100,11 @@ describe("ScoringWorkflow", () => {
   it("reads each log back at lite, so a lost container isn't restarted at the project's size", async () => {
     const { logReads } = await score();
     expect(logReads).toEqual([["score", "lite"]]);
+  });
+
+  it("stores each log under the run's line and id", async () => {
+    const { keys } = await score();
+    expect(keys).toEqual(["logs/abc123/t1a1/7/test.log"]);
   });
 
   it("records the size in each log it stores", async () => {

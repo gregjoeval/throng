@@ -911,6 +911,13 @@ describe("migrate", () => {
       preview: { status: "none" },
       logs: [],
     };
+    // A run stored before runs were keyed on their line.
+    sql.exec(`CREATE TABLE scoring_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, task INTEGER NOT NULL, attempt INTEGER NOT NULL,
+      sha TEXT NOT NULL, trigger TEXT NOT NULL, user_id TEXT, alias TEXT, status TEXT NOT NULL,
+      instance_id TEXT NOT NULL, created_at INTEGER NOT NULL, started_at INTEGER, finished_at INTEGER,
+      torn_down INTEGER NOT NULL DEFAULT 0, result TEXT
+    )`);
     sql.exec(
       `INSERT INTO scoring_runs (project, task, attempt, sha, trigger, status, instance_id, created_at, result)
        VALUES ('abc123', 1, 1, 'a', 'score_now', 'done', 'i', 0, ?)`,
@@ -978,6 +985,13 @@ describe("migrate", () => {
       metrics: {},
       logs: [],
     };
+    // A run stored before runs were keyed on their line.
+    sql.exec(`CREATE TABLE scoring_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, task INTEGER NOT NULL, attempt INTEGER NOT NULL,
+      sha TEXT NOT NULL, trigger TEXT NOT NULL, user_id TEXT, alias TEXT, status TEXT NOT NULL,
+      instance_id TEXT NOT NULL, created_at INTEGER NOT NULL, started_at INTEGER, finished_at INTEGER,
+      torn_down INTEGER NOT NULL DEFAULT 0, result TEXT
+    )`);
     sql.exec(
       `INSERT INTO scoring_runs (project, task, attempt, sha, trigger, status, instance_id, created_at, result)
        VALUES ('abc123', 1, 1, 'a', 'push', 'done', 'i', 0, ?)`,
@@ -1044,12 +1058,12 @@ describe("migrate", () => {
     expect(new TaskStore({ sql, repos })).toBeDefined();
     expect(new TaskStore({ sql, repos })).toBeDefined();
     expect(sql.exec("SELECT user_id, alias FROM journal")).toEqual([{ user_id: "ada", alias: "claude" }]);
-    expect(sql.exec("SELECT user_id, alias FROM scoring_runs")).toEqual([{ user_id: "ada", alias: "claude" }]);
+    expect(sql.exec("SELECT user_id, alias FROM pipeline_runs")).toEqual([{ user_id: "ada", alias: "claude" }]);
     expect(sql.exec("SELECT approved_by_alias, created_by_alias FROM merge_requests")).toEqual([
       { approved_by_alias: "claude", created_by_alias: "codex" },
     ]);
     expect(sql.exec("SELECT reviewer, alias FROM verdicts")).toEqual([{ reviewer: "bob", alias: "claude" }]);
-    for (const table of ["journal", "scoring_runs", "merge_requests", "verdicts"]) {
+    for (const table of ["journal", "pipeline_runs", "merge_requests", "verdicts"]) {
       const columns = sql.exec<{ name: string }>(`PRAGMA table_info(${table})`).map((c) => c.name);
       expect(columns.filter((c) => c.includes("agent"))).toEqual([]);
     }

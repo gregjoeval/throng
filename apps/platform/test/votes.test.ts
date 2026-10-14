@@ -103,7 +103,7 @@ async function setup(selection = "selection: { policy: vote }\n") {
 
   const score = async (ref: AttemptInput, outcome: ScoringOutcome = done()) => {
     await store.scoring.drain();
-    const run = at(store.scoring.listRuns({ task: ref.task, attempt: ref.number }), -1);
+    const run = at(store.scoring.listRuns(`t${ref.task}a${ref.number}`), -1);
     store.scoringFinished(run.id, outcome);
   };
   let n = 0;
@@ -246,7 +246,7 @@ describe("opening a vote", () => {
     const { sql, store, t1a2, scoreAll } = await setup();
     await scoreAll();
     // Raw SQL: nothing forgets a head once a push records it, so no API reaches this state.
-    sql.exec("DELETE FROM scoring_heads WHERE task = ? AND attempt = ?", t1a2.task, t1a2.number);
+    sql.exec("DELETE FROM pipeline_heads WHERE line = ?", `t${t1a2.task}a${t1a2.number}`);
     const opened = await store.openVote(PROJECT, cat, { task: 1 });
     expect(opened.candidates.map((c) => c.attempt)).toEqual([1, 3]);
     expect(opened.candidates.every((c) => /^[0-9a-f]{40}$/u.test(c.head))).toBeTruthy();
@@ -451,7 +451,7 @@ describe("candidates", () => {
     store.castVote(PROJECT, dan, t1a2);
     await store.rescore(PROJECT, cat, t1a1);
     await score(t1a1, { status: "errored", error: "sandbox lost" });
-    const errored = at(store.scoring.listRuns({ task: 1, attempt: 1 }), -1).id;
+    const errored = at(store.scoring.listRuns("t1a1"), -1).id;
     expect(vote().candidates[0]).toMatchObject({
       attempt: 1,
       votes: 0,

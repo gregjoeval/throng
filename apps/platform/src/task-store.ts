@@ -678,7 +678,7 @@ export class TaskStore {
       if (row === undefined) return NO_TASK_DEFINITIONS;
       const task = toTask(row);
       const reviewed = run.trigger === "start" ? (run.owner_started_at ?? 0) : null;
-      const foreign = task.check_writers.find((w) => !w.owner && (reviewed === null || w.at > reviewed));
+      const foreign = task.check_writers.find((w) => !w.owner && (reviewed === null || w.at >= reviewed));
       if (run.trusted && foreign !== undefined) {
         this.runs.distrust(id, { name: foreign.name, writer: foreign.user });
       }

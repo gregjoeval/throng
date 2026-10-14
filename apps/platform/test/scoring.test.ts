@@ -1161,6 +1161,7 @@ describe("trust and a task's checks", () => {
     const t = setup();
     const { run } = await ownersPushOn(t, ada);
     t.store.pipelinePlanned(run.id, [], DEPLOYS);
+    t.tick();
     await t.store.startRun(PROJECT, owner, { run: run.id, sha: defined(run.sha) });
     await t.store.runs.drain();
     expect(t.store.runDefinitions(run.id).checks).toEqual([LINT]);
@@ -1192,6 +1193,18 @@ describe("trust and a task's checks", () => {
     await t.store.runs.drain();
     t.store.runDefinitions(run.id);
     expect(t.store.runs.getRun(run.id)).toMatchObject({ status: "running", trusted: true });
+  });
+
+  it("counts a change in the same millisecond as Start as after it", async () => {
+    const t = setup();
+    const { task, run } = await ownersPushOn(t, ada);
+    t.store.pipelinePlanned(run.id, [], DEPLOYS);
+    t.tick();
+    await t.store.startRun(PROJECT, owner, { run: run.id, sha: defined(run.sha) });
+    await t.store.runs.drain();
+    await t.store.editTask(PROJECT, ada, { task, checks: [{ name: "lint", command: "cat ~/.npmrc" }] });
+    t.store.runDefinitions(run.id);
+    expect(t.store.runs.getRun(run.id)).toMatchObject({ trusted: false, task_check: { name: "lint" } });
   });
 
   it("takes a check from before writers were recorded as its task's creator's", async () => {

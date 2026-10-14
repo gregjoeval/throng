@@ -444,6 +444,39 @@ describe("parseConfig", () => {
       'a: &a ["x","x","x","x","x","x","x","x","x"]\nb: &b [*a,*a,*a,*a,*a,*a,*a,*a,*a]\nc: &c [*b,*b,*b,*b,*b,*b,*b,*b,*b]\nd: [*c,*c,*c,*c,*c,*c,*c,*c,*c]\n';
     expect(parseConfig(text)).toMatchObject({ kind: "invalid", error: expect.stringMatching(/^yaml: /u) });
   });
+
+  it("reuses blocks anchored under definitions, merging mappings with <<, and ignores definitions", () => {
+    const text = `definitions:
+  quick: &quick { timeout: 2m }
+  test: &test pnpm test
+checks:
+  - { <<: *quick, name: unit, command: *test }
+  - <<: *quick
+    name: e2e
+    command: pnpm e2e
+    timeout: 5m
+`;
+    expect(parseConfig(text)).toEqual({
+      kind: "valid",
+      config: {
+        ...EMPTY,
+        checks: [
+          { name: "unit", command: "pnpm test", timeoutMs: 120_000, source: "project" },
+          { name: "e2e", command: "pnpm e2e", timeoutMs: 300_000, source: "project" },
+        ],
+      },
+    });
+  });
+
+  it("rejects a merge key that would bring in too many aliases", () => {
+    const text = `definitions:
+  a: &a { x: 1 }
+  b: &b [*a, *a, *a, *a, *a, *a, *a, *a, *a, *a]
+  c: &c [*b, *b, *b, *b, *b, *b, *b, *b, *b, *b]
+  d: [*c, *c, *c, *c, *c, *c, *c, *c, *c, *c]
+`;
+    expect(parseConfig(text)).toMatchObject({ kind: "invalid", error: expect.stringMatching(/^yaml: /u) });
+  });
 });
 
 describe("loadConfig", () => {

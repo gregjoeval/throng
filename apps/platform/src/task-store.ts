@@ -11,7 +11,7 @@ import { containsCommit, taskBranchHead } from "./base.ts";
 import { migrateValues, normaliseLandingOutcome } from "./casing.ts";
 import { addColumns, renameColumns } from "./columns.ts";
 import { CONFIG_PATH, loadConfig, selectionPolicy } from "./config.ts";
-import type { CheckConfig, ConfigResult, MetricConfig, SelectionPolicy } from "./config.ts";
+import type { CheckConfig, ConfigResult, MetricConfig, NamedSecrets, SelectionPolicy } from "./config.ts";
 import { ServiceError } from "./errors.ts";
 import type { ErrorCode } from "./errors.ts";
 import { Follows } from "./follows.ts";
@@ -38,6 +38,7 @@ import type { Gate } from "./results.ts";
 import { cancellable, runReport, runSettled, SCORING_CAP, ScoringQueue } from "./scoring.ts";
 import type {
   AttemptScoring,
+  PlanVerdict,
   RunReport,
   RunsPage,
   RunsQuery,
@@ -1258,10 +1259,14 @@ export class TaskStore {
       if (head === null) return { scoring: null, mergeRequest, head };
       // A draft isn't scored, but its old result no longer describes its head.
       if (current.state !== "open") {
-        this.scoring.moveHead(attemptLine(current), head);
+        this.scoring.moveHead(attemptLine(current), head, isOwnersPush(project, actor));
         return { scoring: null, mergeRequest, head };
       }
-      return { scoring: this.#request(project, actor, current, head, "push"), mergeRequest, head };
+      return {
+        scoring: this.#request(project, actor, current, head, "push", isOwnersPush(project, actor)),
+        mergeRequest,
+        head,
+      };
     });
   }
 
@@ -1428,8 +1433,8 @@ export class TaskStore {
     if (vote !== null && recorded !== null) this.votes.repin(vote.id, attempt.number, { from: recorded, to: after });
     this.#setFollow(attempt, { followed_head: after });
     this.#pushedToSource(null, attempt, after);
-    if (attempt.state === "open") this.#request(project, null, attempt, after, "push");
-    else this.scoring.moveHead(attemptLine(attempt), after);
+    if (attempt.state === "open") this.#request(project, null, attempt, after, "push", false);
+    else this.scoring.moveHead(attemptLine(attempt), after, false);
   }
 
   #setFollow(
@@ -1723,7 +1728,7 @@ export class TaskStore {
       const attempt = this.#attempt({ task: row.task, number: row.attempt });
       this.#recordPushed(actor, attempt, input.updates);
       this.#dropBranchPush(attempt);
-      const scoring = this.#request(project, actor, attempt, input.head, "open");
+      const scoring = this.#request(project, actor, attempt, input.head, "open", isOwnersPush(project, actor));
       return { task: this.#task(row.task), attempt: this.#attempt(attempt), scoring };
     });
     // The pushed head replaced the fork's `main`, which began at the task head; if its author didn't
@@ -1898,6 +1903,43 @@ export class TaskStore {
     mayGrant(project, actor);
     const secret = this.#secrets.delete(input.name);
     this.#record(actor, "secretDeleted", { name: secret.name, pipelines: secret.pipelines });
+  }
+
+  /**
+   * For a running run's Workflow, before it starts any container: records the containers its plan
+   * may start (`ScoringQueue.planned`), then checks the secrets each of its setups and checks names
+   * (`named`) against the settings. A secret with no value or not allowed in the run's pipeline
+   * refuses the run, naming the step and the secret. An untrusted run that names any secret waits
+   * for the owner instead of starting; one that names none, and a trusted one, go ahead.
+   */
+  pipelinePlanned(id: number, containers: readonly string[], named: readonly NamedSecrets[]): PlanVerdict {
+    const verdict = this.#sql.transaction((): PlanVerdict => {
+      this.scoring.planned(id, containers);
+      const run = this.scoring.getRun(id);
+      if (run === null) throw new Error(`no run ${id}`);
+      for (const { step, secrets } of named) {
+        const refused = this.#secrets.sealedFor(secrets, run.pipeline);
+        if ("error" in refused) return { kind: "refused", error: `${step}: ${refused.error}` };
+      }
+      const names = [...new Set(named.flatMap((n) => n.secrets))];
+      if (names.length === 0 || run.trusted) return { kind: "start" };
+      this.scoring.wait(run, names);
+      return { kind: "waiting" };
+    });
+    // A run waiting for the owner has settled: `wait_for_run` answers.
+    if (verdict.kind === "waiting") this.wakeWaiters();
+    return verdict;
+  }
+
+  /**
+   * For a trusted running run's step that starts a container: the sealed values of the secrets it
+   * names, as the settings are now, or the first that's gone or no longer allowed in the run's
+   * pipeline. Throws for a run that isn't trusted or running, which may hold none.
+   */
+  pipelineSecrets(id: number, names: readonly string[]): ReturnType<Secrets["sealedFor"]> {
+    const run = this.scoring.getRun(id);
+    if (run?.status !== "running" || !run.trusted) throw new Error(`run ${id} may hold no secrets`);
+    return this.#secrets.sealedFor(names, run.pipeline);
   }
 
   // --- votes -----------------------------------------------------------------------------------
@@ -2130,7 +2172,9 @@ export class TaskStore {
       const scored = current === undefined ? null : this.#scoredHead(current);
       if (scored?.sha !== head) return { state: "withdrawn" };
       if (scored.passed) return { state: "standing" };
-      if (scored.status === "queued" || scored.status === "running") return { state: "scoring" };
+      if (scored.status === "queued" || scored.status === "waiting" || scored.status === "running") {
+        return { state: "scoring" };
+      }
       const errored = scored.status === "errored" ? this.scoring.scoredRun(attemptRef(task, attempt)) : null;
       return errored === null ? { state: "withdrawn" } : { state: "errored", run: errored };
     };
@@ -2659,15 +2703,17 @@ export class TaskStore {
       console.error({ event: "scoring.head_unreadable", attempt: attempt.fork, trigger, error: String(error) });
       return null;
     }
-    return head === null ? null : this.#request(project, actor, attempt, head, trigger, readSince);
+    return head === null ? null : this.#request(project, actor, attempt, head, trigger, null, readSince);
   }
 
+  /** Asks for a run of the attempt's head `sha`; `ownersPush` as `ScoringRequestInput` takes it. */
   #request(
     project: ProjectId,
     actor: Actor | null,
     attempt: StoredAttempt,
     sha: string,
     trigger: ScoringTrigger,
+    ownersPush: boolean | null,
     readSince?: number,
   ): ScoringRequest {
     return this.scoring.request({
@@ -2676,6 +2722,7 @@ export class TaskStore {
       sha,
       trigger,
       actor,
+      ownersPush,
       readSince,
     });
   }
@@ -3178,13 +3225,17 @@ function toTask(row: TaskRow): StoredTask {
 /**
  * A task's stored definitions, as JSON, in the current shape. Checks stored while a check could be
  * optional carry `required`, which is dropped: every check that runs must pass. Checks stored before
- * a check could wait for others have no `after`, and wait for none.
+ * a check could wait for others have no `after`, and wait for none. A task's check names no secrets,
+ * and was stored without `secrets`.
  */
 function upgradeDefinitions(json: string): TaskDefinitions {
   const stored = { ...NO_TASK_DEFINITIONS, ...(JSON.parse(json) as Partial<TaskDefinitions>) };
-  const checks = (stored.checks as (Omit<CheckConfig, "after"> & { after?: string[]; required?: boolean })[]).map(
-    ({ required: _required, after = [], ...check }): CheckConfig => ({ ...check, after }),
-  );
+  type StoredCheck = Omit<CheckConfig, "after" | "secrets"> & { after?: string[]; required?: boolean };
+  const checks = (stored.checks as StoredCheck[]).map(({ required: _required, after = [], ...check }): CheckConfig => ({
+    ...check,
+    after,
+    secrets: [],
+  }));
   return { ...stored, checks };
 }
 
@@ -3246,6 +3297,11 @@ function mayGrant(project: ProjectContext, actor: Actor): void {
   if (actor.user.id !== project.owner || actor.alias !== null) {
     throw new ServiceError("forbidden", "only the project owner, acting as themselves, may");
   }
+}
+
+/** Whether `actor`'s push is the owner's, as themselves or under an alias: a run of what they pushed is trusted. */
+function isOwnersPush(project: ProjectContext, actor: Actor): boolean {
+  return actor.user.id === project.owner;
 }
 
 /** The attempt's author, or one of their aliases, holds its claim. */

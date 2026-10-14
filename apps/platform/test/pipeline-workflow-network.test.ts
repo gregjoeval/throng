@@ -68,7 +68,7 @@ async function score(repos: FakeRepos): Promise<{ access: Map<string, OutboundAc
     PROJECT: {
       getByName: () => ({
         definitionsOf: async () => ({ checks: [], metrics: [] }),
-        pipelinePlanned: async () => {},
+        pipelinePlanned: async () => ({ kind: "start" }),
         pipelineFinished: async () => {},
       }),
     },

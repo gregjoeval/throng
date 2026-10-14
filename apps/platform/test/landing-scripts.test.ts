@@ -74,7 +74,7 @@ function checked(head: string): { head: string; main: string; tree: string } {
 }
 
 const plan = (checks: ScorePlan["checks"], setup: string[] = []): ScorePlan => ({
-  setup: setup.map((command, i) => ({ name: `setup${i + 1}`, command })),
+  setup: setup.map((command, i) => ({ name: `setup${i + 1}`, command, secrets: [] })),
   checks,
   allow: [],
 });
@@ -84,6 +84,7 @@ const check = (name: string, command: string, after: string[] = []) => ({
   command,
   timeoutMs: 60_000,
   after,
+  secrets: [],
   metrics: [],
 });
 
@@ -227,6 +228,7 @@ describe("retestScript", () => {
               command: "test -f b.txt && test -f c.txt && test -f built",
               timeoutMs: 60_000,
               after: [],
+              secrets: [],
               metrics: [],
             },
           ],
@@ -262,7 +264,7 @@ describe("retestScript", () => {
         origin,
         fork,
         checked(head),
-        plan([{ name: "no-c", command: "test ! -f c.txt", timeoutMs: 60_000, after: [], metrics: [] }]),
+        plan([{ name: "no-c", command: "test ! -f c.txt", timeoutMs: 60_000, after: [], secrets: [], metrics: [] }]),
       ),
     );
     expect(raw.checks).toMatchObject([{ exit: 1 }]);

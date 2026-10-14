@@ -1,6 +1,7 @@
 // The project's secrets in its settings: each one's name, pipelines and last change, never its value,
 // with forms to add one, replace its value or change its pipelines, and to delete it. Only the owner
-// sees this page; the platform refuses anyone else, and anyone under an alias.
+// sees this page; the platform refuses anyone else, and anyone under an alias. It shows where main's config
+// names each secret, and flags names with no value or not allowed in a pipeline that runs them.
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { PIPELINES } from "@throng/platform/pipelines";
@@ -12,7 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { deleteSecret, putSecret, secretsQuery } from "@/lib/api";
-import type { Pipeline, ProjectRef, Secret } from "@/lib/api";
+import type { Pipeline, ProjectRef, Secret, SecretUse } from "@/lib/api";
 import { relativeDate } from "@/lib/commits";
 import { apiError } from "@/lib/errors";
 
@@ -47,6 +48,7 @@ export function SecretsSettings({ projectRef }: { projectRef: ProjectRef }) {
       {editing?.kind === "new" && <SecretForm projectRef={projectRef} onDone={close} />}
       {secrets.isPending && <Loading />}
       {secrets.isError && <ErrorState error={secrets.error} />}
+      {secrets.isSuccess && <Unset uses={secrets.data.uses.filter((use) => !use.hasValue)} />}
       {secrets.isSuccess &&
         (secrets.data.secrets.length === 0 ? (
           <EmptyState title="No secrets yet" />
@@ -57,6 +59,7 @@ export function SecretsSettings({ projectRef }: { projectRef: ProjectRef }) {
                 <Th>Name</Th>
                 <Th>Pipelines</Th>
                 <Th>Last changed</Th>
+                <Th>Named in main's config</Th>
                 <Th>
                   <span className="sr-only">Actions</span>
                 </Th>
@@ -68,6 +71,7 @@ export function SecretsSettings({ projectRef }: { projectRef: ProjectRef }) {
                   key={secret.name}
                   projectRef={projectRef}
                   secret={secret}
+                  use={secrets.data.uses.find((use) => use.name === secret.name)}
                   onEdit={() => setEditing({ kind: "edit", name: secret.name })}
                 />
               ))}
@@ -86,7 +90,37 @@ export function SecretsSettings({ projectRef }: { projectRef: ProjectRef }) {
   );
 }
 
-function SecretRow({ projectRef, secret, onEdit }: { projectRef: ProjectRef; secret: Secret; onEdit: () => void }) {
+/** The setups and checks naming a secret: `setup deps, check test`. */
+const steps = (use: SecretUse) => use.steps.join(", ");
+
+/** The secrets `main`'s config names that have no value: every run naming one fails before it starts. */
+function Unset({ uses }: { uses: SecretUse[] }) {
+  if (uses.length === 0) return null;
+  return (
+    <div role="alert" className="rounded-xl border border-destructive/50 p-3 text-sm">
+      <p className="font-medium">main's config names secrets with no value. Runs naming them fail.</p>
+      <ul className="mt-1 list-disc pl-5">
+        {uses.map((use) => (
+          <li key={use.name}>
+            <span className="font-mono">{use.name}</span>, named by <span className="font-mono">{steps(use)}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function SecretRow({
+  projectRef,
+  secret,
+  use,
+  onEdit,
+}: {
+  projectRef: ProjectRef;
+  secret: Secret;
+  use: SecretUse | undefined;
+  onEdit: () => void;
+}) {
   const queryClient = useQueryClient();
   const [confirming, setConfirming] = useState(false);
   const remove = useMutation({
@@ -107,6 +141,20 @@ function SecretRow({ projectRef, secret, onEdit }: { projectRef: ProjectRef; sec
         <time dateTime={secret.changedAt} title={secret.changedAt}>
           {relativeDate(secret.changedAt)}
         </time>
+      </td>
+      <td className="px-2 py-2">
+        {use === undefined ? (
+          <span className="text-muted-foreground">Not named</span>
+        ) : (
+          <div className="flex flex-col gap-1">
+            <span className="font-mono">{steps(use)}</span>
+            {use.notAllowedIn.length > 0 && (
+              <span className="text-amber-700 dark:text-amber-400">
+                Not allowed in {use.notAllowedIn.join(" or ")}: runs there fail
+              </span>
+            )}
+          </div>
+        )}
       </td>
       <td className="px-2 py-2">
         <div className="flex justify-end gap-2">

@@ -98,6 +98,12 @@ export interface PipelineParams {
   run: number;
 }
 
+/**
+ * What the project answers a run's plan: start it, it waits for the owner (it started nothing), or
+ * it's refused before anything runs, saying why.
+ */
+export type PlanVerdict = { kind: "start" } | { kind: "waiting" } | { kind: "refused"; error: string };
+
 /** What a run's Workflow reports when it ends: its outcome, or the error that ended it. */
 export type RunReport = { status: "done"; outcome: RunOutcome } | { status: "errored"; error: string };
 
@@ -113,10 +119,14 @@ export function runReport(outcome: ScoringOutcome): RunReport {
 }
 
 /** An attempt's scoring status: its current head's latest run that wasn't cancelled, or `none`. */
-export const ATTEMPT_SCORING_STATUSES = ["none", "queued", "running", "done", "errored"] as const satisfies readonly (
-  | RunStatus
-  | "none"
-)[];
+export const ATTEMPT_SCORING_STATUSES = [
+  "none",
+  "queued",
+  "waiting",
+  "running",
+  "done",
+  "errored",
+] as const satisfies readonly (RunStatus | "none")[];
 
 /**
  * An attempt's scoring, for polling: the status of its current head's latest run (`none` when the
@@ -202,6 +212,11 @@ export interface ScoringRequestInput {
   trigger: ScoringTrigger;
   actor: Actor | null;
   /**
+   * Whether the project's owner (as themselves or under an alias) pushed `sha`, which makes its run
+   * trusted; null when the request isn't a push, so the run is trusted as the head's push was.
+   */
+  ownersPush: boolean | null;
+  /**
    * The newest run id on the line when the caller began reading `sha`. A run queued since then
    * came from a push recorded meanwhile, whose head is at least as new as `sha`, so the request
    * yields to it rather than replace it.
@@ -245,6 +260,8 @@ const SCHEMA = [
 ];
 /** Columns `pipeline_runs` gained after its first version, which a table that old lacks. */
 const PIPELINE_RUN_COLUMNS = ["containers TEXT"];
+/** Columns `pipeline_heads` gained after its first version: whether the owner pushed the head. */
+const PIPELINE_HEAD_COLUMNS = ["owners_push INTEGER NOT NULL DEFAULT 0"];
 /** Columns `scoring_runs` gained after its first version, which a table that old lacks. */
 const SCORING_RUN_COLUMNS = ["result TEXT", "error TEXT", "superseded INTEGER NOT NULL DEFAULT 0"];
 /** `scoring_runs` columns named before an actor's alias was called an alias. */
@@ -304,20 +321,28 @@ export class ScoringQueue {
     this.#reserved = reserved;
     for (const statement of SCHEMA) sql.exec(statement);
     addColumns(sql, "pipeline_runs", PIPELINE_RUN_COLUMNS);
+    addColumns(sql, "pipeline_heads", PIPELINE_HEAD_COLUMNS);
     migrateScoringRuns(sql);
   }
 
   /**
-   * Records that the line's head is now `sha`, marking runs for every other head superseded.
-   * Pushes call it whether or not they ask for a run, so a draft's result is superseded too.
+   * Records that the line's head is now `sha`, marking runs for every other head superseded, and
+   * whether the owner pushed it (`ownersPush`; null keeps what was recorded for the same head, and
+   * says no for a new one). Pushes call it whether or not they ask for a run, so a draft's result is
+   * superseded too.
    */
-  moveHead(line: string, sha: string): void {
+  moveHead(line: string, sha: string, ownersPush: boolean | null): void {
     this.#sql.transaction(() => {
       this.#sql.exec(
-        `INSERT INTO pipeline_heads (line, sha) VALUES (?, ?)
-         ON CONFLICT (line) DO UPDATE SET sha = excluded.sha`,
+        `INSERT INTO pipeline_heads (line, sha, owners_push) VALUES (?, ?, ?)
+         ON CONFLICT (line) DO UPDATE SET
+           owners_push = CASE WHEN ? IS NOT NULL THEN excluded.owners_push
+                              WHEN sha = excluded.sha THEN owners_push ELSE 0 END,
+           sha = excluded.sha`,
         line,
         sha,
+        ownersPush === true ? 1 : 0,
+        ownersPush === null ? null : 1,
       );
       this.#sql.exec("UPDATE pipeline_runs SET superseded = (sha != ?) WHERE line = ?", sha, line);
     });
@@ -365,16 +390,18 @@ export class ScoringQueue {
    */
   request(input: ScoringRequestInput): ScoringRequest {
     return this.#sql.transaction(() => {
-      this.moveHead(input.line, input.sha);
+      this.moveHead(input.line, input.sha, input.ownersPush);
       const live = this.#sql
         .exec<RunRow>(
-          "SELECT * FROM pipeline_runs WHERE line = ? AND status IN ('queued', 'running') ORDER BY id",
+          "SELECT * FROM pipeline_runs WHERE line = ? AND status IN ('queued', 'waiting', 'running') ORDER BY id",
           input.line,
         )
         .map(toRun);
       const same = live.filter((r) => r.sha === input.sha);
-      const waiting = same.find((r) => r.status === "queued");
-      if (waiting !== undefined) return { queued: false, reason: "already queued", run: waiting };
+      const queued = same.find((r) => r.status === "queued");
+      if (queued !== undefined) return { queued: false, reason: "already queued", run: queued };
+      const waiting = same.find((r) => r.status === "waiting");
+      if (waiting !== undefined) return { queued: false, reason: "waiting for the owner", run: waiting };
       const running = same.find((r) => r.status === "running");
       if (running !== undefined && input.trigger !== "rescore") {
         return { queued: false, reason: "already running", run: running };
@@ -398,9 +425,12 @@ export class ScoringQueue {
         if (done !== undefined) return { queued: false, reason: "already scored", run: toRun(done) };
       }
 
+      // A run is trusted when the owner pushed its head, as recorded just now or with the head's push.
       const [row] = this.#sql.exec<RunRow>(
-        `INSERT INTO pipeline_runs (project, line, sha, pipeline, trigger, user_id, alias, status, instance_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', '', ?) RETURNING *`,
+        `INSERT INTO pipeline_runs
+           (project, line, sha, pipeline, trigger, user_id, alias, trusted, status, instance_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, (SELECT owners_push FROM pipeline_heads WHERE line = ?), 'queued', '', ?)
+         RETURNING *`,
         input.project,
         input.line,
         input.sha,
@@ -408,6 +438,7 @@ export class ScoringQueue {
         input.trigger,
         input.actor?.user.id ?? null,
         input.actor?.alias ?? null,
+        input.line,
         this.#ms(),
       );
       if (row === undefined) throw new Error("pipeline run insert returned no row");
@@ -427,7 +458,7 @@ export class ScoringQueue {
   cancelLine(line: string, reason: string): void {
     this.#sql.transaction(() => {
       const live = this.#sql
-        .exec<RunRow>("SELECT * FROM pipeline_runs WHERE line = ? AND status IN ('queued', 'running')", line)
+        .exec<RunRow>("SELECT * FROM pipeline_runs WHERE line = ? AND status IN ('queued', 'waiting', 'running')", line)
         .map(toRun);
       for (const run of live) this.#cancel(run, { reason });
     });
@@ -496,6 +527,20 @@ export class ScoringQueue {
    */
   planned(id: number, containers: readonly string[]): void {
     this.#sql.exec("UPDATE pipeline_runs SET containers = ? WHERE id = ?", JSON.stringify(containers), id);
+  }
+
+  /**
+   * Hands a running run to the owner: it is `waiting` until they start it, holding no slot. Its
+   * Workflow ends having started no container, so there is nothing to stop. False when it wasn't
+   * running (a newer head cancelled it meanwhile).
+   */
+  wait(run: StoredRun, secrets: readonly string[]): boolean {
+    const [row] = this.#sql.exec<RunRow>(
+      "UPDATE pipeline_runs SET status = 'waiting', torn_down = 1 WHERE id = ? AND status = 'running' RETURNING *",
+      run.id,
+    );
+    if (row !== undefined) this.#journal("scoringWaiting", run, { secrets });
+    return row !== undefined;
   }
 
   /**

@@ -98,13 +98,14 @@ describe("parseShortstat", () => {
 describe("scorePlan", () => {
   it("runs the config's setup and checks, each with the metrics it feeds, and nothing without a valid config", () => {
     expect(scorePlan(CONFIG)).toEqual({
-      setup: [{ name: "deps", command: "npm ci" }],
+      setup: [{ name: "deps", command: "npm ci", secrets: [] }],
       checks: [
         {
           name: "test",
           command: "npm test",
           timeoutMs: 120_000,
           after: [],
+          secrets: [],
           metrics: [{ name: "coverage", from: "test.coverage-summary.total.lines.pct", rule: { type: "number" } }],
         },
         {
@@ -112,6 +113,7 @@ describe("scorePlan", () => {
           command: "npm run size",
           timeoutMs: 600_000,
           after: [],
+          secrets: [],
           metrics: [{ name: "bundle_kb", from: "bundle.size.kb", rule: { type: "number" } }],
         },
       ],

@@ -90,6 +90,8 @@ export interface PlannedCheck {
   command: string;
   timeoutMs: number;
   after: string[];
+  /** The secrets its container holds in a trusted run, by name. */
+  secrets: string[];
   metrics: PlannedMetric[];
 }
 
@@ -111,9 +113,10 @@ export interface RawScore {
   setupFailed: number | null;
   /**
    * One per planned check, in order; `exit` is null for a check that didn't run. `metrics` holds the
-   * value of each metric read from its output, by name; none for a check that didn't run.
+   * value of each metric read from its output, by name; none for a check that didn't run. `error`
+   * says why a check never started, such as a secret it names being gone: it errored.
    */
-  checks: { exit: number | null; durationMs: number; metrics: Record<string, MetricValue> }[];
+  checks: { exit: number | null; durationMs: number; metrics: Record<string, MetricValue>; error?: string }[];
 }
 
 /** The metrics read from `check`'s output, in config order. */
@@ -131,11 +134,12 @@ export function scorePlan(config: ConfigResult): ScorePlan {
   if (config.kind !== "valid") return { setup: [], checks: [], allow: [] };
   return {
     setup: config.config.setup,
-    checks: config.config.checks.map(({ name, command, timeoutMs, after }) => ({
+    checks: config.config.checks.map(({ name, command, timeoutMs, after, secrets }) => ({
       name,
       command,
       timeoutMs,
       after,
+      secrets,
       metrics: metricsFrom(name, config.config.metrics).map((metric) => ({
         name: metric.name,
         from: metric.from,
@@ -334,6 +338,12 @@ function skipNote(
   return "skipped: the run didn't report it";
 }
 
+/** How a config check's run went: `errored` when it never started for a reason it gave, else by its exit. */
+function ranOutcome(check: CheckConfig, ran: RawScore["checks"][number] | undefined): CheckOutcome {
+  if (ran?.error !== undefined) return "errored";
+  return checkOutcome(ran?.exit ?? null, ran?.durationMs ?? 0, check.timeoutMs);
+}
+
 /**
  * A config check from its run: its outcome and notes, and the metrics read from its output. A check
  * that didn't pass reports no metrics: each is null, saying why.
@@ -344,7 +354,7 @@ function configScored(
   ran: RawScore["checks"][number] | undefined,
   skipped: string,
 ): ScoredCheck {
-  const outcome = checkOutcome(ran?.exit ?? null, ran?.durationMs ?? 0, check.timeoutMs);
+  const outcome = ranOutcome(check, ran);
   const metricValue = (metric: MetricConfig): MetricValue => {
     if (outcome === "passed") return checkedValue(metric, ran?.metrics[metric.name]);
     const why = outcome === "skipped" ? `was ${skipped}` : ENDED[outcome];
@@ -356,7 +366,7 @@ function configScored(
       source: check.source,
       outcome,
       durationMs: ran?.durationMs ?? 0,
-      notes: outcome === "skipped" ? [skipped] : [],
+      notes: [...(outcome === "skipped" ? [skipped] : []), ...(ran?.error === undefined ? [] : [ran.error])],
     },
     metrics: Object.fromEntries(
       metricsFrom(check.name, metrics).map((metric): [string, MetricResult] => [
@@ -384,12 +394,7 @@ export function buildResult(config: ConfigResult, raw: RawScore): ScoringResult 
 /** Each of the config's checks, scored from its run, a check that never ran saying why. */
 function configChecks(config: Config, raw: RawScore): ScoredCheck[] {
   const failedSetup = raw.setupFailed === null ? null : (config.setup[raw.setupFailed - 1] ?? null);
-  const outcomes = new Map(
-    config.checks.map((check, i) => {
-      const ran = raw.checks[i];
-      return [check.name, checkOutcome(ran?.exit ?? null, ran?.durationMs ?? 0, check.timeoutMs)];
-    }),
-  );
+  const outcomes = new Map(config.checks.map((check, i) => [check.name, ranOutcome(check, raw.checks[i])]));
   return config.checks.map((check, i) =>
     configScored(check, config.metrics, raw.checks[i], skipNote(check, failedSetup, outcomes)),
   );

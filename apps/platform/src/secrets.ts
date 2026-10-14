@@ -4,7 +4,12 @@
 // the keyring in the `SECRETS_KEYRING` Worker secret. Each row names the key that sealed it, so a new
 // key can become current while older ones still open the rows they sealed. The task store checks who
 // may read and change them, and journals every change without its value.
+//
+// A trusted run's step loads the sealed values its container needs (`Secrets.sealedFor`), as the
+// settings are when the step starts, opens them, and puts them straight into the container's env;
+// nothing a Workflow persists ever holds one. Logs, metric values and errors are masked (`masking`).
 
+import type { NamedSecrets } from "./config.ts";
 import { ServiceError } from "./errors.ts";
 import { PIPELINES } from "./pipelines.ts";
 import type { Pipeline } from "./pipelines.ts";
@@ -166,7 +171,7 @@ const SCHEMA = [
 ];
 
 /** Why `name` can't name a secret, or null when it can. */
-function nameError(name: string): string | null {
+export function secretNameError(name: string): string | null {
   if (!SECRET_NAME.test(name)) {
     return "a secret's name is up to 128 uppercase letters, digits and underscores, not starting with a digit";
   }
@@ -175,7 +180,9 @@ function nameError(name: string): string | null {
 }
 
 function encodeBase64(bytes: Uint8Array): string {
-  return btoa(String.fromCharCode(...bytes));
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
 }
 
 function summary(row: StoredSecret): SecretSummary {
@@ -205,7 +212,7 @@ export class Secrets {
    * unless `change` names some; an existing one keeps what `change` leaves out.
    */
   async put(project: string, name: string, change: SecretChange): Promise<SecretSummary> {
-    const invalidName = nameError(name);
+    const invalidName = secretNameError(name);
     if (invalidName !== null) throw new ServiceError("invalidRequest", invalidName);
     const { value, pipelines } = change;
     if (value === undefined && pipelines === undefined) {
@@ -253,4 +260,131 @@ export class Secrets {
     if (row === undefined) throw new ServiceError("notFound", `no secret ${name}`);
     return summary(row);
   }
+
+  /**
+   * The sealed values of `names` for a step of a run in `pipeline`, as the settings are now; or the
+   * first that has no value or isn't allowed there, saying why. Never opened here: the step that
+   * starts the container opens them.
+   */
+  sealedFor(names: readonly string[], pipeline: Pipeline): { sealed: SealedSecret[] } | SecretRefusal {
+    if (names.length === 0) return { sealed: [] };
+    const rows = new Map(
+      this.#sql
+        .exec<StoredSecret>(`SELECT * FROM secrets WHERE name IN (${names.map(() => "?").join(", ")})`, ...names)
+        .map((row) => [row.name, row]),
+    );
+    const sealed: SealedSecret[] = [];
+    for (const name of names) {
+      const row = rows.get(name);
+      const refused = secretRefused(name, row === undefined ? undefined : summary(row), pipeline);
+      if (refused !== null) return refused;
+      if (row !== undefined) sealed.push({ name, ciphertext: row.ciphertext, iv: row.iv, keyId: row.key_id });
+    }
+    return { sealed };
+  }
+}
+
+/** A secret a step can't have, and why: `secret DEPLOY isn't allowed in the default pipeline by the project settings`. */
+export interface SecretRefusal {
+  secret: string;
+  error: string;
+}
+
+/** Why secret `name`, which is `found` in the settings or not, can't reach a step of a run in `pipeline`; null when it can. */
+export function secretRefused(
+  name: string,
+  found: SecretSummary | undefined,
+  pipeline: Pipeline,
+): SecretRefusal | null {
+  if (found === undefined) return { secret: name, error: `secret ${name} has no value in the project settings` };
+  if (!found.pipelines.includes(pipeline)) {
+    return { secret: name, error: `secret ${name} isn't allowed in the ${pipeline} pipeline by the project settings` };
+  }
+  return null;
+}
+
+/** A sealed value as a run's step loads it from the project: its row's base64 fields. */
+export interface SealedSecret {
+  name: string;
+  ciphertext: string;
+  iv: string;
+  keyId: string;
+}
+
+/** Opens a value project `project`'s step loaded (`Secrets.sealedFor`). */
+export async function openSealed(keyring: Keyring, project: string, sealed: SealedSecret): Promise<string> {
+  return openSecret(keyring, project, sealed.name, {
+    ciphertext: columnBytes(sealed.ciphertext),
+    iv: columnBytes(sealed.iv),
+    keyId: sealed.keyId,
+  });
+}
+
+/** A sealed value's base64 column as bytes. */
+function columnBytes(text: string): Uint8Array<ArrayBuffer> {
+  const bytes = decodeBase64(text);
+  if (bytes === null) throw new Error("a sealed secret's column isn't base64");
+  return bytes;
+}
+
+/** What a secret's value, or one of its encoded forms, reads as once masked. */
+export const SECRET_MASK = "***";
+
+/**
+ * Masks every value in `values` in a text: the value itself, its base64 (with or without padding) and
+ * its URL encoding. Longer forms go first, so one form inside another is masked whole. Masking is a
+ * courtesy against accidental prints; what keeps a value from anyone else's code is trust.
+ */
+export function masking(values: readonly string[]): (text: string) => string {
+  const forms = new Set<string>();
+  for (const value of values) {
+    const base64 = encodeBase64(new TextEncoder().encode(value));
+    for (const form of [value, base64, base64.replace(/=+$/u, ""), encodeURIComponent(value)]) forms.add(form);
+  }
+  const longestFirst = [...forms].filter((form) => form !== "").toSorted((a, b) => b.length - a.length);
+  return (text) => longestFirst.reduce((masked, form) => masked.replaceAll(form, SECRET_MASK), text);
+}
+
+/** `value` with `mask` applied to every string in it, at any depth. */
+export function maskedDeep<T>(value: T, mask: (text: string) => string): T {
+  if (typeof value === "string") return mask(value) as T;
+  if (Array.isArray(value)) return value.map((item: unknown) => maskedDeep(item, mask)) as T;
+  if (typeof value === "object" && value !== null) {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, maskedDeep(item, mask)])) as T;
+  }
+  return value;
+}
+
+/**
+ * Where `main`'s config names a secret, for its settings: each name, the steps naming it, and what
+ * would stop a run handing it to them. Every setup and check runs in every pipeline.
+ */
+export interface SecretUse {
+  name: string;
+  /** The steps naming it, as a run's errors name them: `setup deps`, `check test`. */
+  steps: string[];
+  /** Whether it has a value in the settings. */
+  hasValue: boolean;
+  /** The pipelines that run those steps but the settings don't allow it in. */
+  notAllowedIn: Pipeline[];
+}
+
+/** Each secret the config's setups and checks name (see `namedSecrets`), by name, against the settings. */
+export function secretUses(named: readonly NamedSecrets[], secrets: readonly SecretSummary[]): SecretUse[] {
+  const steps = new Map<string, string[]>();
+  for (const { step, secrets: names } of named) {
+    for (const name of names) steps.set(name, [...(steps.get(name) ?? []), step]);
+  }
+  const byName = new Map(secrets.map((secret) => [secret.name, secret]));
+  return [...steps]
+    .toSorted(([a], [b]) => a.localeCompare(b))
+    .map(([name, used]) => {
+      const found = byName.get(name);
+      return {
+        name,
+        steps: used,
+        hasValue: found !== undefined,
+        notAllowedIn: found === undefined ? [] : PIPELINES.filter((p) => !found.pipelines.includes(p)),
+      };
+    });
 }

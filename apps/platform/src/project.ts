@@ -1,13 +1,15 @@
 import { DurableObject } from "cloudflare:workers";
 import { reposFor } from "./artifacts";
 import { camelKeys } from "./casing";
+import type { NamedSecrets } from "./config";
 import type { FollowOutcome } from "./follows";
 import { LANDING_ROLES, sandboxName } from "./grants";
 import type { SandboxRole } from "./grants";
 import type { LandingOutcome } from "./landing";
 import { teardownPipeline } from "./pipeline-workflow";
-import type { RunReport, ScoringOutcome, ScoringRequest, StoredRun } from "./scoring";
+import type { PlanVerdict, RunReport, ScoringOutcome, ScoringRequest, StoredRun } from "./scoring";
 import { keyringFrom } from "./secrets";
+import type { SealedSecret, SecretRefusal } from "./secrets";
 import type { TaskDefinitions } from "./task-definitions";
 import { attemptRef, parseAttemptRef } from "./task-refs";
 import { runTaskMethod, TaskStore } from "./task-store";
@@ -79,7 +81,8 @@ export class ProjectCoordinator extends DurableObject<Env> {
 
   /**
    * For the e2e routes only: queues scoring of a commit pushed straight to an attempt's fork, outside
-   * the git proxy. The forks those routes make have no task rows, so no trigger rules apply.
+   * the git proxy. The forks those routes make have no task rows, so no trigger rules apply. The
+   * suite pushes as the e2e user, who owns every e2e project, so the push is the owner's.
    */
   async e2eScore(project: string, attempt: string, sha: string): Promise<ScoringRequest> {
     const ref = parseAttemptRef(attempt);
@@ -90,6 +93,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
       sha,
       trigger: "push",
       actor: null,
+      ownersPush: true,
     });
     await this.#drain(project);
     return request;
@@ -107,10 +111,23 @@ export class ProjectCoordinator extends DurableObject<Env> {
 
   /**
    * Called by a run's Pipeline Workflow before it starts any container: the containers its plan may
-   * start, so cancelling it destroys them all.
+   * start, so cancelling it destroys them all, and the secrets its setups and checks name. Says
+   * whether it may start (see `TaskStore.pipelinePlanned`); a run that now waits for the owner frees
+   * its slot for the next. A Workflow from before runs named secrets gives none.
    */
-  pipelinePlanned(run: number, containers: string[]): void {
-    this.#tasks.scoring.planned(run, containers);
+  async pipelinePlanned(run: number, containers: string[], named: NamedSecrets[] = []): Promise<PlanVerdict> {
+    const verdict = this.#tasks.pipelinePlanned(run, containers, named);
+    if (verdict.kind === "waiting") await this.#drain(this.#tasks.scoring.getRun(run)?.project);
+    return verdict;
+  }
+
+  /**
+   * Called by a trusted run's Pipeline Workflow in the step that starts a container: the sealed values
+   * of the secrets it names, or why one can't be had (see `TaskStore.pipelineSecrets`). The step opens
+   * them; they're never persisted.
+   */
+  pipelineSecrets(run: number, names: string[]): { sealed: SealedSecret[] } | SecretRefusal {
+    return this.#tasks.pipelineSecrets(run, names);
   }
 
   /** Called by a run's Pipeline Workflow when it ends. Reports from a superseded or cancelled run are discarded. */

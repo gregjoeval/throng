@@ -1,13 +1,16 @@
 // The Pipeline Workflow's steps against fake bindings: which containers start, from what, with what
 // grants and variables; how setups, `after` and the snapshot's fallback decide what runs; and what
 // it reports. `cloudflare:workers`, the Artifacts binding and the base lookup are stubbed. Each
-// container's script is answered by what the test says that setup or check does.
+// container's script is answered by what the test says that setup or check does. The project's
+// secrets are sealed under a test keyring; every container prints each secret it holds, in every
+// form masking hides, into its log, its metrics and any error.
 
 import { describe, expect, it, vi } from "vitest";
-import type { SandboxSize } from "../src/config.ts";
+import type { NamedSecrets, SandboxSize } from "../src/config.ts";
 import type { OutboundAccess } from "../src/network.ts";
 import type { RunOutcome } from "../src/run-outcome.ts";
-import type { PipelineParams, RunReport } from "../src/scoring.ts";
+import type { PipelineParams, PlanVerdict, RunReport } from "../src/scoring.ts";
+import { keyringFrom, sealSecret } from "../src/secrets.ts";
 import { importWorkerModule } from "./support/worker-module.ts";
 import { result } from "./support/workflow-runs.ts";
 
@@ -70,7 +73,36 @@ interface Behaviour {
   broken?: string;
   /** The params the Workflow was started with; a run started by the Scoring Workflow's code named its line `attempt`. */
   payload?: unknown;
+  /** The project's secrets with values, by name. */
+  secrets?: Record<string, string>;
+  /** Secrets gone from the settings by the time a step loads them, though the plan found them. */
+  gone?: string[];
+  /** What the project answers the plan: start, by default. */
+  verdict?: PlanVerdict;
 }
+
+/** The keyring the project's secrets are sealed under, as `SECRETS_KEYRING` holds it. */
+const KEYRING = JSON.stringify({ current: "k1", keys: { k1: btoa("k".repeat(32)) } });
+
+/** A secret's value with characters its base64 and URL encoding both change. */
+const DEPLOY = "dep/loy+tok=en&more?";
+const NPM = "npm-token-0123456789";
+
+/** Every form of `value` masking hides: itself, its base64 with and without padding, and its URL encoding. */
+function forms(value: string): string[] {
+  const base64 = btoa(String.fromCharCode(...new TextEncoder().encode(value)));
+  return [value, base64, base64.replace(/=+$/u, ""), encodeURIComponent(value)];
+}
+
+/** The secrets a container's env holds: everything but the run's `THRONG_*` variables. */
+function heldIn(env: Record<string, string> | undefined): string[] {
+  return Object.entries(env ?? {}).flatMap(([name, value]) => (name.startsWith("THRONG_") ? [] : [value]));
+}
+
+/** What a container prints of the secrets it holds: each in every form. */
+const leak = (values: string[]) => values.flatMap(forms).join(" ");
+
+const encode = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
 
 interface Started {
   /** How the container came up: restored from a snapshot, or from the image. */
@@ -88,9 +120,16 @@ async function pipeline(behaviour: Behaviour = {}) {
   const restores = new Map<string, number>();
   const stored = new Map<string, string>();
   const running = new Set<string>();
+  /** What the Workflow persists: its params, each step's name and config, and what each step returned or threw. */
+  const persisted: unknown[] = [behaviour.payload ?? params];
+  const held = new Map<string, string[]>();
+  const loads: string[][] = [];
   let planned: string[] | null = null;
+  let named: NamedSecrets[] | null = null;
   let report: RunReport | null = null;
+  const keyring = keyringFrom(KEYRING);
   const env = {
+    SECRETS_KEYRING: KEYRING,
     SANDBOX: {
       getByName: (name: string) => {
         const container = name.slice(INSTANCE.length + 1);
@@ -110,10 +149,12 @@ async function pipeline(behaviour: Behaviour = {}) {
           ) => {
             if (script.includes("f=logs/")) {
               const log = /f=logs\/([^\n]+)\.log/u.exec(script)?.[1] ?? "";
-              return { exitCode: 0, stdout: `${container} ${log}\n`, stderr: "" };
+              const leaked = held.get(container)?.length ? `${leak(held.get(container) ?? [])}\n` : "";
+              return { exitCode: 0, stdout: `${container} ${log}\n${leaked}`, stderr: "" };
             }
             const from = started.get(container)?.from ?? "image";
             started.set(container, { from, access: options.access, size: options.size, env: options.env });
+            held.set(container, heldIn(options.env));
             running.add(container);
             events.push(`run ${container}`);
             if (container === "setup") {
@@ -127,11 +168,14 @@ async function pipeline(behaviour: Behaviour = {}) {
               return result({ base: null, shortstat: " 1 file changed, 1 insertion(+)", builtinMs: 1, setups });
             }
             const check = container.slice("check:".length);
-            if (check === behaviour.broken) return { exitCode: 11, stdout: "", stderr: "checkout failed" };
+            const values = held.get(container) ?? [];
+            if (check === behaviour.broken) {
+              return { exitCode: 11, stdout: "", stderr: `checkout failed ${leak(values)}` };
+            }
             return result({
               exit: behaviour.checks?.[check] ?? 0,
               durationMs: 3,
-              metrics: {},
+              metrics: values.length === 0 ? {} : { leaked: { value: leak(values) } },
               setupsRerun: from === "image",
             });
           },
@@ -150,9 +194,24 @@ async function pipeline(behaviour: Behaviour = {}) {
     PROJECT: {
       getByName: () => ({
         definitionsOf: async () => ({ checks: [], metrics: [] }),
-        pipelinePlanned: async (_run: number, containers: string[]) => {
+        pipelinePlanned: async (_run: number, containers: string[], secrets: NamedSecrets[]) => {
           planned = containers;
+          named = secrets;
           events.push("plan");
+          return behaviour.verdict ?? { kind: "start" };
+        },
+        pipelineSecrets: async (_run: number, names: string[]) => {
+          loads.push(names);
+          const sealed = [];
+          for (const name of names) {
+            const value = behaviour.secrets?.[name];
+            if (value === undefined || behaviour.gone?.includes(name)) {
+              return { secret: name, error: `secret ${name} has no value in the project settings` };
+            }
+            const { ciphertext, iv, keyId } = await sealSecret(keyring, "abc123", name, value);
+            sealed.push({ name, ciphertext: encode(ciphertext), iv: encode(iv), keyId });
+          }
+          return { sealed };
         },
         pipelineFinished: async (_run: number, finished: RunReport) => {
           report = finished;
@@ -166,9 +225,19 @@ async function pipeline(behaviour: Behaviour = {}) {
   };
   const returned = await new PipelineWorkflow({}, env).run(
     { payload: behaviour.payload ?? params, instanceId: INSTANCE },
-    { do: stepDo },
+    { do: recordingStepDo(persisted) },
   );
-  return { started, events, stored, planned: planned as string[] | null, report: report as RunReport | null, returned };
+  return {
+    started,
+    events,
+    stored,
+    persisted,
+    loads,
+    planned: planned as string[] | null,
+    named: named as NamedSecrets[] | null,
+    report: report as RunReport | null,
+    returned,
+  };
 }
 
 /** The setups' names in a config, in order. */
@@ -177,17 +246,27 @@ function setupNamesOf(config: string): string[] {
   return [...setup.matchAll(/name: (\w+)/gu)].map((m) => m[1] ?? "");
 }
 
-/** A step that runs `fn`, trying again on failure up to its config's retry limit, as Workflows does. */
-async function stepDo(_name: string, ...rest: unknown[]): Promise<unknown> {
-  const fn = rest.at(-1) as () => Promise<unknown>;
-  const retries = rest.length > 1 ? ((rest[0] as { retries?: { limit: number } }).retries?.limit ?? 0) : 0;
-  for (let tries = 0; ; tries += 1) {
-    try {
-      return await fn();
-    } catch (error) {
-      if (tries === retries) throw error;
+/**
+ * A step that runs `fn`, trying again on failure up to its config's retry limit, as Workflows does,
+ * recording into `persisted` what Workflows would keep: its name, its config, and what each try
+ * returned or threw.
+ */
+function recordingStepDo(persisted: unknown[]) {
+  return async (name: string, ...rest: unknown[]): Promise<unknown> => {
+    const fn = rest.at(-1) as () => Promise<unknown>;
+    const config = rest.length > 1 ? (rest[0] as { retries?: { limit: number } }) : {};
+    persisted.push(name, config);
+    for (let tries = 0; ; tries += 1) {
+      try {
+        const returned = await fn();
+        persisted.push(returned);
+        return returned;
+      } catch (error) {
+        persisted.push(error instanceof Error ? error.message : String(error));
+        if (tries === (config.retries?.limit ?? 0)) throw error;
+      }
     }
-  }
+  };
 }
 
 /** The run's outcome, which a run that wasn't `done` doesn't have. */
@@ -413,6 +492,117 @@ describe("PipelineWorkflow", () => {
     expect(events).not.toContain("snapshot setup");
     expect(steps(outcomeOf(report))).toEqual([["_diff", "check", "passed"]]);
     expect(outcomeOf(report).gate).toBe("passed");
+  });
+});
+
+/** A config whose one setup and one check each name a secret, and whose other check names none. */
+const SECRET_CONFIG = `setup:
+  - { name: deps, command: npm ci, secrets: [NPM_TOKEN] }
+checks:
+  - { name: lint, command: npm run lint }
+  - { name: deploy, command: npm run deploy, secrets: [DEPLOY_TOKEN], after: lint }
+`;
+const SECRETS = { NPM_TOKEN: NPM, DEPLOY_TOKEN: DEPLOY };
+const secretsRun = (behaviour: Behaviour = {}) => pipeline({ config: SECRET_CONFIG, secrets: SECRETS, ...behaviour });
+
+/** Whether `text` holds any form of either secret. */
+const leaks = (text: string) => [...forms(DEPLOY), ...forms(NPM)].some((form) => text.includes(form));
+
+describe("PipelineWorkflow secrets", () => {
+  it("names the secrets each setup and check names in its plan, by name only", async () => {
+    const { named } = await secretsRun();
+    expect(named).toEqual([
+      { step: "setup deps", secrets: ["NPM_TOKEN"] },
+      { step: "check deploy", secrets: ["DEPLOY_TOKEN"] },
+    ]);
+  });
+
+  it("gives each container of a trusted run only the secrets named for it, loaded as it starts", async () => {
+    const { started, loads, events } = await secretsRun();
+    const secretsOf = (container: string) =>
+      Object.fromEntries(Object.entries(started.get(container)?.env ?? {}).filter(([k]) => !k.startsWith("THRONG_")));
+    expect(secretsOf("setup")).toEqual({ NPM_TOKEN: NPM });
+    expect(secretsOf("check:lint")).toEqual({});
+    expect(secretsOf("check:deploy")).toEqual({ DEPLOY_TOKEN: DEPLOY });
+    expect(started.get("check:deploy")?.env).toMatchObject({ THRONG_RUN: "7" });
+    // Loaded per container, not for the run: none for a check that names none.
+    expect(loads).toEqual([["NPM_TOKEN"], ["DEPLOY_TOKEN"]]);
+    expect(events.indexOf("run setup")).toBeGreaterThan(events.indexOf("plan"));
+  });
+
+  it("gives a check that re-runs the setups the setups' secrets too", async () => {
+    const { started } = await secretsRun({ snapshot: null });
+    expect(heldIn(started.get("check:lint")?.env)).toEqual([NPM]);
+    expect(heldIn(started.get("check:deploy")?.env).toSorted()).toEqual([DEPLOY, NPM].toSorted());
+  });
+
+  it("masks what each container held in its stored log, its metric values and its errors", async () => {
+    const { stored, persisted } = await secretsRun();
+    const deployLog = stored.get("logs/abc123/t1a1/7/deploy.log") ?? "";
+    expect(deployLog).toContain("***");
+    expect(stored.get("logs/abc123/t1a1/7/setup.1.log")).toContain("***");
+    for (const log of stored.values()) expect(leaks(log)).toBeFalsy();
+    const deploy = persisted[persisted.indexOf("check deploy") + 2] as { metrics: Record<string, { value: string }> };
+    expect(deploy.metrics["leaked"]?.value).toMatch(/^\*\*\*( \*\*\*)+$/u);
+
+    const broken = await secretsRun({ broken: "deploy" });
+    expect(broken.report).toMatchObject({ status: "errored", error: expect.stringContaining("checkout failed ***") });
+    expect(leaks(JSON.stringify(broken.report))).toBeFalsy();
+  });
+
+  it("persists no secret in any step's params or results, raw, base64 or URL-encoded", async () => {
+    for (const behaviour of [{}, { snapshot: null }, { broken: "deploy" }, { gone: ["DEPLOY_TOKEN"] }]) {
+      const { persisted, report, returned, started } = await secretsRun(behaviour);
+      // The containers did hold them; only the Workflow's own record must not.
+      expect(heldIn(started.get("setup")?.env)).toContain(NPM);
+      expect(leaks(JSON.stringify([persisted, report, returned]))).toBeFalsy();
+    }
+  });
+
+  it("ends the run errored before any container starts when the project refuses its plan", async () => {
+    const error = "check deploy: secret DEPLOY_TOKEN isn't allowed in the default pipeline by the project settings";
+    const { started, report, loads } = await secretsRun({ verdict: { kind: "refused", error } });
+    expect(started.size).toBe(0);
+    expect(loads).toEqual([]);
+    expect(report).toEqual({ status: "errored", error: `Error: ${error}` });
+  });
+
+  it("starts, tears down and reports nothing when the run waits for the owner", async () => {
+    const { started, events, returned, loads } = await secretsRun({ verdict: { kind: "waiting" } });
+    expect(started.size).toBe(0);
+    expect(loads).toEqual([]);
+    expect(events).toEqual(["plan"]);
+    expect(returned).toBeNull();
+  });
+
+  it("fails a check whose secret is gone as its step starts, naming it, and runs the rest", async () => {
+    const { events, report } = await secretsRun({ gone: ["DEPLOY_TOKEN"] });
+    // Restored from the snapshot, its container came up, but ran nothing and was stopped.
+    expect(events).not.toContain("run check:deploy");
+    expect(events).toContain("destroy check:deploy");
+    const outcome = outcomeOf(report);
+    expect(outcome.steps.map((s) => [s.name, s.outcome, s.notes])).toEqual([
+      ["_diff", "passed", []],
+      ["deps", "passed", []],
+      ["lint", "passed", []],
+      ["deploy", "errored", ["secret DEPLOY_TOKEN has no value in the project settings"]],
+    ]);
+    expect(outcome.gate).toBe("failed");
+  });
+
+  it("fails the setups when a secret one names is gone as their step starts, naming it", async () => {
+    const config = `setup:\n  - { name: tools, command: make tools }\n${SECRET_CONFIG.slice("setup:\n".length)}`;
+    const { started, report } = await secretsRun({ config, gone: ["NPM_TOKEN"] });
+    expect(started.size).toBe(0);
+    const outcome = outcomeOf(report);
+    expect(outcome.steps.map((s) => [s.name, s.outcome, s.notes])).toEqual([
+      ["_diff", "passed", []],
+      ["tools", "skipped", ["skipped: setup deps failed"]],
+      ["deps", "errored", ["secret NPM_TOKEN has no value in the project settings"]],
+      ["lint", "skipped", ["skipped: setup deps failed"]],
+      ["deploy", "skipped", ["skipped: setup deps failed"]],
+    ]);
+    expect(outcome.gate).toBe("failed");
   });
 });
 

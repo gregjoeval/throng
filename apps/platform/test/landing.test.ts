@@ -88,7 +88,7 @@ describe("retestConfig", () => {
     const retest = retestConfig(config);
     expect(retest?.kind === "valid" && retest.config.checks.map((c) => c.name)).toEqual(["lint", "test"]);
     expect(retest?.kind === "valid" && retest.config.metrics.map((m) => m.name)).toEqual(["errors", "tests"]);
-    expect(retest?.kind === "valid" && retest.config.setup).toEqual([{ name: "deps", command: "npm ci" }]);
+    expect(retest?.kind === "valid" && retest.config.setup).toEqual([{ name: "deps", command: "npm ci", secrets: [] }]);
   });
 
   it("retests an invalid config, which fails", () => {

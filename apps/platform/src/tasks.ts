@@ -4,7 +4,7 @@
 
 import { currentBase, readTaskBranch } from "./base.ts";
 import type { Base } from "./base.ts";
-import { loadConfig, selectionPolicy } from "./config.ts";
+import { loadConfig, namedSecrets, selectionPolicy } from "./config.ts";
 import type { CheckConfig, MetricConfig, SelectionPolicy, VoteEligibility } from "./config.ts";
 import type { ConflictDetails, ConflictFile } from "./conflicts.ts";
 import { ServiceError } from "./errors.ts";
@@ -20,7 +20,8 @@ import type { Gate, ScoringResult } from "./results.ts";
 import type { RunOutcome, RunStep } from "./run-outcome.ts";
 import { cancellable, runSettled } from "./scoring.ts";
 import type { AttemptScoring, RunsQuery, ScoringRequest, StoredRun } from "./scoring.ts";
-import type { SecretChange, SecretSummary } from "./secrets.ts";
+import { secretUses } from "./secrets.ts";
+import type { SecretChange, SecretSummary, SecretUse } from "./secrets.ts";
 import { NO_TASK_DEFINITIONS, taskDefinitionsFrom, withTask } from "./task-definitions.ts";
 import type { TaskDefinitions, TaskDefinitionsInput } from "./task-definitions.ts";
 import { attemptRef, parseAttemptRef, parseTaskRef, taskRef } from "./task-refs.ts";
@@ -759,9 +760,15 @@ export function taskService({ db, repos, backend, origin }: TaskServiceDeps) {
       }));
     },
 
-    /** The project's secrets by name, with their pipelines and last change, never their values. */
-    async listSecrets(actor: Actor, input: ProjectPath): Promise<SecretSummary[]> {
-      return invoke("listSecrets", await project(input), actor);
+    /**
+     * The project's secrets by name, with their pipelines and last change, never their values; and
+     * where `main`'s config names secrets, flagging any with no value or not allowed where it runs.
+     */
+    async listSecrets(actor: Actor, input: ProjectPath): Promise<{ secrets: SecretSummary[]; uses: SecretUse[] }> {
+      const ctx = await project(input);
+      const secrets = await invoke("listSecrets", ctx, actor);
+      const config = await loadConfig(repos, ctx.id);
+      return { secrets, uses: secretUses(config.kind === "valid" ? namedSecrets(config.config) : [], secrets) };
     },
 
     /** Sets a secret's value, its pipelines, or both. */

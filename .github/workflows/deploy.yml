@@ -42,6 +42,10 @@ jobs:
         run: |
           pnpm wrangler r2 bucket info throng-logs >/dev/null 2>&1 || pnpm wrangler r2 bucket create throng-logs
           pnpm wrangler r2 bucket lifecycle set throng-logs --file r2-lifecycle.json --force
+      # Pipeline caches: the project Durable Objects evict them, so the bucket keeps R2's default rules.
+      - name: Create the caches bucket
+        working-directory: apps/platform
+        run: pnpm wrangler r2 bucket info throng-caches >/dev/null 2>&1 || pnpm wrangler r2 bucket create throng-caches
       # The platform first: throng-web binds to it.
       - run: pnpm --filter @throng/platform run deploy
       - run: pnpm --filter @throng/web run deploy

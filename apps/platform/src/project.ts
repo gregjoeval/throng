@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { reposFor } from "./artifacts";
+import type { CacheEntry, CacheKey, CacheLookup } from "./caches";
 import { camelKeys } from "./casing";
 import type { NamedSecrets } from "./config";
 import type { FollowOutcome } from "./follows";
@@ -26,6 +27,8 @@ function batchDatabase(db: D1Database): BatchDatabase {
 
 /** Where the project's id is kept, for alarms, which carry no call that names it. */
 const PROJECT_KEY = "project";
+/** How long the alarm waits to delete cache entries again after deleting them failed. */
+const EVICTION_RETRY_MS = 60 * 60_000;
 
 export interface JournalEntry {
   id: number;
@@ -69,6 +72,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
       landing: { workflow: env.LANDING, teardown: teardown(LANDING_ROLES) },
       follow: { workflow: env.FOLLOW },
       keyring: keyringFrom(env.SECRETS_KEYRING),
+      cacheObjects: env.CACHES,
     });
   }
 
@@ -128,6 +132,30 @@ export class ProjectCoordinator extends DurableObject<Env> {
    */
   pipelineSecrets(run: number, names: string[]): { sealed: SealedSecret[] } | SecretRefusal {
     return this.#tasks.pipelineSecrets(run, names);
+  }
+
+  /**
+   * Called by a run's Pipeline Workflow before its containers start, with each cache's key hash:
+   * where each restores from and saves to (see `TaskStore.pipelineCaches`).
+   */
+  pipelineCaches(run: number, keys: CacheKey[]): CacheLookup[] {
+    return this.#tasks.pipelineCaches(run, keys);
+  }
+
+  /** Called by a run's Pipeline Workflow right before it saves a cache entry: whether it may (see `TaskStore.pipelineCacheSaving`). */
+  pipelineCacheSaving(run: number, entry: Pick<CacheEntry, "scope" | "name" | "keyHash">): boolean {
+    return this.#tasks.pipelineCacheSaving(run, entry);
+  }
+
+  /** Called by a run's Pipeline Workflow once it saved a cache entry: records it in the index. */
+  async pipelineCacheSaved(
+    run: number,
+    entry: Pick<CacheEntry, "scope" | "name" | "keyHash" | "size">,
+  ): Promise<boolean> {
+    const recorded = this.#tasks.pipelineCacheSaved(run, entry);
+    // A new entry may take the project over its cap, and falls unused in time.
+    await this.#drain(this.#tasks.scoring.getRun(run)?.project);
+    return recorded;
   }
 
   /** Called by a run's Pipeline Workflow when it ends. Reports from a superseded or cancelled run are discarded. */
@@ -198,13 +226,24 @@ export class ProjectCoordinator extends DurableObject<Env> {
 
   /**
    * Publishes changed tasks and attempts to the D1 projection, setting itself again while some remain
-   * or after a failure. A project's tasks only change through calls that name it, so its id is known
+   * or after a failure, and evicts the cache entries due, setting itself again for the next to fall
+   * unused. A project's tasks and caches only change through calls that name it, so its id is known
    * whenever anything is pending.
    */
   override async alarm(): Promise<void> {
     if (this.#project === null) return;
-    const next = await this.#tasks.projection.publish(batchDatabase(this.env.DB), this.#project);
-    if (next !== null) await this.ctx.storage.setAlarm(Date.now() + next);
+    const project = this.#project;
+    const [next] = await Promise.all([
+      this.#tasks.projection.publish(batchDatabase(this.env.DB), project),
+      this.#tasks.evictCaches(project).catch((error: unknown) => {
+        console.error({ event: "cache.eviction_failed", project, error: String(error) });
+      }),
+    ]);
+    // Entries still due failed to delete: they're tried again later rather than at once.
+    const caches =
+      this.#tasks.caches.evictable().length > 0 ? Date.now() + EVICTION_RETRY_MS : this.#tasks.caches.nextUnused();
+    const due = [next === null ? null : Date.now() + next, caches].filter((at): at is number => at !== null);
+    if (due.length > 0) await this.ctx.storage.setAlarm(Math.max(Date.now(), Math.min(...due)));
   }
 
   /** E2e cleanup only: deletes all of this project's storage, so nothing of an e2e run is left. */
@@ -238,9 +277,14 @@ export class ProjectCoordinator extends DurableObject<Env> {
     // An alarm already set publishes these changes too. One more than a moment away is a retry backing
     // off after D1 failed, up to `MAX_PROJECTION_RETRY_MS`: these changes wait for it, as they would
     // fail too until D1 is back.
-    if (this.#tasks.projection.hasChanges() && (await this.ctx.storage.getAlarm()) === null) {
+    const alarm = await this.ctx.storage.getAlarm();
+    if (this.#tasks.projection.hasChanges() && alarm === null) {
       await this.ctx.storage.setAlarm(Date.now());
+      return;
     }
+    // The alarm also evicts each cache entry once it falls unused.
+    const unused = this.#tasks.caches.nextUnused();
+    if (unused !== null && (alarm === null || alarm > unused)) await this.ctx.storage.setAlarm(unused);
   }
 
   #log(kind: string, detail: Record<string, unknown>): void {

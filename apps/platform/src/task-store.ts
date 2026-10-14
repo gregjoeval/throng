@@ -8,6 +8,9 @@
 
 import { archiveRef } from "./archive.ts";
 import { containsCommit, taskBranchHead } from "./base.ts";
+import { CacheIndex } from "./cache-index.ts";
+import { cacheObjectKey, restoreScopes, saveScope } from "./caches.ts";
+import type { CacheEntry, CacheKey, CacheLookup } from "./caches.ts";
 import { migrateValues, normaliseLandingOutcome } from "./casing.ts";
 import { addColumns, renameColumns } from "./columns.ts";
 import { CONFIG_PATH, loadConfig, selectionPolicy } from "./config.ts";
@@ -492,7 +495,17 @@ export interface TaskStoreDeps {
   follow?: FollowRunner | null | undefined;
   /** Seals secrets' values: `SECRETS_KEYRING`'s. Without one, setting a secret fails. */
   keyring?: Keyring | undefined;
+  /** Deletes cache entries' objects from the `CACHES` bucket; without one, nothing is evicted. */
+  cacheObjects?: CacheObjects | null | undefined;
 }
+
+/** The part of the `CACHES` R2 bucket eviction uses; tests pass a fake. */
+export interface CacheObjects {
+  delete: (keys: string[]) => Promise<void>;
+}
+
+/** Most keys one R2 `delete` takes. */
+const MAX_DELETE_KEYS = 1000;
 
 /**
  * The task and attempt state machine for one project. Every method takes the project, the actor
@@ -524,6 +537,9 @@ export class TaskStore {
   readonly #waiters = new Waiters();
   /** The project's secrets, which never reach the projection. */
   readonly #secrets: Secrets;
+  /** The project's cache entries, indexed. */
+  readonly caches: CacheIndex;
+  readonly #cacheObjects: CacheObjects | null;
 
   constructor({
     sql,
@@ -533,10 +549,12 @@ export class TaskStore {
     landing = null,
     follow = null,
     keyring = keyringFrom(undefined),
+    cacheObjects = null,
   }: TaskStoreDeps) {
     this.#sql = sql;
     this.#repos = repos;
     this.#now = now;
+    this.#cacheObjects = cacheObjects;
     this.#landing = landing;
     this.#follow = follow;
     migrate(sql);
@@ -547,6 +565,7 @@ export class TaskStore {
     this.verdicts = new Verdicts({ sql });
     this.votes = new Votes({ sql });
     this.#secrets = new Secrets({ sql, keyring, now });
+    this.caches = new CacheIndex({ sql, now });
     this.scoring = new ScoringQueue({
       sql,
       runner: scoring,
@@ -1963,6 +1982,67 @@ export class TaskStore {
     return this.#secrets.sealedFor(names, run.pipeline);
   }
 
+  // --- caches ----------------------------------------------------------------------------------
+  //
+  // A run's Workflow computes each cache's key hash before its containers start, then asks here where
+  // each restores from and saves to: the scopes its line reads, and its own line's when the run is
+  // trusted and no entry it reads matches. Entries it saved are recorded here; eviction deletes their
+  // objects after every store call (`drain`) and on the Durable Object's alarm.
+
+  /**
+   * For a run's Workflow, before its containers start: for each cache key, the scope whose entry it
+   * restores, marked used now, or null on a miss; and the scope a save goes to, which is the run's
+   * own line's only when it's trusted, isn't an attempt's, and missed.
+   */
+  pipelineCaches(id: number, keys: readonly CacheKey[]): CacheLookup[] {
+    const run = this.scoring.getRun(id);
+    if (run === null) throw new Error(`no run ${id}`);
+    const scopes = restoreScopes(run.line);
+    const own = saveScope(run.line);
+    return this.#sql.transaction(() =>
+      keys.map((key): CacheLookup => {
+        const restore = this.caches.find(scopes, key.name, key.keyHash);
+        if (restore !== null || own === null) return { ...key, restore, save: null };
+        if (!run.trusted) return { ...key, restore, save: null, unsaved: "this run isn't trusted" };
+        return { ...key, restore, save: own };
+      }),
+    );
+  }
+
+  /**
+   * For a running run's Workflow, right before it saves an entry's object: whether it may. Only a
+   * trusted run saves, only to its own line's scope, and never over an entry already there, as
+   * entries are immutable.
+   */
+  pipelineCacheSaving(id: number, entry: Pick<CacheEntry, "scope" | "name" | "keyHash">): boolean {
+    return this.#maySaveCache(id, entry) && !this.caches.has(entry);
+  }
+
+  /**
+   * For a trusted running run's Workflow, once it saved an entry's object: records it in the index.
+   * False when it isn't recorded: an entry for its key was saved first, or the run may not save there.
+   */
+  pipelineCacheSaved(id: number, entry: Pick<CacheEntry, "scope" | "name" | "keyHash" | "size">): boolean {
+    return this.#maySaveCache(id, entry) && this.caches.record(entry);
+  }
+
+  #maySaveCache(id: number, entry: Pick<CacheEntry, "scope">): boolean {
+    const run = this.scoring.getRun(id);
+    return run?.status === "running" && run.trusted && saveScope(run.line) === entry.scope;
+  }
+
+  /** Deletes the objects of every evictable cache entry, then their rows; one that fails to delete stays for the next try. */
+  async evictCaches(project: string): Promise<void> {
+    if (this.#cacheObjects === null) return;
+    const entries = this.caches.evictable();
+    for (let i = 0; i < entries.length; i += MAX_DELETE_KEYS) {
+      const batch = entries.slice(i, i + MAX_DELETE_KEYS);
+      await this.#cacheObjects.delete(batch.map((entry) => cacheObjectKey(project, entry)));
+      this.caches.remove(batch);
+      for (const entry of batch) console.log({ event: "cache.evicted", project, ...entry });
+    }
+  }
+
   // --- votes -----------------------------------------------------------------------------------
   //
   // Under the `vote` selection policy, a task's creator can make its selection by vote. Opening one
@@ -2315,8 +2395,18 @@ export class TaskStore {
       await this.#drainLandings(project);
       await this.#drainFollows(project);
       await this.scoring.drain();
+      await this.#evictCachesSafely(project);
     } finally {
       this.wakeWaiters();
+    }
+  }
+
+  /** Evicts cache entries without failing the drain: what isn't deleted now is next time. */
+  async #evictCachesSafely(project: string): Promise<void> {
+    try {
+      await this.evictCaches(project);
+    } catch (error) {
+      console.error({ event: "cache.eviction_failed", project, error: String(error) });
     }
   }
 
@@ -2796,6 +2886,8 @@ export class TaskStore {
       number,
     );
     this.#journal(actor, to === "closed" ? "closed" : "madeObsolete", number, null);
+    // The task branch's line ends with its task: the caches it saved go.
+    this.caches.endLine(taskRef(number));
     const vote = this.votes.open(number);
     if (vote !== null) this.#endVote(null, vote, null);
   }
@@ -3257,18 +3349,26 @@ function toTask(row: TaskRow): StoredTask {
 /**
  * A task's stored definitions, as JSON, in the current shape. Checks stored while a check could be
  * optional carry `required`, which is dropped: every check that runs must pass. Checks stored before
- * a check could wait for others have no `after`, and wait for none. A task's check names no secrets
- * and is in no group, and was stored without either.
+ * a check could wait for others have no `after`, and wait for none; those stored before checks used
+ * caches have no `caches`, and use none. A task's check names no secrets and is in no group, and was
+ * stored without either.
  */
 function upgradeDefinitions(json: string): TaskDefinitions {
   const stored = { ...NO_TASK_DEFINITIONS, ...(JSON.parse(json) as Partial<TaskDefinitions>) };
-  type StoredCheck = Omit<CheckConfig, "after" | "secrets" | "group"> & { after?: string[]; required?: boolean };
-  const checks = (stored.checks as StoredCheck[]).map(({ required: _required, after = [], ...check }): CheckConfig => ({
-    ...check,
-    after,
-    secrets: [],
-    group: null,
-  }));
+  type StoredCheck = Omit<CheckConfig, "after" | "secrets" | "group" | "caches"> & {
+    after?: string[];
+    caches?: string[];
+    required?: boolean;
+  };
+  const checks = (stored.checks as StoredCheck[]).map(
+    ({ required: _required, after = [], caches = [], ...check }): CheckConfig => ({
+      ...check,
+      after,
+      caches,
+      secrets: [],
+      group: null,
+    }),
+  );
   return { ...stored, checks };
 }
 

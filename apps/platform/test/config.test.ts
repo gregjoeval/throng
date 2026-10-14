@@ -15,6 +15,7 @@ import { withTask } from "../src/task-definitions.ts";
 import { FakeRepos } from "./fake-repos.ts";
 
 const EMPTY: Config = {
+  caches: [],
   setup: [],
   network: { allow: [] },
   checks: [],
@@ -26,8 +27,10 @@ const EMPTY: Config = {
 };
 
 const FULL = `
+caches:
+  pnpm: { path: [~/.local/share/pnpm/store, ~/.cache/pnpm], key: pnpm-lock.yaml }
 setup:
-  - { name: deps, command: pnpm install --frozen-lockfile }
+  - { name: deps, command: pnpm install --frozen-lockfile, caches: [pnpm] }
 network:
   allow:
     - api.github.com
@@ -64,6 +67,9 @@ const check = (fields: string) => `checks:\n  - { name: test, command: pnpm test
 const metric = (fields: string) => `checks:\n  - { name: test, command: pnpm test }\nmetrics:\n  - { ${fields} }\n`;
 const FROM = "from: test.report.total";
 
+/** A config defining one cache, `pnpm`, with `fields`. */
+const cached = (fields: string) => `caches:\n  pnpm: { ${fields} }\n`;
+
 describe("parseConfig", () => {
   it("is none without a file", () => {
     expect(parseConfig(null)).toEqual({ kind: "none" });
@@ -82,7 +88,8 @@ describe("parseConfig", () => {
     expect(parseConfig(FULL)).toEqual({
       kind: "valid",
       config: {
-        setup: [{ name: "deps", command: "pnpm install --frozen-lockfile", secrets: [] }],
+        caches: [{ name: "pnpm", path: ["~/.local/share/pnpm/store", "~/.cache/pnpm"], key: ["pnpm-lock.yaml"] }],
+        setup: [{ name: "deps", command: "pnpm install --frozen-lockfile", secrets: [], caches: ["pnpm"] }],
         network: { allow: ["api.github.com", "registry.example.org"] },
         checks: [
           {
@@ -92,6 +99,7 @@ describe("parseConfig", () => {
             after: [],
             secrets: [],
             group: null,
+            caches: [],
             source: "project",
           },
           {
@@ -101,6 +109,7 @@ describe("parseConfig", () => {
             after: ["test"],
             secrets: [],
             group: null,
+            caches: [],
             source: "project",
           },
         ],
@@ -181,6 +190,7 @@ describe("parseConfig", () => {
             after: [],
             secrets: [],
             group: null,
+            caches: [],
             source: "project",
           },
         ],
@@ -513,6 +523,87 @@ describe("parseConfig", () => {
     ]);
   });
 
+  it("reads the caches, each path and key one entry or a list, and the caches each setup, check and step uses", () => {
+    const result = parseConfig(`caches:
+  pnpm: { path: [~/.local/share/pnpm/store, ~/.cache/pnpm], key: [pnpm-lock.yaml, "packages/*/package.json"] }
+  pip: { path: /root/.cache/pip, key: requirements.txt }
+setup:
+  - { name: deps, command: pnpm install --frozen-lockfile, caches: [pnpm, pnpm] }
+checks:
+  - { name: lint, command: pnpm lint }
+  - { name: test, command: pytest, caches: [pip] }
+pipelines:
+  main:
+    steps: [{ name: deploy, command: pnpm deploy, caches: [pnpm] }]
+`);
+    expect(result.kind === "valid" && result.config.caches).toEqual([
+      {
+        name: "pnpm",
+        path: ["~/.local/share/pnpm/store", "~/.cache/pnpm"],
+        key: ["pnpm-lock.yaml", "packages/*/package.json"],
+      },
+      { name: "pip", path: ["/root/.cache/pip"], key: ["requirements.txt"] },
+    ]);
+    expect(result.kind === "valid" && result.config.setup.map((s) => s.caches)).toEqual([["pnpm"]]);
+    expect(result.kind === "valid" && result.config.checks.map((c) => c.caches)).toEqual([[], ["pip"]]);
+    expect(result.kind === "valid" && result.config.pipelines.main.steps.map((s) => s.caches)).toEqual([["pnpm"]]);
+  });
+
+  it.each([
+    ["caches that aren't a mapping", "caches: [pnpm]\n", /^caches: caches must be a mapping of caches by name$/u],
+    ["a cache that isn't a mapping", "caches:\n  pnpm: ~/.cache\n", /^caches\.pnpm: a cache must be a mapping/u],
+    ["a cache without a key", cached("path: ~/.cache/pnpm"), /^caches\.pnpm\.key: key must be a string/u],
+    ["a cache without a path", cached("key: pnpm-lock.yaml"), /^caches\.pnpm\.path: path must be a string/u],
+    ["an unknown cache key", cached("path: /a, key: k, restore: always"), /^caches\.pnpm\.restore: unknown key$/u],
+    ["a badly named cache", "caches:\n  Pnpm: { path: /a, key: k }\n", /^caches\.Pnpm: cache name must match/u],
+    ["an empty path list", cached("path: [], key: k"), /^caches\.pnpm\.path: path must name at least one$/u],
+    [
+      "a relative path",
+      cached("path: node_modules, key: k"),
+      /^caches\.pnpm\.path\[0\]: a cache's path must be absolute/u,
+    ],
+    [
+      "a path of ~ alone",
+      cached("path: ~/, key: k"),
+      /^caches\.pnpm\.path\[0\]: a cache's path must name a directory/u,
+    ],
+    [
+      "a path with ..",
+      cached("path: /root/../etc, key: k"),
+      /^caches\.pnpm\.path\[0\]: .*must not contain \. or \.\./u,
+    ],
+    [
+      "a path in the workspace",
+      cached("path: /workspace/tree/node_modules, key: k"),
+      /^caches\.pnpm\.path\[0\]: a cache's path must be outside \/workspace/u,
+    ],
+    [
+      "an absolute key",
+      cached("path: /a, key: /etc/passwd"),
+      /^caches\.pnpm\.key\[0\]: a key entry is a path or glob/u,
+    ],
+    ["a key with ..", cached("path: /a, key: ../x"), /^caches\.pnpm\.key\[0\]: a key entry must not contain \.\./u],
+    [
+      "a setup using an unknown cache",
+      "setup:\n  - { name: deps, command: x, caches: [pnpm] }\n",
+      /^setup\[0\]\.caches\[0\]: no cache is named pnpm in \.throng\/config\.yml$/u,
+    ],
+    [
+      "a check using an unknown cache",
+      `${cached("path: /a, key: k")}checks:\n  - { name: test, command: x, caches: [pnpm, npm] }\n`,
+      /^checks\[0\]\.caches\[1\]: no cache is named npm in \.throng\/config\.yml$/u,
+    ],
+    [
+      "a post-gate step using an unknown cache",
+      "pipelines:\n  main:\n    steps: [{ name: deploy, command: x, caches: [wrangler] }]\n",
+      /^pipelines\.main\.steps\[0\]\.caches\[0\]: no cache is named wrangler/u,
+    ],
+    ["caches that aren't a list", check("caches: pnpm"), /^checks\[0\]\.caches: caches must be a list/u],
+  ])("rejects %s", (_, text, error) => {
+    const result = parseConfig(text);
+    expect(result.kind === "invalid" ? result.error : "").toMatch(error);
+  });
+
   it("reads the secrets each setup and check names, each once, and none by default", () => {
     const result = parseConfig(
       "setup:\n  - { name: deps, command: npm ci, secrets: [NPM_TOKEN] }\n" +
@@ -549,8 +640,8 @@ pipelines:
       main: {
         groups: ["verify"],
         steps: [
-          { name: "migrate", command: "pnpm db:migrate" },
-          { name: "deploy", command: "pnpm deploy" },
+          { name: "migrate", command: "pnpm db:migrate", caches: [] },
+          { name: "deploy", command: "pnpm deploy", caches: [] },
         ],
       },
     });
@@ -689,6 +780,7 @@ checks:
             after: [],
             secrets: [],
             group: null,
+            caches: [],
             source: "project",
           },
           {
@@ -698,6 +790,7 @@ checks:
             after: [],
             secrets: [],
             group: null,
+            caches: [],
             source: "project",
           },
         ],
@@ -763,6 +856,7 @@ const smoke = (after: string[]): CheckConfig => ({
   after,
   secrets: [],
   group: null,
+  caches: [],
   source: "task",
 });
 

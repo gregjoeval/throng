@@ -2,19 +2,21 @@ import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import { reposFor } from "./artifacts";
 import { lineBase } from "./base";
+import { CACHE_TRANSFER_TIMEOUT_MS, cacheKeyHashes, cacheObjectKey, restoreNote, saveNote } from "./caches";
+import type { CacheSave, RunCache } from "./caches";
 import { loadConfig, namedSecrets, networkAllow, pipelineConfig, sandboxSize } from "./config";
-import type { ConfigResult, SandboxSize, StepConfig } from "./config";
+import type { CacheConfig, ConfigResult, SandboxSize, SetupConfig, StepConfig } from "./config";
 import { legacyScoreSandboxName, pipelineSandboxName } from "./grants";
 import { logKey, setupLogName, stepLogName } from "./logs";
 import { NO_NETWORK } from "./network";
 import type { NetworkAccess } from "./network";
 import { loadRegistries } from "./npmrc";
-import { originMainRef } from "./repos";
+import { lineRepo, originMainRef } from "./repos";
 import { checkOrder, POST_GATE_STEP_TIMEOUT_MS, scorePlan, setupTimeoutMs, STEP_SLACK_MS } from "./results";
 import type { PlannedCheck, RawScore, ScorePlan } from "./results";
 import { pipelineOutcome, withPostGateSteps } from "./run-outcome";
 import type { PostGateRun, RunOutcome, SetupRun } from "./run-outcome";
-import type { SandboxSnapshot } from "./sandbox";
+import type { SandboxSnapshot, StartOptions } from "./sandbox";
 import { pipelineFor } from "./scoring";
 import type { PipelineParams, PlanVerdict, RunReport } from "./scoring";
 import { checkScript, parseResult, setupScript, stepReadyScript, stepScript } from "./scripts";
@@ -154,6 +156,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, PipelineParams | S
       // An untrusted run that names a secret is the owner's to start; it started nothing.
       if (verdict.kind === "waiting") return null;
       if (verdict.kind === "refused") throw new Error(verdict.error);
+      const caches = await this.#caches(step, instanceId, params, runCaches(config, planned));
       // A task's definitions never change `network.allow`, so the run's config gives `main`'s.
       const context: RunContext = {
         instanceId,
@@ -161,10 +164,14 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, PipelineParams | S
         plan: planned,
         size,
         network: { registries, allow: networkAllow(config) },
+        caches,
       };
       const setup = await step.do(
         "setup",
-        { retries: STEP_RETRIES, timeout: setupTimeoutMs(planned) + 2 * STEP_SLACK_MS },
+        {
+          retries: STEP_RETRIES,
+          timeout: setupTimeoutMs(planned) + 2 * STEP_SLACK_MS + cacheTransfersMs(setupCaches(planned), 2),
+        },
         () => this.#setup(context, base?.sha ?? null),
       );
       const checks = setup.setups.every((s) => s.exit === 0)
@@ -203,8 +210,131 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, PipelineParams | S
   }
 
   /**
+   * The caches the run uses, each with its key hash, computed from the head's tree before any
+   * container starts, and where the project says it restores from and saves to. When that can't be
+   * done, every cache is a miss the run never saves, with a note why: a cache never fails a run.
+   */
+  async #caches(
+    step: WorkflowStep,
+    instanceId: string,
+    params: PipelineParams,
+    caches: readonly CacheConfig[],
+  ): Promise<RunCache[]> {
+    if (caches.length === 0) return [];
+    try {
+      const lookups = await step.do("caches", { retries: STEP_RETRIES, timeout: "2 minutes" }, async () => {
+        const repos = reposFor(this.env);
+        const repo = lineRepo(params.project, params.line);
+        const head = await repos.readCommit(repo, params.sha);
+        if (head === null) throw new Error(`the head ${params.sha} is missing`);
+        const image = await this.env.SANDBOX.getByName(pipelineSandboxName(instanceId, { kind: "setup" })).image();
+        const reader = { readTree: (hash: string) => repos.readTree(repo, hash) };
+        const keys = await cacheKeyHashes(reader, head.treeHash, caches, image);
+        return this.env.PROJECT.getByName(params.project).pipelineCaches(params.run, keys);
+      });
+      return caches.map((cache): RunCache => {
+        const lookup = lookups.find((found) => found.name === cache.name);
+        if (lookup === undefined) return { ...cache, error: "the project didn't look it up" };
+        const { name: _name, ...found } = lookup;
+        return { ...cache, ...found };
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return caches.map((cache) => ({ ...cache, error: message.slice(0, 300) }));
+    }
+  }
+
+  /**
+   * Restores the caches named `names` into the container `sandbox`, starting it from the image with
+   * `start` if it isn't running, and returns a note on each: a hit with its time, or a miss and why.
+   */
+  async #restoreCaches(
+    context: RunContext,
+    sandbox: string,
+    names: readonly string[],
+    start: StartOptions & { timeoutMs?: number },
+  ): Promise<string[]> {
+    const notes: string[] = [];
+    for (const cache of cachesNamed(context, names)) {
+      if ("error" in cache || cache.restore === null) {
+        notes.push(restoreNote(cache, null));
+        continue;
+      }
+      const key = cacheObjectKey(context.params.project, { ...cache, scope: cache.restore });
+      notes.push(restoreNote(cache, await this.env.SANDBOX.getByName(sandbox).restoreCache(key, cache.path, start)));
+    }
+    return notes;
+  }
+
+  /**
+   * Restores the caches a check's or post-gate step's container uses, `names`, once it came up. One
+   * from the setups' snapshot already holds the setups' caches, so only its own others are restored;
+   * one that will re-run the setups gets the setups' caches too.
+   */
+  async #prepareCaches(
+    context: RunContext,
+    sandbox: string,
+    names: readonly string[],
+    start: StartOptions & { timeoutMs?: number },
+    fromSnapshot: boolean,
+  ): Promise<string[]> {
+    const setups = setupCaches(context.plan);
+    if (!fromSnapshot) return this.#restoreCaches(context, sandbox, [...new Set([...setups, ...names])], start);
+    const inSnapshot = names
+      .filter((name) => setups.includes(name))
+      .map((name) => `cache ${name}: in the setups' snapshot`);
+    const restored = await this.#restoreCaches(
+      context,
+      sandbox,
+      names.filter((name) => !setups.includes(name)),
+      start,
+    );
+    return [...inSnapshot, ...restored];
+  }
+
+  /**
+   * Saves the caches named `names` from the running container `sandbox` where the run may save them,
+   * once the command using them passed, and records each saved entry with the project. An entry is
+   * never written over: a key the project already has an entry for isn't saved again. Returns a note
+   * on each that says something; a save problem is only ever a note.
+   */
+  async #saveCaches(context: RunContext, sandbox: string, names: readonly string[]): Promise<string[]> {
+    const notes: string[] = [];
+    const project = this.env.PROJECT.getByName(context.params.project);
+    for (const cache of cachesNamed(context, names)) {
+      if ("error" in cache || cache.save === null) {
+        const note = saveNote(cache, null);
+        if (note !== null) notes.push(note);
+        continue;
+      }
+      const entry = { scope: cache.save, name: cache.name, keyHash: cache.keyHash };
+      let saved: CacheSave;
+      try {
+        if (!(await project.pipelineCacheSaving(context.params.run, entry))) {
+          notes.push(`cache ${cache.name}: not saved: ${cache.save} already has an entry for its key`);
+          continue;
+        }
+        saved = await this.env.SANDBOX.getByName(sandbox).saveCache(
+          cacheObjectKey(context.params.project, entry),
+          cache.path,
+        );
+        if (saved.kind === "saved") {
+          const recorded = await project.pipelineCacheSaved(context.params.run, { ...entry, size: saved.bytes });
+          if (!recorded) saved = { kind: "failed", error: "the project didn't record it" };
+        }
+      } catch (error) {
+        saved = { kind: "failed", error: String(error).slice(0, 300) };
+      }
+      notes.push(saveNote(cache, saved) ?? "");
+    }
+    return notes.filter((note) => note !== "");
+  }
+
+  /**
    * Runs the setups in the setup container and, when they all passed, snapshots it. Its logs are
-   * stored before the container goes: the checks start from the snapshot, never from it.
+   * stored before the container goes: the checks start from the snapshot, never from it. The caches
+   * the setups use are restored before the first runs, and saved once each setup using one passed;
+   * a note on each goes on the first setup that uses it.
    */
   async #setup(context: RunContext, base: string | null): Promise<SetupStage> {
     const { instanceId, params, plan, size, network } = context;
@@ -212,6 +342,8 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, PipelineParams | S
     // In a trusted run the container holds every secret the setups name, as the settings are now.
     const held = await this.#hold(params, setupSecrets(plan));
     if ("error" in held) return secretlessSetup(plan, held);
+    const caches = setupCaches(plan);
+    let restoreNotes: string[] = [];
     try {
       const run = await runInSandbox(
         this.env,
@@ -225,12 +357,21 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, PipelineParams | S
           sandbox: name,
           env: { ...runContext(params), ...held.env },
           timeoutMs: setupTimeoutMs(plan) + STEP_SLACK_MS,
+          prepare: async (start) => {
+            restoreNotes = await this.#restoreCaches(context, name, caches, start);
+          },
         },
       );
       const result = parseResult<SetupResult>(run.stdout);
       if (result === null) throw new Error(`setup gave no result (exit ${run.exitCode}): ${run.stderr.slice(-2000)}`);
       const sandbox = this.env.SANDBOX.getByName(name);
       const passed = result.setups.every((s) => s.exit === 0);
+      // A cache is saved once every setup using it passed, from this container, which is its saver.
+      const saveable = caches.filter((cache) =>
+        plan.setup.every((setup, i) => !setup.caches.includes(cache) || result.setups[i]?.exit === 0),
+      );
+      const saveNotes = await this.#saveCaches(context, name, saveable);
+      const setups = withCacheNotes(plan.setup, result.setups, [...restoreNotes, ...saveNotes].map(held.mask));
       let snapshot: SandboxSnapshot | null = null;
       // With no setups there's nothing to keep: each later container just checks the head out.
       if (passed && plan.setup.length > 0 && (plan.checks.length > 0 || plan.steps.length > 0)) {
@@ -246,10 +387,11 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, PipelineParams | S
         names: plan.setup.map((_, i) => setupLogName(i + 1)),
         key: (log) => logKey({ project: params.project, line: params.line, run: params.run }, log),
         size,
+        notes: new Map(setups.map((setup, i) => [setupLogName(i + 1), setup.notes ?? []])),
         mask: held.mask,
       });
       await sandbox.destroy();
-      return { ...result, snapshot, logs };
+      return { ...result, setups, snapshot, logs };
     } catch (error) {
       throw maskedError(error, held.mask);
     }
@@ -271,7 +413,13 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, PipelineParams | S
         if (waited.some((stage) => stage?.exit !== 0)) return null;
         return step.do(
           `check ${check.name}`,
-          { retries: STEP_RETRIES, timeout: checkTimeoutMs(context.plan, check) + STEP_SLACK_MS },
+          {
+            retries: STEP_RETRIES,
+            timeout:
+              checkTimeoutMs(context.plan, check) +
+              STEP_SLACK_MS +
+              cacheTransfersMs([...setupCaches(context.plan), ...check.caches], 2),
+          },
           () => this.#check(context, setup.snapshot, check),
         );
       })();
@@ -300,6 +448,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, PipelineParams | S
     const { instanceId, params, plan, size, network } = context;
     const name = pipelineSandboxName(instanceId, { kind: "check", name: check.name });
     let held = NOTHING_HELD;
+    let cacheNotes: string[] = [];
     try {
       const run = await runInSandbox(
         this.env,
@@ -311,6 +460,9 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, PipelineParams | S
           network,
           size,
           sandbox: name,
+          prepare: async (start, fromSnapshot) => {
+            cacheNotes = await this.#prepareCaches(context, name, check.caches, start, fromSnapshot);
+          },
           env: async (fromSnapshot) => {
             const names = fromSnapshot ? check.secrets : [...setupSecrets(plan), ...check.secrets];
             const holding = await this.#hold(params, names);
@@ -326,7 +478,11 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, PipelineParams | S
       if (result === null)
         throw new Error(`check ${check.name} gave no result (exit ${run.exitCode}): ${run.stderr.slice(-2000)}`);
       const { setupsRerun, ...ran } = result;
-      const notes = setupsRerun && plan.setup.length > 0 ? [snapshot === null ? NO_SNAPSHOT : SETUPS_RERUN] : [];
+      const saved = ran.exit === 0 ? await this.#saveCaches(context, name, savedBy(context, name, check.caches)) : [];
+      const notes = [
+        ...(setupsRerun && plan.setup.length > 0 ? [snapshot === null ? NO_SNAPSHOT : SETUPS_RERUN] : []),
+        ...[...cacheNotes, ...saved].map(held.mask),
+      ];
       const logs = await storeLogs(this.env, {
         sandbox: name,
         names: [check.name],
@@ -363,13 +519,25 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, PipelineParams | S
       for (const postGate of plan.steps) {
         const ready = await step.do(
           `step ${postGate.name} ready`,
-          { retries: STEP_RETRIES, timeout: setupTimeoutMs(plan) + 2 * STEP_SLACK_MS },
+          {
+            retries: STEP_RETRIES,
+            timeout:
+              setupTimeoutMs(plan) +
+              2 * STEP_SLACK_MS +
+              cacheTransfersMs([...setupCaches(plan), ...postGate.caches], 1),
+          },
           () => this.#stepReady(context, snapshot, postGate),
         );
-        const notes = ready.setupsRerun && plan.setup.length > 0 ? [STEP_SETUPS_RERUN(snapshot)] : [];
+        const notes = [
+          ...(ready.setupsRerun && plan.setup.length > 0 ? [STEP_SETUPS_RERUN(snapshot)] : []),
+          ...ready.cacheNotes,
+        ];
         const run = await step.do(
           `step ${postGate.name}`,
-          { retries: { limit: 0, delay: "1 second" }, timeout: POST_GATE_STEP_TIMEOUT_MS + 2 * STEP_SLACK_MS },
+          {
+            retries: { limit: 0, delay: "1 second" },
+            timeout: POST_GATE_STEP_TIMEOUT_MS + 2 * STEP_SLACK_MS + cacheTransfersMs(postGate.caches, 1),
+          },
           () => this.#stepRun(context, postGate, notes),
         );
         ran.set(postGate.name, run);
@@ -379,9 +547,18 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, PipelineParams | S
     return withPostGateSteps(scored, plan.steps, ran);
   }
 
-  /** Readies a post-gate step's container: restored from the snapshot, or with the setups re-run. */
-  async #stepReady(context: RunContext, snapshot: SandboxSnapshot | null, postGate: StepConfig): Promise<StepReady> {
+  /**
+   * Readies a post-gate step's container: restored from the snapshot, or with the setups re-run, and
+   * with the caches it uses restored. Says how restoring them went.
+   */
+  async #stepReady(
+    context: RunContext,
+    snapshot: SandboxSnapshot | null,
+    postGate: StepConfig,
+  ): Promise<StepReady & { cacheNotes: string[] }> {
     const { instanceId, params, plan, size, network } = context;
+    const name = pipelineSandboxName(instanceId, { kind: "step", name: postGate.name });
+    let cacheNotes: string[] = [];
     const run = await runInSandbox(
       this.env,
       instanceId,
@@ -391,17 +568,20 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, PipelineParams | S
       {
         network,
         size,
-        sandbox: pipelineSandboxName(instanceId, { kind: "step", name: postGate.name }),
+        sandbox: name,
         env: runContext(params),
         snapshot,
         timeoutMs: setupTimeoutMs(plan) + STEP_SLACK_MS,
+        prepare: async (start, fromSnapshot) => {
+          cacheNotes = await this.#prepareCaches(context, name, postGate.caches, start, fromSnapshot);
+        },
       },
     );
     const result = parseResult<StepReady>(run.stdout);
     if (result === null) {
       throw new Error(`step ${postGate.name} wasn't readied (exit ${run.exitCode}): ${run.stderr.slice(-2000)}`);
     }
-    return result;
+    return { ...result, cacheNotes };
   }
 
   /**
@@ -424,16 +604,20 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, PipelineParams | S
     if (result === null) {
       throw new Error(`step ${postGate.name} gave no result (exit ${run.exitCode}): ${run.stderr.slice(-2000)}`);
     }
+    // Saving a cache is only ever a note, so it never fails this step, which isn't retried.
+    const saved =
+      result.exit === 0 ? await this.#saveCaches(context, name, savedBy(context, name, postGate.caches)) : [];
+    const noted = [...notes, ...saved];
     const log = stepLogName(postGate.name);
     const logs = await storeLogs(this.env, {
       sandbox: name,
       names: [log],
       key: (stored) => logKey({ project: params.project, line: params.line, run: params.run }, stored),
       size,
-      notes: new Map([[log, notes]]),
+      notes: new Map([[log, noted]]),
     });
     await sandbox.destroy();
-    return { ...result, logged: logs.includes(log), notes };
+    return { ...result, logged: logs.includes(log), notes: noted };
   }
 
   /**
@@ -506,6 +690,56 @@ interface RunContext {
   plan: RunPlan;
   size: SandboxSize;
   network: NetworkAccess;
+  /** The caches the run uses, with where each restores from and saves to. */
+  caches: RunCache[];
+}
+
+/** The caches anything in the plan uses, as the config defines them; none without a valid config. */
+function runCaches(config: ConfigResult, plan: RunPlan): CacheConfig[] {
+  if (config.kind !== "valid") return [];
+  const used = new Set([...plan.setup, ...plan.checks, ...plan.steps].flatMap((user) => user.caches));
+  return config.config.caches.filter((cache) => used.has(cache.name));
+}
+
+/** The caches the setups use, each once, in order. */
+function setupCaches(plan: Pick<ScorePlan, "setup">): string[] {
+  return [...new Set(plan.setup.flatMap((setup) => setup.caches))];
+}
+
+/** The run's caches named `names`. */
+function cachesNamed(context: RunContext, names: readonly string[]): RunCache[] {
+  return context.caches.filter((cache) => names.includes(cache.name));
+}
+
+/**
+ * Which of `names` the container `sandbox` saves: each cache is saved from one container of a run,
+ * so its entry is written once: the setup container's when a setup uses it, else the first check's
+ * in the plan that does, else the first post-gate step's.
+ */
+function savedBy(context: RunContext, sandbox: string, names: readonly string[]): string[] {
+  const { instanceId, plan } = context;
+  const saver = (name: string): string | null => {
+    if (setupCaches(plan).includes(name)) return pipelineSandboxName(instanceId, { kind: "setup" });
+    const check = plan.checks.find((c) => c.caches.includes(name));
+    if (check !== undefined) return pipelineSandboxName(instanceId, { kind: "check", name: check.name });
+    const step = plan.steps.find((s) => s.caches.includes(name));
+    return step === undefined ? null : pipelineSandboxName(instanceId, { kind: "step", name: step.name });
+  };
+  return names.filter((name) => saver(name) === sandbox);
+}
+
+/** The setups' runs with `notes` (about their caches) on the first setup that uses each cache. */
+function withCacheNotes(
+  setups: readonly SetupConfig[],
+  runs: readonly SetupRun[],
+  notes: readonly string[],
+): SetupRun[] {
+  return runs.map((run, i) => {
+    const earlier = new Set(setups.slice(0, i).flatMap((setup) => setup.caches));
+    const own = (setups[i]?.caches ?? []).filter((cache) => !earlier.has(cache));
+    const noted = notes.filter((note) => own.some((cache) => note.startsWith(`cache ${cache}:`)));
+    return noted.length === 0 ? run : { ...run, notes: noted };
+  });
 }
 
 /** A run's params in the current shape, whichever code started it. */
@@ -513,6 +747,11 @@ function paramsLine(params: PipelineParams | ScoringParams): PipelineParams {
   if ("line" in params) return params;
   const { attempt, ...rest } = params;
   return { ...rest, line: attempt };
+}
+
+/** Room a step gets for moving `caches`, each up to `transfers` times (a restore, a save) at its timeout. */
+function cacheTransfersMs(caches: readonly string[], transfers: number): number {
+  return new Set(caches).size * transfers * CACHE_TRANSFER_TIMEOUT_MS;
 }
 
 /** How long a check's container may take: the check at its timeout, and the setups again if it re-runs them. */

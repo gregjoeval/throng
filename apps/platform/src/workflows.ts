@@ -11,7 +11,7 @@ import type { NetworkAccess } from "./network";
 import { forkRepo, lineRepo, originRepo } from "./repos";
 import { scorePlan, scoreTimeoutMs } from "./results";
 import type { ScorePlan } from "./results";
-import type { RunResult, SandboxSnapshot } from "./sandbox";
+import type { RunResult, SandboxSnapshot, StartOptions } from "./sandbox";
 
 const TOKEN_TTL_SECONDS = 30 * 60;
 /** Each step's retries after its first try, for infrastructure errors; then the run ends `errored`. */
@@ -74,6 +74,11 @@ export interface ScriptOptions<R extends SandboxRole> {
    * after that the container starts from the image, and the script finds the snapshot's work missing.
    */
   snapshot?: SandboxSnapshot | null;
+  /**
+   * Called once the container came up from `snapshot` (or didn't), before the script: such as
+   * restoring the caches the script uses. It's given how to start the container, should it start it.
+   */
+  prepare?: (start: StartOptions & { timeoutMs?: number }, fromSnapshot: boolean) => Promise<void>;
 }
 
 /**
@@ -94,6 +99,7 @@ export async function runInSandbox<R extends SandboxRole>(
     sandbox: name = sandboxName(instanceId, role),
     env: vars,
     snapshot = null,
+    prepare,
   }: ScriptOptions<R>,
 ): Promise<RunResult> {
   const grants = (await mintGrants(env, repos, ROLE_GRANTS[role])) as RoleGrants<R>;
@@ -107,6 +113,7 @@ export async function runInSandbox<R extends SandboxRole>(
       (await sandbox.restore(snapshot, { access, size }, timeoutMs));
     if (!restored) console.warn({ event: "sandbox.restore_gave_up", sandbox: name, snapshot: snapshot.id });
   }
+  await prepare?.({ access, size, ...(timeoutMs === undefined ? {} : { timeoutMs }) }, restored);
   const scriptEnv = typeof vars === "function" ? await vars(restored) : vars;
   const result = await sandbox.run(script(grants), {
     access,

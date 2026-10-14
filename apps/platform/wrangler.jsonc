@@ -33,7 +33,10 @@
     { "name": "throng-follow", "binding": "FOLLOW", "class_name": "FollowWorkflow" },
   ],
   // Scoring run logs. R2's lifecycle rule (30 days on `logs/`) isn't wrangler config: see the README.
-  "r2_buckets": [{ "binding": "LOGS", "bucket_name": "throng-logs" }],
+  "r2_buckets": [
+    { "binding": "LOGS", "bucket_name": "throng-logs" },
+    { "binding": "CACHES", "bucket_name": "throng-caches" },
+  ],
   "d1_databases": [
     {
       "binding": "DB",
@@ -82,7 +85,10 @@
         { "name": "throng-ci-landing", "binding": "LANDING", "class_name": "LandingWorkflow" },
         { "name": "throng-ci-follow", "binding": "FOLLOW", "class_name": "FollowWorkflow" },
       ],
-      "r2_buckets": [{ "binding": "LOGS", "bucket_name": "throng-ci-logs" }],
+      "r2_buckets": [
+        { "binding": "LOGS", "bucket_name": "throng-ci-logs" },
+        { "binding": "CACHES", "bucket_name": "throng-ci-caches" },
+      ],
       "d1_databases": [
         {
           "binding": "DB",

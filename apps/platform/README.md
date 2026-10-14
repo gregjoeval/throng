@@ -80,6 +80,26 @@ A check is in at most one `group`. A pipeline that lists `groups` runs only the 
 
 Every container gets one read grant on its line's repo (the attempt's fork, or the origin for a task branch or `main`), fetching its branches and `refs/tasks/*`, and no write grant, reaches only `main`'s `network.allow` and `.npmrc` registries, and gets `THRONG_PROJECT`, `THRONG_PIPELINE`, `THRONG_LINE`, `THRONG_SHA` and `THRONG_RUN`. Before starting any, the Workflow tells the project Durable Object every container its plan may start. When the run ends, or a newer head cancels it (the Workflow is terminated), every one of them is destroyed and the snapshot released. Containers can't delete a snapshot yet: Cloudflare deletes it 30 days after it was taken or last restored. Each step's outcome, duration, notes and log go to the Durable Object as the run's outcome, from which scoring takes the attempt's score and verdict.
 
+### Caches
+
+A cache keeps paths, such as a dependency store, between runs (`src/caches.ts`). `.throng/config.yml` names each with the paths it keeps (`~/…` or absolute, outside `/workspace`) and the files in the tree that key it (paths or globs, `*`, `?` and `**`); setups, checks and post-gate steps list the ones they use, and a task's checks may list those `main` defines. An unknown name is a config error.
+
+```yaml
+caches:
+  # pnpm needs its metadata cache too: a store alone fails `pnpm install --offline` with ERR_PNPM_NO_OFFLINE_META.
+  pnpm: { path: [~/.local/share/pnpm/store, ~/.cache/pnpm], key: pnpm-lock.yaml }
+setup:
+  - { name: deps, command: pnpm install --frozen-lockfile --prefer-offline, caches: [pnpm] }
+```
+
+- **Key.** Before any container starts, the Workflow reads the head's git tree and hashes, per cache, its name, its paths, each key entry's blob id (a glob's matches in sorted order; `absent` for an entry nothing matches) and the Sandbox image, so a new image never restores an old image's entry.
+- **Restore.** By exact key hash only, never a near match. An attempt (`t42a3`) reads `main`'s entries; a task branch (`t42`) reads its own, then `main`'s; `main` reads its own. A container restores what it uses before its command: the setup container the setups' caches; a check's or step's container its own others, as the setups' are already in the snapshot it starts from (or all of them, when it re-runs the setups). The object is streamed straight from R2 into `zstd -d | tar -x` at `/`.
+- **Save.** Only a trusted run saves, only on a task branch or `main` (into its own line's scope), only after the command using the cache passed, and only when the scope has no entry for that key: the first save wins, and entries are never written over. Attempt runs never save, task checks included. Each cache is saved from one container of a run: the setup container's when a setup uses it, else the first check's in the plan that does, else the first post-gate step's. The container's `tar | zstd -3` is streamed from its stdout into an R2 multipart upload (16 MiB parts, two in flight); one over 2 GB is dropped.
+- **Notes.** A cache never fails a run. Each step that uses one notes a hit (with the entry's size and the restore time) or a miss and why, and a save (with size and time) or why it wasn't saved; a failed restore removes what it half-extracted and the step runs without the cache. The setups' notes go on the first setup using each cache.
+- **Storage.** Entries are `caches/<projectId>/<scope>/<name>/<keyHash>.tar.zst` in the `CACHES` R2 bucket (`throng-caches`, and `throng-ci-caches` for `ci`), indexed in the project Durable Object's `cache_entries` table (scope, name, key hash, size, created, last used). The deploy and E2E workflows create the bucket when it's missing.
+- **Eviction** (`src/cache-index.ts`), after every store call and on the Durable Object's alarm: an entry restored by no run for 7 days is deleted, except `main`'s latest of each cache; while a project's entries are over 10 GB, the least recently used go first, task branches' before `main`'s; and a task branch's entries go when its task closes or goes obsolete.
+- **Secrets.** Whatever a trusted run leaves in a cache's paths is restored into later runs, attempts' included. Never keep a token in a cache's path (a `~/.npmrc`, say).
+
 ## Scoring logs
 
 Each pipeline run copies the log of every setup and check to the `LOGS` R2 bucket at `logs/<projectId>/<line>/<runId>/<name>.log` (`src/logs.ts`); runs from before runs were keyed on their line keep theirs at `logs/<projectId>/<t42a3>/<sha>/<runId>/<name>.log` until they expire. The nth setup's log is named `setup.<n>` and a check's is its name; check names can't contain a dot, so they never collide. Logs over 5 MB keep their head and tail with a `[throng: truncated …]` marker between them. The run's result lists the logs it stored, and `GET /api/projects/{owner}/{project}/runs/{runId}/logs/{step}` streams one as text, or answers `notFound` once it's missing or expired.
@@ -182,6 +202,7 @@ gh workflow run e2e.yml --ref my-branch     # every scenario, against a branch
 
   The e2e user has no Access session, so throng-web can't forward the page's API calls. Instead the browser sends each `/api/*` request to `THRONG_URL` with the e2e user's Throng token (`scripts/e2e-browser.ts`). Everything else is the deployed UI; only throng-web's Access check and forwarding are skipped, and those have unit tests in `apps/web`. For the same reason `throng-web-ci` must not be behind a Cloudflare Access application: the workflow fails at **Wait for throng-web-ci** if it is.
 
+- `caches`: on a real project, through `/api`. An attempt lands; the trusted `main` run of the landing saves a cache its setup fills (`cache stamp: saved for main` in the setup's notes). The next task's attempt, forked from that `main`, restores it (a hit in its setup's notes), saves nothing, and its check prints the stamp `main`'s run wrote.
 - `metrics`, `failing`, `invalid`, `preview`, `coalesce`, `intrusion`, `deps`: scoring, through the e2e routes' attempts (forks with no task rows); see the header of `scripts/e2e.ts`.
 - `taskmetrics`: a task's own metric over a project check, through `/api` on a project with task rows. A clashing name is refused on save; the saved metric is scored with `source: task`; once `main`'s config adds a metric with the task's name, the attempt's next run is `config: invalid`, naming the clash.
 - `taskchecks`: a task adds a metric over a project check and a check of its own, through `/api`. Its check runs after the project's with `source: task`, its metrics read both checks, and the gate follows its check: one attempt passes it, the other fails it. Then the task makes its check only report (it exits 0 and writes a metric), and the failing attempt is rescored at the same head with a passing gate.

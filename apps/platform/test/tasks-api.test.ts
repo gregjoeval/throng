@@ -286,6 +286,7 @@ describe("task checks", () => {
       after: [],
       secrets: [],
       group: null,
+      caches: [],
       source: "task",
     };
     expect(created.body["checks"]).toEqual([smoke]);

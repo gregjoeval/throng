@@ -32,6 +32,7 @@ const taskCheck = (check: Partial<CheckConfig> = {}): CheckConfig => ({
   after: [],
   secrets: [],
   group: null,
+  caches: [],
   source: "task",
   ...check,
 });
@@ -39,6 +40,9 @@ const taskCheck = (check: Partial<CheckConfig> = {}): CheckConfig => ({
 function raw(checks: RawScore["checks"]): RawScore {
   return { base: null, shortstat: "", builtinMs: 0, setupFailed: null, checks };
 }
+
+/** A task's definitions: one check using `caches`. */
+const uses = (caches: string[]) => ({ checks: [{ name: "smoke", command: "./smoke.sh", caches }] });
 
 describe("a run's config with its task's definitions", () => {
   it("reads a task metric over a project check, and scores it with source task", () => {
@@ -100,7 +104,7 @@ checks:
       ],
     });
     const plan = scorePlan(config);
-    expect(plan.setup).toEqual([{ name: "deps", command: "pnpm install", secrets: [] }]);
+    expect(plan.setup).toEqual([{ name: "deps", command: "pnpm install", secrets: [], caches: [] }]);
     expect(plan.allow).toEqual(["api.example.com"]);
     expect(plan.checks.map((check) => [check.name, check.metrics.map((metric) => metric.name)])).toEqual([
       ["test", []],
@@ -211,6 +215,27 @@ describe("a task's definitions", () => {
     const input = { checks: [{ name: "deploy", command: "./smoke.sh" }] };
     expect(taskDefinitionsFrom(input, NO_TASK_DEFINITIONS, project)).toEqual({
       error: "checks[0].name: deploy is also a post-gate step's name in .throng/config.yml",
+    });
+  });
+
+  it("lets a task's check use a cache main's config defines, and no other", () => {
+    const project = parseConfig("caches:\n  pnpm: { path: ~/.cache/pnpm, key: pnpm-lock.yaml }\n");
+    expect(taskDefinitionsFrom(uses(["pnpm"]), NO_TASK_DEFINITIONS, project)).toMatchObject({
+      definitions: { checks: [{ name: "smoke", caches: ["pnpm"] }] },
+    });
+    expect(taskDefinitionsFrom(uses(["pip"]), NO_TASK_DEFINITIONS, project)).toEqual({
+      error: "checks[0].caches[0]: no cache is named pip in .throng/config.yml",
+    });
+    expect(taskDefinitionsFrom(uses(["pnpm"]), NO_TASK_DEFINITIONS, { kind: "none" })).toEqual({
+      error: "checks[0].caches[0]: no cache is named pnpm in .throng/config.yml",
+    });
+  });
+
+  it("makes a run's config invalid when main no longer defines a cache a task's check uses", () => {
+    const defined = { checks: [taskCheck({ caches: ["pnpm"] })], metrics: [] };
+    expect(withTask(parseConfig(""), defined)).toEqual({
+      kind: "invalid",
+      error: "task checks[0].caches[0]: no cache is named pnpm in .throng/config.yml",
     });
   });
 

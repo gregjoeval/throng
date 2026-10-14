@@ -124,6 +124,16 @@ The default is ${DEFAULT_SANDBOX_SIZE}. Like the rest of the config, it is read 
 attempt that changes it still runs at \`main\`'s size, and the change applies once it lands. Each stored log
 notes the size it ran at under \`== throng ==\`, so a check killed for memory shows how much it had.
 
+## Caches
+
+\`caches:\` in \`.throng/config.yml\` names caches, each with the paths it keeps and the files that key it, as
+in \`pnpm: {path: [~/.local/share/pnpm/store, ~/.cache/pnpm], key: pnpm-lock.yaml}\` (pnpm needs its metadata
+cache beside its store to install offline). Setups, checks and post-gate steps list the ones they use, as in
+\`caches: [pnpm]\`; a task's checks may list only those \`main\` defines. A cache is restored only when its key
+matches exactly: attempts read \`main\`'s, a task branch its own then \`main\`'s. Only runs of the owner's code
+on a task branch or \`main\` save one, after the step using it passed; attempts never do. A cache never fails a
+run: each step's notes say hit or miss, and saved or not, with the times.
+
 ## Secrets
 
 The project owner keeps secrets in the project's settings: a name, a value nobody can read back, and the

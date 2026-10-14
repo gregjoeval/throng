@@ -946,7 +946,7 @@ describe("trust and secrets", () => {
     });
   });
 
-  it("replaces a waiting run with a newer push's", async () => {
+  it("replaces a waiting run with a newer push's, which waits again", async () => {
     const t = setup();
     await withSecret(t);
     const adas = await opened(t, ada);
@@ -954,6 +954,9 @@ describe("trust and secrets", () => {
     t.store.pipelinePlanned(at(t.runs(adas), 0).id, [], DEPLOYS);
     t.pushed(adas, t.commit(adas, "newer\n"));
     expect(t.runs(adas).map((r) => r.status)).toEqual(["cancelled", "queued"]);
+    await t.store.scoring.drain();
+    expect(t.store.pipelinePlanned(at(t.runs(adas), 1).id, [], DEPLOYS)).toEqual({ kind: "waiting" });
+    expect(t.runs(adas).map((r) => r.status)).toEqual(["cancelled", "waiting"]);
   });
 
   it("loads a trusted running run's secrets sealed, as the settings are now, and none for any other run", async () => {
@@ -973,6 +976,95 @@ describe("trust and secrets", () => {
       secret: "DEPLOY",
       error: "secret DEPLOY has no value in the project settings",
     });
+  });
+});
+
+/** `main`'s config, committed to the origin: a check `deploy` that names DEPLOY. */
+const DEPLOY_CONFIG = "checks:\n  - { name: deploy, command: ./deploy, secrets: [DEPLOY] }\n";
+
+/** Ada's open attempt whose run, naming DEPLOY in `main`'s config, waits for the owner. */
+async function waitingRun(t: ReturnType<typeof setup>) {
+  t.repos.commit(ORIGIN, { files: { ".throng/config.yml": DEPLOY_CONFIG } });
+  await withSecret(t);
+  const ref = await opened(t, ada);
+  await t.store.scoring.drain();
+  const run = at(t.runs(ref), 0);
+  expect(t.store.pipelinePlanned(run.id, [`${run.instance_id}/setup`], DEPLOYS)).toEqual({ kind: "waiting" });
+  return { ref, run: defined(t.store.scoring.getRun(run.id)) };
+}
+
+describe("starting a waiting run", () => {
+  it("records what a waiting run would hold, and queues it again for the owner, trusted, with a new Workflow", async () => {
+    const t = setup();
+    const { ref, run } = await waitingRun(t);
+    expect(run).toMatchObject({ status: "waiting", secrets: ["DEPLOY"], trusted: false });
+
+    const started = await t.store.startRun(PROJECT, owner, { run: run.id, sha: defined(run.sha) });
+    expect(started).toMatchObject({
+      id: run.id,
+      sha: run.sha,
+      status: "queued",
+      trusted: true,
+      trigger: "start",
+      user_id: owner.user.id,
+      alias: null,
+      started_at: null,
+      instance_id: `${run.instance_id}-started`,
+    });
+    expect(t.journal().at(-1)).toMatchObject({ kind: "scoringQueued", run: run.id, trigger: "start" });
+    await t.store.scoring.drain();
+    expect(t.workflow.created.at(-1)).toEqual({
+      id: `${run.instance_id}-started`,
+      params: { project: PROJECT.id, line: "t1a1", sha: run.sha, run: run.id },
+    });
+    expect(at(t.runs(ref), 0).status).toBe("running");
+    expect(t.store.pipelinePlanned(run.id, [], DEPLOYS)).toEqual({ kind: "start" });
+    expect(t.store.pipelineSecrets(run.id, ["DEPLOY"])).toMatchObject({ sealed: [{ name: "DEPLOY" }] });
+  });
+
+  it("is the owner's alone, acting as themselves", async () => {
+    const t = setup();
+    const { run } = await waitingRun(t);
+    const sha = defined(run.sha);
+    expect(await code(t.store.startRun(PROJECT, ada, { run: run.id, sha }))).toBe("forbidden");
+    expect(await code(t.store.startRun(PROJECT, actor("owner001", "claude"), { run: run.id, sha }))).toBe("forbidden");
+    expect(t.store.scoring.getRun(run.id)?.status).toBe("waiting");
+  });
+
+  it("refuses a head other than the one the run waits on, and a line that moved on since", async () => {
+    const t = setup();
+    const { ref, run } = await waitingRun(t);
+    const sha = defined(run.sha);
+    expect(await code(t.store.startRun(PROJECT, owner, { run: run.id, sha: "f".repeat(40) }))).toBe("invalidState");
+    // A draft's push moves its line's head without asking for a run.
+    t.store.scoring.moveHead(attemptRef(ref.task, ref.number), t.commit(ref, "moved\n"), false);
+    expect(await code(t.store.startRun(PROJECT, owner, { run: run.id, sha }))).toBe("invalidState");
+    expect(t.store.scoring.getRun(run.id)?.status).toBe("waiting");
+  });
+
+  it("refuses a run that isn't waiting, such as one a newer push replaced", async () => {
+    const t = setup();
+    const { ref, run } = await waitingRun(t);
+    t.pushed(ref, t.commit(ref, "newer\n"));
+    await expect(t.store.startRun(PROJECT, owner, { run: run.id, sha: defined(run.sha) })).rejects.toThrow(
+      `run ${run.id} is cancelled; only a waiting run can be started`,
+    );
+  });
+
+  it("re-checks every secret the run names, as main's config is now, against the settings", async () => {
+    const t = setup();
+    const { run } = await waitingRun(t);
+    const sha = defined(run.sha);
+    await t.store.putSecret(PROJECT, owner, { name: "DEPLOY", pipelines: ["main"] });
+    await expect(t.store.startRun(PROJECT, owner, { run: run.id, sha })).rejects.toThrow(
+      `can't start run ${run.id}: check deploy: secret DEPLOY isn't allowed in the default pipeline by the project settings`,
+    );
+    t.store.deleteSecret(PROJECT, owner, { name: "DEPLOY" });
+    await expect(t.store.startRun(PROJECT, owner, { run: run.id, sha })).rejects.toThrow(
+      "check deploy: secret DEPLOY has no value in the project settings",
+    );
+    await withSecret(t);
+    expect((await t.store.startRun(PROJECT, owner, { run: run.id, sha })).status).toBe("queued");
   });
 });
 

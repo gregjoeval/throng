@@ -12,6 +12,7 @@ import { SingleAttemptView } from "@/components/single-attempt";
 import { EmptyState, ErrorState, Loading } from "@/components/states";
 import { TaskActions } from "@/components/task-actions";
 import { TaskBranchRuns } from "@/components/task-branch-runs";
+import { TaskWaitingRuns } from "@/components/waiting-runs";
 import { mergeRequestQuery, taskAttemptsQuery, taskQuery } from "@/lib/api";
 import type { ProjectRef } from "@/lib/api";
 import { buildPath } from "@/lib/paths";
@@ -30,6 +31,7 @@ export function TaskPage({ projectRef, task: ref }: TaskAt & { task: string }) {
   return (
     <div className="flex flex-col gap-4">
       <TaskHeader projectRef={projectRef} task={task.data} attempts={attempts.data?.attempts ?? []} />
+      <TaskWaitingRuns projectRef={projectRef} task={task.data.ref} />
       <section aria-label="Task body">
         {attempts.isPending && <Loading />}
         {attempts.isError && <ErrorState error={attempts.error} />}

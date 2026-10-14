@@ -18,6 +18,7 @@ import {
   HandOffSchema,
   json,
   OpenVoteSchema,
+  OWNER_AS_THEMSELVES,
   pageQuerySchema,
   PageSchema,
   PostVerdictSchema,
@@ -26,6 +27,7 @@ import {
   RunsQuerySchema,
   SelectionPolicyInputSchema,
   SelectionSchema,
+  StartRunSchema,
   TaskChecksInputSchema,
   TaskMetricsInputSchema,
   VoteCandidateSchema,
@@ -534,10 +536,30 @@ const RunSchema = z
     sha: z.string().nullable().openapi({
       description: "The head it runs; null for a merge request's landing until it lands, when it is the landed commit.",
     }),
-    trigger: z.enum(SCORING_TRIGGERS).openapi({ description: "`merge` for a merge request's landing." }),
+    trigger: z.enum(SCORING_TRIGGERS).openapi({
+      description: "`merge` for a merge request's landing; `start` once the project owner started it after it waited.",
+    }),
     status: z.enum(RUN_STATUSES).openapi({
       description: "`waiting` while it needs the project owner to start it; it holds no slot meanwhile.",
     }),
+    waiting: z
+      .object({
+        head: z.string().openapi({
+          description:
+            "The head it would run, which Start names: its own, or for a merge request's landing the approved head.",
+        }),
+        attempt: z.string().nullable().openapi({
+          description: "The attempt `head` is on: the run's own line, or a landing's source attempt; null otherwise.",
+          example: "t42a3",
+        }),
+        secrets: z.array(z.string()).openapi({ description: "The secrets it would hold once started, by name." }),
+      })
+      .nullable()
+      .openapi({
+        description:
+          "While it waits for the project owner, what starting it means; null otherwise. A run of code that isn't the " +
+          "owner's waits when it names a secret, and a merge request no owner approved waits when `main` names one.",
+      }),
     trusted: z.boolean().openapi({ description: "Whether it may hold the secrets its pipeline allows." }),
     requestedBy: UserRefSchema.nullable().openapi({ description: "Who triggered it; null when no user did." }),
     alias: z.string().nullable(),
@@ -1833,6 +1855,41 @@ export function apiRoutes(options: ApiOptions = {}) {
       async (c) => {
         const { runId, ...path } = c.req.valid("param");
         return c.json(await tasks(c).cancelRun(c.var.actor, { ...path, run: runId }), 200);
+      },
+    )
+    .openapi(
+      createRoute({
+        method: "post",
+        path: "/projects/{owner}/{project}/runs/{runId}/start",
+        operationId: "startRun",
+        tags: ["Runs"],
+        summary: "Start a run waiting for the owner",
+        description:
+          "Starts a `waiting` run of code that isn't the owner's, after the owner reviewed its head: it is queued " +
+          "again as a trusted run, triggered `start`, and holds the secrets it names. Only the project owner acting as " +
+          "themselves may, never under an alias, and there is no MCP tool for it. `sha` pins the head reviewed: it is " +
+          "refused when the run waits on another, when its line moved on since, or, for a merge request's landing, " +
+          "when the merge request no longer approves it or can't join the queue. Each secret the run names, as " +
+          "`main`'s config is now, must have a value and be allowed in its pipeline. A started landing joins the merge " +
+          "queue and lands in its turn. Journals `scoringQueued`.",
+        security: bearerOrWeb,
+        middleware: [browser] as const,
+        request: { params: RunPathSchema, body: { required: true, ...json(StartRunSchema) } },
+        responses: {
+          200: { description: "The started run, queued.", ...json(RunDetailSchema) },
+          400: errorResponse("The run id or the body is invalid."),
+          401: unauthorizedBearer,
+          403: errorResponse(OWNER_AS_THEMSELVES),
+          404: errorResponse("No such project or run."),
+          409: errorResponse(
+            "`invalidState`: the run isn't waiting, waits on another head, its line or merge request moved on, or a " +
+              "secret it names has no value or isn't allowed in its pipeline.",
+          ),
+        },
+      }),
+      async (c) => {
+        const { runId, ...path } = c.req.valid("param");
+        return c.json(await tasks(c).startRun(c.var.actor, { ...path, run: runId, ...c.req.valid("json") }), 200);
       },
     )
     .openapi(

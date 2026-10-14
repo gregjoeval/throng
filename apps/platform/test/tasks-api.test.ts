@@ -488,6 +488,7 @@ describe("attempt routes", () => {
         superseded: false,
         gate: null,
         cancellable: true,
+        waiting: null,
       },
     });
     expect((await call("POST", `${a}/score`, ada)).body).toMatchObject({ queued: false, reason: "already queued" });

@@ -27,7 +27,10 @@ export const MAX_WAITERS_PER_USER = 10;
 /** The fields of an attempt a wait compares against its snapshot from request time. */
 export interface AttemptWatch {
   state: AttemptState;
-  /** The newest `done` or `errored` run of its current head, or null when that head has none. */
+  /**
+   * The newest run of its current head that is `done`, `errored` or waiting for the project owner, which
+   * rests until someone acts; null when that head has none.
+   */
   scoredRun: number | null;
   /** Its latest merge request: which one, its state and when it last left the queue; null when it has none. */
   mergeRequest: { id: number; state: MergeRequestState; dequeuedAt: string | null } | null;
@@ -35,7 +38,7 @@ export interface AttemptWatch {
 
 /**
  * Whether `until` already holds when the wait arrives, so it answers at once. Only `scored` is a
- * state rather than a change: the current head has a `done` or `errored` run.
+ * state rather than a change: the current head has a `done` or `errored` run, or one waiting for the owner.
  */
 export function alreadyMet(until: WaitCondition, now: AttemptWatch): boolean {
   return until === "scored" && now.scoredRun !== null;
@@ -43,7 +46,7 @@ export function alreadyMet(until: WaitCondition, now: AttemptWatch): boolean {
 
 /**
  * Whether `after` answers a wait for `until` that snapshotted `before`. `scored` holds once the
- * current head has a finished run it didn't have before, so a push alone doesn't answer it; as part
+ * current head has a settled run it didn't have before, so a push alone doesn't answer it; as part
  * of `any`, that is how a new score counts as a change.
  */
 export function watchChanged(until: WaitCondition, before: AttemptWatch, after: AttemptWatch): boolean {

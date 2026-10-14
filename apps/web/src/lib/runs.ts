@@ -23,6 +23,7 @@ export const TRIGGER_LABELS: Record<Run["trigger"], string> = {
   scoreNow: "Score now",
   rescore: "Rescore",
   merge: "Merge",
+  start: "Start",
 };
 
 export const STEP_OUTCOME_LABELS: Record<RunStep["outcome"], string> = {
@@ -71,6 +72,26 @@ export function lineHref(projectRef: ProjectRef, run: Pick<Run, "line" | "sha">)
   if (task !== null) return buildPath({ view: "task", ...projectRef, task: taskRef(task) });
   if (run.sha === null) return buildPath({ view: "commits", ...projectRef, ref: run.line });
   return buildPath({ view: "commit", ...projectRef, sha: run.sha });
+}
+
+/** What starting a run waiting for the owner means: the head it runs, the attempt that's on, and the secrets it holds. */
+export type Waiting = NonNullable<Run["waiting"]>;
+
+/** Where a waiting run's diff is: the commit it would run, looked up in the attempt it's on. */
+export function waitingHref(projectRef: ProjectRef, waiting: Waiting): string {
+  const attempt = waiting.attempt === null ? {} : { attempt: waiting.attempt };
+  return buildPath({ view: "commit", ...projectRef, sha: waiting.head, ...attempt });
+}
+
+/**
+ * The task a run belongs to (`t42`): its line's, or for a merge request's landing its source
+ * attempt's; null for any other `main` run.
+ */
+export function runTask(run: Pick<Run, "line" | "waiting">): string | null {
+  const attempt = parseAttemptRef(run.waiting?.attempt ?? run.line);
+  if (attempt !== null) return taskRef(attempt.task);
+  const task = parseTaskRef(run.line);
+  return task === null ? null : taskRef(task);
 }
 
 /** A run's head as the runs pages show it: short, or a dash for a landing that hasn't landed. */

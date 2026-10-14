@@ -413,6 +413,16 @@ export async function cancelRun(projectRef: ProjectRef, run: number) {
 }
 
 /**
+ * Starts a run waiting for the owner at `sha`, the head they reviewed; only the owner acting as
+ * themselves may. Rejects with hono's `DetailedError` on failure, such as a line that moved on.
+ */
+export async function startRun(projectRef: ProjectRef, run: number, sha: string) {
+  return parseResponse(
+    projectApi.runs[":runId"].start.$post({ param: { ...projectRef, runId: String(run) }, json: { sha } }),
+  );
+}
+
+/**
  * One step's log of a run, streamed: the text read so far, growing as chunks arrive. A stored log
  * never changes, so it's never refetched.
  */

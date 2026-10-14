@@ -32,6 +32,9 @@
 // own container started from the setup's snapshot, one waits for the other with `after`, and each
 // gets the run's THRONG_* variables), secrets (the owner sets a secret allowed in default; a check naming it in a run
 // of the owner's push writes a hash of it, and the stored log shows the mask, never the value; nothing deploys),
+// waiting (a second user's attempt naming a `default` secret waits for the owner and holds no slot; Start with a
+// stale sha, the owner's token under an alias and the second user's are refused; the owner's Start runs it with
+// the secret; through `/api`),
 // caches (an attempt lands; the trusted `main` run of it saves a cache, which the next attempt's run restores,
 // a hit in its setup's notes, and saves nothing; through `/api`),
 // pipeline (two setups and three checks, one waiting for the others with `after` in a group `main`
@@ -158,6 +161,13 @@ interface ListedRun {
   gate: "passed" | "failed" | null;
 }
 
+/** A run as the runs routes give it while it may wait for the owner, as far as the scenarios read it. */
+interface WaitingRun extends ListedRun {
+  trusted: boolean;
+  startedAt: string | null;
+  waiting: { head: string; attempt: string | null; secrets: string[] } | null;
+}
+
 /** A run's outcome as `GET …/runs/{runId}` gives it, as far as the scenarios read it. */
 interface RunOutcome {
   outcome: {
@@ -282,7 +292,7 @@ interface MyListings {
 }
 
 interface ScoringStatus {
-  status: "none" | "queued" | "running" | "done" | "errored";
+  status: "none" | "queued" | "waiting" | "running" | "done" | "errored";
   sha: string | null;
   /** The current result, with the run it came from. */
   result?: ApiResult & { run: number };
@@ -302,6 +312,7 @@ const scenarios: Record<string, () => Promise<void>> = {
   preview,
   coalesce,
   secrets,
+  waiting,
   caches,
   pipeline,
   intrusion,
@@ -1208,6 +1219,75 @@ console.log("base64 " + Buffer.from(value).toString("base64"));
 }
 
 /**
+ * A second user's attempt runs a check naming a secret allowed in `default`: its run is untrusted, so it
+ * waits for the owner and holds no slot. Start with a stale sha is refused, as is the owner's token
+ * under an alias and the second user's; the owner's Start at the run's head runs it with the secret,
+ * and the check prints a hash of it.
+ */
+async function waiting(): Promise<void> {
+  const timeline = new Timeline();
+  const value = `e2e-secret-${randomBytes(12).toString("hex")}`;
+  const hash = createHash("sha256").update(value).digest("hex");
+  const p = await setUpRealProject(timeline, {
+    "scripts/secret.js": `import { createHash } from "node:crypto";
+console.log("sha256 " + createHash("sha256").update(process.env.E2E_SECRET ?? "").digest("hex"));
+`,
+    ".throng/config.yml": `checks:
+  - { name: secret, command: node scripts/secret.js, secrets: [E2E_SECRET] }
+`,
+  });
+  await throng(p, "PUT", "/secrets/E2E_SECRET", { value, pipelines: ["default"] });
+  timeline.mark("secret set");
+  const [reviewer, alias] = await Promise.all([e2eReviewerToken(), e2eAgentToken("claude")]);
+  const theirs: RealProject = { ...p, token: reviewer.token };
+  const aliased: RealProject = { ...p, token: alias.token };
+
+  // The second user's attempt, pushed and opened by them: their code, which no owner pushed.
+  const [t1, a1] = ["t1", "t1a1"];
+  await createTask(p, t1, "Someone else's change");
+  await createAttempts(theirs, t1, [a1], timeline);
+  const head = await editAndPush(theirs, a1, "src/greeting.js", (s) => s.replace('"hello"', '"hello, a1"'), "a1");
+  await throng(theirs, "POST", `/attempts/${a1}/open`);
+  const held = await poll(`${a1}'s run waiting for the owner`, async () => {
+    const { runs } = await throng<{ runs: WaitingRun[] }>(p, "GET", `/runs?line=${a1}&status=waiting`);
+    return runs.find((r) => r.sha === head) ?? null;
+  });
+  timeline.mark(`run ${held.id} waiting`);
+  assert(
+    !held.trusted &&
+      held.startedAt === null &&
+      held.waiting?.head === head &&
+      held.waiting.secrets.includes("E2E_SECRET"),
+    `expected an untrusted run waiting on ${head} for E2E_SECRET, holding no slot: ${JSON.stringify(held)}`,
+  );
+  const { runs: running } = await throng<{ runs: ListedRun[] }>(p, "GET", "/runs?status=running");
+  assert(!running.some((r) => r.id === held.id), "expected the waiting run to hold no slot");
+
+  const start = (as: RealProject, sha: string) =>
+    throng<WaitingRun>(as, "POST", `/runs/${held.id}/start`, { sha }).then(
+      () => 200,
+      (error: unknown) => (error instanceof HttpError ? error.status : Promise.reject(error)),
+    );
+  const stale = await start(p, "0".repeat(40));
+  assert(stale === 409, `expected Start with a stale sha to be refused, got ${stale}`);
+  const underAlias = await start(aliased, head);
+  assert(underAlias === 403, `expected the owner's token under an alias to be refused, got ${underAlias}`);
+  const notOwner = await start(theirs, head);
+  assert(notOwner === 403, `expected the second user to be refused, got ${notOwner}`);
+  timeline.mark("refused: a stale sha, an alias, another user");
+
+  const started = await throng<WaitingRun>(p, "POST", `/runs/${held.id}/start`, { sha: head });
+  assert(started.trusted && started.trigger === "start", `expected a trusted started run: ${JSON.stringify(started)}`);
+  timeline.mark(`owner started run ${held.id}`);
+  const result = await scoredHead(p, a1, head);
+  assert(result.result.run === held.id, `expected run ${held.id} to score ${a1}, got run ${result.result.run}`);
+  assert(result.result.gate === "passed", `expected the started run to pass: ${JSON.stringify(result.result.checks)}`);
+  const log = await throngText(p, `/runs/${held.id}/logs/secret`, "text/plain");
+  assert(log.includes(`sha256 ${hash}`), `expected the started run's check to have held the secret:\n${log}`);
+  await finish(p.project, p.work, timeline);
+}
+
+/**
  * A trusted `main` run saves a cache; the next attempt's run restores it and saves nothing. The
  * cache's setup writes a stamp into the cache's path only when it's missing, and a check prints it,
  * so the attempt's check shows the stamp `main`'s run wrote.
@@ -1770,6 +1850,13 @@ function e2eAgentToken(alias: string, as?: "reviewer"): Promise<MintedToken> {
   const query = new URLSearchParams({ alias, ...(as === undefined ? {} : { as }) });
   // A repeat mints a second token, which expires unused with the e2e tokens' TTL.
   const minted = api<MintedToken>("POST", `/e2e/token?${query}`, { retry: true });
+  e2eAgentTokens.push(minted);
+  return minted;
+}
+
+/** Mints a Throng token for the reviewer acting as themselves: a second user, who isn't the projects' owner. */
+function e2eReviewerToken(): Promise<MintedToken> {
+  const minted = api<MintedToken>("POST", "/e2e/token?as=reviewer", { retry: true });
   e2eAgentTokens.push(minted);
   return minted;
 }

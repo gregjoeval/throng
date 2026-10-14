@@ -68,10 +68,11 @@ Both are read from the origin's \`main\`, never from your attempt: a change to e
 4. \`update_attempt\` with \`state: open\`: the attempt is ready to be scored and selected. While it is a draft,
    \`score_now\` scores its head on demand.
 5. \`wait_for_attempt\` with \`until: scored\` holds for up to ${DEFAULT_WAIT_SECONDS} seconds (\`wait\`, at most
-   ${MAX_WAIT_SECONDS}) until the head has a \`done\` or \`errored\` run, and answers at once if it already has one.
-   Call it again while \`changed\` is false. Each user may have ${MAX_WAITERS_PER_USER} waits at a time per project;
-   past that, a wait returns at once with \`changed: false\`. Waits are held in memory, so a deploy of Throng drops
-   the ones in flight: each answers \`changed: false\` early, and you wait again. \`until\` also takes \`stateChanged\`,
+   ${MAX_WAIT_SECONDS}) until the head has a \`done\` or \`errored\` run, or one \`waiting\` for the project owner
+   (tell your human: only they can start it), and answers at once if it already has one. Call it again while
+   \`changed\` is false. Each user may have ${MAX_WAITERS_PER_USER} waits at a time per project; past that, a wait
+   returns at once with \`changed: false\`. Waits are held in memory, so a deploy of Throng drops the ones in
+   flight: each answers \`changed: false\` early, and you wait again. \`until\` also takes \`stateChanged\`,
    \`mergeRequestChanged\` and \`any\`.
 6. \`get_attempt\` gives the scoring status and the current result: the gate, each check and the metrics. For a
    failing check, \`get_log\` with the run id and the step (the check's name) returns the log's last
@@ -108,7 +109,9 @@ Every push runs a pipeline on its line: an attempt (\`t42a3\`), a task's task br
 (setups, checks, post-gate steps), each with its outcome, duration, notes and the \`log\` to pass to \`get_log\`
 as \`step\`, and the run's metrics. \`wait_for_run\` holds like \`wait_for_attempt\` until the run is done or
 \`waiting\`, and answers at once if it already is. A \`waiting\` run needs the project owner to start it: tell your
-human, since no tool can. Only the owner can cancel a run, through the UI or REST API.
+human, since no tool can. A merge request no owner approved waits the same way when \`main\`'s pipeline names a
+secret: its landing, a \`main\` run, is \`waiting\` until the owner starts it, and only then joins the merge queue.
+Only the owner can cancel a run, through the UI or REST API.
 
 ## The Sandbox
 

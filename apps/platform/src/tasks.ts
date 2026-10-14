@@ -22,7 +22,7 @@ import { secretUses } from "./secrets.ts";
 import type { SecretChange, SecretSummary, SecretUse } from "./secrets.ts";
 import { NO_TASK_DEFINITIONS, taskDefinitionsFrom, withTask } from "./task-definitions.ts";
 import type { TaskDefinitions, TaskDefinitionsInput } from "./task-definitions.ts";
-import { attemptRef, parseAttemptRef, parseTaskRef, taskRef } from "./task-refs.ts";
+import { attemptRef, isAttemptRef, parseAttemptRef, parseTaskRef, taskRef } from "./task-refs.ts";
 import type {
   AttemptInput,
   AttemptMergeRequest,
@@ -249,6 +249,11 @@ export interface Run {
   gate: Gate | null;
   /** Whether the project owner may cancel it now. */
   cancellable: boolean;
+  /**
+   * While it waits for the owner: the head Start names, the attempt that head is on (null for a task
+   * branch's), and the secrets it would hold once started. Null otherwise.
+   */
+  waiting: { head: string; attempt: string | null; secrets: string[] } | null;
 }
 
 /** A run with how it ended: its outcome (and the slice scoring reads) once `done`, its error once `errored`. */
@@ -636,6 +641,12 @@ export function taskService({ db, repos, backend, origin }: TaskServiceDeps) {
       return runDetail(run, await handles(db, [run.user_id]));
     },
 
+    /** Starts a run waiting for the owner at the head `sha` they reviewed. Only the owner acting as themselves may. */
+    async startRun(actor: Actor, input: ProjectPath & { run: number; sha: string }): Promise<RunDetail> {
+      const run = await invoke("startRun", await project(input), actor, { run: input.run, sha: input.sha });
+      return runDetail(run, await handles(db, [run.user_id]));
+    },
+
     /**
      * Hands an active attempt to the user with handle `to`, who becomes its author. Only its
      * author (or their aliases) may. An unknown handle is `notFound`; handing it to its own author
@@ -958,7 +969,17 @@ function publicRun(run: StoredRun, users: Map<string, string>): Run {
     superseded: run.superseded,
     gate: run.outcome?.gate ?? null,
     cancellable: cancellable(run),
+    waiting: waitingFor(run),
   };
+}
+
+/** What starting a run waiting for the owner means: the head it runs, the attempt that's on, and the secrets it holds. */
+function waitingFor(run: StoredRun): Run["waiting"] {
+  if (run.status !== "waiting") return null;
+  const head = run.sha ?? run.merge_head;
+  if (head === null) return null;
+  const attempt = isAttemptRef(run.line) ? run.line : run.merge_attempt;
+  return { head, attempt, secrets: run.secrets ?? [] };
 }
 
 function runDetail(run: StoredRun, users: Map<string, string>): RunDetail {

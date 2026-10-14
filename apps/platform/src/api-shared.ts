@@ -246,8 +246,8 @@ export const WaitQuerySchema = z.object({
     .default("any")
     .openapi({
       description:
-        "What to wait for, with `wait`: `scored`, the current head has a `done` or `errored` run (at once if it " +
-        "already has one); " +
+        "What to wait for, with `wait`: `scored`, the current head has a `done` or `errored` run, or one waiting for " +
+        "the project owner to start it (at once if it already has one); " +
         "`stateChanged`, the attempt's state; `mergeRequestChanged`, its merge request's state or last dequeue; " +
         "`any`, any of them.",
     }),
@@ -297,6 +297,19 @@ export const PageSchema = {
 };
 
 /** `GET …/runs`' filters and cursor; `list_runs` takes the same. */
+/** Who may grant a secret or start a waiting run: a 403's description on those routes. */
+export const OWNER_AS_THEMSELVES = "Only the project owner, acting as themselves (never under an alias), may.";
+
+export const StartRunSchema = z
+  .object({
+    sha: z.string().min(1).openapi({
+      description:
+        "The head you reviewed, as the run's `waiting.head` gives it. If the run no longer waits on it, nothing starts.",
+      example: "3f2a9c1e8b7d6f5a4c3b2a1908f7e6d5c4b3a291",
+    }),
+  })
+  .openapi("StartRun");
+
 export const RunsQuerySchema = z.object({
   line: z
     .string()

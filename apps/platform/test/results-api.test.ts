@@ -483,6 +483,7 @@ describe("scoring runs", () => {
       superseded: true,
       gate: "passed",
       cancellable: false,
+      waiting: null,
       error: null,
       outcome: expect.objectContaining({ gate: "passed" }),
       result: result(),

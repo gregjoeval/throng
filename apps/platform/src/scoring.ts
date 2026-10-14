@@ -15,6 +15,11 @@
 // no newer head replaces it. The task store queues one for the front of the merge queue, and cancels
 // it when its merge request leaves the queue, only until `land` claims its push.
 //
+// A run of code that isn't the owner's that names a secret waits for the owner (`wait`), holding no
+// slot, until they start it (`start`), which queues it again, trusted. A merge request no owner
+// approved whose `main` names one has its landing held the same way (`holdLanding`) before it joins
+// the queue; once started, that landing waits in the queue until its merge request is at the front.
+//
 // It also tracks each line's head, moved by every push and scoring request, so a result for an
 // older head is superseded and the attempt's `scoring` status is about its current head.
 //
@@ -37,8 +42,11 @@ import type { Actor } from "./tokens.ts";
 /** Most Sandbox-holding runs (pipeline runs, landings included, and follows) one project may have running at once. */
 export const SCORING_CAP = 3;
 
-/** What asked for a run: an attempt opened, a push, Score now, a rescore, or a merge request's landing (`merge`). */
-export const SCORING_TRIGGERS = ["open", "push", "scoreNow", "rescore", "merge"] as const;
+/**
+ * What asked for a run: an attempt opened, a push, Score now, a rescore, a merge request's landing
+ * (`merge`), or the owner starting a run that waited for them (`start`).
+ */
+export const SCORING_TRIGGERS = ["open", "push", "scoreNow", "rescore", "merge", "start"] as const;
 /** A run is `waiting` while it needs the owner to start it, and holds no slot meanwhile. */
 export const RUN_STATUSES = ["queued", "waiting", "running", "done", "cancelled", "errored"] as const;
 export type ScoringTrigger = (typeof SCORING_TRIGGERS)[number];
@@ -115,6 +123,16 @@ export interface LandingRunParams extends Omit<PipelineParams, "sha"> {
  * it's refused before anything runs, saying why.
  */
 export type PlanVerdict = { kind: "start" } | { kind: "waiting" } | { kind: "refused"; error: string };
+
+/** What a landing is asked for with: its merge request, the head it merges from which attempt, and who approved it. */
+export interface LandingRequest {
+  project: string;
+  mergeRequest: number;
+  head: string;
+  /** The source attempt the head is on: `t42a3`. */
+  attempt: string;
+  approver: { user: string; alias: string | null };
+}
 
 /** What a run's Workflow reports when it ends: its outcome, or the error that ended it. */
 export type RunReport = { status: "done"; outcome: RunOutcome } | { status: "errored"; error: string };
@@ -200,11 +218,25 @@ export interface StoredRun {
   legacy_logs: boolean;
   /** For a landing: whether its `land` step claimed the push to `main`, after which nothing cancels it. */
   land_claimed: boolean;
+  /** The secrets it named when it began to wait for the owner, which it holds once started; null if it never waited. */
+  secrets: string[] | null;
+  /** For a landing: the approved head it merges, and the attempt that head is on; null for a landing from before. */
+  merge_head: string | null;
+  merge_attempt: string | null;
 }
 
 interface RunRow extends Omit<
   StoredRun,
-  "pipeline" | "trigger" | "status" | "trusted" | "outcome" | "result" | "superseded" | "legacy_logs" | "land_claimed"
+  | "pipeline"
+  | "trigger"
+  | "status"
+  | "trusted"
+  | "outcome"
+  | "result"
+  | "superseded"
+  | "legacy_logs"
+  | "land_claimed"
+  | "secrets"
 > {
   pipeline: string;
   trigger: string;
@@ -214,6 +246,7 @@ interface RunRow extends Omit<
   superseded: number;
   legacy_logs: number;
   land_claimed: number;
+  secrets: string | null;
   torn_down: number;
   /** The containers the run's plan named (JSON), once its Workflow planned them. */
   containers: string | null;
@@ -276,7 +309,14 @@ const SCHEMA = [
 )`,
 ];
 /** Columns `pipeline_runs` gained after its first version, which a table that old lacks. */
-const PIPELINE_RUN_COLUMNS = ["containers TEXT", "land_claimed INTEGER NOT NULL DEFAULT 0", "legacy_landing INTEGER"];
+const PIPELINE_RUN_COLUMNS = [
+  "containers TEXT",
+  "land_claimed INTEGER NOT NULL DEFAULT 0",
+  "legacy_landing INTEGER",
+  "secrets TEXT",
+  "merge_head TEXT",
+  "merge_attempt TEXT",
+];
 /** Columns `pipeline_heads` gained after its first version: whether the owner pushed the head. */
 const PIPELINE_HEAD_COLUMNS = ["owners_push INTEGER NOT NULL DEFAULT 0"];
 /** Columns `scoring_runs` gained after its first version, which a table that old lacks. */
@@ -324,6 +364,11 @@ export interface ScoringQueueDeps {
   reserved?: () => number;
   /** What a landing's Workflow is told of the merge it lands; the task store knows. */
   landing?: ((run: StoredRun) => LandingParams) | null;
+  /**
+   * Whether a queued run may start now: a landing only once its merge request is at the front of the
+   * merge queue, landing. The task store knows; every run may when no one says.
+   */
+  ready?: (run: StoredRun) => boolean;
 }
 
 /** One project's pipeline runs, and the queue that starts them. */
@@ -333,13 +378,22 @@ export class ScoringQueue {
   readonly #now: () => Date;
   readonly #reserved: () => number;
   readonly #landing: ((run: StoredRun) => LandingParams) | null;
+  readonly #ready: (run: StoredRun) => boolean;
 
-  constructor({ sql, runner = null, now = () => new Date(), reserved = () => 0, landing = null }: ScoringQueueDeps) {
+  constructor({
+    sql,
+    runner = null,
+    now = () => new Date(),
+    reserved = () => 0,
+    landing = null,
+    ready = () => true,
+  }: ScoringQueueDeps) {
     this.#sql = sql;
     this.#runner = runner;
     this.#now = now;
     this.#reserved = reserved;
     this.#landing = landing;
+    this.#ready = ready;
     for (const statement of SCHEMA) sql.exec(statement);
     addColumns(sql, "pipeline_runs", PIPELINE_RUN_COLUMNS);
     addColumns(sql, "pipeline_heads", PIPELINE_HEAD_COLUMNS);
@@ -401,6 +455,19 @@ export class ScoringQueue {
     const [row] = this.#sql.exec<{ id: number }>(
       `SELECT r.id FROM pipeline_runs r JOIN pipeline_heads h ON h.line = r.line AND h.sha = r.sha
        WHERE r.line = ? AND r.status IN ('done', 'errored') ORDER BY r.id DESC LIMIT 1`,
+      line,
+    );
+    return row?.id ?? null;
+  }
+
+  /**
+   * The newest run of the line's current head that rests until someone acts: `done`, `errored`, or
+   * waiting for the owner; null when that head has none. What a wait for `scored` watches.
+   */
+  settledRun(line: string): number | null {
+    const [row] = this.#sql.exec<{ id: number }>(
+      `SELECT r.id FROM pipeline_runs r JOIN pipeline_heads h ON h.line = r.line AND h.sha = r.sha
+       WHERE r.line = ? AND r.status IN ('done', 'errored', 'waiting') ORDER BY r.id DESC LIMIT 1`,
       line,
     );
     return row?.id ?? null;
@@ -479,33 +546,78 @@ export class ScoringQueue {
   }
 
   /**
-   * Queues a landing of merge request `mergeRequest`: a `main` run with no head until it lands, asked
-   * for by whoever approved it, and trusted when the project owner did.
+   * Queues a landing of merge request `mergeRequest`, which merges `head` from `attempt`: a `main` run
+   * with no head until it lands, asked for by whoever approved it, and trusted when the project
+   * owner did.
    */
-  requestLanding(input: {
-    project: string;
-    mergeRequest: number;
-    approver: { user: string; alias: string | null };
-    trusted: boolean;
-  }): StoredRun {
+  requestLanding(input: LandingRequest & { trusted: boolean }): StoredRun {
+    const run = this.#insertLanding(input, input.trusted ? "trusted" : "untrusted");
+    this.#journal("scoringQueued", run, { trigger: "merge" });
+    return run;
+  }
+
+  /**
+   * Holds the landing of merge request `mergeRequest`, which no owner approved and whose `main` run
+   * names `secrets`, for the owner: a landing `waiting` until they start it, before its merge request
+   * joins the queue. It holds no slot, and has no Workflow until it starts.
+   */
+  holdLanding(input: LandingRequest & { secrets: readonly string[] }): StoredRun {
+    const run = this.#insertLanding(input, "waiting");
+    this.#sql.exec("UPDATE pipeline_runs SET secrets = ? WHERE id = ?", JSON.stringify(input.secrets), run.id);
+    this.#journal("scoringWaiting", run, { mergeRequest: input.mergeRequest, secrets: input.secrets });
+    return { ...run, secrets: [...input.secrets] };
+  }
+
+  /** The landings waiting for the owner, oldest first. */
+  heldLandings(): StoredRun[] {
+    return this.#sql
+      .exec<RunRow>("SELECT * FROM pipeline_runs WHERE merge_request IS NOT NULL AND status = 'waiting' ORDER BY id")
+      .map(toRun);
+  }
+
+  #insertLanding(input: LandingRequest, as: "trusted" | "untrusted" | "waiting"): StoredRun {
     const [row] = this.#sql.exec<RunRow>(
       `INSERT INTO pipeline_runs
-         (project, line, sha, pipeline, trigger, merge_request, user_id, alias, trusted, status, instance_id, created_at)
-       VALUES (?, ?, NULL, 'main', 'merge', ?, ?, ?, ?, 'queued', '', ?) RETURNING *`,
+         (project, line, sha, pipeline, trigger, merge_request, merge_head, merge_attempt, user_id, alias, trusted,
+          status, instance_id, created_at)
+       VALUES (?, ?, NULL, 'main', 'merge', ?, ?, ?, ?, ?, ?, ?, '', ?) RETURNING *`,
       input.project,
       MAIN_LINE,
       input.mergeRequest,
+      input.head,
+      input.attempt,
       input.approver.user,
       input.approver.alias,
-      input.trusted ? 1 : 0,
+      as === "trusted" ? 1 : 0,
+      as === "waiting" ? "waiting" : "queued",
       this.#ms(),
     );
     if (row === undefined) throw new Error("pipeline run insert returned no row");
     const instanceId = `${input.project}-${MAIN_LINE}-landing-${row.id}`;
     this.#sql.exec("UPDATE pipeline_runs SET instance_id = ? WHERE id = ?", instanceId, row.id);
-    const run = toRun({ ...row, instance_id: instanceId });
-    this.#journal("scoringQueued", run, { trigger: "merge" });
-    return run;
+    return toRun({ ...row, instance_id: instanceId });
+  }
+
+  /**
+   * Starts a run that waits for the owner, as `owner` asked: it is queued again, trusted, triggered
+   * by them (`start`). A run other than a landing gets a new Workflow instance, as its first one
+   * ended when it began to wait; a held landing has had none, and keeps its id.
+   */
+  start(run: StoredRun, owner: Actor): StoredRun {
+    const instanceId = run.merge_request === null ? `${run.instance_id}-started` : run.instance_id;
+    const [row] = this.#sql.exec<RunRow>(
+      `UPDATE pipeline_runs SET status = 'queued', trusted = 1, trigger = 'start', user_id = ?, alias = ?,
+         instance_id = ?, started_at = NULL, torn_down = 0, containers = NULL
+       WHERE id = ? AND status = 'waiting' RETURNING *`,
+      owner.user.id,
+      owner.alias,
+      instanceId,
+      run.id,
+    );
+    if (row === undefined) throw new Error(`run ${run.id} isn't waiting`);
+    const started = toRun(row);
+    this.#journal("scoringQueued", started, { trigger: "start" });
+    return started;
   }
 
   /** The landings still queued or running, oldest first. */
@@ -569,15 +681,17 @@ export class ScoringQueue {
     return n;
   }
 
-  /** Whether a `main` run would start at the next drain: one is queued, and none is running. */
+  /** Whether a `main` run would start at the next drain: one is queued and ready, and none is running. */
   mainStartable(): boolean {
-    const [row] = this.#sql.exec<{ n: number }>(
-      `SELECT COUNT(*) AS n FROM pipeline_runs q WHERE line = ? AND status = 'queued' AND NOT EXISTS (
-         SELECT 1 FROM pipeline_runs r WHERE r.line = q.line AND r.status = 'running'
-       )`,
-      MAIN_LINE,
-    );
-    return (row?.n ?? 0) > 0;
+    return this.#sql
+      .exec<RunRow>(
+        `SELECT * FROM pipeline_runs q WHERE line = ? AND status = 'queued' AND NOT EXISTS (
+           SELECT 1 FROM pipeline_runs r WHERE r.line = q.line AND r.status = 'running'
+         )`,
+        MAIN_LINE,
+      )
+      .map(toRun)
+      .some((run) => this.#ready(run));
   }
 
   /** The newest run id on the line, or 0; what a request's `readSince` compares against. */
@@ -608,7 +722,7 @@ export class ScoringQueue {
     const starting = this.#sql.transaction(() => {
       const free = SCORING_CAP - this.running() - this.#reserved();
       if (free <= 0) return [];
-      // One run per line: its oldest queued one, when none is running there.
+      // One run per line: its oldest queued one that is ready, when none is running there.
       const lines = new Set<string>();
       const rows = this.#sql
         .exec<RunRow>(
@@ -618,7 +732,7 @@ export class ScoringQueue {
           MAIN_LINE,
         )
         .map(toRun)
-        .filter((run) => !lines.has(run.line) && Boolean(lines.add(run.line)))
+        .filter((run) => this.#ready(run) && !lines.has(run.line) && Boolean(lines.add(run.line)))
         .slice(0, free);
       for (const run of rows) {
         this.#sql.exec("UPDATE pipeline_runs SET status = 'running', started_at = ? WHERE id = ?", this.#ms(), run.id);
@@ -649,7 +763,9 @@ export class ScoringQueue {
    */
   wait(run: StoredRun, secrets: readonly string[]): boolean {
     const [row] = this.#sql.exec<RunRow>(
-      "UPDATE pipeline_runs SET status = 'waiting', torn_down = 1 WHERE id = ? AND status = 'running' RETURNING *",
+      `UPDATE pipeline_runs SET status = 'waiting', torn_down = 1, secrets = ?
+       WHERE id = ? AND status = 'running' RETURNING *`,
+      JSON.stringify(secrets),
       run.id,
     );
     if (row !== undefined) this.#journal("scoringWaiting", run, { secrets });
@@ -816,6 +932,7 @@ function toRun(row: RunRow): StoredRun {
     superseded: row.superseded === 1,
     legacy_logs: row.legacy_logs === 1,
     land_claimed: row.land_claimed === 1,
+    secrets: row.secrets === null ? null : (JSON.parse(row.secrets) as string[]),
   };
 }
 

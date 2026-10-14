@@ -4,7 +4,7 @@
 
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import type { AccessBindings } from "./access.ts";
-import { json, ProjectPathSchema, requestTaskService } from "./api-shared.ts";
+import { json, OWNER_AS_THEMSELVES, ProjectPathSchema, requestTaskService } from "./api-shared.ts";
 import type { AuthEnv, bearerOrForwarded } from "./auth.ts";
 import { errorBody, errorResponse } from "./errors.ts";
 import { PIPELINES } from "./pipelines.ts";
@@ -73,7 +73,6 @@ const SecretPathSchema = ProjectPathSchema.extend({
 });
 
 const security: Record<string, string[]>[] = [{ bearer: [] }, { web: [] }];
-const OWNER_AS_THEMSELVES = "Only the project owner, acting as themselves (never under an alias), may.";
 const unauthorized = errorResponse("No valid bearer token.");
 
 export function secretsRoutes({ auth, repos, tasks }: SecretsOptions) {

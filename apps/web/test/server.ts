@@ -222,6 +222,7 @@ export function runDetail(id: number, sha: string, fields: Partial<RunWithOutcom
     superseded: false,
     gate: "passed",
     cancellable: false,
+    waiting: null,
     error: null,
     outcome: { base, config, gate, metrics, steps: [step("test")] },
     result: { base, config, gate, checks: [check("test", "passed")], metrics, logs: ["test"] },

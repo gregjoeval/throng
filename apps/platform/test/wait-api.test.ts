@@ -209,6 +209,29 @@ describe("waiting on an attempt", () => {
     expect((await errored.answer).body).toMatchObject({ scoring: { status: "errored", sha: next }, changed: true });
   });
 
+  it("answers scored once the current head's run waits for the owner, and at once while it does", async () => {
+    const { call, ada, greg, base, wait, push, store, projectId } = await setup();
+    const owner = (await call("GET", "/me", greg)).body as { user: User; alias: null };
+    await store(projectId).putSecret({ id: projectId, owner: owner.user.id }, owner, {
+      name: "DEPLOY",
+      value: "deploy-token-0123",
+      pipelines: ["default"],
+    });
+    await call("POST", `${base}/attempts/t1a1/open`, ada);
+    const { answer, answered } = await wait(1, "wait=30&until=scored");
+    const head = await push(1, "one\n");
+    await store(projectId).scoring.drain();
+    await settle();
+    expect(answered()).toBeFalsy();
+    const run = at(store(projectId).scoring.listRuns("t1a1"), -1);
+    expect(store(projectId).pipelinePlanned(run.id, [], [{ step: "check deploy", secrets: ["DEPLOY"] }])).toEqual({
+      kind: "waiting",
+    });
+    expect((await answer).body).toMatchObject({ scoring: { status: "waiting", sha: head }, changed: true });
+    const again = await call("GET", `${base}/attempts/t1a1?wait=30&until=scored`, ada);
+    expect(again.body).toMatchObject({ scoring: { status: "waiting", sha: head }, changed: true });
+  });
+
   it("answers scored at once when the current head already has a done or errored run", async () => {
     const { call, ada, base, push, finish } = await setup();
     await call("POST", `${base}/attempts/t1a1/open`, ada);

@@ -320,6 +320,167 @@ describe("starting a landing", () => {
   });
 });
 
+/** `main`'s config: a post-gate step of `main` that names PROD. */
+const PROD_CONFIG = "pipelines:\n  main:\n    steps:\n      - { name: deploy, command: ./deploy, secrets: [PROD] }\n";
+
+/** A project whose `main` names PROD, allowed in `main`. */
+async function prod() {
+  const t = setup();
+  t.repos.commit("abc123-main", { files: { ".throng/config.yml": PROD_CONFIG } });
+  await t.store.putSecret(PROJECT, owner, { name: "PROD", value: "prod-token-0123", pipelines: ["main"] });
+  return t;
+}
+
+describe("a landing held for the owner", () => {
+  it("holds a merge request no owner approved whose `main` names a secret, before it joins the queue", async () => {
+    const { store, drain, queued, mr, landing, workflow } = await prod();
+    // ada creates the task and selects her own attempt: the gap a task creator merging their own closes.
+    const t1 = await queued("Ada's", ada);
+    await drain();
+    expect(mr(t1.task)).toMatchObject({ state: "pending", position: null });
+    expect(landing()).toMatchObject({
+      line: "main",
+      sha: null,
+      trigger: "merge",
+      merge_request: mr(t1.task).id,
+      merge_head: mr(t1.task).approved_head,
+      merge_attempt: "t1a1",
+      status: "waiting",
+      trusted: false,
+      secrets: ["PROD"],
+      user_id: ada.user.id,
+    });
+    expect(workflow.created.filter((c) => c.params.line === "main")).toEqual([]);
+    expect(store.scoring.running()).toBe(0);
+    // Asking again holds it once.
+    await store.approveMergeRequest(PROJECT, ada, { task: t1.task });
+    expect(store.scoring.heldLandings()).toHaveLength(1);
+  });
+
+  it("queues at once one whose `main` names no secret, or one the owner approved", async () => {
+    const t = setup();
+    const t1 = await t.queued("Ada's", ada);
+    expect(t.mr(t1.task).state).toBe("queued");
+    const p = await prod();
+    const t2 = await p.queued("Owner's");
+    expect(p.mr(t2.task).state).toBe("queued");
+    expect(p.store.scoring.heldLandings()).toEqual([]);
+  });
+
+  it("holds one once its head's run passes, when it was selected before", async () => {
+    const { store, drain, attempt, mr, landing, mainRuns } = await prod();
+    const ref = await attempt("Ada's", ada);
+    await store.selectAttempt(PROJECT, ada, ref);
+    await drain();
+    expect(mainRuns()).toEqual([]);
+    const run = at(store.scoring.listRuns("t1a1"), -1);
+    const passing = {
+      status: "done" as const,
+      outcome: landingOutcome({ ...failedGate, gate: "passed", steps: [] }, null),
+    };
+    expect(await store.pipelineReported(run.id, passing)).toBeTruthy();
+    expect(mr(ref.task).state).toBe("pending");
+    expect(landing()).toMatchObject({ status: "waiting", secrets: ["PROD"] });
+  });
+
+  it("starts for the owner: it joins the queue, and lands as a trusted run", async () => {
+    const { store, drain, queued, mr, landing, workflow, land } = await prod();
+    const t1 = await queued("Ada's", ada);
+    const held = landing();
+    const started = await store.startRun(PROJECT, owner, { run: held.id, sha: mr(t1.task).approved_head });
+    expect(started).toMatchObject({
+      id: held.id,
+      status: "queued",
+      trusted: true,
+      trigger: "start",
+      user_id: owner.user.id,
+    });
+    expect(mr(t1.task).state).toBe("queued");
+    await drain();
+    expect(mr(t1.task).state).toBe("landing");
+    expect(landing()).toMatchObject({ id: held.id, status: "running", trusted: true });
+    expect(workflow.created.at(-1)).toMatchObject({
+      id: held.instance_id,
+      params: { line: "main", sha: null, run: held.id, landing: { approver: { user: ada.user.id, alias: null } } },
+    });
+    expect(store.pipelinePlanned(held.id, [], [{ step: "step deploy", secrets: ["PROD"], pipeline: "main" }])).toEqual({
+      kind: "start",
+    });
+    await land();
+    expect(mr(t1.task).state).toBe("merged");
+  });
+
+  it("waits its turn behind the landing under way once started, holding no slot", async () => {
+    const { store, drain, queued, mr, landing, mainRuns, land } = await prod();
+    const t1 = await queued("Owner's");
+    await drain();
+    const t2 = await queued("Ada's", ada);
+    const held = landing();
+    expect(held).toMatchObject({ status: "waiting", merge_request: mr(t2.task).id });
+    await store.startRun(PROJECT, owner, { run: held.id, sha: mr(t2.task).approved_head });
+    await drain();
+    expect(mr(t2.task)).toMatchObject({ state: "queued", position: 2 });
+    expect(mainRuns().map((r) => [r.merge_request, r.status])).toEqual([
+      [mr(t1.task).id, "running"],
+      [mr(t2.task).id, "queued"],
+    ]);
+    expect(store.scoring.mainStartable()).toBeFalsy();
+
+    // `land` lands the running landing: the first, then the one the owner started.
+    const first = mainRuns()[0];
+    expect(store.claimLandingPush(defined(first).id)).toBeTruthy();
+    await store.pipelineLanded(defined(first).id, SHA);
+    await store.pipelineReported(defined(first).id, { status: "done", outcome: landedOutcome(SHA) });
+    await drain();
+    expect(mr(t2.task).state).toBe("landing");
+    expect(mainRuns().find((r) => r.id === held.id)).toMatchObject({ status: "running", trusted: true });
+    await land("d".repeat(40));
+    expect(mr(t2.task).state).toBe("merged");
+  });
+
+  it("refuses a head other than the approved one, anyone but the owner as themselves, and a stale approval", async () => {
+    const { store, drain, queued, mr, landing, push } = await prod();
+    const t1 = await queued("Ada's", ada);
+    const held = landing();
+    const sha = mr(t1.task).approved_head;
+    await expect(store.startRun(PROJECT, owner, { run: held.id, sha: "f".repeat(40) })).rejects.toThrow(
+      `run ${held.id} waits on ${sha}, not ${"f".repeat(40)}`,
+    );
+    await expect(store.startRun(PROJECT, ada, { run: held.id, sha })).rejects.toThrow(/only the project owner/u);
+    await expect(store.startRun(PROJECT, actor("owner001", "claude"), { run: held.id, sha })).rejects.toThrow(
+      /acting as themselves/u,
+    );
+
+    // A push to the source needs a new approval: the hold is let go.
+    push(t1);
+    await drain();
+    expect(mr(t1.task).state).toBe("needsReview");
+    expect(store.scoring.getRun(held.id)?.status).toBe("cancelled");
+    await expect(store.startRun(PROJECT, owner, { run: held.id, sha })).rejects.toThrow(/is cancelled/u);
+  });
+
+  it("lets go of the hold once `main` names no secret, on the next approval", async () => {
+    const { store, queued, mr, landing, repos } = await prod();
+    const t1 = await queued("Ada's", ada);
+    const held = landing();
+    repos.commit("abc123-main", { files: { ".throng/config.yml": "checks: []\n" } });
+    await store.approveMergeRequest(PROJECT, ada, { task: t1.task });
+    expect(mr(t1.task).state).toBe("queued");
+    expect(store.scoring.getRun(held.id)?.status).toBe("cancelled");
+  });
+
+  it("lets go of the hold when the owner approves it instead, which trusts it", async () => {
+    const { store, drain, queued, mr, landing } = await prod();
+    const t1 = await queued("Ada's", ada);
+    const held = landing();
+    await store.approveMergeRequest(PROJECT, owner, { task: t1.task });
+    expect(mr(t1.task).state).toBe("queued");
+    expect(store.scoring.getRun(held.id)?.status).toBe("cancelled");
+    await drain();
+    expect(landing()).toMatchObject({ status: "running", trusted: true, user_id: owner.user.id });
+  });
+});
+
 describe("a landing that lands", () => {
   it("merges its merge request once `land` pushes, its head the landed sha, before its post-gate steps end", async () => {
     const { store, drain, queued, mr, landing, journalKinds } = setup();

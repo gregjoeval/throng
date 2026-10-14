@@ -401,7 +401,8 @@ function mcpServer({ repos, tasks, logs, diffCache }: Deps, { actor, token, env,
     "wait_for_attempt",
     `Hold until what \`until\` watches on the attempt changes, or \`wait\` seconds (default ${DEFAULT_WAIT_SECONDS}, ` +
       `at most ${MAX_WAIT_SECONDS}) pass, then return the attempt and whether it changed. \`until: scored\` waits ` +
-      "for the current head to have a `done` or `errored` run, and answers at once if it already has one. " +
+      "for the current head to have a `done` or `errored` run, or one `waiting` for the project owner (tell your user: " +
+      "only they can start it), and answers at once if it already has one. " +
       "Call again while `changed` is false. A deploy drops waits in flight: they answer `changed: false`.",
     onAttempt.extend({
       wait: WaitSecondsSchema.default(DEFAULT_WAIT_SECONDS).describe(`Seconds to hold, 1 to ${MAX_WAIT_SECONDS}.`),

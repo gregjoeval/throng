@@ -11,6 +11,7 @@ import type { ScoringTrigger } from "../src/scoring.ts";
 import type { User } from "../src/users.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
+import { defined } from "./support/defined.ts";
 import type { Json } from "./support/json.ts";
 import { PASSED } from "./support/results.ts";
 import { testTaskBackends } from "./support/task-backend.ts";
@@ -43,9 +44,11 @@ async function setup() {
   const { backend, store, sql } = testTaskBackends(repos, now, runner);
   const api = apiRoutes({ verifierFor: () => verify, now, repos: () => repos, tasks: () => backend });
   const env = { DB: testDatabase(), ACCESS_TEAM_DOMAIN: "throng.cloudflareaccess.com", ACCESS_AUD: "aud" };
-  const call = async (method: string, path: string, bearer?: string) => {
+  const call = async (method: string, path: string, bearer?: string, body?: unknown) => {
     const headers: Record<string, string> = bearer === undefined ? {} : { Authorization: `Bearer ${bearer}` };
-    const res = await api.request(path, { method, headers }, env);
+    if (body !== undefined) headers["Content-Type"] = "application/json";
+    const init = { method, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) };
+    const res = await api.request(path, init, env);
     return { status: res.status, body: (await res.json()) as Json };
   };
   const tokenFor = async (email: string, alias?: string) => {
@@ -124,6 +127,7 @@ describe("GET /projects/{owner}/{project}/runs", () => {
       superseded: false,
       gate: "passed",
       cancellable: false,
+      waiting: null,
     });
   });
 
@@ -194,6 +198,68 @@ describe("GET /projects/{owner}/{project}/runs/{runId}", () => {
       result: null,
       cancellable: true,
     });
+  });
+});
+
+/** A run on `t1a1` waiting for the owner, naming DEPLOY; returns its id and head. */
+async function waitingRun(t: Awaited<ReturnType<typeof setup>>) {
+  const id = t.run("t1a1");
+  const sha = defined(t.queue().getRun(id)?.sha);
+  t.queue().moveHead("t1a1", sha, false);
+  await t.queue().drain();
+  expect(t.queue().wait(defined(t.queue().getRun(id)), ["DEPLOY"])).toBeTruthy();
+  return { id, sha };
+}
+
+describe("POST /projects/{owner}/{project}/runs/{runId}/start", () => {
+  it("lists a waiting run with the head Start names, its attempt and the secrets it would hold", async () => {
+    const t = await setup();
+    const { id, sha } = await waitingRun(t);
+    const res = await t.call("GET", `${t.base}/runs/${id}`, t.ada);
+    expect(res.body).toMatchObject({
+      status: "waiting",
+      cancellable: true,
+      waiting: { head: sha, attempt: "t1a1", secrets: ["DEPLOY"] },
+    });
+    const listed = await t.call("GET", `${t.base}/runs?status=waiting`, t.ada);
+    expect(listed.body["runs"][0]["waiting"]).toEqual({ head: sha, attempt: "t1a1", secrets: ["DEPLOY"] });
+  });
+
+  it("starts it for the owner at the head they name: queued again, trusted, triggered `start`", async () => {
+    const t = await setup();
+    const { id, sha } = await waitingRun(t);
+    const res = await t.call("POST", `${t.base}/runs/${id}/start`, t.greg, { sha });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      id,
+      sha,
+      status: "queued",
+      trusted: true,
+      trigger: "start",
+      requestedBy: { handle: "greg" },
+      alias: null,
+      waiting: null,
+    });
+  });
+
+  it("refuses another head, a run that isn't waiting, anyone but the owner, and the owner under an alias", async () => {
+    const t = await setup();
+    const { id, sha } = await waitingRun(t);
+    const stale = await t.call("POST", `${t.base}/runs/${id}/start`, t.greg, { sha: "f".repeat(40) });
+    expect(stale.status).toBe(409);
+    expect(stale.body["error"]["code"]).toBe("invalidState");
+    expect((await t.call("POST", `${t.base}/runs/${id}/start`, t.ada, { sha })).status).toBe(403);
+    const gregClaude = await t.tokenFor("greg@example.com", "claude");
+    const aliased = await t.call("POST", `${t.base}/runs/${id}/start`, gregClaude, { sha });
+    expect(aliased.status).toBe(403);
+    expect(aliased.body["error"]["message"]).toBe("only the project owner, acting as themselves, may");
+    expect((await t.call("POST", `${t.base}/runs/${id + 1}/start`, t.greg, { sha })).status).toBe(404);
+    expect((await t.call("POST", `${t.base}/runs/${id}/start`, t.greg, {})).status).toBe(400);
+    expect((await t.call("POST", `${t.base}/runs/${id}/start`, undefined, { sha })).status).toBe(401);
+    const queued = t.run("t2a1");
+    const notWaiting = await t.call("POST", `${t.base}/runs/${queued}/start`, t.greg, { sha });
+    expect(notWaiting.status).toBe(409);
+    expect((await t.call("GET", `${t.base}/runs/${id}`, t.greg)).body).toMatchObject({ status: "waiting" });
   });
 });
 

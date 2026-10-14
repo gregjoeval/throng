@@ -199,6 +199,10 @@ describe("/mcp", () => {
     const client = await connect(await tokenFor("greg@example.com"));
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name)).toEqual(TOOLS);
+    // Only the owner acting as themselves starts a waiting run, so no tool can.
+    expect(tools.map((t) => t.name).filter((name) => name.startsWith("start_") && name !== "start_attempts")).toEqual(
+      [],
+    );
     for (const tool of tools) expect(tool.description).toEqual(expect.any(String));
   });
 

@@ -9,11 +9,13 @@ import type { ReactNode } from "react";
 import { RunLog } from "@/components/run-log";
 import { ErrorState, Loading } from "@/components/states";
 import { Button } from "@/components/ui/button";
-import { cancelRun, meQuery, projectKey, projectQuery, runQuery } from "@/lib/api";
+import { StartRun } from "@/components/waiting-runs";
+import { cancelRun, projectKey, runQuery } from "@/lib/api";
 import type { ProjectRef, RunWithOutcome } from "@/lib/api";
 import { formatValue, linkTarget } from "@/lib/arena";
 import { shortSha } from "@/lib/commits";
 import { apiError } from "@/lib/errors";
+import { useIsOwner } from "@/lib/owner";
 import { buildPath } from "@/lib/paths";
 import {
   formatDuration,
@@ -55,6 +57,7 @@ function Header({ projectRef, run }: { projectRef: ProjectRef; run: RunWithOutco
     <header className="flex flex-col gap-3">
       <div className="flex flex-wrap items-center gap-3">
         <h2 className="font-heading text-lg font-medium">Run {run.id}</h2>
+        <StartRun projectRef={projectRef} run={run} />
         <Cancel projectRef={projectRef} run={run} />
       </div>
       <dl
@@ -83,6 +86,11 @@ function Header({ projectRef, run }: { projectRef: ProjectRef; run: RunWithOutco
         <Field label="Duration">{duration === null ? "—" : formatDuration(duration)}</Field>
         <Field label="Triggered by">{triggeredBy(run)}</Field>
         {run.superseded ? <Field label="Head moved">Superseded</Field> : null}
+        {run.waiting === null ? null : (
+          <Field label="Would hold">
+            {run.waiting.secrets.length === 0 ? "No secrets" : run.waiting.secrets.join(", ")}
+          </Field>
+        )}
       </dl>
       {run.error === null ? null : (
         <p role="alert" className="rounded-lg border border-destructive/40 px-3 py-2 text-sm text-destructive">
@@ -104,15 +112,13 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 
 /** The owner's Cancel, while the run can be cancelled. */
 function Cancel({ projectRef, run }: { projectRef: ProjectRef; run: RunWithOutcome }) {
-  const me = useQuery(meQuery);
-  const project = useQuery(projectQuery(projectRef));
+  const isOwner = useIsOwner(projectRef);
   const queryClient = useQueryClient();
   const cancel = useMutation({
     mutationFn: () => cancelRun(projectRef, run.id),
     // The run and every list it shows in change.
     onSuccess: () => queryClient.invalidateQueries({ queryKey: projectKey(projectRef) }),
   });
-  const isOwner = me.isSuccess && project.isSuccess && me.data.user.id === project.data.owner.id;
   if (!isOwner || !run.cancellable) return null;
   return (
     <>

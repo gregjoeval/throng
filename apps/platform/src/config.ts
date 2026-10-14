@@ -870,6 +870,17 @@ export function pipelineConfig(config: ConfigResult, pipeline: Pipeline): Config
 }
 
 /**
+ * The secrets a run of `pipeline` names under the project's `config` (see `namedSecrets`): those of
+ * its setups, the checks it runs and its post-gate steps. None for a config that isn't valid, which
+ * runs nothing.
+ */
+export function pipelineSecrets(config: ConfigResult, pipeline: Pipeline): NamedSecrets[] {
+  const runs = pipelineConfig(config, pipeline);
+  if (runs.kind !== "valid") return [];
+  return namedSecrets({ ...runs.config, steps: runs.config.pipelines[pipeline].steps });
+}
+
+/**
  * The selection policy a task is selected under: its own override, else its project config's. A
  * missing or invalid config leaves it to the task's creator.
  */

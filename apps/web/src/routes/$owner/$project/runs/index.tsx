@@ -3,6 +3,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 import { ProjectView } from "@/components/project-view";
 import { EmptyState, ErrorState, Loading } from "@/components/states";
+import { WaitingForYou } from "@/components/waiting-runs";
 import { runsQuery } from "@/lib/api";
 import type { ProjectRef, Run } from "@/lib/api";
 import { buildPath, runsSearch } from "@/lib/paths";
@@ -32,7 +33,10 @@ const STATUS_FILTERS = [
   ...Object.entries(RUN_STATUS_LABELS).map(([value, label]) => ({ value, label })),
 ];
 
-/** Every run on the project's lines, newest first, a page at a time, filtered by line and status. */
+/**
+ * Every run on the project's lines, newest first, a page at a time, filtered by line and status;
+ * above them, for the owner, the runs waiting for them to start.
+ */
 function RunList() {
   const { owner, project } = Route.useParams();
   const search = runsSearch(Route.useSearch());
@@ -44,6 +48,7 @@ function RunList() {
 
   return (
     <ProjectView location={{ view: "runs", owner, project, ...search }}>
+      <WaitingForYou projectRef={projectRef} />
       <div className="flex flex-col gap-2">
         <Filters label="Line">
           {LINE_FILTERS.map(({ value, label }) => (

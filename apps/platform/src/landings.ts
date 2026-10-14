@@ -2,11 +2,11 @@
 // `pipeline_runs` (spec #257, "Run storage"). Each landing becomes a landing's run, linked to its
 // merge request, so the runs list and the dequeue banner find it; the table is then dropped.
 
-import { normaliseDequeue } from "./casing.ts";
 import type { ConflictDetails } from "./conflicts.ts";
 import { conflictOutcome, landedOutcome, legacyFailedOutcome } from "./landing.ts";
 import type { LegacyFailedCheck } from "./landing.ts";
-import type { LegacyDequeueDetails } from "./merge-requests.ts";
+import { storedDequeue } from "./merge-requests.ts";
+import type { Dequeue } from "./merge-requests.ts";
 import type { RunOutcome } from "./run-outcome.ts";
 import { MAIN_LINE } from "./scoring.ts";
 import type { RunStatus } from "./scoring.ts";
@@ -115,19 +115,8 @@ export function migrateLandings(sql: Sql): void {
   });
 }
 
-/** A dequeue as stored before landings were runs: its reason, its details, and when. */
-interface StoredDequeue {
-  reason: string;
-  at: string;
-  details?: LegacyDequeueDetails;
-}
-
-function storedDequeue(json: string): StoredDequeue {
-  return normaliseDequeue(JSON.parse(json) as StoredDequeue);
-}
-
 /** How the landing went, from its status and, for a dequeued one, the dequeue it left. */
-function endOf(landing: LandingRow, mr: MergeRequestRow, dequeue: StoredDequeue | null): Ended {
+function endOf(landing: LandingRow, mr: MergeRequestRow, dequeue: Dequeue | null): Ended {
   const none = { sha: null, outcome: null, error: null };
   switch (landing.status) {
     case "running":

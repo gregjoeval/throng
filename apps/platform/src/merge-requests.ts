@@ -167,7 +167,7 @@ export interface MergeRequestsDeps {
 }
 
 /** A stored dequeue, read in camelCase whenever it was stored; one stored before landings were runs names none. */
-function storedDequeue(json: string): Dequeue {
+export function storedDequeue(json: string): Dequeue {
   const dequeue = normaliseDequeue(JSON.parse(json) as Omit<Dequeue, "run"> & { run?: number | null });
   return { ...dequeue, run: dequeue.run ?? null };
 }

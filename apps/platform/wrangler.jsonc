@@ -52,6 +52,8 @@
     // PLACEHOLDER: the Zero Trust team domain and the Access application's audience (AUD) tag.
     "ACCESS_TEAM_DOMAIN": "gregjoeval.cloudflareaccess.com",
     "ACCESS_AUD": "2a713dce7fdf28f6d07c5954b0a9d57e867717b5af65ba730b98473b3366712b",
+    // The Worker's own public URL, which throng-web's Tokens page puts in the setup it shows.
+    "PUBLIC_URL": "https://throng.gregjoeval.workers.dev",
   },
   "secrets": { "required": ["E2E_TOKEN", "SECRETS_KEYRING"] },
   "observability": { "enabled": true },
@@ -102,6 +104,7 @@
       "vars": {
         "ACCESS_TEAM_DOMAIN": "gregjoeval.cloudflareaccess.com",
         "ACCESS_AUD": "2a713dce7fdf28f6d07c5954b0a9d57e867717b5af65ba730b98473b3366712b",
+        "PUBLIC_URL": "https://throng-ci.gregjoeval.workers.dev",
       },
       "secrets": { "required": ["E2E_TOKEN", "SECRETS_KEYRING"] },
       "observability": { "enabled": true },

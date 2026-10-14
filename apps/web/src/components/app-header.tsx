@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { LogOutIcon } from "lucide-react";
+import { KeyRoundIcon, LogOutIcon } from "lucide-react";
 import { ProjectSwitcher } from "@/components/project-switcher";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { buttonVariants } from "@/components/ui/button";
@@ -23,6 +23,10 @@ export function AppHeader() {
         <ProjectSwitcher />
         <div className="ml-auto flex items-center gap-1">
           <SignedInUser />
+          <Link to="/tokens" className={buttonVariants({ variant: "ghost", size: "sm" })}>
+            <KeyRoundIcon />
+            Tokens
+          </Link>
           <ThemeToggle />
           <a href={SIGN_OUT_URL} className={buttonVariants({ variant: "ghost", size: "sm" })}>
             <LogOutIcon />

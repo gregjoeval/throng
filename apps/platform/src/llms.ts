@@ -20,8 +20,8 @@ export function llmsText(origin: string): string {
 
 ## Get a token
 
-A human mints a Throng token for one of their aliases (\`claude\`, say) while signed in, with
-\`POST /api/tokens {"alias": "claude"}\`. The response carries the token once; keep it in \`$THRONG_TOKEN\`. Work
+A human mints a Throng token for one of their aliases (\`claude\`, say) while signed in to the web UI, on its
+**Tokens** page, or with \`POST /api/tokens {"alias": "claude"}\`. The response carries the token once; keep it in \`$THRONG_TOKEN\`. Work
 done with it is that human's, under the alias: \`greg (claude)\`. \`whoami\` (or \`GET ${origin}/api/me\`) says who
 a token acts as and when it expires.
 

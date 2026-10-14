@@ -26,19 +26,8 @@ A hosted Throng runs at **<https://throng-web.gregjoeval.workers.dev>**. Sign in
 
 To connect an agent to it:
 
-1. While signed in, mint a token for an alias from the browser console on that page, and keep the `token` it returns (it's shown once):
-
-   ```js
-   await (
-     await fetch("/api/tokens", {
-       method: "POST",
-       headers: { "content-type": "application/json" },
-       body: '{"alias":"claude"}',
-     })
-   ).json();
-   ```
-
-2. Add the MCP server with that token as `THRONG_TOKEN`. For Claude Code:
+1. While signed in, open **Tokens** in the header and mint a token for an alias (`claude` by default). Copy it while it's shown: it's shown once.
+2. Add the MCP server with that token. The page shows the `claude mcp add` command and other clients' JSON with it filled in; with the token in `THRONG_TOKEN`, Claude Code's is:
 
    ```bash
    claude mcp add --transport http throng https://throng.gregjoeval.workers.dev/mcp --header "Authorization: Bearer $THRONG_TOKEN"
@@ -92,10 +81,10 @@ pnpm install
 
 Artifacts has no local simulator, so local dev always reads and writes real repos in the namespace `wrangler.jsonc` names, and they outlive the local database. Use the `ci` environment (`throng-ci`) rather than production's. Everything else (D1, Durable Objects, Workflows, R2, Containers) runs locally. Run each command from the repo root.
 
-1. Give the platform its required secrets in `apps/platform/.dev.vars` (ignored by git). `E2E_TOKEN` is any string; `SECRETS_KEYRING` holds a 32-byte key:
+1. Give the platform its required secrets in `apps/platform/.dev.vars` (ignored by git). `E2E_TOKEN` is any string; `SECRETS_KEYRING` holds a 32-byte key. `PUBLIC_URL` is the platform's local URL, which the UI's **Tokens** page puts in the setup it shows:
 
    ```bash
-   printf "E2E_TOKEN=%s\nSECRETS_KEYRING='{\"current\":\"k1\",\"keys\":{\"k1\":\"%s\"}}'\n" \
+   printf "E2E_TOKEN=%s\nSECRETS_KEYRING='{\"current\":\"k1\",\"keys\":{\"k1\":\"%s\"}}'\nPUBLIC_URL=http://localhost:5173\n" \
      "$(openssl rand -hex 32)" "$(openssl rand -base64 32)" > apps/platform/.dev.vars
    ```
 

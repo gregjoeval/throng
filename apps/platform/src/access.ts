@@ -14,6 +14,11 @@ export interface AccessBindings {
   ACCESS_TEAM_DOMAIN: string;
   /** The Access application's audience tag. */
   ACCESS_AUD: string;
+  /**
+   * The platform's public URL, e.g. `https://throng.example.workers.dev`, for setup an agent pastes.
+   * Unset, it's the origin the request came in on, which over throng-web's binding is throng-web's.
+   */
+  PUBLIC_URL?: string;
 }
 
 export interface AccessEnv {

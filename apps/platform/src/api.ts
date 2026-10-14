@@ -138,6 +138,10 @@ const MintTokenSchema = z
 
 const MintedTokenSchema = TokenSchema.extend({
   token: z.string().openapi({ description: "The plaintext `thr_…` token. It is shown only in this response." }),
+  url: z.string().openapi({
+    description: "The platform's public URL, which the token is for: its MCP server is at `<url>/mcp`.",
+    example: "https://throng.example.workers.dev",
+  }),
 }).openapi("MintedToken");
 
 const ProjectSchema = z
@@ -1332,7 +1336,8 @@ export function apiRoutes(options: ApiOptions = {}) {
       async (c) => {
         const input = { ...c.req.valid("json"), via: c.var.token };
         const { token, plaintext } = await tokens(c.env).mint(c.var.actor, input);
-        return c.json({ ...publicToken(token), token: plaintext }, 201);
+        const url = c.env.PUBLIC_URL ?? new URL(c.req.url).origin;
+        return c.json({ ...publicToken(token), token: plaintext, url }, 201);
       },
     )
     .openapi(

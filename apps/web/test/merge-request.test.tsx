@@ -14,7 +14,9 @@ import {
   bob,
   me,
   result,
+  runDetail,
   serveCompare,
+  serveConflictDiffs,
   server,
   serveTasks,
   task,
@@ -110,6 +112,24 @@ describe("the merge request view", () => {
     expect(await banner()).toHaveTextContent(text);
   });
 
+  it("shows the task branch's runs beside the banner", async () => {
+    const { error: _e, outcome: _o, result: _r, ...run } = runDetail(4, HEAD, { line: "t1", status: "running" });
+    server.use(
+      http.get("*/api/projects/:owner/:project/runs", ({ request }) =>
+        HttpResponse.json({ runs: new URL(request.url).searchParams.get("line") === "t1" ? [run] : [], next: null }),
+      ),
+    );
+    await openMergeRequest(mergeRequest());
+    const runs = await within(view()).findByRole("region", { name: "Task branch runs" });
+    expect(within(runs).getByRole("listitem", { name: "Run 4" })).toHaveTextContent(`Run 4${HEAD.slice(0, 7)}Running`);
+  });
+
+  it("shows no task branch runs while the task branch has none", async () => {
+    await openMergeRequest(mergeRequest());
+    await banner();
+    expect(within(view()).queryByRole("region", { name: "Task branch runs" })).toBeNull();
+  });
+
   it("names the alias an approval came through", async () => {
     await openMergeRequest(mergeRequest({ approvedBy: { ...bob, alias: "claude" } }));
     await banner();
@@ -169,6 +189,7 @@ describe("a merge request that needs review", () => {
 /** A `conflict` dequeue: `src/a.ts` with one content hunk, and `big.json` too large for hunks. */
 const CONFLICT: Dequeue = {
   reason: "conflict",
+  run: 9,
   at: "2026-10-10T12:05:00.000Z",
   details: {
     attempt: "t1a1",
@@ -199,24 +220,18 @@ const CONFLICT: Dequeue = {
 function serveDequeue(dequeue: Dequeue, asked: string[] = []) {
   return [
     http.get("*/api/projects/:owner/:project/tasks/:t/merge-request/dequeue", () => HttpResponse.json(dequeue)),
-    http.get("*/api/projects/:owner/:project/tasks/:t/merge-request/dequeue/files/*", ({ request }) => {
-      const url = new URL(request.url);
-      const path = decodeURIComponent(url.pathname.split("/dequeue/files/")[1]?.replace(/\/diff$/u, "") ?? "");
-      const side = url.searchParams.get("side");
-      asked.push(`${path}?side=${side}`);
-      // Main's side adds one line and the attempt's two, to tell them apart.
-      return HttpResponse.json({ ...addedFile(path), additions: side === "main" ? 1 : 2 });
-    }),
+    serveConflictDiffs("tasks/:t/merge-request/dequeue", asked),
   ];
 }
 
 describe("a dequeued merge request", () => {
-  it("lists each conflicting file with its type, its hunks side by side, and both sides' diffs", async () => {
+  it("lists each conflicting file with its type, its hunks side by side and both sides' diffs, and links its run", async () => {
     const asked: string[] = [];
     server.use(...serveDequeue(CONFLICT, asked));
-    await openMergeRequest(mergeRequest({ lastDequeue: { reason: "conflict", at: CONFLICT.at } }));
+    await openMergeRequest(mergeRequest({ lastDequeue: { reason: "conflict", run: 9, at: CONFLICT.at } }));
     const dequeue = await within(view()).findByRole("region", { name: "Dequeued" });
     expect(dequeue).toHaveTextContent("It conflicted with main");
+    expect(within(dequeue).getByRole("link", { name: "View run" })).toHaveAttribute("href", "/ada/alpha/runs/9");
 
     const file = await within(dequeue).findByRole("region", { name: "Conflict in src/a.ts" });
     expect(file).toHaveTextContent("Both changed it");
@@ -236,6 +251,7 @@ describe("a dequeued merge request", () => {
     const toAttempt = within(file).getByRole("region", { name: "Base → t1a1" });
     expect(await within(toAttempt).findByRole("listitem", { name: "src/a.ts" })).toHaveTextContent("+2");
 
+    // A file too large for hunks still shows its diff to each side.
     const big = within(dequeue).getByRole("region", { name: "Conflict in big.json" });
     expect(big).toHaveTextContent("Deleted on one side, changed on the other");
     expect(within(big).getByRole("note")).toHaveTextContent("Its hunks were left out: they were too large to show.");
@@ -246,38 +262,51 @@ describe("a dequeued merge request", () => {
       .toEqual(["big.json?side=attempt", "big.json?side=main", "src/a.ts?side=attempt", "src/a.ts?side=main"]);
   });
 
-  it("lists the checks that failed the retest, with their logs", async () => {
+  it("lists the setups and checks that failed its landing's gate, and links its run", async () => {
     const dequeue: Dequeue = {
       reason: "failedChecks",
+      run: 12,
       at: "2026-10-10T12:05:00.000Z",
       details: {
-        checks: [
-          { name: "test", outcome: "failed", log: "test" },
-          { name: "e2e", outcome: "timedOut", log: null },
+        steps: [
+          { name: "deps", kind: "setup", outcome: "failed" },
+          { name: "test", kind: "check", outcome: "errored" },
         ],
       },
     };
     server.use(...serveDequeue(dequeue));
-    await openMergeRequest(mergeRequest({ lastDequeue: { reason: "failedChecks", at: dequeue.at } }));
+    await openMergeRequest(mergeRequest({ lastDequeue: { reason: "failedChecks", run: 12, at: dequeue.at } }));
     const section = await within(view()).findByRole("region", { name: "Dequeued" });
     expect(section).toHaveTextContent("Checks failed on the merge with main");
-    const checks = await within(section).findByRole("list", { name: "Failed checks" });
+    const steps = await within(section).findByRole("list", { name: "Failed steps" });
     expect(
-      within(checks)
+      within(steps)
         .getAllByRole("listitem")
         .map((li) => li.textContent),
-    ).toEqual(["testFailedLog", "e2eTimed out"]);
-    expect(within(checks).getByRole("link", { name: "Log" })).toHaveAttribute(
-      "href",
-      "/api/projects/ada/alpha/tasks/t1/merge-request/dequeue/logs/test",
-    );
+    ).toEqual(["depsSetup failed", "testErrored"]);
+    expect(within(section).getByRole("link", { name: "View run" })).toHaveAttribute("href", "/ada/alpha/runs/12");
   });
 
-  it("says why for a reason without details", async () => {
-    await openMergeRequest(mergeRequest({ lastDequeue: { reason: "newPush", at: "2026-10-10T12:05:00.000Z" } }));
-    expect(await within(view()).findByRole("region", { name: "Dequeued" })).toHaveTextContent(
-      "A new push to t1a1 took it out of the queue.",
+  it("shows an errored landing's error", async () => {
+    const dequeue: Dequeue = {
+      reason: "errored",
+      run: 13,
+      at: "2026-10-10T12:05:00.000Z",
+      details: { error: "land: main moved; the lease failed" },
+    };
+    server.use(...serveDequeue(dequeue));
+    await openMergeRequest(mergeRequest({ lastDequeue: { reason: "errored", run: 13, at: dequeue.at } }));
+    const section = await within(view()).findByRole("region", { name: "Dequeued" });
+    expect(await within(section).findByText("land: main moved; the lease failed")).toBeInTheDocument();
+  });
+
+  it("says why for a reason without details, with no run to link", async () => {
+    await openMergeRequest(
+      mergeRequest({ lastDequeue: { reason: "newPush", run: null, at: "2026-10-10T12:05:00.000Z" } }),
     );
+    const section = await within(view()).findByRole("region", { name: "Dequeued" });
+    expect(section).toHaveTextContent("A new push to t1a1 took it out of the queue.");
+    expect(within(section).queryByRole("link", { name: "View run" })).toBeNull();
   });
 });
 

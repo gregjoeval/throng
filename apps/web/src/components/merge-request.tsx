@@ -3,19 +3,21 @@
 // why it last left the queue, and Cancel.
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import { useState } from "react";
 import type { ReactNode } from "react";
 import { CommitFiles } from "@/components/commit-files";
 import { RelativeTime } from "@/components/commit-meta";
+import { ConflictFiles } from "@/components/conflict-files";
 import { Lane } from "@/components/lane";
 import { useMaySelect } from "@/components/selection";
 import { ErrorState, Loading } from "@/components/states";
+import { TaskBranchRuns } from "@/components/task-branch-runs";
 import { Button } from "@/components/ui/button";
 import {
   actOnMergeRequest,
   compareQuery,
-  dequeueFileDiffQuery,
-  dequeueLogUrl,
+  dequeueConflictDiffQuery,
   dequeueQuery,
   mergeRequestQuery,
   TASK_POLL_MS,
@@ -25,6 +27,8 @@ import {
 import type { ProjectRef } from "@/lib/api";
 import type { ArenaAttempt } from "@/lib/arena";
 import { apiError } from "@/lib/errors";
+import { buildPath } from "@/lib/paths";
+import { STEP_OUTCOME_LABELS } from "@/lib/runs";
 import { isOpenMergeRequest } from "@/lib/tasks";
 import type { Attempt, Dequeue, MergeRequest, Task } from "@/lib/tasks";
 
@@ -54,6 +58,7 @@ export function MergeRequestView({ projectRef, task, source }: InTask & { source
         mr={mr.data}
         action={open && mayAct ? <CancelMergeRequest projectRef={projectRef} task={task} mr={mr.data} /> : null}
       />
+      <TaskBranchRuns projectRef={projectRef} task={task} />
       {state === "needsReview" ? (
         <ChangesSinceApproval projectRef={projectRef} task={task} mr={mr.data} attempt={attempt} mayApprove={mayAct} />
       ) : null}
@@ -238,72 +243,61 @@ function reasonText(dequeue: { reason: Dequeue["reason"] }, attempt: string): st
   }
 }
 
-/** The merge request's last dequeue: its reason and, for those that have them, the details. */
+/**
+ * The merge request's last dequeue: its reason, a link to the landing's run behind it, and the
+ * details that run holds: the conflict, the steps that failed, or the error.
+ */
 function Dequeued({ projectRef, task, mr, at }: InTask & { mr: MergeRequest; at: string }) {
   const reason = mr.lastDequeue?.reason ?? "newPush";
+  const run = mr.lastDequeue?.run ?? null;
   const detailed = reason === "conflict" || reason === "failedChecks" || reason === "errored";
   const dequeue = useQuery({ ...dequeueQuery(projectRef, task.ref, at), enabled: detailed });
   return (
     <section aria-label="Dequeued" className="flex flex-col gap-3 rounded-xl border px-4 py-3 text-sm">
-      <h3 className="font-heading font-medium">
-        Dequeued <RelativeTime date={at} />
-      </h3>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="font-heading font-medium">
+          Dequeued <RelativeTime date={at} />
+        </h3>
+        {run === null ? null : (
+          <Link to={buildPath({ view: "run", ...projectRef, run })} className="underline">
+            View run
+          </Link>
+        )}
+      </div>
       <p>{reasonText({ reason }, mr.attempt)}</p>
       {detailed && dequeue.isPending ? <Loading label="Loading details…" /> : null}
       {dequeue.isError ? <ErrorState error={dequeue.error} /> : null}
-      {dequeue.isSuccess ? <DequeueDetails projectRef={projectRef} task={task} dequeue={dequeue.data} /> : null}
+      {dequeue.isSuccess ? <DequeueDetails projectRef={projectRef} task={task} at={at} dequeue={dequeue.data} /> : null}
     </section>
   );
 }
 
-type FailedCheck = Extract<NonNullable<Dequeue["details"]>, { checks: unknown }>["checks"][number];
-
-const OUTCOME_LABELS: Record<FailedCheck["outcome"], string> = {
-  failed: "Failed",
-  timedOut: "Timed out",
-  skipped: "Skipped",
-};
-
-function DequeueDetails({ projectRef, task, dequeue }: InTask & { dequeue: Dequeue }) {
+function DequeueDetails({ projectRef, task, at, dequeue }: InTask & { at: string; dequeue: Dequeue }) {
   const { details } = dequeue;
   if (details === null) return null;
   if ("files" in details) {
     return (
-      <div className="flex flex-col gap-3">
-        {details.files.map((file) => (
-          <ConflictFile
-            key={file.path}
-            projectRef={projectRef}
-            task={task}
-            at={dequeue.at}
-            attempt={details.attempt}
-            file={file}
-          />
-        ))}
-      </div>
+      <ConflictFiles
+        details={details}
+        diffQuery={(path, side) => dequeueConflictDiffQuery(projectRef, task.ref, at, path, side)}
+      />
     );
   }
-  if ("checks" in details) {
+  if ("steps" in details) {
     return (
       <>
         {details.error === undefined ? null : (
           <pre className="whitespace-pre-wrap text-destructive">{details.error}</pre>
         )}
-        <ul aria-label="Failed checks" className="flex flex-col gap-1">
-          {details.checks.map((check) => (
-            <li key={check.name} className="flex items-center gap-3">
-              <span className="font-mono">{check.name}</span>
-              <span className="text-muted-foreground">{OUTCOME_LABELS[check.outcome]}</span>
-              {check.log === null ? null : (
-                <a
-                  href={dequeueLogUrl(projectRef, task.ref, check.log)}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="underline"
-                >
-                  Log
-                </a>
-              )}
+        <ul aria-label="Failed steps" className="flex flex-col gap-1">
+          {details.steps.map((step) => (
+            <li key={step.name} className="flex items-center gap-3">
+              <span className="font-mono">{step.name}</span>
+              <span className="text-muted-foreground">
+                {step.kind === "setup"
+                  ? `Setup ${STEP_OUTCOME_LABELS[step.outcome].toLowerCase()}`
+                  : STEP_OUTCOME_LABELS[step.outcome]}
+              </span>
             </li>
           ))}
         </ul>
@@ -312,101 +306,8 @@ function DequeueDetails({ projectRef, task, dequeue }: InTask & { dequeue: Deque
   }
   return (
     <p>
-      <span className="font-mono">{details.step}</span>: {details.error}
+      {details.step === undefined ? null : <span className="font-mono">{details.step}: </span>}
+      {details.error}
     </p>
-  );
-}
-
-type ConflictFileDetails = Extract<NonNullable<Dequeue["details"]>, { files: unknown }>["files"][number];
-
-const CONFLICT_LABELS: Record<ConflictFileDetails["type"], string> = {
-  content: "Both changed it",
-  modifyDelete: "Deleted on one side, changed on the other",
-  addAdd: "Both added it",
-  rename: "Renamed differently on each side",
-};
-
-/** One conflicting file: its type, each hunk's three sides, and its diff from the base to each side. */
-function ConflictFile({
-  projectRef,
-  task,
-  at,
-  attempt,
-  file,
-}: InTask & { at: string; attempt: string; file: ConflictFileDetails }) {
-  return (
-    <section aria-label={`Conflict in ${file.path}`} className="flex flex-col gap-2 rounded-lg border px-3 py-2">
-      <h4 className="flex flex-wrap items-center gap-2">
-        <span className="font-mono">{file.path}</span>
-        <span className="text-xs text-muted-foreground">{CONFLICT_LABELS[file.type]}</span>
-      </h4>
-      {file.truncated ? (
-        <p role="note" className="text-muted-foreground">
-          Its hunks were left out: they were too large to show.
-        </p>
-      ) : null}
-      {(file.hunks ?? []).map((hunk) => (
-        <table
-          key={hunk.startLine}
-          aria-label={`Hunk at line ${hunk.startLine}`}
-          className="w-full table-fixed text-xs"
-        >
-          <thead>
-            <tr>
-              {["Base", "main", attempt].map((side) => (
-                <th key={side} className="px-2 py-1 text-left font-medium text-muted-foreground">
-                  {side}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              {[hunk.base, hunk.main, hunk.attempt].map((lines, i) => (
-                <td key={i} className="border px-2 py-1 align-top">
-                  <pre className="overflow-x-auto whitespace-pre">{lines.join("\n")}</pre>
-                </td>
-              ))}
-            </tr>
-          </tbody>
-        </table>
-      ))}
-      <div className="grid gap-3 lg:grid-cols-2">
-        <SideDiff projectRef={projectRef} task={task} at={at} path={file.path} side="main" label="Base → main" />
-        <SideDiff
-          projectRef={projectRef}
-          task={task}
-          at={at}
-          path={file.path}
-          side="attempt"
-          label={`Base → ${attempt}`}
-        />
-      </div>
-    </section>
-  );
-}
-
-function SideDiff({
-  projectRef,
-  task,
-  at,
-  path,
-  side,
-  label,
-}: InTask & { at: string; path: string; side: "main" | "attempt"; label: string }) {
-  const diff = useQuery(dequeueFileDiffQuery(projectRef, task.ref, at, path, side));
-  let body: ReactNode;
-  if (diff.isPending) body = <Loading label="Loading diff…" />;
-  else if (diff.isError) body = <ErrorState error={diff.error} />;
-  else {
-    const file = diff.data;
-    const totals = { files: 1, additions: file.additions, deletions: file.deletions };
-    body = <CommitFiles diff={{ files: [file], totals, truncated: false }} idPrefix={`conflict-${side}-`} />;
-  }
-  return (
-    <section aria-label={label} className="flex min-w-0 flex-col gap-2">
-      <h5 className="text-xs font-medium text-muted-foreground">{label}</h5>
-      {body}
-    </section>
   );
 }

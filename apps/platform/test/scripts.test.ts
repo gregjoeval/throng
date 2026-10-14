@@ -1,14 +1,23 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parseConfig } from "../src/config.ts";
-import { previewGrant, previewName } from "../src/preview.ts";
-import { buildResult, MAX_OUTPUT_BYTES, scorePlan } from "../src/results.ts";
-import type { PlannedMetric, RawScore, ScorePlan } from "../src/results.ts";
-import { parseResult, previewScript, scoreScript } from "../src/scripts.ts";
-import type { PreviewScriptResult } from "../src/scripts.ts";
+import type { ConfigResult, SetupConfig } from "../src/config.ts";
+import { buildResult, checkOrder, MAX_OUTPUT_BYTES, scorePlan } from "../src/results.ts";
+import type { PlannedCheck, PlannedMetric, RawScore } from "../src/results.ts";
+import {
+  checkScript,
+  mergeCheckoutSha,
+  parseResult,
+  RERUN_SETUP_FAILED_EXIT,
+  setupScript,
+  STEP_NOT_READY_EXIT,
+  stepReadyScript,
+  stepScript,
+} from "../src/scripts.ts";
+import type { Checkout, CheckRun, MergeCheckout, SetupResult, StepReady, StepRun } from "../src/scripts.ts";
 import { NO_TASK_DEFINITIONS, taskDefinitionsFrom, withTask } from "../src/task-definitions.ts";
 import { at } from "./support/defined.ts";
 
@@ -62,14 +71,19 @@ beforeEach(() => {
 
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
-const plan = (overrides: Partial<ScorePlan> = {}): ScorePlan => ({ setup: [], checks: [], allow: [], ...overrides });
-const check = (name: string, command: string, timeoutMs = 60_000, metrics: PlannedMetric[] = []) => ({
+const check = (name: string, command: string, timeoutMs = 60_000, metrics: PlannedMetric[] = []): PlannedCheck => ({
   name,
   command,
   timeoutMs,
+  after: [],
+  secrets: [],
+  caches: [],
   metrics,
 });
+const setup = (...commands: string[]): SetupConfig[] =>
+  commands.map((command, i) => ({ name: `s${i + 1}`, command, secrets: [], caches: [] }));
 const number = (name: string, from: string): PlannedMetric => ({ name, from, rule: { type: "number" } });
+const cat = (path: string) => execFileSync("cat", [path], { encoding: "utf8" });
 
 /** Pushes an attempt to the fork on top of the origin's main (adds 2 lines, deletes 2) and returns its head. */
 function attemptHead(): string {
@@ -79,14 +93,52 @@ function attemptHead(): string {
   return head;
 }
 
-describe("scoreScript", () => {
-  it("records the base it's given and the diff size from it, and runs nothing without a plan", () => {
+/** What a line's containers check out: `sha`, fetched from `remote`. */
+const line = (remote: string, sha: string): Checkout => ({ kind: "line", remote, sha });
+
+/** Runs one check in `sandbox`: one the setup container's snapshot started (it holds `setup.done`), or a fresh one. */
+function runCheck(sandbox: string, head: string, setups: SetupConfig[], planned: PlannedCheck): CheckRun {
+  return runScript<CheckRun>(checkScript(line(fork, head), setups, planned), sandbox);
+}
+
+/**
+ * Runs a config's plan as a pipeline run's containers would: the setups in one directory, then each
+ * check in a copy of it (a snapshot's restore), skipping a check whose waits didn't all pass.
+ */
+function runPipeline(config: ConfigResult, base: string | null, head: string): RawScore {
+  const plan = scorePlan(config);
+  const setupDir = mkdtempSync(join(root, "setup-"));
+  const ran = runScript<SetupResult>(setupScript(line(fork, head), base, plan.setup), setupDir);
+  const failed = ran.setups.findIndex((s) => s.exit !== 0);
+  const exits = new Map<string, number>();
+  for (const planned of checkOrder(plan.checks)) {
+    if (failed !== -1 || planned.after.some((name) => exits.get(name) !== 0)) continue;
+    const restored = mkdtempSync(join(root, "check-"));
+    cpSync(setupDir, restored, { recursive: true });
+    exits.set(planned.name, runCheck(restored, head, plan.setup, planned).exit);
+  }
+  return {
+    base: ran.base,
+    shortstat: ran.shortstat,
+    builtinMs: ran.builtinMs,
+    setupFailed: failed === -1 ? null : failed + 1,
+    checks: plan.checks.map((planned) => {
+      const exit = exits.get(planned.name);
+      return exit === undefined ? { exit: null, durationMs: 0, metrics: {} } : { exit, durationMs: 1, metrics: {} };
+    }),
+  };
+}
+
+describe("setupScript", () => {
+  it("records the base it's given and the diff size from it, and runs nothing without setups", () => {
     const base = git(origin, "rev-parse", "main");
     const head = attemptHead();
-    const raw = runScript<RawScore>(scoreScript(fork, { sha: head, base }, plan()));
-    expect(raw).toMatchObject({ base, setupFailed: null, checks: [] });
-    expect(raw.shortstat.trim()).toBe("2 files changed, 2 insertions(+), 2 deletions(-)");
-    expect(raw.builtinMs).toBeGreaterThanOrEqual(0);
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    const ran = runScript<SetupResult>(setupScript(line(fork, head), base, []), sandbox);
+    expect(ran).toMatchObject({ base, setups: [] });
+    expect(ran.shortstat.trim()).toBe("2 files changed, 2 insertions(+), 2 deletions(-)");
+    expect(ran.builtinMs).toBeGreaterThanOrEqual(0);
+    expect(cat(join(sandbox, "setup.done"))).toBe("");
   });
 
   it("diffs against the empty tree when the attempt has no base", () => {
@@ -94,95 +146,261 @@ describe("scoreScript", () => {
     git(work, "rm", "-rqf", ".");
     const head = commit("only.txt", "x\ny\n", "unrelated");
     git(work, "push", "-q", fork, "lone:main", "--force");
-    const raw = runScript<RawScore>(scoreScript(fork, { sha: head, base: null }, plan()));
-    expect(raw.base).toBeNull();
-    expect(raw.shortstat.trim()).toBe("1 file changed, 2 insertions(+)");
+    const ran = runScript<SetupResult>(setupScript(line(fork, head), null, []));
+    expect(ran.base).toBeNull();
+    expect(ran.shortstat.trim()).toBe("1 file changed, 2 insertions(+)");
   });
 
-  it("runs every check in order, after a failure too, with a fresh $THRONG_OUTPUT directory each, reading a failed check's output too", () => {
+  it("runs each setup in order, logging each, and gets the run's variables", () => {
     const head = attemptHead();
-    const empty = `test -z "$(ls -A "$THRONG_OUTPUT")"`;
-    const checks = [
-      check("first", `${empty} && echo '{"n": 1}' > "$THRONG_OUTPUT/r.json" && echo first >> ../order`, 60_000, [
-        number("n", "first.r.n"),
-      ]),
-      check("broken", `echo broken >> ../order; echo '{"failed": 2}' > "$THRONG_OUTPUT/r.json"; exit 3`, 60_000, [
-        number("failed", "broken.r.failed"),
-      ]),
-      check("last", `${empty} && echo last >> ../order && test -f b.txt`),
-    ];
     const sandbox = mkdtempSync(join(root, "sandbox-"));
-    const raw = runScript<RawScore>(scoreScript(fork, { sha: head, base: null }, plan({ checks })), sandbox);
-    expect(raw.checks.map((c) => [c.exit, c.metrics])).toEqual([
-      [0, { n: { value: 1 } }],
-      [3, { failed: { value: 2 } }],
-      [0, {}],
-    ]);
-    expect(execFileSync("cat", [join(sandbox, "order")], { encoding: "utf8" })).toBe("first\nbroken\nlast\n");
-    expect(execFileSync("cat", [join(sandbox, "logs/broken.log")], { encoding: "utf8" })).toBe("");
-  });
-
-  it("skips every check after a failed setup command, and names the command", () => {
-    const head = attemptHead();
-    const setup = ["true", "echo nope >&2; false", "touch ../never"];
-    const sandbox = mkdtempSync(join(root, "sandbox-"));
-    const raw = runScript<RawScore>(
-      scoreScript(
-        fork,
-        { sha: head, base: null },
-        plan({ setup, checks: [check("test", "true", 60_000, [number("n", "test.r.n")])] }),
-      ),
+    const ran = runScript<SetupResult>(
+      setupScript(line(fork, head), null, setup("echo one >> ../order", "echo two >> ../order; echo logged")),
       sandbox,
     );
-    expect(raw).toMatchObject({ setupFailed: 2, checks: [{ exit: null, metrics: {} }] });
-    expect(execFileSync("cat", [join(sandbox, "logs/setup.2.log")], { encoding: "utf8" })).toBe("nope\n");
+    expect(ran.setups.map((s) => s.exit)).toEqual([0, 0]);
+    expect(cat(join(sandbox, "order"))).toBe("one\ntwo\n");
+    expect(cat(join(sandbox, "logs/setup.2.log"))).toBe("logged\n");
+  });
+
+  it("stops at the first setup that fails, and leaves no mark for the checks", () => {
+    const head = attemptHead();
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    const ran = runScript<SetupResult>(
+      setupScript(line(fork, head), null, setup("true", "echo nope >&2; false", "touch ../never")),
+      sandbox,
+    );
+    expect(ran.setups.map((s) => s.exit)).toEqual([0, 1, null]);
+    expect(cat(join(sandbox, "logs/setup.2.log"))).toBe("nope\n");
     expect(() => execFileSync("test", ["-e", join(sandbox, "never")])).toThrow();
+    expect(() => execFileSync("test", ["-e", join(sandbox, "setup.done")])).toThrow();
   });
 
-  it("stops a check at its timeout", () => {
-    const head = attemptHead();
-    const raw = runScript<RawScore>(
-      scoreScript(fork, { sha: head, base: null }, plan({ checks: [check("slow", "sleep 20", 1000)] })),
-    );
-    expect(raw.checks[0]).toMatchObject({ exit: 124 });
-    expect(at(raw.checks, 0).durationMs).toBeGreaterThanOrEqual(1000);
-    expect(at(raw.checks, 0).durationMs).toBeLessThan(10_000);
-  });
-
-  it("quotes commands so a check can't break out of the script", () => {
-    const head = attemptHead();
-    const raw = runScript<RawScore>(
-      scoreScript(
-        fork,
-        { sha: head, base: null },
-        plan({ checks: [check("quotes", `echo "it's" '$HOME' "$(echo ok)" > ../quoted`)] }),
-      ),
-    );
-    expect(at(raw.checks, 0).exit).toBe(0);
+  it("checks out a task branch's head from the origin, where it's only under refs/tasks", () => {
+    commit("t.txt", "a test\n", "the task's test");
+    const head = git(work, "rev-parse", "HEAD");
+    git(work, "push", "-q", origin, "HEAD:refs/tasks/t1");
+    git(work, "reset", "-q", "--hard", "HEAD~1");
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    const ran = runScript<SetupResult>(setupScript(line(origin, head), null, setup("cat t.txt")), sandbox);
+    expect(ran.setups.map((s) => s.exit)).toEqual([0]);
+    expect(cat(join(sandbox, "logs/setup.1.log"))).toBe("a test\n");
   });
 
   it("is idempotent: rerunning in the same directory gives the same result", () => {
     const head = attemptHead();
     const sandbox = mkdtempSync(join(root, "sandbox-"));
-    const script = scoreScript(
-      fork,
-      { sha: head, base: null },
-      plan({
-        checks: [
-          check("test", `test ! -e "$THRONG_OUTPUT/r.json" && echo '{"n": 1}' > "$THRONG_OUTPUT/r.json"`, 60_000, [
-            number("n", "test.r.n"),
-          ]),
-        ],
-      }),
+    const script = setupScript(line(fork, head), null, setup("test ! -e built && touch built"));
+    const first = runScript<SetupResult>(script, sandbox);
+    const second = runScript<SetupResult>(script, sandbox);
+    expect(first.setups.map((s) => s.exit)).toEqual([0]);
+    expect(second.setups.map((s) => s.exit)).toEqual([0]);
+  });
+});
+
+describe("post-gate step scripts", () => {
+  const deploy = {
+    name: "deploy",
+    command: "echo deploying >> ../deploys && test -f built && echo done",
+    secrets: [],
+    caches: [],
+  };
+
+  it("readies a step's container from the setups' snapshot, then runs its command once in the tree", () => {
+    const head = attemptHead();
+    const setups = setup("echo ran >> ../setups && touch built");
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    runScript<SetupResult>(setupScript(line(fork, head), null, setups), sandbox);
+    expect(runScript<StepReady>(stepReadyScript(fork, head, setups, deploy), sandbox)).toEqual({ setupsRerun: false });
+    expect(runScript<StepRun>(stepScript(deploy, 60_000), sandbox)).toMatchObject({ exit: 0 });
+    expect(cat(join(sandbox, "setups"))).toBe("ran\n");
+    expect(cat(join(sandbox, "deploys"))).toBe("deploying\n");
+    expect(cat(join(sandbox, "logs/step.deploy.log"))).toBe("done\n");
+  });
+
+  it("readies a fresh container by fetching the head and running the setups, their output at the top of the log", () => {
+    const head = attemptHead();
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    const setups = setup("echo installing && touch built");
+    expect(runScript<StepReady>(stepReadyScript(fork, head, setups, deploy), sandbox)).toEqual({ setupsRerun: true });
+    expect(runScript<StepRun>(stepScript(deploy, 60_000), sandbox)).toMatchObject({ exit: 0 });
+    expect(cat(join(sandbox, "logs/step.deploy.log"))).toBe("== throng: setup s1 ==\ninstalling\ndone\n");
+  });
+
+  it("reports a failed command's exit, and refuses to run in a container that wasn't readied", () => {
+    const head = attemptHead();
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    expect(() => execFileSync("bash", ["-c", stepScript(deploy, 60_000)], { cwd: sandbox, env: ENV })).toThrow(
+      expect.objectContaining({ status: STEP_NOT_READY_EXIT }),
     );
-    const first = runScript<RawScore>(script, sandbox);
-    const second = runScript<RawScore>(script, sandbox);
-    expect(first.checks[0]).toMatchObject({ exit: 0, metrics: { n: { value: 1 } } });
-    expect({ ...second, builtinMs: 0, checks: second.checks.map((c) => ({ ...c, durationMs: 0 })) }).toEqual({
-      ...first,
-      builtinMs: 0,
-      checks: first.checks.map((c) => ({ ...c, durationMs: 0 })),
+    runScript<StepReady>(stepReadyScript(fork, head, [], deploy), sandbox);
+    expect(
+      runScript<StepRun>(stepScript({ name: "deploy", command: "exit 4", secrets: [], caches: [] }, 60_000), sandbox),
+    ).toMatchObject({
+      exit: 4,
     });
+  });
+
+  it("moves a landing's restored container from the merged tree to the landed commit, keeping what the setups made", () => {
+    const main = git(origin, "rev-parse", "main");
+    const head = attemptHead();
+    const tree = git(work, "rev-parse", `${head}^{tree}`);
+    const merging: Checkout = { kind: "merge", origin, fork, merge: { head, main, tree, committedAt: 1 } };
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    runScript<SetupResult>(setupScript(merging, main, setup("touch built")), sandbox);
+    // The land step pushed the merge to the origin's `main`: here, the head itself, whose tree is the same.
+    git(work, "push", "-q", origin, "main");
+    expect(runScript<StepReady>(stepReadyScript(origin, head, [], deploy), sandbox)).toEqual({ setupsRerun: false });
+    expect(git(join(sandbox, "tree"), "rev-parse", "HEAD")).toBe(head);
+    expect(runScript<StepRun>(stepScript(deploy, 60_000), sandbox)).toMatchObject({ exit: 0 });
+  });
+
+  it("never runs a step's command twice in one readied container", () => {
+    const head = attemptHead();
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    runScript<StepReady>(stepReadyScript(fork, head, setup("touch built"), deploy), sandbox);
+    runScript<StepRun>(stepScript(deploy, 60_000), sandbox);
+    expect(() => execFileSync("bash", ["-c", stepScript(deploy, 60_000)], { cwd: sandbox, env: ENV })).toThrow(
+      expect.objectContaining({ status: STEP_NOT_READY_EXIT }),
+    );
+    expect(cat(join(sandbox, "deploys"))).toBe("deploying\n");
+  });
+});
+
+/** `main` moved on after the attempt forked, so the landing merges the two. */
+function diverged(): MergeCheckout {
+  const head = attemptHead();
+  git(work, "checkout", "-q", "-b", "other", `${head}~2`);
+  const main = commit("c.txt", "main moved\n", "main moves");
+  git(work, "push", "-q", origin, "other:main");
+  const tree = git(work, "merge-tree", "--write-tree", main, head).split("\n")[0] ?? "";
+  return { main, head, tree, committedAt: 1_700_000_000 };
+}
+
+describe("a landing's checkout", () => {
+  it("makes the merge again from the origin and the fork, with `main` and the head as its parents", () => {
+    const merge = diverged();
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    const merging: Checkout = { kind: "merge", origin, fork, merge };
+    const ran = runScript<SetupResult>(
+      setupScript(merging, merge.main, setup("test -f b.txt && test -f c.txt")),
+      sandbox,
+    );
+    expect(ran.setups).toEqual([{ exit: 0, durationMs: expect.any(Number) }]);
+    expect(ran.shortstat.trim()).toBe("2 files changed, 2 insertions(+), 2 deletions(-)");
+    const tree = join(sandbox, "tree");
+    expect(git(tree, "rev-parse", "HEAD^{tree}")).toBe(merge.tree);
+    expect(git(tree, "rev-parse", "HEAD^1", "HEAD^2")).toBe(`${merge.main}\n${merge.head}`);
+  });
+
+  it("makes the same merge commit in every container, whose sha the Workflow knows without one", async () => {
+    const merge = diverged();
+    const merging: Checkout = { kind: "merge", origin, fork, merge };
+    const heads = ["setup-", "check-"].map((prefix) => {
+      const sandbox = mkdtempSync(join(root, prefix));
+      runScript<SetupResult>(setupScript(merging, merge.main, []), sandbox);
+      return git(join(sandbox, "tree"), "rev-parse", "HEAD");
+    });
+    expect(heads[1]).toBe(heads[0]);
+    expect(await mergeCheckoutSha(merge)).toBe(heads[0]);
+  });
+
+  it("runs a check on the merge in a fresh container", () => {
+    const merge = diverged();
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    const merging: Checkout = { kind: "merge", origin, fork, merge };
+    const ran = runScript<CheckRun>(checkScript(merging, [], check("test", "test -f b.txt && test -f c.txt")), sandbox);
+    expect(ran).toMatchObject({ exit: 0, setupsRerun: true });
+  });
+
+  it("fails as infrastructure when the merge doesn't give the tree its merge step recorded", () => {
+    const merge = { ...diverged(), tree: "f".repeat(40) };
+    const merging: Checkout = { kind: "merge", origin, fork, merge };
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    expect(() =>
+      execFileSync("bash", ["-c", setupScript(merging, merge.main, [])], { cwd: sandbox, env: ENV, stdio: "pipe" }),
+    ).toThrow(expect.objectContaining({ status: 14 }));
+  });
+});
+
+describe("checkScript", () => {
+  it("runs the check in the setups' tree when it starts from their snapshot, without running them again", () => {
+    const head = attemptHead();
+    const setups = setup("echo ran >> ../setups && touch built");
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    runScript<SetupResult>(setupScript(line(fork, head), null, setups), sandbox);
+    const ran = runCheck(sandbox, head, setups, check("test", "test -f built && test -f b.txt"));
+    expect(ran).toMatchObject({ exit: 0, setupsRerun: false });
+    expect(cat(join(sandbox, "setups"))).toBe("ran\n");
+  });
+
+  it("fetches the head and runs the setups itself in a fresh container, their output at the top of its log", () => {
+    const head = attemptHead();
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    const ran = runCheck(
+      sandbox,
+      head,
+      setup("echo installing && touch built"),
+      check("test", "test -f built && echo ok"),
+    );
+    expect(ran).toMatchObject({ exit: 0, setupsRerun: true });
+    expect(cat(join(sandbox, "logs/test.log"))).toBe("== throng: setup s1 ==\ninstalling\nok\n");
+  });
+
+  it("fails as infrastructure when a setup that passed fails again in its own container", () => {
+    const head = attemptHead();
+    expect(() =>
+      execFileSync("bash", ["-c", checkScript(line(fork, head), setup("false"), check("test", "true"))], {
+        cwd: mkdtempSync(join(root, "sandbox-")),
+        env: ENV,
+      }),
+    ).toThrow(expect.objectContaining({ status: RERUN_SETUP_FAILED_EXIT }));
+  });
+
+  it("gives the check an empty $THRONG_OUTPUT and reads a failed check's metrics too", () => {
+    const head = attemptHead();
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    const empty = `test -z "$(ls -A "$THRONG_OUTPUT")"`;
+    const ran = runCheck(
+      sandbox,
+      head,
+      [],
+      check("broken", `${empty} && echo '{"failed": 2}' > "$THRONG_OUTPUT/r.json"; exit 3`, 60_000, [
+        number("failed", "broken.r.failed"),
+      ]),
+    );
+    expect(ran).toMatchObject({ exit: 3, metrics: { failed: { value: 2 } } });
+  });
+
+  it("stops a check at its timeout", () => {
+    const head = attemptHead();
+    const ran = runCheck(mkdtempSync(join(root, "sandbox-")), head, [], check("slow", "sleep 20", 1000));
+    expect(ran.exit).toBe(124);
+    expect(ran.durationMs).toBeGreaterThanOrEqual(1000);
+    expect(ran.durationMs).toBeLessThan(10_000);
+  });
+
+  it("quotes commands so a check can't break out of the script", () => {
+    const head = attemptHead();
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    const ran = runCheck(sandbox, head, [], check("quotes", `echo "it's" '$HOME' "$(echo ok)" > ../quoted`));
+    expect(ran.exit).toBe(0);
+    expect(cat(join(sandbox, "quoted"))).toBe("it's $HOME ok\n");
+  });
+
+  it("is idempotent: rerunning in the same container gives the same result", () => {
+    const head = attemptHead();
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    const planned = check(
+      "test",
+      `test ! -e "$THRONG_OUTPUT/r.json" && echo '{"n": 1}' > "$THRONG_OUTPUT/r.json"`,
+      60_000,
+      [number("n", "test.r.n")],
+    );
+    const first = runCheck(sandbox, head, setup("touch built"), planned);
+    const second = runCheck(sandbox, head, setup("touch built"), planned);
+    expect(first).toMatchObject({ exit: 0, metrics: { n: { value: 1 } } });
+    expect(second).toMatchObject({ exit: 0, metrics: { n: { value: 1 } } });
   });
 
   it("turns a project's config into a scored result end to end, reading two files from one check", () => {
@@ -196,26 +414,30 @@ describe("scoreScript", () => {
       echo '${JSON.stringify(coverage)}' > "$THRONG_OUTPUT/coverage-summary.json"
   - name: lint
     command: >-
-      echo '{"errors": 3}' > "$THRONG_OUTPUT/lint.json"; exit 1
-    required: false
+      echo '{"errors": 3}' > "$THRONG_OUTPUT/lint.json"
 metrics:
   - { name: tests, from: test.report.numTotalTests, type: number }
   - { name: coverage, from: test.coverage-summary.total.lines.pct, type: number, unit: "%" }
   - { name: first-duration, from: test.report.testResults.0.duration, type: number, order: asc }
   - { name: lint-errors, from: lint.lint.errors, type: number, order: asc }
 `);
-    const raw = runScript<RawScore>(
-      scoreScript(fork, { sha: head, base: git(origin, "rev-parse", "main") }, scorePlan(config)),
+    const plan = scorePlan(config);
+    const raw = runPipeline(config, git(origin, "rev-parse", "main"), head);
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    const metrics = Object.fromEntries(
+      plan.checks.map((planned) => [planned.name, runCheck(sandbox, head, [], planned).metrics]),
     );
-    const result = buildResult(config, raw);
+    const result = buildResult(config, {
+      ...raw,
+      checks: raw.checks.map((ran, i) => ({ ...ran, metrics: metrics[at(plan.checks, i).name] ?? {} })),
+    });
     expect(result).toMatchObject({
       config: { kind: "valid" },
       gate: "passed",
       checks: [
         { name: "_diff", outcome: "passed" },
-        { name: "test", required: true, outcome: "passed" },
-        { name: "lint", required: false, outcome: "failed" },
-        { name: "_preview", outcome: "skipped" },
+        { name: "test", outcome: "passed" },
+        { name: "lint", outcome: "passed" },
       ],
       metrics: {
         "_diff.filesChanged": { value: 2 },
@@ -229,26 +451,20 @@ metrics:
     });
   });
 
-  it("runs a task's checks after the project's, after its setup, and gates on a required one", () => {
+  it("runs a task's checks beside the project's, after its setups, waiting as they say, and gates on them", () => {
     const head = attemptHead();
     const project = parseConfig(`setup:
-  - echo ready > ../setup-ran
+  - { name: ready, command: echo ready > ../setup-ran }
 checks:
   - name: test
-    command: >-
-      echo '{"lines": 40}' > "$THRONG_OUTPUT/report.json"
+    command: echo test >> ../order
 `);
     const task = taskDefinitionsFrom(
       {
         checks: [
-          {
-            name: "smoke",
-            command: `test -f ../setup-ran && echo '{"ok": false}' > "$THRONG_OUTPUT/smoke.json"; exit 1`,
-          },
-        ],
-        metrics: [
-          { name: "lines", from: "test.report.lines", type: "number" },
-          { name: "smoked", from: "smoke.smoke.ok", type: "boolean" },
+          { name: "smoke", command: "test -f ../setup-ran", after: "test" },
+          { name: "e2e", command: "exit 1" },
+          { name: "deploy", command: "true", after: ["smoke", "e2e"] },
         ],
       },
       NO_TASK_DEFINITIONS,
@@ -256,22 +472,15 @@ checks:
     );
     if ("error" in task) throw new Error(task.error);
     const config = withTask(project, task.definitions);
-    const raw = runScript<RawScore>(
-      scoreScript(fork, { sha: head, base: git(origin, "rev-parse", "main") }, scorePlan(config)),
-    );
-    expect(buildResult(config, raw)).toMatchObject({
+    expect(buildResult(config, runPipeline(config, null, head))).toMatchObject({
       gate: "failed",
       checks: [
         { name: "_diff" },
         { name: "test", source: "project", outcome: "passed" },
-        { name: "smoke", source: "task", required: true, outcome: "failed" },
-        { name: "_preview", outcome: "skipped" },
+        { name: "smoke", source: "task", outcome: "passed" },
+        { name: "e2e", source: "task", outcome: "failed" },
+        { name: "deploy", source: "task", outcome: "skipped", notes: ["skipped: waits for e2e, which failed"] },
       ],
-      metrics: {
-        smoke: { source: "task", value: "failed" },
-        lines: { source: "task", value: 40 },
-        smoked: { source: "task", value: false },
-      },
     });
   });
 
@@ -294,10 +503,8 @@ checks:
       `head -c ${MAX_OUTPUT_BYTES + 1} /dev/zero > "$THRONG_OUTPUT/big.json"`,
       `touch "$THRONG_OUTPUT/notes.txt"`,
     ].join(" && ");
-    const raw = runScript<RawScore>(
-      scoreScript(fork, { sha: head, base: null }, plan({ checks: [check("test", command, 60_000, metrics)] })),
-    );
-    expect(at(raw.checks, 0).metrics).toEqual({
+    const ran = runCheck(mkdtempSync(join(root, "sandbox-")), head, [], check("test", command, 60_000, metrics));
+    expect(ran.metrics).toEqual({
       "missing-file": { value: null, note: "test.nope: no nope.json in $THRONG_OUTPUT; files there: bad, big, out" },
       "missing-key": { value: null, note: "test.out.totals: no key totals; keys there: total, runs, label" },
       "missing-index": { value: null, note: "test.out.runs.3: no index 3 in an array; indexes there: 0 to 0" },
@@ -324,10 +531,8 @@ checks:
       { name: "n", from: "test.out.n", rule: { type: "string" } },
     ];
     const command = `echo '${JSON.stringify(json)}' > "$THRONG_OUTPUT/out.json"`;
-    const raw = runScript<RawScore>(
-      scoreScript(fork, { sha: head, base: null }, plan({ checks: [check("test", command, 60_000, metrics)] })),
-    );
-    expect(at(raw.checks, 0).metrics).toEqual({
+    const ran = runCheck(mkdtempSync(join(root, "sandbox-")), head, [], check("test", command, 60_000, metrics));
+    expect(ran.metrics).toEqual({
       ok: { value: true },
       flaky: { value: null, note: "test.out.flaky: expected a boolean, got a string" },
       grade: { value: "b" },
@@ -335,107 +540,5 @@ checks:
       url: { value: "https://ci.example.test/1" },
       n: { value: null, note: "test.out.n: expected a string, got a number" },
     });
-  });
-});
-
-/** A stand-in `wrangler` on PATH: records its args and env, then succeeds or fails. */
-function fakeWrangler(behaviour: "deploys" | "fails"): string {
-  const bin = mkdtempSync(join(root, "bin-"));
-  const body =
-    behaviour === "deploys"
-      ? `echo '{"preview":{"urls":["https://t1a1-pabc123.acct.workers.dev"]}}'`
-      : `echo 'deploy refused' >&2; exit 1`;
-  writeFileSync(
-    join(bin, "wrangler"),
-    `#!/usr/bin/env bash
-printf '%s\\n' "$*" "$CLOUDFLARE_API_TOKEN" "$CLOUDFLARE_ACCOUNT_ID" "$(cat built 2>/dev/null)" > ../wrangler-call
-${body}
-`,
-    { mode: 0o755 },
-  );
-  return bin;
-}
-
-/** Runs a preview script with `bin` (the fake wrangler) first on PATH. */
-function runPreview(script: string, bin: string, sandbox = mkdtempSync(join(root, "sandbox-"))) {
-  const env = { ...ENV, PATH: `${bin}:${process.env.PATH}` };
-  const stdout = execFileSync("bash", ["-c", script], { cwd: sandbox, env, encoding: "utf8" });
-  const result = parseResult<PreviewScriptResult>(stdout);
-  if (result === null) throw new Error(`no result in: ${stdout}`);
-  return { result, sandbox };
-}
-
-/** The preview's log the script left for storing. */
-const previewLog = (sandbox: string) =>
-  execFileSync("cat", [join(sandbox, "logs/preview.deploy.log")], { encoding: "utf8" });
-
-/** What the fake wrangler recorded, or a throw if it never ran. */
-const wranglerCall = (sandbox: string) => execFileSync("cat", [join(sandbox, "wrangler-call")], { encoding: "utf8" });
-
-describe("previewScript", () => {
-  // The project abc123's attempt t1a1, under the project's own Worker.
-  const target = {
-    ...previewGrant("acct", "abc123"),
-    previewName: previewName({ project: "abc123", attempt: "t1a1" }),
-  };
-
-  it("builds with preview.command, then deploys the head as the named Preview and reports its URL", () => {
-    const head = attemptHead();
-    const { result, sandbox } = runPreview(
-      previewScript(fork, head, { ...target, command: "cat b.txt > built" }),
-      fakeWrangler("deploys"),
-    );
-    expect(result).toEqual({ ok: true, url: "https://t1a1-pabc123.acct.workers.dev" });
-    expect(wranglerCall(sandbox)).toBe(
-      "preview --worker-name pabc123 --name t1a1 --json\nadded-by-worker\nacct\nattempt\nline two\n",
-    );
-  });
-
-  it("deploys without a build step when preview has no command", () => {
-    const head = attemptHead();
-    const { result } = runPreview(previewScript(fork, head, { ...target, command: null }), fakeWrangler("deploys"));
-    expect(result).toMatchObject({ ok: true });
-  });
-
-  it("fails at the build stage, with its output, and deploys nothing when preview.command fails", () => {
-    const head = attemptHead();
-    const { result, sandbox } = runPreview(
-      previewScript(fork, head, { ...target, command: "echo 'it is broken' >&2; exit 2" }),
-      fakeWrangler("deploys"),
-    );
-    expect(result).toMatchObject({ ok: false, stage: "build" });
-    expect(result.ok === false && result.output).toContain("it is broken");
-    expect(() => wranglerCall(sandbox)).toThrow();
-  });
-
-  it("fails at the deploy stage, with wrangler's output, when the deploy fails", () => {
-    const head = attemptHead();
-    const { result } = runPreview(previewScript(fork, head, { ...target, command: null }), fakeWrangler("fails"));
-    expect(result).toMatchObject({ ok: false, stage: "deploy" });
-    expect(result.ok === false && result.output).toContain("deploy refused");
-  });
-
-  it("writes the build's and the deploy's output to the preview's log, whichever stage it ends at", () => {
-    const head = attemptHead();
-    const failed = runPreview(
-      previewScript(fork, head, { ...target, command: "echo building; echo 'it is broken' >&2; exit 2" }),
-      fakeWrangler("deploys"),
-    );
-    expect(previewLog(failed.sandbox)).toBe("building\nit is broken\n");
-
-    const sandbox = mkdtempSync(join(root, "sandbox-"));
-    runPreview(previewScript(fork, head, { ...target, command: "echo building" }), fakeWrangler("fails"), sandbox);
-    expect(previewLog(sandbox)).toBe("building\ndeploy refused\n");
-    // A rerun starts the log afresh.
-    runPreview(previewScript(fork, head, { ...target, command: null }), fakeWrangler("fails"), sandbox);
-    expect(previewLog(sandbox)).toBe("deploy refused\n");
-  });
-
-  it("is idempotent: rerunning in the same directory deploys again", () => {
-    const head = attemptHead();
-    const script = previewScript(fork, head, { ...target, command: "touch built" });
-    const bin = fakeWrangler("deploys");
-    const { result, sandbox } = runPreview(script, bin);
-    expect(runPreview(script, bin, sandbox).result).toEqual(result);
   });
 });

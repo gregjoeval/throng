@@ -16,7 +16,6 @@ import { userForEmail } from "../src/users.ts";
 import { testDatabase } from "./support/d1.ts";
 import { at, defined } from "./support/defined.ts";
 import { git, gitEnv, LocalGitHost, serve, tryGit } from "./support/git-host.ts";
-import { FakePreviewWorkers } from "./support/preview-workers.ts";
 import { testTaskBackends } from "./support/task-backend.ts";
 
 const cleanups: (() => Promise<void>)[] = [];
@@ -50,10 +49,7 @@ async function setup() {
   const ada = await person("ada@example.com");
   const bob = await person("bob@example.com");
 
-  const created = await projectService({ db, repos: host, previewWorkers: new FakePreviewWorkers() }).create(
-    greg.actor,
-    { handle: "throng" },
-  );
+  const created = await projectService({ db, repos: host }).create(greg.actor, { handle: "throng" });
   const project: ProjectContext = { id: created.id, owner: greg.user.id };
   const origin = originRepo(project.id);
 
@@ -157,7 +153,7 @@ describe("push-to-create", () => {
       ["created", 1],
       ["opened", 1],
       ["pushed", 1],
-      ["scoringQueued", 1],
+      ["runQueued", 1],
     ]);
     expect(pushed.stderr).toMatch(new RegExp(`remote: scoring queued for t2a1 \\(${sha}\\)`, "u"));
     expect(JSON.parse(at(events, 3).detail)).toEqual({
@@ -329,7 +325,7 @@ describe("joining a task with a t<n>/ branch", () => {
       journal()
         .filter((e) => e.task === 1 && e.attempt === 2)
         .map((e) => e.kind),
-    ).toEqual(["created", "opened", "pushed", "scoringQueued", "pushed", "scoringCancelled", "scoringQueued"]);
+    ).toEqual(["created", "opened", "pushed", "runQueued", "pushed", "runCancelled", "runQueued"]);
   });
 
   it("rejects a join for a missing, closed or obsolete task, one at its limit, or one with an open merge request", async () => {

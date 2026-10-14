@@ -1,10 +1,9 @@
-// A scoring run's logs: one per `setup` step, check and preview, stored in R2 under the run. The key
+// A scoring run's logs: one per `setup` step and check, stored in R2 under the run. The key
 // layout, the log names and the script that reads a log out of the Sandbox (truncated to fit) live
 // here; the R2 lifecycle deletes logs after `LOG_RETENTION_DAYS` (see the README's setup).
 
 import type { SandboxSize } from "./config.ts";
 import { ServiceError } from "./errors.ts";
-import type { ScoringParams } from "./scoring.ts";
 
 /** Logs over this many bytes are stored truncated, keeping their head and tail. */
 export const MAX_LOG_BYTES = 5 * 1024 * 1024;
@@ -13,15 +12,22 @@ export const LOG_RETENTION_DAYS = 30;
 /** The key prefix every log is stored under, and the lifecycle rule applies to. */
 export const LOG_PREFIX = "logs/";
 
-/** The preview's log. Check names can't contain a dot, so it never collides with a check's. */
-export const PREVIEW_LOG = "preview.deploy";
-/** A check's log name is its own name; setup steps, the preview and checks never share one. */
+/** A check's log name is its own name; setup steps and checks never share one. */
 const LOG_NAME = /^[a-z0-9][a-z0-9_-]*(\.[a-z0-9_-]+)?$/u;
 
 /** The part of the logs R2 bucket Throng uses; tests pass one in memory. */
 export interface LogStore {
   get: (key: string) => Promise<{ body: ReadableStream } | null>;
   put: (key: string, value: string) => Promise<unknown>;
+}
+
+/** The log under the first of `keys` the store holds, or `null` if it holds none. */
+export async function firstLog(store: LogStore, keys: string[]): Promise<{ body: ReadableStream } | null> {
+  for (const key of keys) {
+    const log = await store.get(key);
+    if (log !== null) return log;
+  }
+  return null;
 }
 
 /** What R2 and the log endpoint serve a log as. */
@@ -32,31 +38,41 @@ export function setupLogName(step: number): string {
   return `setup.${step}`;
 }
 
+/** The log name of post-gate step `step`: `step.<name>`, apart from the checks' names. */
+export function stepLogName(step: string): string {
+  return `step.${step}`;
+}
+
 /** Whether `name` could name a run's log, so a request can't build a key outside the run. */
 export function isLogName(name: string): boolean {
   return LOG_NAME.test(name);
 }
 
-/** Where a run's log is stored: `logs/<projectId>/<t42a3>/<sha>/<runId>/<name>.log`. */
-export function logKey({ project, attempt, sha, run }: ScoringParams, name: string): string {
-  return `${LOG_PREFIX}${project}/${attempt}/${sha}/${run}/${name}.log`;
+/** Where a run's log is stored: `logs/<projectId>/<line>/<runId>/<name>.log`. */
+export function logKey({ project, line, run }: { project: string; line: string; run: number }, name: string): string {
+  return `${LOG_PREFIX}${project}/${line}/${run}/${name}.log`;
 }
 
 /**
- * Where a landing's retest log is stored: `logs/<projectId>/<t42a3>/<head>/landing-<landingId>/<name>.log`,
- * next to the head's scoring runs and under the same lifecycle rule.
+ * Where a run stored its log before runs were keyed on their line,
+ * `logs/<projectId>/<t42a3>/<sha>/<runId>/<name>.log`; read until the lifecycle rule expires them.
  */
-export function landingLogKey(
-  {
-    project,
-    task,
-    attempt,
-    head,
-    landing,
-  }: { project: string; task: number; attempt: number; head: string; landing: number },
+export function legacyLogKey(
+  { project, line, sha, run }: { project: string; line: string; sha: string; run: number },
   name: string,
 ): string {
-  return `${LOG_PREFIX}${project}/t${task}a${attempt}/${head}/landing-${landing}/${name}.log`;
+  return `${LOG_PREFIX}${project}/${line}/${sha}/${run}/${name}.log`;
+}
+
+/**
+ * Where a landing stored its retest's log before landings were runs,
+ * `logs/<projectId>/<t42a3>/<head>/landing-<landingId>/<name>.log`; read until the lifecycle rule expires them.
+ */
+export function legacyLandingLogKey(
+  { project, attempt, head, landing }: { project: string; attempt: string; head: string; landing: number },
+  name: string,
+): string {
+  return `${LOG_PREFIX}${project}/${attempt}/${head}/landing-${landing}/${name}.log`;
 }
 
 /** The `notFound` for a log a run doesn't have: never stored, expired, or a name no log can have. */
@@ -86,11 +102,6 @@ head -c ${keep} "$f"
 printf '\\n[throng: truncated %d of %d bytes]\\n' $(( size - ${2 * keep} )) "$size"
 tail -c ${keep} "$f"
 `;
-}
-
-/** The logs a score plan may write, in run order: each setup step, then each check. */
-export function logNames(plan: { setup: string[]; checks: { name: string }[] }): string[] {
-  return [...plan.setup.map((_, i) => setupLogName(i + 1)), ...plan.checks.map((check) => check.name)];
 }
 
 /** The note on every log a step wrote: the Sandbox size its container ran at. */

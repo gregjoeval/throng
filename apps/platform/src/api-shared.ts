@@ -1,7 +1,7 @@
 // HTTP plumbing more than one route module shares (the REST routes in `api.ts`, `browse-api.ts` and
 // `dequeue-api.ts`, and the MCP tools in `mcp.ts`): the project path, multi-segment `{path}` routes,
-// the public shape of a file or commit diff with its `text/x-diff` answer, the request schemas the
-// MCP tools reuse, and the task service for a request.
+// the public shape of a file or commit diff with its `text/x-diff` answer, a landing's conflicting
+// file diffed to either side, the request schemas the MCP tools reuse, and the project and task services.
 
 import { z } from "@hono/zod-openapi";
 import type { OpenAPIHono, RouteConfig } from "@hono/zod-openapi";
@@ -9,14 +9,15 @@ import type { Context } from "hono";
 import type { AccessBindings } from "./access.ts";
 import { DEFAULT_COMMITS_PAGE, MAX_COMMITS_PAGE } from "./browse.ts";
 import { SelectionPolicySchema } from "./config.ts";
-import { DIFF_FLAGS, FILE_STATUSES } from "./diff.ts";
-import type { DiffCache } from "./diff.ts";
+import { DIFF_FLAGS, diffFile, FILE_STATUSES } from "./diff.ts";
+import type { DiffCache, FileSide } from "./diff.ts";
+import { ServiceError } from "./errors.ts";
 import { MAX_SOURCE_URL } from "./import-source.ts";
-import type { PreviewWorkers } from "./preview-workers.ts";
 import { MAX_PROJECT_HANDLE, PROJECT_HANDLE, projectService } from "./projects.ts";
 import type { Repos } from "./repos.ts";
+import { DEFAULT_RUNS_PAGE, isLineFilter, MAX_RUNS_PAGE, RUN_STATUSES } from "./scoring.ts";
 import { taskService } from "./tasks.ts";
-import type { TaskBackend } from "./tasks.ts";
+import type { ConflictFileSource, TaskBackend } from "./tasks.ts";
 import { MAX_VERDICT_BODY, VERDICT_RECOMMENDATIONS } from "./verdicts.ts";
 import { DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS, WAIT_CONDITIONS } from "./waiters.ts";
 
@@ -100,22 +101,60 @@ export function diffResponse(c: Context, patch: () => string, body: () => unknow
   return c.json(body(), 200);
 }
 
+/** The sides a conflicting file diffs to from its merge base: `main`, or the approved head. */
+export const CONFLICT_SIDES = ["main", "attempt"] as const;
+export type ConflictSide = (typeof CONFLICT_SIDES)[number];
+
+export const ConflictSideQuerySchema = z.object({
+  side: z.enum(CONFLICT_SIDES).openapi({ description: "Diff to `main`'s file, or to the approved head's." }),
+});
+
+/** A conflict diff's description: what it diffs, and the caps and answers it shares with the commit diff. */
+export const CONFLICT_DIFF_DESCRIPTION =
+  "from its base blob to `main`'s (`side=main`) or the approved head's (`side=attempt`). A side with no file is " +
+  "a delete; a base with none, an add. The commit diff's per-file caps apply. With `Accept: text/x-diff`, the " +
+  "answer is the patch.";
+
+/**
+ * Answers one conflicting file diffed from its merge base to `side`. The base's and `main`'s blobs
+ * are in the origin; the approved head's in its fork while the attempt is active, and in the origin
+ * once it's archived.
+ */
+export async function conflictDiffResponse(
+  c: Context,
+  repos: Repos,
+  { file, origin, fork }: ConflictFileSource,
+  side: ConflictSide,
+): Promise<Response> {
+  const sideOf = (s: "base" | ConflictSide): FileSide | null => {
+    const hash = file.blobs[s];
+    const mode = file.modes[s];
+    return hash === null || mode === null ? null : { path: file.path, mode, hash };
+  };
+  const old = sideOf("base");
+  const next = sideOf(side);
+  if (old === null && next === null)
+    throw new ServiceError("notFound", `neither the base nor ${side} has ${file.path}`);
+  const diff = (repo: string) => diffFile(repos, repo, old, next);
+  const found = side === "main" ? await diff(origin) : await diff(fork).catch(() => diff(origin));
+  return diffResponse(
+    c,
+    () => found.patch ?? "",
+    () => found,
+  );
+}
+
 /** Whether the client asked for the unified patch rather than JSON. */
 export function wantsPatch(accept: string | undefined): boolean {
   return accept?.split(",").some((t) => t.split(";")[0]?.trim().toLowerCase() === "text/x-diff") ?? false;
 }
 
 /**
- * The project service for an environment, given its repos, its preview Workers and how an import
- * source's host is reached (the global `fetch` when undefined).
+ * The project service for an environment, given its repos and how an import source's host is
+ * reached (the global `fetch` when undefined).
  */
-export function envProjectService(
-  repos: (env: AccessBindings) => Repos,
-  previewWorkers: (env: AccessBindings) => PreviewWorkers,
-  fetch: typeof globalThis.fetch | undefined,
-) {
-  return (env: AccessBindings) =>
-    projectService({ db: env.DB, repos: repos(env), previewWorkers: previewWorkers(env), fetch });
+export function envProjectService(repos: (env: AccessBindings) => Repos, fetch: typeof globalThis.fetch | undefined) {
+  return (env: AccessBindings) => projectService({ db: env.DB, repos: repos(env), fetch });
 }
 
 /**
@@ -188,10 +227,11 @@ export const AttemptLimitSchema = z
 /** A task's checks as a request gives them: checked like `.throng/config.yml`'s, so they're described there. */
 export const TaskChecksInputSchema = z.array(z.unknown()).openapi({
   description:
-    "The task's own checks, run after the project's in the same container, under its `setup` and " +
+    "The task's own checks, run beside the project's after its `setup`, under its " +
     "`network.allow`, in the shape of `.throng/config.yml`'s `checks`: `name`, `command`, and optionally " +
-    "`required` (true by default; a required task check gates the task's attempts) and `timeout`. Names must " +
-    "not start with `_` or clash with a check or metric in the project's config on `main`. Replaces the " +
+    "`timeout` and `after` (the checks it waits for, the project's or the task's). Every task check that " +
+    "runs must pass for an attempt's gate to pass. Names must " +
+    "not start with `_` or clash with a setup, check or metric in the project's config on `main`. Replaces the " +
     "task's checks; its metrics may read them.",
   example: [{ name: "smoke", command: "./smoke.sh", timeout: "2m" }],
 });
@@ -288,8 +328,8 @@ export const WaitQuerySchema = z.object({
     .default("any")
     .openapi({
       description:
-        "What to wait for, with `wait`: `scored`, the current head has a `done` or `errored` run (at once if it " +
-        "already has one); " +
+        "What to wait for, with `wait`: `scored`, the current head has a `done` or `errored` run, or one waiting for " +
+        "the project owner to start it (at once if it already has one); " +
         "`stateChanged`, the attempt's state; `mergeRequestChanged`, its merge request's state or last dequeue; " +
         "`any`, any of them.",
     }),
@@ -337,3 +377,44 @@ export const PageSchema = {
   limit: z.number().int(),
   next: z.number().int().nullable().openapi({ description: "The next page's offset; null on the last page." }),
 };
+
+/** Who may grant a secret or start a waiting run: a 403's description on those routes. */
+export const OWNER_AS_THEMSELVES = "Only the project owner, acting as themselves (never under an alias), may.";
+
+export const StartRunSchema = z
+  .object({
+    sha: z.string().min(1).openapi({
+      description:
+        "The head you reviewed, as the run's `waiting.head` gives it. If the run no longer waits on it, nothing starts.",
+      example: "3f2a9c1e8b7d6f5a4c3b2a1908f7e6d5c4b3a291",
+    }),
+  })
+  .openapi("StartRun");
+
+/** `GET …/runs`' filters and cursor; `list_runs` takes the same. */
+export const RunsQuerySchema = z.object({
+  line: z
+    .string()
+    .refine(isLineFilter, { error: "line must be `main`, `tasks`, a task (`t42`) or an attempt (`t42a3`)" })
+    .optional()
+    .openapi({
+      description:
+        "Only this line's runs: `main`, a task's task branch (`t42`) or an attempt (`t42a3`); `tasks` for every " +
+        "line but `main`. Every line when absent.",
+      example: "main",
+    }),
+  status: z.enum(RUN_STATUSES).optional().openapi({ description: "Only runs with this status.", example: "waiting" }),
+  cursor: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .optional()
+    .openapi({ description: "Where a page starts: the `next` of the page before it. Absent for the first page." }),
+  limit: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(MAX_RUNS_PAGE)
+    .default(DEFAULT_RUNS_PAGE)
+    .openapi({ description: `Runs per page: ${DEFAULT_RUNS_PAGE} by default, at most ${MAX_RUNS_PAGE}.` }),
+});

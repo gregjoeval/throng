@@ -3,7 +3,7 @@ import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
 import type { Attempt, ListedTask } from "@/lib/tasks";
 import { renderApp } from "./app";
-import { attempt, bob, me, server, serveTasks, task } from "./server";
+import { attempt, BASE, bob, me, runDetail, server, serveTasks, task } from "./server";
 
 const SHA = "c0ffee".padEnd(40, "0");
 const ARCHIVED = "a1".padEnd(40, "0");
@@ -148,6 +148,115 @@ describe("the task page body", () => {
       `/ada/alpha/commit/${SHA}`,
     );
     expect(within(body()).getByRole("link", { name: "t1a1" })).toHaveAttribute("href", `/ada/alpha/tree/${ARCHIVED}`);
+  });
+
+  it("shows the task branch's latest runs beside a merged merge request's banner, each linking to its page", async () => {
+    const asked: string[] = [];
+    serveMergeRequest({ state: "merged", mergeSha: SHA, mergedAt: me.user.createdAt });
+    server.use(
+      http.get("*/api/projects/:owner/:project/runs", ({ request }) => {
+        asked.push(new URL(request.url).search);
+        const { error: _e, outcome: _o, result: _r, ...run } = runDetail(9, SHA, { line: "t1" });
+        const older = { ...run, id: 8, status: "cancelled" as const, gate: null, superseded: true };
+        return HttpResponse.json({ runs: [run, older], next: null });
+      }),
+    );
+    await openTask(task(1, { state: "closed", closedBy: bob }), [
+      attempt(1, 2, { state: "merged", mergedSha: SHA, mergeRequest: { state: "merged", lastDequeue: null } }),
+    ]);
+    const runs = await within(body()).findByRole("region", { name: "Task branch runs" });
+    // It asks only for the few it shows.
+    expect(asked).toContain("?line=t1&limit=3");
+    expect(within(runs).getByRole("listitem", { name: "Run 9" })).toHaveTextContent(
+      `Run 9${SHA.slice(0, 7)}DoneGate passed`,
+    );
+    expect(within(runs).getByRole("listitem", { name: "Run 8" })).toHaveAttribute("data-superseded", "true");
+    expect(within(runs).getByRole("link", { name: "Run 9" })).toHaveAttribute("href", "/ada/alpha/runs/9");
+    expect(within(runs).getByRole("link", { name: "All runs on t1" })).toHaveAttribute(
+      "href",
+      "/ada/alpha/runs?line=t1",
+    );
+  });
+
+  it("shows the task's runs waiting for the owner, with their secrets, head, diff and Start", async () => {
+    const started: unknown[] = [];
+    /** A waiting run on `line`, whose head is on attempt `on`, as the runs list gives it. */
+    const waiting = (id: number, line: string, on: string | null) => {
+      const {
+        error: _e,
+        outcome: _o,
+        result: _r,
+        ...run
+      } = runDetail(id, SHA, {
+        line,
+        status: "waiting",
+        gate: null,
+        ...(line === "main" ? { sha: null, pipeline: "main" as const, trigger: "merge" as const } : {}),
+        waiting: { head: SHA, attempt: on, base: line === "main" ? null : BASE, secrets: ["DEPLOY"], taskCheck: null },
+      });
+      return run;
+    };
+    server.use(
+      http.get("*/api/projects/:owner/:project/runs", () =>
+        HttpResponse.json({
+          runs: [
+            waiting(7, "t1a2", "t1a2"),
+            waiting(6, "t2a1", "t2a1"),
+            waiting(5, "main", "t1a2"),
+            waiting(4, "t1", null),
+          ],
+          next: null,
+        }),
+      ),
+      http.post("*/api/projects/:owner/:project/runs/:id/start", async ({ params, request }) => {
+        started.push({ id: params["id"], ...((await request.json()) as object) });
+        return HttpResponse.json(runDetail(7, SHA, { status: "queued" }));
+      }),
+    );
+    const { user } = await openTask(task(1), [attempt(1, 2, { state: "open" })]);
+    const list = await screen.findByRole("region", { name: "Waiting for the owner" });
+    expect(
+      within(list)
+        .getAllByRole("listitem")
+        .map((item) => item.getAttribute("aria-label")),
+    ).toEqual(["Run 7", "Run 5", "Run 4"]);
+    const item = within(list).getByRole("listitem", { name: "Run 7" });
+    expect(item).toHaveTextContent(`Run 7t1a2${SHA.slice(0, 7)}DiffSecrets: DEPLOY`);
+    expect(within(item).getByRole("link", { name: "Diff" })).toHaveAttribute(
+      "href",
+      `/ada/alpha/compare/${BASE}...${SHA}?attempt=t1a2`,
+    );
+    const diff = (id: number) =>
+      within(within(list).getByRole("listitem", { name: `Run ${id}` })).getByRole("link", { name: "Diff" });
+    expect(diff(4)).toHaveAttribute("href", `/ada/alpha/compare/${BASE}...${SHA}`);
+    expect(diff(5)).toHaveAttribute("href", `/ada/alpha/compare/main...${SHA}?attempt=t1a2`);
+    await user.click(within(item).getByRole("button", { name: "Start run 7" }));
+    await waitFor(() => expect(started).toEqual([{ id: "7", sha: SHA }]));
+  });
+
+  it("shows the task's waiting runs without Start to anyone but the owner", async () => {
+    server.use(
+      http.get("*/api/projects/:owner/:project", () =>
+        HttpResponse.json({ id: "id-alpha", handle: "alpha", owner: bob, createdAt: me.user.createdAt }),
+      ),
+      http.get("*/api/projects/:owner/:project/runs", () => {
+        const {
+          error: _e,
+          outcome: _o,
+          result: _r,
+          ...run
+        } = runDetail(7, SHA, {
+          line: "t1a1",
+          status: "waiting",
+          waiting: { head: SHA, attempt: "t1a1", base: BASE, secrets: ["DEPLOY"], taskCheck: null },
+        });
+        return HttpResponse.json({ runs: [run], next: null });
+      }),
+    );
+    await openTask(task(1), [attempt(1, 1, { state: "open" })]);
+    const list = await screen.findByRole("region", { name: "Waiting for the owner" });
+    expect(within(list).getByRole("listitem", { name: "Run 7" })).toHaveTextContent("Secrets: DEPLOY");
+    expect(within(list).queryByRole("button")).toBeNull();
   });
 
   it("says when a closed task never merged", async () => {

@@ -57,6 +57,8 @@ The header's **Sign out** links to `/cdn-cgi/access/logout` on the app's own hos
 - `/:owner/:project/commit/:sha`: one commit
 - `/:owner/:project/tasks`: the task list, open by default (`?state=closed` or `?state=obsolete` for the other tabs)
 - `/:owner/:project/tasks/:t`: one task, `t42`
+- `/:owner/:project/runs`: every run on the project's lines, newest first (`?line=main`, `?line=tasks` or `?line=t42a3`, `?status=waiting`, and `?cursor=` for an older page)
+- `/:owner/:project/runs/:run`: one run, with its steps, logs and metrics
 
 A ref is `main`, an attempt (`t42a3`) or a full sha. A sha can carry `?attempt=t42a3`, naming the attempt fork to look it up in.
 

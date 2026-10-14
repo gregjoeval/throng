@@ -35,7 +35,6 @@ import type { PushReport, PushRequest, RefUpdate } from "./pkt-line.ts";
 import { resolveProject } from "./projects.ts";
 import { artifactsErrorCode, forkRepo, originRepo } from "./repos.ts";
 import type { Repos, TokenScope } from "./repos.ts";
-import { headAttemptRef } from "./scoring.ts";
 import type { ScoringRequest } from "./scoring.ts";
 import {
   attemptRef,
@@ -424,7 +423,7 @@ function taskBranchLines(task: number, head: { sha: string } | null): string[] {
 function scoringLines({ scoring }: { scoring: ScoringRequest | null }): string[] {
   if (scoring === null || !scoring.queued) return [];
   const { run } = scoring;
-  return [`scoring queued for ${headAttemptRef(run)} (${run.sha})`];
+  return [`scoring queued for ${run.line} (${run.sha})`];
 }
 
 /** The `remote:` lines for a push recorded on an attempt's fork: scoring, then its merge request's news. */

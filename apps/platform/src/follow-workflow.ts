@@ -61,7 +61,7 @@ export class FollowWorkflow extends WorkflowEntrypoint<Env, FollowParams> {
   }
 
   async #follow(instanceId: string, params: FollowParams): Promise<FollowResult> {
-    const repos = { project: params.project, attempt: attemptRef(params.task, params.attempt) };
+    const repos = { project: params.project, line: attemptRef(params.task, params.attempt) };
     const run = await runInSandbox(
       this.env,
       instanceId,

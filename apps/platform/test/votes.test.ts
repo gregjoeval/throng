@@ -8,7 +8,7 @@ import { CONFIG_PATH } from "../src/config.ts";
 import { ServiceError } from "../src/errors.ts";
 import type { FollowParams } from "../src/follows.ts";
 import type { Gate, ScoringResult } from "../src/results.ts";
-import type { ScoringOutcome, ScoringParams, ScoringWorkflow } from "../src/scoring.ts";
+import type { LandingRunParams, PipelineParams, PipelineWorkflowBinding, ScoringOutcome } from "../src/scoring.ts";
 import { TaskStore } from "../src/task-store.ts";
 import type { AttemptInput, ProjectContext } from "../src/task-store.ts";
 import type { Actor } from "../src/tokens.ts";
@@ -32,8 +32,8 @@ const eve = actor("eve00001");
 const eveClaude = actor("eve00001", "claude");
 const fay = actor("fay00001");
 
-class FakeWorkflow implements ScoringWorkflow {
-  async create(_options: { id: string; params: ScoringParams }): Promise<unknown> {
+class FakeWorkflow implements PipelineWorkflowBinding {
+  async create(_options: { id: string; params: PipelineParams | LandingRunParams }): Promise<unknown> {
     return {};
   }
   async get(_id: string): Promise<{ terminate: () => Promise<void> }> {
@@ -78,7 +78,7 @@ async function setup(selection = "selection: { policy: vote }\n") {
     sql,
     repos,
     now: () => new Date((clock += 1000)),
-    scoring: { workflow: new FakeWorkflow(), teardown: async () => {} },
+    runner: { workflow: new FakeWorkflow(), teardown: async () => {} },
     follow: { workflow: follows },
   });
   const journal = () =>
@@ -102,8 +102,13 @@ async function setup(selection = "selection: { policy: vote }\n") {
   const author = (ref: AttemptInput) => at(authors, ref.number - 1);
 
   const score = async (ref: AttemptInput, outcome: ScoringOutcome = done()) => {
-    await store.scoring.drain();
-    const run = at(store.scoring.listRuns({ task: ref.task, attempt: ref.number }), -1);
+    await store.runs.drain();
+    // A task branch push runs on the task branch's line too, holding a slot until it ends.
+    for (const run of store.runs.listRuns(`t${ref.task}`).filter((r) => r.status === "running")) {
+      store.scoringFinished(run.id, done());
+      await store.runs.drain();
+    }
+    const run = at(store.runs.listRuns(`t${ref.task}a${ref.number}`), -1);
     store.scoringFinished(run.id, outcome);
   };
   let n = 0;
@@ -246,7 +251,7 @@ describe("opening a vote", () => {
     const { sql, store, t1a2, scoreAll } = await setup();
     await scoreAll();
     // Raw SQL: nothing forgets a head once a push records it, so no API reaches this state.
-    sql.exec("DELETE FROM scoring_heads WHERE task = ? AND attempt = ?", t1a2.task, t1a2.number);
+    sql.exec("DELETE FROM pipeline_heads WHERE line = ?", `t${t1a2.task}a${t1a2.number}`);
     const opened = await store.openVote(PROJECT, cat, { task: 1 });
     expect(opened.candidates.map((c) => c.attempt)).toEqual([1, 3]);
     expect(opened.candidates.every((c) => /^[0-9a-f]{40}$/u.test(c.head))).toBeTruthy();
@@ -451,7 +456,7 @@ describe("candidates", () => {
     store.castVote(PROJECT, dan, t1a2);
     await store.rescore(PROJECT, cat, t1a1);
     await score(t1a1, { status: "errored", error: "sandbox lost" });
-    const errored = at(store.scoring.listRuns({ task: 1, attempt: 1 }), -1).id;
+    const errored = at(store.runs.listRuns("t1a1"), -1).id;
     expect(vote().candidates[0]).toMatchObject({
       attempt: 1,
       votes: 0,
@@ -670,7 +675,7 @@ describe("closing a vote", () => {
     store.castVote(PROJECT, eve, t1a1);
     store.castVote(PROJECT, dan, t1a2);
     push(t1a1);
-    await store.scoring.drain();
+    await store.runs.drain();
     expect(store.getAttempt(PROJECT, owner, t1a1).scoring.status).not.toBe("done");
     expect(vote().candidates[0]).toMatchObject({ withdrawn: true, being_scored: false });
     expect((await store.closeVote(PROJECT, cat, { task: 1 })).vote.winner).toBe(2);

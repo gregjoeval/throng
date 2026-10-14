@@ -115,6 +115,7 @@ describe("tasks", () => {
       closed_by: null,
       attempt_limit: null,
       definitions: { checks: [], metrics: [] },
+      check_writers: [],
       selection: null,
     });
     expect(t2).toMatchObject({ number: 2, body: "**md**", attempt_limit: 2 });
@@ -911,6 +912,13 @@ describe("migrate", () => {
       preview: { status: "none" },
       logs: [],
     };
+    // A run stored before runs were keyed on their line.
+    sql.exec(`CREATE TABLE scoring_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, task INTEGER NOT NULL, attempt INTEGER NOT NULL,
+      sha TEXT NOT NULL, trigger TEXT NOT NULL, user_id TEXT, alias TEXT, status TEXT NOT NULL,
+      instance_id TEXT NOT NULL, created_at INTEGER NOT NULL, started_at INTEGER, finished_at INTEGER,
+      torn_down INTEGER NOT NULL DEFAULT 0, result TEXT
+    )`);
     sql.exec(
       `INSERT INTO scoring_runs (project, task, attempt, sha, trigger, status, instance_id, created_at, result)
        VALUES ('abc123', 1, 1, 'a', 'score_now', 'done', 'i', 0, ?)`,
@@ -945,7 +953,7 @@ describe("migrate", () => {
     expect(run.result?.checks.find((c) => c.name === "test")?.outcome).toBe("timedOut");
     expect(run.result?.metrics["test"]).toMatchObject({ type: "enum", value: "timedOut" });
     expect(sql.exec("SELECT kind FROM journal ORDER BY id")).toEqual(
-      ["returnedToDraft", "handedOff", "madeObsolete", "mainAdvanced", "needsReview", "scoringQueued", "forkReady"].map(
+      ["returnedToDraft", "handedOff", "madeObsolete", "mainAdvanced", "needsReview", "runQueued", "forkReady"].map(
         (kind) => ({ kind }),
       ),
     );
@@ -958,6 +966,65 @@ describe("migrate", () => {
         at,
       ),
     ).toThrow(/UNIQUE/u);
+  });
+
+  it("reads journal entries stored under a scoring queue's event names under a pipeline run's", () => {
+    const sql = testSql();
+    expect(new TaskStore({ sql, repos: new FakeRepos() })).toBeDefined();
+    const old = ["scoringQueued", "scoringWaiting", "scoringStarted", "scoringErrored", "scoringCancelled", "scored"];
+    for (const kind of old) sql.exec("INSERT INTO journal (at, kind, detail) VALUES (1, ?, '{}')", kind);
+    expect(new TaskStore({ sql, repos: new FakeRepos() })).toBeDefined();
+    expect(sql.exec("SELECT kind FROM journal ORDER BY id")).toEqual(
+      ["runQueued", "runWaiting", "runStarted", "runErrored", "runCancelled", "scored"].map((kind) => ({ kind })),
+    );
+  });
+
+  it("reads task checks and results stored when a check could be optional without required, and waiting for none", () => {
+    const sql = testSql();
+    const repos = new FakeRepos();
+    expect(new TaskStore({ sql, repos })).toBeDefined();
+    const smoke = { name: "smoke", command: "./smoke.sh", required: false, timeoutMs: 1000, source: "task" };
+    sql.exec(
+      `INSERT INTO tasks (number, title, body, creator, state, created_at, definitions)
+       VALUES (1, 't', '', 'ada', 'open', '2026-10-10T12:00:00.000Z', ?)`,
+      JSON.stringify({ checks: [smoke], metrics: [] }),
+    );
+    const result = {
+      base: null,
+      config: { kind: "valid" },
+      gate: "passed",
+      checks: [{ name: "smoke", source: "task", required: false, outcome: "failed", durationMs: 1, notes: [] }],
+      metrics: {},
+      logs: [],
+    };
+    // A run stored before runs were keyed on their line.
+    sql.exec(`CREATE TABLE scoring_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, task INTEGER NOT NULL, attempt INTEGER NOT NULL,
+      sha TEXT NOT NULL, trigger TEXT NOT NULL, user_id TEXT, alias TEXT, status TEXT NOT NULL,
+      instance_id TEXT NOT NULL, created_at INTEGER NOT NULL, started_at INTEGER, finished_at INTEGER,
+      torn_down INTEGER NOT NULL DEFAULT 0, result TEXT
+    )`);
+    sql.exec(
+      `INSERT INTO scoring_runs (project, task, attempt, sha, trigger, status, instance_id, created_at, result)
+       VALUES ('abc123', 1, 1, 'a', 'push', 'done', 'i', 0, ?)`,
+      JSON.stringify(result),
+    );
+    const store = new TaskStore({ sql, repos });
+    expect(store.getTask(PROJECT, ada, { task: 1 }).definitions.checks).toEqual([
+      {
+        name: "smoke",
+        command: "./smoke.sh",
+        timeoutMs: 1000,
+        after: [],
+        secrets: [],
+        group: null,
+        caches: [],
+        source: "task",
+      },
+    ]);
+    expect(store.getScoringRun(PROJECT, ada, { run: 1 }).result?.checks).toEqual([
+      { name: "smoke", source: "task", outcome: "failed", durationMs: 1, notes: [] },
+    ]);
   });
 
   it("drops the spike's push inbox tables", () => {
@@ -1012,12 +1079,12 @@ describe("migrate", () => {
     expect(new TaskStore({ sql, repos })).toBeDefined();
     expect(new TaskStore({ sql, repos })).toBeDefined();
     expect(sql.exec("SELECT user_id, alias FROM journal")).toEqual([{ user_id: "ada", alias: "claude" }]);
-    expect(sql.exec("SELECT user_id, alias FROM scoring_runs")).toEqual([{ user_id: "ada", alias: "claude" }]);
+    expect(sql.exec("SELECT user_id, alias FROM pipeline_runs")).toEqual([{ user_id: "ada", alias: "claude" }]);
     expect(sql.exec("SELECT approved_by_alias, created_by_alias FROM merge_requests")).toEqual([
       { approved_by_alias: "claude", created_by_alias: "codex" },
     ]);
     expect(sql.exec("SELECT reviewer, alias FROM verdicts")).toEqual([{ reviewer: "bob", alias: "claude" }]);
-    for (const table of ["journal", "scoring_runs", "merge_requests", "verdicts"]) {
+    for (const table of ["journal", "pipeline_runs", "merge_requests", "verdicts"]) {
       const columns = sql.exec<{ name: string }>(`PRAGMA table_info(${table})`).map((c) => c.name);
       expect(columns.filter((c) => c.includes("agent"))).toEqual([]);
     }

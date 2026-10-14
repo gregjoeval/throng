@@ -1,4 +1,4 @@
-// A project's `.throng/config.yml`: its setup, checks, metrics, preview, attempt cap and Sandbox size. `parseConfig`
+// A project's `.throng/config.yml`: its setups, checks, metrics, attempt cap and Sandbox size. `parseConfig`
 // is pure, so the API's validate endpoint, the attempt cap and scoring all read a config the same
 // way. `loadConfig` always reads it from the origin's `main`, so an attempt can't change its own
 // checks.
@@ -8,8 +8,11 @@ import { z } from "zod";
 import { METRIC_FORMATS, METRIC_TYPES, parseFrom } from "./metric-values.ts";
 import type { MetricFormat } from "./metric-values.ts";
 import { HOSTNAME } from "./network.ts";
+import { PIPELINES } from "./pipelines.ts";
+import type { Pipeline } from "./pipelines.ts";
 import { readOriginFile } from "./repos.ts";
 import type { Repos } from "./repos.ts";
+import { secretNameError } from "./secrets.ts";
 
 export const CONFIG_PATH = ".throng/config.yml";
 /** Larger configs are rejected rather than parsed. */
@@ -80,33 +83,85 @@ export type MetricConfig = {
   | { type: "enum"; values: string[] }
 );
 
+/** A setup: a named command run before every check, in order with the others. */
+export interface SetupConfig {
+  name: string;
+  command: string;
+  /** The secrets it uses, by name: in a trusted run, the setup container holds them. */
+  secrets: string[];
+  /** The caches it uses, by name: restored before the setups run, and saved once each setup using one passed. */
+  caches: string[];
+}
+
+/**
+ * A named cache: the paths it keeps, absolute or under `~/`, and the files in the tree whose contents
+ * key it (paths or globs). A run restores it only on an exact match of its key (see `caches.ts`).
+ */
+export interface CacheConfig {
+  name: string;
+  path: string[];
+  key: string[];
+}
+
 export interface CheckConfig {
   name: string;
   command: string;
-  /** Whether the gate needs it to pass. */
-  required: boolean;
   timeoutMs: number;
+  /** The checks it waits for: it runs only once each of them passed. */
+  after: string[];
+  /** The secrets it uses, by name: in a trusted run, its container holds them. A task's check names none. */
+  secrets: string[];
+  /** The one group it is in, which a pipeline may choose it by; null outside one, and always for a task's check. */
+  group: string | null;
+  /** The caches it uses, by name: restored before it runs, and saved once it passed. A task's check may name `main`'s. */
+  caches: string[];
   source: ConfigLayer;
 }
 
+/** A post-gate step: a named command `main` runs once the gate passes, in order with the others. */
+export interface StepConfig {
+  name: string;
+  command: string;
+  /**
+   * The secrets it uses, by name, its pipeline's added to its own: in a trusted run, its command
+   * holds them. A pipeline's secrets reach only its steps, never the setups or checks.
+   */
+  secrets: string[];
+  /** The caches it uses, by name: restored before it runs, and saved once it passed. */
+  caches: string[];
+}
+
+/** What one pipeline runs besides the setups: which checks, and the post-gate steps after its gate. */
+export interface PipelineConfig {
+  /** The groups whose checks it runs; null to run every check. A task's checks always run on its attempts. */
+  groups: string[] | null;
+  /** Run in order once the gate passes, stopping at the first that fails. Only `main` has any. */
+  steps: StepConfig[];
+}
+
 export interface Config {
-  /** Commands run once, in order, before the checks. */
-  setup: string[];
+  /** The named caches setups, checks and post-gate steps may use, in order. */
+  caches: CacheConfig[];
+  /** Run once, in order, before the checks; a failed one stops the run. */
+  setup: SetupConfig[];
   /** Extra HTTPS hosts checks may reach, lowercased. */
   network: { allow: string[] };
-  /** Run in order. */
+  /** Run in parallel once the setups passed, each once the checks it waits for passed. */
   checks: CheckConfig[];
   /** Read from the checks' output files, in order. */
   metrics: MetricConfig[];
-  /** Null when the project doesn't deploy previews; `command` is null when it needs no build. */
-  preview: { command: string | null } | null;
   /** Null to use the default cap on active attempts per task. */
   attempts: { limit: number | null };
   /** Who makes each task's selection, unless a task overrides it. */
   selection: SelectionPolicy;
-  /** The size of the containers that run the repository's code: `score`, `check` and `preview`. */
+  /** The size of the containers that run the repository's code: setups, checks and a landing's merge. */
   sandbox: { size: SandboxSize };
+  /** What each pipeline runs: `main` on `main`, `default` on every other line. */
+  pipelines: Record<Pipeline, PipelineConfig>;
 }
+
+/** A pipeline a config leaves out: it runs every check, and nothing after its gate. */
+export const EVERY_CHECK: PipelineConfig = { groups: null, steps: [] };
 
 export type ConfigResult =
   /** No config file: zero config. */
@@ -124,6 +179,8 @@ const ORDERS: Record<(typeof ORDER_ALIASES)[number], MetricOrder> = {
   desc: "desc",
 };
 const DURATION = /^(\d+)(s|m|h)$/u;
+/** Most aliases a config may resolve, so a few anchors can't expand into a huge document. */
+const MAX_ALIASES = 100;
 const UNIT_MS = { s: 1000, m: 60 * 1000, h: 60 * 60 * 1000 } as const;
 
 const name = (what: string) =>
@@ -190,10 +247,16 @@ export function checkMetricFields(metric: z.infer<typeof MetricSchema>, at: numb
   });
 }
 
-/** A layer's checks and metrics, as far as the name rules read them. */
+/** Where `main`'s post-gate steps are in a config. */
+const MAIN_STEPS = ["pipelines", "main", "steps"] as const;
+
+/** A layer's setups, checks and metrics, as far as the name rules read them. A task's layer has no setups. */
 export interface NamedLayer {
-  checks: readonly { name: string }[];
+  setup?: readonly { name: string }[];
+  checks: readonly { name: string; after: readonly string[] }[];
   metrics: readonly { name: string; from: string }[];
+  /** `main`'s post-gate steps; a task's layer has none. */
+  steps?: readonly { name: string }[];
 }
 
 /** A broken name rule, at its path in the layer: `["metrics", 0, "from"]`. */
@@ -203,25 +266,59 @@ export interface NameProblem {
 }
 
 /**
- * Each name rule a layer's checks and metrics break, in order. A check's outcome is a metric named
- * after it, so checks and metrics share one namespace: a name may be used once, and a metric may read
- * only a check that exists. `project` is the config a task's layer goes over: its names are taken,
- * and its checks may be read. It is null for the project's config itself.
+ * Each name rule a layer's setups, checks, post-gate steps and metrics break, in order. Setups, checks
+ * and steps share one namespace, and so do checks and metrics, as a check's outcome is a metric named
+ * after it: a name may
+ * be used once, and a metric may read only a check that exists. A check's `after` names only checks,
+ * never itself, a setup (every check already waits for every setup) or a circle. `project` is the
+ * config a task's layer goes over: its names are taken, and its checks may be read and waited for. It
+ * is null for the project's config itself, whose checks can't name a task's.
  */
 export function nameProblems(layer: NamedLayer, project: NamedLayer | null): NameProblem[] {
+  const projectSetups = new Set(project?.setup?.map((setup) => setup.name));
   const projectChecks = new Set(project?.checks.map((check) => check.name));
   const projectMetrics = new Set(project?.metrics.map((metric) => metric.name));
+  const projectSteps = new Set(project?.steps?.map((step) => step.name));
   const taken = (used: string): string | null => {
+    if (projectSetups.has(used)) return `${used} is also a setup's name in ${CONFIG_PATH}`;
     if (projectChecks.has(used)) return `${used} is also a check's name in ${CONFIG_PATH}`;
+    if (projectSteps.has(used)) return `${used} is also a post-gate step's name in ${CONFIG_PATH}`;
     if (projectMetrics.has(used)) return `${used} is also a metric's name in ${CONFIG_PATH}`;
     return null;
   };
   const problems: NameProblem[] = [];
+  const setups = new Set<string>();
+  layer.setup?.forEach((setup, i) => {
+    if (setups.has(setup.name))
+      problems.push({ path: ["setup", i, "name"], message: `duplicate setup name ${setup.name}` });
+    setups.add(setup.name);
+  });
   const checks = new Set<string>();
   layer.checks.forEach((check, i) => {
-    const message = taken(check.name) ?? (checks.has(check.name) ? `duplicate check name ${check.name}` : null);
+    let message = taken(check.name);
+    if (message === null && setups.has(check.name)) message = `check name ${check.name} is also a setup's name`;
+    else if (message === null && checks.has(check.name)) message = `duplicate check name ${check.name}`;
     if (message !== null) problems.push({ path: ["checks", i, "name"], message });
     checks.add(check.name);
+  });
+  layer.checks.forEach((check, i) => {
+    for (const waited of check.after) {
+      const message = afterProblem(check.name, waited, {
+        setups: (other) => setups.has(other) || projectSetups.has(other),
+        checks: (other) => checks.has(other) || projectChecks.has(other),
+      });
+      if (message !== null) problems.push({ path: ["checks", i, "after"], message });
+    }
+  });
+  problems.push(...circles(layer.checks));
+  const steps = new Set<string>();
+  layer.steps?.forEach((step, i) => {
+    let message: string | null = null;
+    if (setups.has(step.name)) message = `step name ${step.name} is also a setup's name`;
+    else if (checks.has(step.name)) message = `step name ${step.name} is also a check's name`;
+    else if (steps.has(step.name)) message = `duplicate step name ${step.name}`;
+    if (message !== null) problems.push({ path: [...MAIN_STEPS, i, "name"], message });
+    steps.add(step.name);
   });
   const metrics = new Set<string>();
   layer.metrics.forEach((metric, i) => {
@@ -235,6 +332,44 @@ export function nameProblems(layer: NamedLayer, project: NamedLayer | null): Nam
       problems.push({ path: ["metrics", i, "from"], message: `no check is named ${check}` });
     }
   });
+  return problems;
+}
+
+/** What's wrong with check `check` waiting for `waited`, given which names are setups and checks; null when nothing. */
+function afterProblem(
+  check: string,
+  waited: string,
+  names: { setups: (name: string) => boolean; checks: (name: string) => boolean },
+): string | null {
+  if (waited === check) return "a check can't wait for itself";
+  if (names.setups(waited))
+    return `${waited} is a setup; every check already waits for every setup, so after only names checks`;
+  return names.checks(waited) ? null : `no check is named ${waited}`;
+}
+
+/**
+ * Each circle the layer's `after`s make, once, at the check it was found from: `a → b → a`. A
+ * layer's checks wait only for its own or for the project's, and the project's never wait for a
+ * task's, so every circle lies within one layer.
+ */
+function circles(checks: NamedLayer["checks"]): NameProblem[] {
+  const index = new Map(checks.map((check, i) => [check.name, i]));
+  const state = new Map<string, "visiting" | "done">();
+  const problems: NameProblem[] = [];
+  const visit = (check: string, trail: string[]): void => {
+    if (state.get(check) === "done") return;
+    if (state.get(check) === "visiting") {
+      const circle = [...trail.slice(trail.indexOf(check)), check].join(" → ");
+      problems.push({ path: ["checks", index.get(check) ?? 0, "after"], message: `after makes a circle: ${circle}` });
+      return;
+    }
+    state.set(check, "visiting");
+    for (const waited of checks[index.get(check) ?? 0]?.after ?? []) {
+      if (waited !== check && index.has(waited)) visit(waited, [...trail, check]);
+    }
+    state.set(check, "done");
+  };
+  for (const check of checks) visit(check.name, []);
   return problems;
 }
 
@@ -261,15 +396,49 @@ export function metricConfig(metric: z.infer<typeof MetricSchema>, source: Confi
   }
 }
 
-/** A parsed check as stored, as the layer `source` defined it: required, with a 10m timeout, by default. */
+/**
+ * A parsed check as stored, as the layer `source` defined it: with a 10m timeout, and nothing to wait
+ * for and no secrets by default.
+ */
 export function checkConfig(check: z.infer<typeof CheckSchema>, source: ConfigLayer): CheckConfig {
   return {
     name: check.name,
     command: check.command,
-    required: check.required ?? true,
     timeoutMs: check.timeout ?? DEFAULT_CHECK_TIMEOUT_MS,
+    after: check.after,
+    secrets: check.secrets,
+    group: check.group ?? null,
+    caches: check.caches,
     source,
   };
+}
+
+/**
+ * The secrets one setup, check or post-gate step names, with the step as a run's errors name it:
+ * `setup deps`, `check test`, `step deploy`. A post-gate step runs only in `pipeline`; a setup or
+ * check has none, as every pipeline may run it.
+ */
+export interface NamedSecrets {
+  step: string;
+  secrets: string[];
+  pipeline?: Pipeline;
+}
+
+/** The secrets each setup, check and `main` post-gate step names, in run order, leaving out those that name none. */
+export function namedSecrets(stages: {
+  setup: readonly Pick<SetupConfig, "name" | "secrets">[];
+  checks: readonly Pick<CheckConfig, "name" | "secrets">[];
+  steps?: readonly Pick<StepConfig, "name" | "secrets">[];
+}): NamedSecrets[] {
+  return [
+    ...stages.setup.map((setup) => ({ step: `setup ${setup.name}`, secrets: setup.secrets })),
+    ...stages.checks.map((check) => ({ step: `check ${check.name}`, secrets: check.secrets })),
+    ...(stages.steps ?? []).map((step) => ({
+      step: `step ${step.name}`,
+      secrets: step.secrets,
+      pipeline: "main" as const,
+    })),
+  ].filter((named) => named.secrets.length > 0);
 }
 
 const TimeoutSchema = z
@@ -282,10 +451,147 @@ const TimeoutSchema = z
   .refine((ms) => ms > 0, "timeout must be positive")
   .refine((ms) => ms <= MAX_CHECK_TIMEOUT_MS, "timeout must be at most 30m");
 
+/** The checks a check waits for: one name or a list of them, as a list; none by default. */
+const AfterSchema = z
+  .union([z.string(), z.array(z.string({ error: "must be a check's name" }))], {
+    error: "after must be a check's name or a list of them",
+  })
+  .optional()
+  .transform((after) => (after === undefined ? [] : [after].flat()));
+
+/** The secrets a setup, check, post-gate step or pipeline uses: their names, each once; none by default. */
+const SecretsSchema = z
+  .array(
+    z.string({ error: "must be a secret's name" }).superRefine((text, ctx) => {
+      const message = secretNameError(text);
+      if (message !== null) ctx.addIssue({ code: "custom", message });
+    }),
+    { error: "secrets must be a list of secrets' names" },
+  )
+  .optional()
+  .transform((secrets) => [...new Set(secrets)]);
+
+/** The caches a setup, check or post-gate step uses: their names, each once; none by default. */
+const CachesSchema = z
+  .array(z.string({ error: "must be a cache's name" }), { error: "caches must be a list of caches' names" })
+  .optional()
+  .transform((caches) => [...new Set(caches)]);
+
+/** Where the checkout and its logs live in a container: wiped as each container starts, so no cache may be there. */
+const WORKSPACE = "/workspace";
+const CACHE_PATH_ERROR = "a cache's path must be absolute or start with ~/, like ~/.cache/pnpm";
+
+/** What's wrong with a cache's path; null when nothing. */
+function cachePathError(path: string): string | null {
+  if (!path.startsWith("/") && !path.startsWith("~/")) return CACHE_PATH_ERROR;
+  const parts = path.split("/").slice(1);
+  if (parts.every((part) => part === "")) return "a cache's path must name a directory or file, not / or ~";
+  if (parts.includes("..") || parts.includes(".")) return "a cache's path must not contain . or .. parts";
+  if (path === WORKSPACE || path.startsWith(`${WORKSPACE}/`)) {
+    return `a cache's path must be outside ${WORKSPACE}, where each container checks the tree out afresh`;
+  }
+  return null;
+}
+
+/** What's wrong with an entry of a cache's key; null when nothing. */
+function cacheKeyError(entry: string): string | null {
+  if (entry === "" || entry.startsWith("/")) return "a key entry is a path or glob in the tree, like pnpm-lock.yaml";
+  if (entry.split("/").includes("..")) return "a key entry must not contain .. parts";
+  return null;
+}
+
+/** One string or a list of them, as a list. */
+const oneOrList = (what: string, error: (text: string) => string | null) =>
+  z
+    .union(
+      [
+        z.string(),
+        z.array(z.string({ error: "must be a string" }), { error: `${what} must be a string or a list of them` }),
+      ],
+      { error: `${what} must be a string or a list of them` },
+    )
+    .transform((value) => [value].flat())
+    .superRefine((values, ctx) => {
+      if (values.length === 0) ctx.addIssue({ code: "custom", message: `${what} must name at least one` });
+      values.forEach((value, i) => {
+        const message = error(value);
+        if (message !== null) ctx.addIssue({ code: "custom", path: [i], message });
+      });
+    });
+
+/** A cache as a config writes it: the paths it keeps and the files that key it, each one or a list. */
+const CacheSchema = z.strictObject(
+  {
+    path: oneOrList("path", cachePathError),
+    key: oneOrList("key", cacheKeyError),
+  },
+  { error: "a cache must be a mapping with a path and a key, like { path: ~/.cache/pip, key: requirements.txt }" },
+);
+
+/** The caches a config defines, by name. */
+const CachesConfigSchema = z
+  .record(z.string(), CacheSchema, { error: "caches must be a mapping of caches by name" })
+  .superRefine((caches, ctx) => {
+    for (const cache of Object.keys(caches).filter((key) => !CONFIG_NAME.test(key))) {
+      ctx.addIssue({ code: "custom", path: [cache], message: `cache name must match ${CONFIG_NAME.source}` });
+    }
+  });
+
+/** Where each setup, check and post-gate step lists its caches, as far as `cacheProblems` reads them. */
+export interface CacheUsers {
+  setup?: readonly { caches: readonly string[] }[];
+  checks: readonly { caches: readonly string[] }[];
+  steps?: readonly { caches: readonly string[] }[];
+}
+
+/**
+ * Each cache a setup, check or post-gate step lists that `defined` doesn't name. A task's checks may
+ * use only the caches `main`'s config defines.
+ */
+export function cacheProblems(layer: CacheUsers, defined: ReadonlySet<string>): NameProblem[] {
+  const problems: NameProblem[] = [];
+  const unknown = (path: (string | number)[], caches: readonly string[]) =>
+    caches.forEach((cache, j) => {
+      if (!defined.has(cache)) {
+        problems.push({ path: [...path, "caches", j], message: `no cache is named ${cache} in ${CONFIG_PATH}` });
+      }
+    });
+  layer.setup?.forEach((setup, i) => unknown(["setup", i], setup.caches));
+  layer.checks.forEach((check, i) => unknown(["checks", i], check.caches));
+  layer.steps?.forEach((step, i) => unknown([...MAIN_STEPS, i], step.caches));
+  return problems;
+}
+
+/** Only a check is in a group, which a pipeline chooses it by. */
+const NO_GROUP = z.never({ error: "only checks take a group; a pipeline's groups choose which checks it runs" });
+
+/** A setup: a name and a command, run in order before every check. */
+const SetupSchema = z.strictObject(
+  {
+    name: name("setup name"),
+    command,
+    secrets: SecretsSchema,
+    caches: CachesSchema,
+    after: z.never({ error: "only checks take after; setups run in order" }).optional(),
+    group: NO_GROUP.optional(),
+  },
+  { error: "a setup must be a mapping with a name and a command, like { name: deps, command: npm ci }" },
+);
+
 export const CheckSchema = z.strictObject({
   name: name("check name"),
   command,
-  required: z.boolean({ error: "required must be true or false" }).optional(),
+  required: z
+    .never({
+      error: "required is gone: every check that runs must pass; to report without blocking, exit 0 and write a metric",
+    })
+    .optional(),
+  needs: z.never({ error: "needs is gone: a check names the checks it waits for with after" }).optional(),
+  after: AfterSchema,
+  secrets: SecretsSchema,
+  caches: CachesSchema,
+  group: name("group").optional(),
+  groups: z.never({ error: "a check is in at most one group: use group" }).optional(),
   timeout: TimeoutSchema.optional(),
   metrics: z
     .never({
@@ -319,10 +625,112 @@ export const SelectionPolicySchema = z
     selection.policy === "vote" ? { policy: "vote", eligible: selection.eligible ?? "anyone" } : CREATOR_SELECTS,
   );
 
+/** A post-gate step: a name and a command, run in order once the gate passes. */
+const StepSchema = z.strictObject(
+  {
+    name: name("step name"),
+    command,
+    secrets: SecretsSchema,
+    caches: CachesSchema,
+    after: z.never({ error: "only checks take after; steps run in order" }).optional(),
+    group: NO_GROUP.optional(),
+  },
+  { error: "a step must be a mapping with a name and a command, like { name: deploy, command: pnpm deploy }" },
+);
+
+/** The groups a pipeline runs: at least one group's name; every check when left out. */
+const GroupsSchema = z
+  .array(name("group"), { error: "groups must be a list of groups" })
+  .min(1, "groups must name at least one group; leave groups out to run every check");
+
+const SKIP = z.never({
+  error: "skip is gone: give checks groups, and list the groups this pipeline runs under groups",
+});
+
+/**
+ * A pipeline as a config writes it; only `main` has post-gate steps. Its `secrets` are added to each
+ * of its steps', so a pipeline naming any needs steps.
+ */
+const pipelineSchema = (steps: z.ZodType<z.infer<typeof StepSchema>[] | undefined>) =>
+  z
+    .strictObject(
+      { groups: GroupsSchema.optional(), skip: SKIP.optional(), secrets: SecretsSchema, steps },
+      { error: "a pipeline must be a mapping" },
+    )
+    .superRefine((pipeline, ctx) => {
+      if (pipeline.secrets.length > 0 && (pipeline.steps ?? []).length === 0) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["secrets"],
+          message:
+            "a pipeline's secrets only reach its own steps, and it has none; name them on the setups or checks that use them",
+        });
+      }
+    });
+
+/** The pipelines a config may set, and no other: there are no per-branch pipelines. */
+const PipelinesSchema = z
+  .looseObject(
+    {
+      default: pipelineSchema(
+        z.never({ error: "only main has post-gate steps; default runs on attempts and task branches" }).optional(),
+      ).optional(),
+      main: pipelineSchema(z.array(StepSchema, { error: "steps must be a list of steps" }).optional()).optional(),
+    },
+    { error: "pipelines must be a mapping of default and main" },
+  )
+  .superRefine((pipelines, ctx) => {
+    const known: readonly string[] = PIPELINES;
+    for (const pipeline of Object.keys(pipelines).filter((key) => !known.includes(key))) {
+      ctx.addIssue({
+        code: "custom",
+        path: [pipeline],
+        message: `unknown pipeline; the pipelines are ${PIPELINES.join(" and ")}`,
+      });
+    }
+  });
+
+/**
+ * What's wrong with the groups each pipeline runs: a group no check is in, and a check it runs waiting
+ * for one it doesn't, which would then never run.
+ */
+function groupProblems(
+  checks: readonly { name: string; after: readonly string[]; group?: string | undefined }[],
+  pipelines: Partial<Record<Pipeline, { groups?: readonly string[] | undefined } | undefined>>,
+): NameProblem[] {
+  const problems: NameProblem[] = [];
+  for (const pipeline of PIPELINES) {
+    const groups = pipelines[pipeline]?.groups;
+    if (groups === undefined) continue;
+    const path = ["pipelines", pipeline, "groups"];
+    for (const group of new Set(groups)) {
+      if (!checks.some((check) => check.group === group)) {
+        problems.push({ path, message: `no check is in the group ${group}` });
+      }
+    }
+    const runs = new Set(
+      checks.filter((check) => check.group !== undefined && groups.includes(check.group)).map((check) => check.name),
+    );
+    const known = new Set(checks.map((check) => check.name));
+    for (const check of checks.filter((c) => runs.has(c.name))) {
+      for (const waited of check.after.filter((other) => known.has(other) && !runs.has(other))) {
+        problems.push({
+          path,
+          message: `${check.name} runs here and waits for ${waited}, which doesn't; put them in a group together`,
+        });
+      }
+    }
+  }
+  return problems;
+}
+
 const ConfigSchema = z
   .strictObject(
     {
-      setup: z.array(command, { error: "setup must be a list of commands" }).optional(),
+      /** Where a config keeps the anchors it reuses; Throng reads nothing in it. */
+      definitions: z.unknown().optional(),
+      caches: CachesConfigSchema.optional(),
+      setup: z.array(SetupSchema, { error: "setup must be a list of setups" }).optional(),
       network: z
         .strictObject({
           allow: z
@@ -338,7 +746,11 @@ const ConfigSchema = z
         .optional(),
       checks: z.array(CheckSchema, { error: "checks must be a list" }).optional(),
       metrics: z.array(MetricSchema, { error: "metrics must be a list" }).optional(),
-      preview: z.strictObject({ command: command.optional() }, { error: "preview must be a mapping" }).optional(),
+      preview: z
+        .never({
+          error: "previews are now a check: move it under `checks`, with `after` naming the checks it waits for",
+        })
+        .optional(),
       attempts: z
         .strictObject({
           limit: z
@@ -349,6 +761,7 @@ const ConfigSchema = z
         })
         .optional(),
       selection: SelectionPolicySchema.optional(),
+      pipelines: PipelinesSchema.optional(),
       sandbox: z
         .strictObject(
           { size: z.enum(SANDBOX_SIZES, { error: `size must be ${oneOf(SANDBOX_SIZES)}` }).optional() },
@@ -359,27 +772,40 @@ const ConfigSchema = z
     { error: "the config must be a mapping" },
   )
   .superRefine((config, ctx) => {
-    const layer = { checks: config.checks ?? [], metrics: config.metrics ?? [] };
+    const layer = {
+      setup: config.setup ?? [],
+      checks: config.checks ?? [],
+      metrics: config.metrics ?? [],
+      steps: config.pipelines?.main?.steps ?? [],
+    };
     for (const problem of nameProblems(layer, null)) ctx.addIssue({ code: "custom", ...problem });
+    for (const problem of cacheProblems(layer, new Set(Object.keys(config.caches ?? {})))) {
+      ctx.addIssue({ code: "custom", ...problem });
+    }
+    for (const problem of groupProblems(layer.checks, config.pipelines ?? {})) {
+      ctx.addIssue({ code: "custom", ...problem });
+    }
     layer.metrics.forEach((metric, i) => checkMetricFields(metric, i, ctx));
   });
 
 /**
  * Parses a config file's text, or null when there's no file. An empty file is a valid config with
- * every default. YAML errors, schema errors and unknown keys all make it `invalid`.
+ * every default. YAML errors, schema errors and unknown keys all make it `invalid`. A config may reuse
+ * blocks through anchors, aliases and `<<` merge keys, resolving at most `MAX_ALIASES` aliases; it
+ * keeps its anchors under a top-level `definitions:`, which is otherwise ignored.
  */
 export function parseConfig(text: string | null): ConfigResult {
   if (text === null) return { kind: "none" };
   if (new TextEncoder().encode(text).length > MAX_CONFIG_BYTES) {
     return { kind: "invalid", error: `the config is larger than ${MAX_CONFIG_BYTES} bytes` };
   }
-  const doc = parseDocument(text);
+  const doc = parseDocument(text, { merge: true });
   if (doc.errors.length > 0) {
     return { kind: "invalid", error: doc.errors.map((e) => `yaml: ${e.message}`).join("\n") };
   }
   let value: unknown;
   try {
-    value = doc.toJS({ maxAliasCount: 100 });
+    value = doc.toJS({ maxAliasCount: MAX_ALIASES });
   } catch (error) {
     return { kind: "invalid", error: `yaml: ${error instanceof Error ? error.message : String(error)}` };
   }
@@ -391,16 +817,76 @@ export function parseConfig(text: string | null): ConfigResult {
   return {
     kind: "valid",
     config: {
-      setup: config.setup ?? [],
+      caches: Object.entries(config.caches ?? {}).map(([cache, { path, key }]) => ({ name: cache, path, key })),
+      setup: (config.setup ?? []).map((setup) => ({
+        name: setup.name,
+        command: setup.command,
+        secrets: setup.secrets,
+        caches: setup.caches,
+      })),
       network: { allow: config.network?.allow ?? [] },
       checks: (config.checks ?? []).map((check) => checkConfig(check, "project")),
       metrics: (config.metrics ?? []).map((metric) => metricConfig(metric, "project")),
-      preview: config.preview === undefined ? null : { command: config.preview.command ?? null },
       attempts: { limit: config.attempts?.limit ?? null },
       selection: config.selection ?? CREATOR_SELECTS,
       sandbox: { size: config.sandbox?.size ?? DEFAULT_SANDBOX_SIZE },
+      pipelines: {
+        default: { groups: config.pipelines?.default?.groups ?? null, steps: [] },
+        main: {
+          groups: config.pipelines?.main?.groups ?? null,
+          steps: (config.pipelines?.main?.steps ?? []).map((step) => ({
+            name: step.name,
+            command: step.command,
+            secrets: [...new Set([...(config.pipelines?.main?.secrets ?? []), ...step.secrets])],
+            caches: step.caches,
+          })),
+        },
+      },
     },
   };
+}
+
+/**
+ * The config as `pipeline` runs it: only the checks it runs, the metrics read from them, and its own
+ * post-gate steps (see `PipelineConfig`). A task's check waiting for a project check the pipeline
+ * doesn't run makes it invalid, as that check would never run.
+ */
+export function pipelineConfig(config: ConfigResult, pipeline: Pipeline): ConfigResult {
+  if (config.kind !== "valid") return config;
+  const { groups } = config.config.pipelines[pipeline];
+  const runs = (check: CheckConfig) =>
+    groups === null || check.source === "task" || (check.group !== null && groups.includes(check.group));
+  const checks = config.config.checks.filter(runs);
+  const names = new Set(checks.map((check) => check.name));
+  const dropped = new Set(config.config.checks.filter((check) => !runs(check)).map((check) => check.name));
+  const problems = checks.flatMap((check) =>
+    check.after
+      .filter((waited) => dropped.has(waited))
+      .map((waited) => `${check.name} waits for ${waited}, which the ${pipeline} pipeline doesn't run`),
+  );
+  if (problems.length > 0) return { kind: "invalid", error: problems.join("\n") };
+  const metrics = config.config.metrics.filter((metric) => names.has(parseFrom(metric.from).check));
+  return { kind: "valid", config: { ...config.config, checks, metrics } };
+}
+
+/**
+ * Every secret the project's `config` names (see `namedSecrets`): its setups', every check's and
+ * `main`'s post-gate steps'. What the secrets settings flag against. None for a config that isn't valid.
+ */
+export function configSecrets(config: ConfigResult): NamedSecrets[] {
+  if (config.kind !== "valid") return [];
+  return namedSecrets({ ...config.config, steps: config.config.pipelines.main.steps });
+}
+
+/**
+ * The secrets a run of `pipeline` names under the project's `config` (see `namedSecrets`): those of
+ * its setups, the checks it runs and its post-gate steps. None for a config that isn't valid, which
+ * runs nothing.
+ */
+export function pipelineSecrets(config: ConfigResult, pipeline: Pipeline): NamedSecrets[] {
+  const runs = pipelineConfig(config, pipeline);
+  if (runs.kind !== "valid") return [];
+  return namedSecrets({ ...runs.config, steps: runs.config.pipelines[pipeline].steps });
 }
 
 /**

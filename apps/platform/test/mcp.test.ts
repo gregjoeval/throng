@@ -9,6 +9,7 @@ import { publicApp } from "../src/app.ts";
 import { CONFIG_PATH } from "../src/config.ts";
 import { DIFF_CAPS } from "../src/diff.ts";
 import { FORWARDED_EMAIL_HEADER } from "../src/forwarded.ts";
+import { landedOutcome } from "../src/landing.ts";
 import type { LogStore } from "../src/logs.ts";
 import { MAX_FILE_BYTES, MAX_LOG_SLICE_BYTES } from "../src/mcp.ts";
 import type { ScoringOutcome } from "../src/scoring.ts";
@@ -19,7 +20,6 @@ import { DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS } from "../src/waiters.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
 import type { Json } from "./support/json.ts";
-import { FakePreviewWorkers } from "./support/preview-workers.ts";
 import { PASSED } from "./support/results.ts";
 import { testTaskBackends } from "./support/task-backend.ts";
 
@@ -45,6 +45,9 @@ const TOOLS = [
   "wait_for_attempt",
   "score_now",
   "rescore",
+  "list_runs",
+  "get_run",
+  "wait_for_run",
   "get_log",
   "post_verdict",
   "list_verdicts",
@@ -57,6 +60,7 @@ const TOOLS = [
   "add_vote_candidate",
   "close_vote",
   "get_vote",
+  "list_secrets",
 ];
 
 /** An R2 bucket in memory. */
@@ -87,7 +91,7 @@ const runner = {
 async function setup() {
   const repos = new FakeRepos();
   const logs = new MemoryLogs();
-  const { backend, store, sql } = testTaskBackends(repos, now, runner, runner);
+  const { backend, store, sql } = testTaskBackends(repos, now, runner);
   // Every store call a tool makes, with the actor it passed: a store method takes `(project, actor, …)`.
   const storeCalls: { method: string; actor: Actor }[] = [];
   const recording = (projectId: string): TaskBackend => ({
@@ -100,7 +104,6 @@ async function setup() {
     verifierFor: () => verify,
     now,
     repos: () => repos,
-    previewWorkers: () => new FakePreviewWorkers(),
     fetch: repos.sourceFetch,
     tasks: () => recording,
     logs: () => logs,
@@ -138,12 +141,18 @@ async function setup() {
       while (!stopped.signal.aborted) {
         const tasks = store(projectId);
         await tasks.drain(projectId);
-        const runs = sql(projectId).exec<{ id: number }>("SELECT id FROM scoring_runs WHERE status = 'running'");
-        for (const { id } of runs) tasks.scoringFinished(id, { status: "done", result: PASSED });
-        const landing = tasks.landings.active();
-        if (landing !== null) {
+        const runs = sql(projectId).exec<{ id: number; merge_request: number | null }>(
+          "SELECT id, merge_request FROM pipeline_runs WHERE status = 'running'",
+        );
+        for (const { id, merge_request } of runs) {
+          if (merge_request === null) {
+            tasks.scoringFinished(id, { status: "done", result: PASSED });
+            continue;
+          }
           const merge = repos.commit(`${projectId}-main`, { files: { "README.md": "merged\n" } }).hash;
-          await tasks.landingFinished(landing.id, { kind: "landed", sha: merge });
+          tasks.claimLandingPush(id);
+          await tasks.pipelineLanded(id, merge);
+          tasks.pipelineFinished(id, { status: "done", outcome: landedOutcome(merge) });
         }
         await new Promise((r) => setTimeout(r, 5));
       }
@@ -154,7 +163,7 @@ async function setup() {
     };
   };
 
-  return { repos, logs, store, storeCalls, env, app, fetchApp, tokenFor, connect, runPlatform };
+  return { repos, logs, store, sql, storeCalls, env, app, fetchApp, tokenFor, connect, runPlatform };
 }
 
 /** greg's project with one commit on `main` and a task t1, and clients for greg, ada, and ada as `claude`. */
@@ -192,6 +201,10 @@ describe("/mcp", () => {
     const client = await connect(await tokenFor("greg@example.com"));
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name)).toEqual(TOOLS);
+    // Only the owner acting as themselves starts a waiting run, so no tool can.
+    expect(tools.map((t) => t.name).filter((name) => name.startsWith("start_") && name !== "start_attempts")).toEqual(
+      [],
+    );
     for (const tool of tools) expect(tool.description).toEqual(expect.any(String));
   });
 
@@ -466,10 +479,10 @@ describe("/mcp", () => {
       await call(ada, "update_attempt", { project, attempt: `t1a${number}`, state: "open" });
     }
     const tasks = store(projectId);
-    await tasks.scoring.drain();
+    await tasks.runs.drain();
     /** Finishes the attempt's latest run with `gate`. */
     const finish = (number: number, gate: "passed" | "failed") => {
-      const run = tasks.scoring.listRuns({ task: 1, attempt: number }).at(-1)?.id ?? 0;
+      const run = tasks.runs.listRuns(`t${1}a${number}`).at(-1)?.id ?? 0;
       tasks.scoringFinished(run, { status: "done", result: { ...PASSED, gate } });
     };
     finish(1, "passed");
@@ -481,7 +494,7 @@ describe("/mcp", () => {
     expect((await call(ada, "cast_vote", { project, task: "t1", attempt: "t1a1" })).summary).toMatch(/^forbidden: /u);
 
     await pushTo(2, "ada@example.com");
-    await tasks.scoring.drain();
+    await tasks.runs.drain();
     finish(2, "passed");
     const added = await call(greg, "add_vote_candidate", { project, task: "t1", attempt: "t1a2" });
     expect(added.summary).toBe("t1's vote is open: t1a1 0, t1a2 0");
@@ -505,8 +518,8 @@ describe("/mcp", () => {
     const tasks = store(projectId);
     /** Ends t1a1's latest run with `outcome`; returns its id. */
     const finish = async (outcome: ScoringOutcome) => {
-      await tasks.scoring.drain();
-      const run = tasks.scoring.listRuns({ task: 1, attempt: 1 }).at(-1)?.id ?? 0;
+      await tasks.runs.drain();
+      const run = tasks.runs.listRuns("t1a1").at(-1)?.id ?? 0;
       tasks.scoringFinished(run, outcome);
       return run;
     };
@@ -534,8 +547,8 @@ describe("/mcp", () => {
     await pushTo(1, "bob@example.com");
     await call(bob, "update_attempt", { project, attempt: "t1a1", state: "open" });
     const tasks = store(projectId);
-    await tasks.scoring.drain();
-    const run = tasks.scoring.listRuns({ task: 1, attempt: 1 }).at(-1)?.id ?? 0;
+    await tasks.runs.drain();
+    const run = tasks.runs.listRuns("t1a1").at(-1)?.id ?? 0;
     tasks.scoringFinished(run, { status: "done", result: PASSED });
     await call(greg, "open_vote", { project, task: "t1" });
 
@@ -606,18 +619,127 @@ describe("/mcp", () => {
   });
 
   it("returns a log's last 64 KB by default, and another part from `offset`", async () => {
-    const { ada, logs, projectId, main, project } = await withProject();
+    const { ada, logs, projectId, project } = await withProject();
     await call(ada, "start_attempts", { project, task: "t1" });
     const scored = await call(ada, "score_now", { project, attempt: "t1a1" });
     const run = scored.data["run"]["id"] as number;
     const log = `${"a".repeat(MAX_LOG_SLICE_BYTES)}${"b".repeat(100)}`;
-    logs.objects.set(`logs/${projectId}/t1a1/${main}/${run}/test.log`, log);
+    logs.objects.set(`logs/${projectId}/t1a1/${run}/test.log`, log);
 
-    const tail = await call(ada, "get_log", { project, run, name: "test" });
+    const tail = await call(ada, "get_log", { project, run, step: "test" });
     expect(tail.data).toMatchObject({ size: log.length, offset: 100, hint: expect.any(String) });
     expect(tail.data["text"]).toBe(log.slice(100));
-    const head = await call(ada, "get_log", { project, run, name: "test", offset: 0 });
+    const head = await call(ada, "get_log", { project, run, step: "test", offset: 0 });
     expect(head.data["text"]).toBe(log.slice(0, MAX_LOG_SLICE_BYTES));
-    expect((await call(ada, "get_log", { project, run, name: "lint" })).summary).toMatch(/^notFound: /u);
+    expect((await call(ada, "get_log", { project, run, step: "lint" })).summary).toMatch(/^notFound: /u);
+  });
+
+  it("takes get_log's old `name` for `step`, and refuses a call naming neither", async () => {
+    const { ada, logs, projectId, project } = await withProject();
+    await call(ada, "start_attempts", { project, task: "t1" });
+    const run = (await call(ada, "score_now", { project, attempt: "t1a1" })).data["run"]["id"] as number;
+    logs.objects.set(`logs/${projectId}/t1a1/${run}/test.log`, "1 passed\n");
+
+    expect((await call(ada, "get_log", { project, run, name: "test" })).data).toMatchObject({
+      step: "test",
+      text: "1 passed\n",
+    });
+    expect((await call(ada, "get_log", { project, run, step: "test", name: "lint" })).data["text"]).toBe("1 passed\n");
+    expect((await call(ada, "get_log", { project, run })).summary).toMatch(/^invalidRequest: /u);
+  });
+
+  it("lists the project's runs, filtered and paged, and gets one with its steps", async () => {
+    const { ada, project, projectId, store } = await withProject();
+    await call(ada, "start_attempts", { project, task: "t1", count: 2 });
+    const first = (await call(ada, "score_now", { project, attempt: "t1a1" })).data["run"]["id"] as number;
+    const second = (await call(ada, "score_now", { project, attempt: "t1a2" })).data["run"]["id"] as number;
+    await store(projectId).runs.drain();
+    store(projectId).scoringFinished(first, { status: "done", result: { ...PASSED, logs: ["setup.1"] } });
+
+    const all = await call(ada, "list_runs", { project });
+    expect(all.summary).toBe("2 runs");
+    expect(all.data).toMatchObject({
+      runs: [
+        { id: second, line: "t1a2" },
+        { id: first, line: "t1a1" },
+      ],
+      next: null,
+    });
+    const paged = await call(ada, "list_runs", { project, line: "tasks", limit: 1 });
+    expect(paged.summary).toBe(`1 runs; more from cursor ${second}`);
+    const rest = await call(ada, "list_runs", { project, cursor: second });
+    expect(rest.data["runs"].map((r: Json) => r["id"])).toEqual([first]);
+    expect((await call(ada, "list_runs", { project, status: "running" })).data["runs"]).toMatchObject([{ id: second }]);
+    expect((await call(ada, "list_runs", { project, line: "feature" })).isError).toBeTruthy();
+
+    const run = await call(ada, "get_run", { project, run: first });
+    expect(run.summary).toBe(`run ${first} on t1a1 is done, gate passed`);
+    expect(run.data["run"]["outcome"]["steps"]).toMatchObject([{ name: "setup.1", kind: "setup", log: "setup.1" }]);
+    expect((await call(ada, "get_run", { project, run: 99 })).summary).toMatch(/^notFound: /u);
+  });
+
+  it("waits for a run until it is done, and answers at once for one waiting for the owner", async () => {
+    const { ada, project, projectId, store, sql } = await withProject();
+    await call(ada, "start_attempts", { project, task: "t1", count: 2 });
+    const run = (await call(ada, "score_now", { project, attempt: "t1a1" })).data["run"]["id"] as number;
+    await store(projectId).runs.drain();
+
+    const waiting = call(ada, "wait_for_run", { project, run, wait: 5 });
+    await new Promise((r) => setTimeout(r, 20));
+    store(projectId).scoringFinished(run, { status: "done", result: PASSED });
+    const done = await waiting;
+    expect(done.summary).toBe(`run ${run} on t1a1 is done, gate passed`);
+    expect(done.data["run"]).toMatchObject({ id: run, status: "done", settled: true });
+
+    const held = (await call(ada, "score_now", { project, attempt: "t1a2" })).data["run"]["id"] as number;
+    sql(projectId).exec("UPDATE pipeline_runs SET status = 'waiting' WHERE id = ?", held);
+    const owner = await call(ada, "wait_for_run", { project, run: held, wait: 5 });
+    expect(owner.summary).toBe(`run ${held} on t1a2 is waiting: it needs the project owner to start it`);
+    expect(owner.data["run"]).toMatchObject({ status: "waiting", settled: true });
+  });
+
+  it("answers an unsettled wait when its time runs out", async () => {
+    const { ada, project } = await withProject();
+    await call(ada, "start_attempts", { project, task: "t1" });
+    const run = (await call(ada, "score_now", { project, attempt: "t1a1" })).data["run"]["id"] as number;
+    const answered = await call(ada, "wait_for_run", { project, run, wait: 1 });
+    expect(answered.summary).toBe(`run ${run} is still queued`);
+    expect(answered.data["run"]).toMatchObject({ status: "queued", settled: false });
+  });
+
+  it("reads a migrated run's log under its old key, or under its line if it stored it after the migration", async () => {
+    const { ada, logs, sql, projectId, project } = await withProject();
+    await call(ada, "start_attempts", { project, task: "t1" });
+    const scored = await call(ada, "score_now", { project, attempt: "t1a1" });
+    const run = scored.data["run"]["id"] as number;
+    const sha = scored.data["run"]["sha"] as string;
+    sql(projectId).exec("UPDATE pipeline_runs SET legacy_logs = 1 WHERE id = ?", run);
+    logs.objects.set(`logs/${projectId}/t1a1/${sha}/${run}/test.log`, "old\n");
+    logs.objects.set(`logs/${projectId}/t1a1/${run}/setup.1.log`, "new\n");
+
+    expect((await call(ada, "get_log", { project, run, step: "test" })).data["text"]).toBe("old\n");
+    expect((await call(ada, "get_log", { project, run, step: "setup.1" })).data["text"]).toBe("new\n");
+    expect((await call(ada, "get_log", { project, run, step: "lint" })).summary).toMatch(/^notFound: /u);
+  });
+
+  it("lists secrets' names and pipelines to the owner's aliases, never their values", async () => {
+    const { ada, connect, env, project, projectId, store, tokenFor } = await withProject();
+    const greg = await userForEmail(env.DB, "greg@example.com");
+    const value = "cf-token-0123456789";
+    await store(projectId).putSecret(
+      { id: projectId, owner: greg.id },
+      { user: greg, alias: null },
+      { name: "DEPLOY_TOKEN", value, pipelines: ["main"] },
+    );
+    const gregClaude = await connect(await tokenFor("greg@example.com", "claude"));
+    const listed = await call(gregClaude, "list_secrets", { project });
+    expect(listed.isError).toBeFalsy();
+    expect(listed.summary).toBe("1 secrets: DEPLOY_TOKEN (main)");
+    expect(listed.data).toEqual({
+      secrets: [{ name: "DEPLOY_TOKEN", pipelines: ["main"], changedAt: "2026-10-10T12:00:00.000Z" }],
+      uses: [],
+    });
+    expect(JSON.stringify(listed)).not.toContain(value);
+    expect((await call(ada, "list_secrets", { project })).summary).toMatch(/^forbidden: /u);
   });
 });

@@ -17,6 +17,7 @@ const OUTCOME_LABELS: Record<CheckOutcome, string> = {
 const SCORING_STATES: Record<ArenaAttempt["status"], string> = {
   none: "it hasn't been asked for",
   queued: "scoring is queued",
+  waiting: "scoring is waiting for the owner",
   running: "scoring is running",
   done: "scoring is done",
   errored: "scoring errored",
@@ -42,7 +43,7 @@ export function Scorecard({ attempt, columns }: { attempt: ArenaAttempt; columns
   );
 }
 
-/** Each check of a result: its name, whether it's required, its outcome and how long it took. */
+/** Each check of a result: its name, its outcome and how long it took. */
 export function ChecksTable({ checks }: { checks: NonNullable<ArenaAttempt["result"]>["checks"] }) {
   return (
     <table className="w-full text-xs">
@@ -51,7 +52,6 @@ export function ChecksTable({ checks }: { checks: NonNullable<ArenaAttempt["resu
         {checks.map((check) => (
           <tr key={check.name} aria-label={check.name}>
             <td className="py-0.5 font-mono">{check.name}</td>
-            <td className="text-muted-foreground">{check.required ? "Required" : "Optional"}</td>
             <td>{OUTCOME_LABELS[check.outcome]}</td>
             <td className="text-right tabular-nums">{(check.durationMs / 1000).toFixed(1)} s</td>
           </tr>

@@ -1,5 +1,5 @@
 // Task and attempt references, `t42` and `t42a3`, and the task a reserved branch belongs to.
-// Kept apart from the task store so the scoring queue can name attempts without importing it.
+// Kept apart from the task store so `PipelineRuns` can name attempts without importing it.
 
 const TASK_REF = /^t?([1-9]\d*)$/u;
 const ATTEMPT_REF = /^t?([1-9]\d*)a([1-9]\d*)$/u;

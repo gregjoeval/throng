@@ -9,7 +9,6 @@ import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
 import { at } from "./support/defined.ts";
 import type { Json } from "./support/json.ts";
-import { FakePreviewWorkers } from "./support/preview-workers.ts";
 import { testTaskBackends } from "./support/task-backend.ts";
 
 /** Access sessions are `as:<email>`. */
@@ -60,7 +59,6 @@ async function setup() {
     verifierFor: () => verify,
     now,
     repos: () => repos,
-    previewWorkers: () => new FakePreviewWorkers(),
     tasks: () => counting,
   });
   const env = { DB: testDatabase(), ACCESS_TEAM_DOMAIN: "throng.cloudflareaccess.com", ACCESS_AUD: "aud" };
@@ -105,9 +103,9 @@ async function setup() {
   };
   /** Starts queued runs, then reports how ada's attempt `t1a<n>`'s latest run ended. */
   const finish = async (attempt: number, outcome: ScoringOutcome = { status: "done", result: RESULT }) => {
-    const scoring = store(projectId).scoring;
+    const scoring = store(projectId).runs;
     await scoring.drain();
-    const run = at(scoring.listRuns({ task: 1, attempt }), -1);
+    const run = at(scoring.listRuns(`t1a${attempt}`), -1);
     expect(store(projectId).scoringFinished(run.id, outcome)).toBeTruthy();
   };
   /**
@@ -209,6 +207,29 @@ describe("waiting on an attempt", () => {
     expect(errored.answered()).toBeFalsy();
     await finish(1, { status: "errored", error: "sandbox lost" });
     expect((await errored.answer).body).toMatchObject({ scoring: { status: "errored", sha: next }, changed: true });
+  });
+
+  it("answers scored once the current head's run waits for the owner, and at once while it does", async () => {
+    const { call, ada, greg, base, wait, push, store, projectId } = await setup();
+    const owner = (await call("GET", "/me", greg)).body as { user: User; alias: null };
+    await store(projectId).putSecret({ id: projectId, owner: owner.user.id }, owner, {
+      name: "DEPLOY",
+      value: "deploy-token-0123",
+      pipelines: ["default"],
+    });
+    await call("POST", `${base}/attempts/t1a1/open`, ada);
+    const { answer, answered } = await wait(1, "wait=30&until=scored");
+    const head = await push(1, "one\n");
+    await store(projectId).runs.drain();
+    await settle();
+    expect(answered()).toBeFalsy();
+    const run = at(store(projectId).runs.listRuns("t1a1"), -1);
+    expect(store(projectId).pipelinePlanned(run.id, [], [{ step: "check deploy", secrets: ["DEPLOY"] }])).toEqual({
+      kind: "waiting",
+    });
+    expect((await answer).body).toMatchObject({ scoring: { status: "waiting", sha: head }, changed: true });
+    const again = await call("GET", `${base}/attempts/t1a1?wait=30&until=scored`, ada);
+    expect(again.body).toMatchObject({ scoring: { status: "waiting", sha: head }, changed: true });
   });
 
   it("answers scored at once when the current head already has a done or errored run", async () => {

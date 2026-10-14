@@ -11,16 +11,16 @@ import { gitRoutes, UPSTREAM_TOKEN_TTL_SECONDS } from "../src/git-proxy.ts";
 import { projectService } from "../src/projects.ts";
 import { forkRepo, originRepo } from "../src/repos.ts";
 import type { ScoringResult } from "../src/results.ts";
-import type { ScoringRunner } from "../src/scoring.ts";
+import type { PipelineRunner } from "../src/scoring.ts";
 import type { ProjectContext } from "../src/task-store.ts";
 import { mintToken } from "../src/tokens.ts";
 import type { Actor } from "../src/tokens.ts";
 import { userForEmail } from "../src/users.ts";
-import { conflictDetails, ERRORED } from "./support/conflicts.ts";
+import { conflictDetails } from "./support/conflicts.ts";
 import { testDatabase } from "./support/d1.ts";
 import { at } from "./support/defined.ts";
 import { git, gitEnv, LocalGitHost, serve, tryGit } from "./support/git-host.ts";
-import { FakePreviewWorkers } from "./support/preview-workers.ts";
+import { conflicted, endLanding, ERRORED } from "./support/landings.ts";
 import { testTaskBackends } from "./support/task-backend.ts";
 
 const cleanups: (() => Promise<void>)[] = [];
@@ -40,7 +40,7 @@ async function setup() {
 
   const db = testDatabase();
   // Runs start but never finish on their own: a test finishes one with `scoringFinished`.
-  const scoring: ScoringRunner = {
+  const scoring: PipelineRunner = {
     workflow: { create: async () => ({}), get: async () => ({ terminate: async () => {} }) },
     teardown: async () => {},
   };
@@ -59,10 +59,7 @@ async function setup() {
   const ada = await person("ada@example.com");
   const bob = await person("bob@example.com");
 
-  const created = await projectService({ db, repos: host, previewWorkers: new FakePreviewWorkers() }).create(
-    greg.actor,
-    { handle: "throng" },
-  );
+  const created = await projectService({ db, repos: host }).create(greg.actor, { handle: "throng" });
   const project: ProjectContext = { id: created.id, owner: greg.user.id };
   const origin = originRepo(project.id);
 
@@ -181,7 +178,7 @@ describe("git proxy", () => {
     expect(pushed.stderr).toMatch(/HEAD -> main/u);
     expect(
       store(project.id)
-        .scoring.listRuns({ task: 1, attempt: 1 })
+        .runs.listRuns("t1a1")
         .map((r) => [r.trigger, r.sha, r.status]),
     ).toEqual([
       ["open", expect.any(String), "cancelled"],
@@ -360,8 +357,8 @@ describe("merge request notices on a push to the source attempt", () => {
     const ref = { task: 1, number: 1 };
     await store(project.id).openAttempt(project, ada.actor, ref);
     await store(project.id).selectAttempt(project, ada.actor, ref);
-    await store(project.id).scoring.drain();
-    const run = at(store(project.id).scoring.listRuns({ task: 1, attempt: 1 }), -1);
+    await store(project.id).runs.drain();
+    const run = at(store(project.id).runs.listRuns("t1a1"), -1);
     store(project.id).scoringFinished(run.id, { status: "done", result: passed });
     expect(store(project.id).getMergeRequest(project, ada.actor, { task: 1 }).state).toBe("queued");
     const dir = await clone("throng/t1a1.git", ada.token);
@@ -381,8 +378,7 @@ describe("merge request notices on a push to the source attempt", () => {
 
   it("prints a conflict dequeue with its file count once, and that the push needs review", async () => {
     const { commit, dir, dequeueUrl, env, project, store } = await queued();
-    const details = conflictDetails(["a.ts", "b.ts", "c.ts"]);
-    store(project.id).dequeueMergeRequest(project, null, { task: 1, reason: "conflict", details });
+    await endLanding(store(project.id), project.id, conflicted(conflictDetails(["a.ts", "b.ts", "c.ts"])));
 
     const sha = await commit(dir, "fix");
     const pushed = await tryGit(dir, env, "push", "origin", "HEAD:main");
@@ -398,7 +394,7 @@ describe("merge request notices on a push to the source attempt", () => {
 
   it("prints a dequeue without a file count when there is none, on a push that moves no head", async () => {
     const { dir, dequeueUrl, env, project, store } = await queued();
-    store(project.id).dequeueMergeRequest(project, null, { task: 1, reason: "errored", details: ERRORED });
+    await endLanding(store(project.id), project.id, ERRORED);
 
     const pushed = await tryGit(dir, env, "push", "origin", "HEAD:refs/heads/copy");
     expect(pushed.ok).toBeTruthy();

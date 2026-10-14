@@ -7,6 +7,7 @@
 
 import { z } from "zod";
 import {
+  cacheProblems,
   checkConfig,
   checkMetricFields,
   CheckSchema,
@@ -15,6 +16,7 @@ import {
   DEFAULT_SANDBOX_SIZE,
   describeIssue,
   describePath,
+  EVERY_CHECK,
   metricConfig,
   MetricSchema,
   nameProblems,
@@ -36,9 +38,15 @@ export interface TaskDefinitionsInput {
 
 export const NO_TASK_DEFINITIONS: TaskDefinitions = { checks: [], metrics: [] };
 
+/** A task's check: a config's, naming no secrets and in no group, as it always runs on the task's attempts. */
+const TaskCheckSchema = CheckSchema.extend({
+  secrets: z.never({ error: "a task's checks get no secrets: tasks aren't reviewed like main's config" }).optional(),
+  group: z.never({ error: "a task's checks take no group: they always run on the task's attempts" }).optional(),
+});
+
 const TaskSchema = z
   .object({
-    checks: z.array(CheckSchema, { error: "checks must be a list" }).optional(),
+    checks: z.array(TaskCheckSchema, { error: "checks must be a list" }).optional(),
     metrics: z.array(MetricSchema, { error: "metrics must be a list" }).optional(),
   })
   .superRefine(({ metrics }, ctx) => {
@@ -58,7 +66,9 @@ export function taskDefinitionsFrom(
   const parsed = TaskSchema.safeParse(input);
   if (!parsed.success) return { error: parsed.error.issues.map(describeIssue).join("\n") };
   const definitions = {
-    checks: parsed.data.checks?.map((check) => checkConfig(check, "task")) ?? current.checks,
+    checks:
+      parsed.data.checks?.map((check) => checkConfig({ ...check, secrets: [], group: undefined }, "task")) ??
+      current.checks,
     metrics: parsed.data.metrics?.map((metric) => metricConfig(metric, "task")) ?? current.metrics,
   };
   if (defines(definitions) && project.kind === "invalid") {
@@ -85,14 +95,15 @@ export function withTask(project: ConfigResult, task: TaskDefinitions): ConfigRe
   const problems = clashes(config, task);
   if (problems.length > 0) return { kind: "invalid", error: problems.map((line) => `task ${line}`).join("\n") };
   const base: Config = config ?? {
+    caches: [],
     setup: [],
     network: { allow: [] },
     checks: [],
     metrics: [],
-    preview: null,
     attempts: { limit: null },
     selection: CREATOR_SELECTS,
     sandbox: { size: DEFAULT_SANDBOX_SIZE },
+    pipelines: { default: EVERY_CHECK, main: EVERY_CHECK },
   };
   return {
     kind: "valid",
@@ -101,9 +112,53 @@ export function withTask(project: ConfigResult, task: TaskDefinitions): ConfigRe
 }
 
 /**
- * Each name rule the task's checks and metrics break over the project's config (`nameProblems`), one
- * line each: `metrics[0].from: no check is named lint`.
+ * Each name rule the task's checks and metrics break over the project's config (`nameProblems`), and
+ * each cache its checks use that the project's config doesn't define, one line each:
+ * `metrics[0].from: no check is named lint`.
  */
 function clashes(project: Config | null, task: TaskDefinitions): string[] {
-  return nameProblems(task, project).map(({ path, message }) => `${describePath(path)}: ${message}`);
+  const layer = project === null ? null : { ...project, steps: project.pipelines.main.steps };
+  const caches = new Set(project?.caches.map((cache) => cache.name));
+  return [...nameProblems(task, layer), ...cacheProblems(task, caches)].map(
+    ({ path, message }) => `${describePath(path)}: ${message}`,
+  );
+}
+
+/**
+ * Who wrote one of a task's checks: the user whose create or edit last changed it, and whether that
+ * user was the project's owner, as themselves or under an alias, as for a push.
+ */
+export interface CheckWriter {
+  /** The check's name. */
+  name: string;
+  user: string;
+  owner: boolean;
+  /** When they wrote it (ms); 0 for a check saved before writers were. */
+  at: number;
+}
+
+/**
+ * Who wrote each of `checks`, a task's checks once `editor` set them: a check `current` holds
+ * unchanged keeps its writer in `writers`, and every other one is `editor`'s.
+ */
+export function checkWriters(
+  checks: readonly CheckConfig[],
+  current: readonly CheckConfig[],
+  writers: readonly CheckWriter[],
+  editor: Omit<CheckWriter, "name">,
+): CheckWriter[] {
+  return checks.map((check) => {
+    const kept = current.some((old) => canonicalCheck(old) === canonicalCheck(check));
+    const writer = kept ? writers.find((w) => w.name === check.name) : undefined;
+    return writer ?? { name: check.name, ...editor };
+  });
+}
+
+/** A check as JSON with its fields in name order, so two equal checks match whatever order a stored one keeps. */
+function canonicalCheck(check: CheckConfig): string {
+  return JSON.stringify(
+    Object.entries(check)
+      .filter(([, value]) => value !== undefined)
+      .toSorted(([x], [y]) => x.localeCompare(y)),
+  );
 }

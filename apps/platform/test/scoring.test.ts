@@ -1,8 +1,19 @@
 import { describe, expect, it } from "vitest";
+import { DEFAULT_CHECK_TIMEOUT_MS } from "../src/config.ts";
+import type { CheckConfig } from "../src/config.ts";
 import { ServiceError } from "../src/errors.ts";
 import type { CheckResult, LegacyResult, ScoringResult } from "../src/results.ts";
-import { SCORING_CAP } from "../src/scoring.ts";
-import type { ScoringOutcome, ScoringParams, ScoringRequest, ScoringWorkflow } from "../src/scoring.ts";
+import { RUN_CAP, runReport } from "../src/scoring.ts";
+import type {
+  LandingRunParams,
+  PipelineParams,
+  PipelineWorkflowBinding,
+  RunReport,
+  ScoringRequest,
+  StoredRun,
+} from "../src/scoring.ts";
+import { keyringFrom, openSealed } from "../src/secrets.ts";
+import { attemptRef } from "../src/task-refs.ts";
 import { TaskStore } from "../src/task-store.ts";
 import type { AttemptInput, ProjectContext } from "../src/task-store.ts";
 import type { Actor } from "../src/tokens.ts";
@@ -12,6 +23,8 @@ import { testSql } from "./support/task-backend.ts";
 
 const PROJECT: ProjectContext = { id: "abc123", owner: "owner001" };
 const ORIGIN = "abc123-main";
+/** The keyring secrets are sealed under, as `SECRETS_KEYRING` holds it. */
+const KEYRING = JSON.stringify({ current: "k1", keys: { k1: btoa("k".repeat(32)) } });
 
 function actor(id: string, alias: string | null = null): Actor {
   return { user: { id, handle: id, email: `${id}@example.com`, created_at: "" }, alias };
@@ -24,12 +37,12 @@ const bob = actor("bob00001");
 const cat = actor("cat00001");
 
 /** A Workflow binding that records what it was asked to do. */
-class FakeWorkflow implements ScoringWorkflow {
-  readonly created: { id: string; params: ScoringParams }[] = [];
+class FakeWorkflow implements PipelineWorkflowBinding {
+  readonly created: { id: string; params: PipelineParams | LandingRunParams }[] = [];
   readonly terminated: string[] = [];
   failNext = false;
 
-  async create(options: { id: string; params: ScoringParams }): Promise<unknown> {
+  async create(options: { id: string; params: PipelineParams | LandingRunParams }): Promise<unknown> {
     if (this.failNext) {
       this.failNext = false;
       throw new Error("workflow service unavailable");
@@ -44,23 +57,27 @@ class FakeWorkflow implements ScoringWorkflow {
 }
 
 function setup() {
+  let clock = new Date("2026-10-10T12:00:00.000Z");
+  /** Moves the store's clock on by a second. */
+  const tick = () => void (clock = new Date(clock.getTime() + 1000));
   const repos = new FakeRepos();
   void repos.create(ORIGIN, { defaultBranch: "main" });
   const base = repos.commit(ORIGIN, { files: { "README.md": "hi\n" }, message: "init" });
   const sql = testSql();
   const workflow = new FakeWorkflow();
-  const tornDown: string[] = [];
+  const tornDown: [string, readonly string[]][] = [];
   const store = new TaskStore({
     sql,
     repos,
-    now: () => new Date("2026-10-10T12:00:00.000Z"),
-    scoring: { workflow, teardown: async (id) => void tornDown.push(id) },
+    now: () => clock,
+    runner: { workflow, teardown: async (id, containers) => void tornDown.push([id, containers]) },
+    keyring: keyringFrom(KEYRING),
   });
   const journal = () =>
     (sql.db.prepare("SELECT kind, detail FROM journal ORDER BY id").all() as { kind: string; detail: string }[]).map(
       (e): Record<string, unknown> => ({ kind: e.kind, ...(JSON.parse(e.detail) as Record<string, unknown>) }),
     );
-  const runs = (ref: AttemptInput) => store.scoring.listRuns({ task: ref.task, attempt: ref.number });
+  const runs = (ref: AttemptInput) => store.runs.listRuns(attemptRef(ref.task, ref.number));
 
   /** Commits on an attempt's fork `main`, as a push would, and returns the new head. */
   const commit = (ref: AttemptInput, content: string) =>
@@ -80,7 +97,7 @@ function setup() {
   /** A task by ada with one draft attempt by ada. */
   const draft = async (): Promise<AttemptInput> => at(await drafts(), 0);
 
-  return { repos, base, store, workflow, tornDown, journal, runs, commit, pushed, drafts, draft };
+  return { repos, base, sql, tick, store, workflow, tornDown, journal, runs, commit, pushed, drafts, draft };
 }
 
 async function code(promise: Promise<unknown>): Promise<string> {
@@ -104,11 +121,9 @@ function result(overrides: Partial<ScoringResult> = {}): ScoringResult {
   };
 }
 
-const done = (overrides: Partial<ScoringResult> = {}): ScoringOutcome => ({
-  status: "done",
-  result: result(overrides),
-});
-const errored = (): ScoringOutcome => ({ status: "errored", error: "sandbox lost" });
+const done = (overrides: Partial<ScoringResult> = {}): RunReport =>
+  runReport({ status: "done", result: result(overrides) });
+const errored = (): RunReport => ({ status: "errored", error: "sandbox lost" });
 
 function queued(request: ScoringRequest | null): ScoringRequest & { queued: true } {
   expect(request?.queued).toBeTruthy();
@@ -124,12 +139,12 @@ describe("scoring triggers", () => {
     expect(runs(ref)).toMatchObject([
       { sha: base.hash, trigger: "open", status: "queued", user_id: ada.user.id, alias: "claude" },
     ]);
-    await store.scoring.drain();
+    await store.runs.drain();
     expect(runs(ref)).toMatchObject([{ status: "running" }]);
     expect(workflow.created).toEqual([
       {
         id: `abc123-t1a1-${base.hash.slice(0, 12)}-1`,
-        params: { project: "abc123", attempt: "t1a1", sha: base.hash, run: 1 },
+        params: { project: "abc123", line: "t1a1", sha: base.hash, run: 1 },
       },
     ]);
   });
@@ -191,8 +206,8 @@ describe("scoring triggers", () => {
     await store.openAttempt(PROJECT, ada, ref);
     expect(await code(store.rescore(PROJECT, bob, ref))).toBe("forbidden");
     for (const who of [ada, cat, owner]) {
-      await store.scoring.drain();
-      store.scoring.finish(at(runs(ref), -1).id, done());
+      await store.runs.drain();
+      store.runs.finish(at(runs(ref), -1).id, done());
       const request = queued(await store.rescore(PROJECT, who, ref));
       expect(request.run).toMatchObject({ trigger: "rescore", user_id: who.user.id });
     }
@@ -208,7 +223,7 @@ describe("scoring triggers", () => {
     const ref = { task: made.task, number: made.number };
     expect(await code(store.scoreNow(PROJECT, ada, ref))).toBe("invalidState");
     expect((await store.openAttempt(PROJECT, ada, ref)).state).toBe("open");
-    expect(store.scoring.listRuns({ task: ref.task, attempt: ref.number })).toEqual([]);
+    expect(store.runs.listRuns(attemptRef(ref.task, ref.number))).toEqual([]);
   });
 });
 
@@ -217,13 +232,13 @@ describe("the scoring queue", () => {
     const { store, runs, commit, pushed, draft, journal } = setup();
     const ref = await draft();
     await store.openAttempt(PROJECT, ada, ref);
-    await store.scoring.drain();
+    await store.runs.drain();
     const a = commit(ref, "a\n");
     const b = commit(ref, "b\n");
     queued(pushed(ref, a));
     expect(pushed(ref, a)).toMatchObject({ queued: false, reason: "already queued" });
-    await store.scoring.drain();
-    store.scoring.finish(at(runs(ref), -1).id, done());
+    await store.runs.drain();
+    store.runs.finish(at(runs(ref), -1).id, done());
 
     queued(pushed(ref, b));
     // Back to a, which already has a finished run: b's run is superseded and a isn't scored again.
@@ -242,9 +257,9 @@ describe("the scoring queue", () => {
 
   it("keeps one pending run per attempt: the newest head wins", async () => {
     const { store, runs, commit, pushed, drafts } = setup();
-    const refs = await drafts(SCORING_CAP + 1);
+    const refs = await drafts(RUN_CAP + 1);
     for (const ref of refs) await store.openAttempt(PROJECT, ada, ref);
-    await store.scoring.drain();
+    await store.runs.drain();
     const waiting = at(refs, -1);
     expect(runs(waiting)).toMatchObject([{ status: "queued" }]);
 
@@ -260,46 +275,49 @@ describe("the scoring queue", () => {
     const { store, workflow, tornDown, runs, commit, pushed, draft, journal } = setup();
     const ref = await draft();
     await store.openAttempt(PROJECT, ada, ref);
-    await store.scoring.drain();
+    await store.runs.drain();
     const running = at(runs(ref), 0);
+    // Its Workflow planned its containers before starting any.
+    const containers = [`${running.instance_id}/setup`, `${running.instance_id}/check:test`];
+    store.runs.planned(running.id, containers);
 
     const head = commit(ref, "newer\n");
     pushed(ref, head);
-    await store.scoring.drain();
+    await store.runs.drain();
     expect(workflow.terminated).toEqual([running.instance_id]);
-    expect(tornDown).toEqual([running.instance_id]);
+    expect(tornDown).toEqual([[running.instance_id, containers]]);
     expect(runs(ref).map((r) => [r.sha, r.status])).toEqual([
       [running.sha, "cancelled"],
       [head, "running"],
     ]);
-    expect(journal().find((e) => e.kind === "scoringCancelled")).toMatchObject({ run: 1, superseded_by: head });
+    expect(journal().find((e) => e.kind === "runCancelled")).toMatchObject({ run: 1, superseded_by: head });
 
     // A late report from the cancelled run is discarded, and a second drain stops nothing more.
-    expect(store.scoring.finish(running.id, done())).toBeFalsy();
-    expect(store.scoring.getRun(running.id)?.status).toBe("cancelled");
-    await store.scoring.drain();
+    expect(store.runs.finish(running.id, done())).toBeFalsy();
+    expect(store.runs.getRun(running.id)?.status).toBe("cancelled");
+    await store.runs.drain();
     expect(workflow.terminated).toHaveLength(1);
   });
 
-  it(`runs at most ${SCORING_CAP} at once and starts the oldest waiting run as one finishes`, async () => {
+  it(`runs at most ${RUN_CAP} at once and starts the oldest waiting run as one finishes`, async () => {
     const { store, workflow, runs, drafts, journal } = setup();
-    const refs = await drafts(SCORING_CAP + 2);
+    const refs = await drafts(RUN_CAP + 2);
     for (const ref of refs) await store.openAttempt(PROJECT, ada, ref);
-    await store.scoring.drain();
-    expect(workflow.created.map((c) => c.params.attempt)).toEqual(["t1a1", "t1a2", "t1a3"]);
+    await store.runs.drain();
+    expect(workflow.created.map((c) => c.params.line)).toEqual(["t1a1", "t1a2", "t1a3"]);
     expect(refs.map((r) => at(runs(r), 0).status)).toEqual(["running", "running", "running", "queued", "queued"]);
 
-    expect(store.scoring.finish(at(runs(at(refs, 1)), 0).id, done())).toBeTruthy();
-    await store.scoring.drain();
-    expect(workflow.created.map((c) => c.params.attempt)).toEqual(["t1a1", "t1a2", "t1a3", "t1a4"]);
+    expect(store.runs.finish(at(runs(at(refs, 1)), 0).id, done())).toBeTruthy();
+    await store.runs.drain();
+    expect(workflow.created.map((c) => c.params.line)).toEqual(["t1a1", "t1a2", "t1a3", "t1a4"]);
     expect(journal().find((e) => e.kind === "scored")).toMatchObject({
       ref: "t1a2",
       gate: "passed",
       summary: "no checks configured",
     });
 
-    store.scoring.finish(at(runs(at(refs, 0)), 0).id, errored());
-    await store.scoring.drain();
+    store.runs.finish(at(runs(at(refs, 0)), 0).id, errored());
+    await store.runs.drain();
     expect(refs.map((r) => at(runs(r), 0).status)).toEqual(["errored", "done", "running", "running", "running"]);
   });
 
@@ -307,14 +325,14 @@ describe("the scoring queue", () => {
     const { store, workflow, runs, base, draft } = setup();
     const ref = await draft();
     await store.openAttempt(PROJECT, ada, ref);
-    await store.scoring.drain();
-    store.scoring.finish(at(runs(ref), 0).id, done());
+    await store.runs.drain();
+    store.runs.finish(at(runs(ref), 0).id, done());
 
     store.draftAttempt(PROJECT, ada, ref);
     await store.openAttempt(PROJECT, ada, ref);
     expect(runs(ref)).toHaveLength(1);
     expect(await store.rescore(PROJECT, ada, ref)).toMatchObject({ queued: true, run: { sha: base.hash } });
-    await store.scoring.drain();
+    await store.runs.drain();
     expect(workflow.created.map((c) => c.id)).toEqual([
       `abc123-t1a1-${base.hash.slice(0, 12)}-1`,
       `abc123-t1a1-${base.hash.slice(0, 12)}-2`,
@@ -325,8 +343,8 @@ describe("the scoring queue", () => {
     const { store, runs, draft } = setup();
     const ref = await draft();
     await store.scoreNow(PROJECT, ada, ref);
-    await store.scoring.drain();
-    store.scoring.finish(at(runs(ref), 0).id, errored());
+    await store.runs.drain();
+    store.runs.finish(at(runs(ref), 0).id, errored());
     expect(await store.scoreNow(PROJECT, ada, ref)).toMatchObject({ queued: true });
   });
 
@@ -335,9 +353,9 @@ describe("the scoring queue", () => {
     const ref = await draft();
     await store.openAttempt(PROJECT, ada, ref);
     workflow.failNext = true;
-    await store.scoring.drain();
+    await store.runs.drain();
     expect(runs(ref)).toMatchObject([{ status: "errored" }]);
-    expect(journal().find((e) => e.kind === "scoringErrored")).toMatchObject({
+    expect(journal().find((e) => e.kind === "runErrored")).toMatchObject({
       error: expect.stringMatching(/unavailable/u),
     });
   });
@@ -365,19 +383,19 @@ describe("the scoring queue", () => {
     const { store, workflow, runs, drafts, journal } = setup();
     const refs = await drafts(4);
     for (const ref of refs) await store.openAttempt(PROJECT, ada, ref);
-    await store.scoring.drain();
+    await store.runs.drain();
     expect(refs.map((r) => at(runs(r), 0).status)).toEqual(["running", "running", "running", "queued"]);
 
     store.draftAttempt(PROJECT, ada, at(refs, 0));
     await store.closeAttempt(PROJECT, ada, at(refs, 1));
     await store.obsoleteAttempt(PROJECT, owner, at(refs, 3));
     await store.markMerged(PROJECT, owner, { ...at(refs, 2), sha: "f00" });
-    await store.scoring.drain();
+    await store.runs.drain();
     expect(refs.map((r) => at(runs(r), 0).status)).toEqual(["cancelled", "cancelled", "cancelled", "cancelled"]);
     expect(workflow.terminated).toHaveLength(3);
     expect(
       journal()
-        .filter((e) => e.kind === "scoringCancelled")
+        .filter((e) => e.kind === "runCancelled")
         .map((e) => e.reason),
     ).toEqual(["returned to draft", "attempt closed", "attempt obsolete", "attempt merged"]);
   });
@@ -390,8 +408,8 @@ describe("the scoring queue", () => {
     const task = store.createTask(PROJECT, ada, { title: "t" });
     const a = at(await store.createAttempts(PROJECT, ada, { task: task.number }), 0);
     await store.openAttempt(PROJECT, ada, { task: a.task, number: a.number });
-    await store.scoring.drain();
-    expect(store.scoring.listRuns({ task: a.task, attempt: a.number })).toMatchObject([{ status: "queued" }]);
+    await store.runs.drain();
+    expect(store.runs.listRuns(attemptRef(a.task, a.number))).toMatchObject([{ status: "queued" }]);
   });
 });
 
@@ -408,8 +426,8 @@ describe("rescoring on a task edit", () => {
     const [open, draft] = await env.drafts(2);
     if (open === undefined || draft === undefined) throw new Error("two drafts expected");
     await env.store.openAttempt(PROJECT, ada, open);
-    await env.store.scoring.drain();
-    env.store.scoring.finish(at(env.runs(open), 0).id, done());
+    await env.store.runs.drain();
+    env.store.runs.finish(at(env.runs(open), 0).id, done());
     return { ...env, open, draft };
   }
 
@@ -428,9 +446,9 @@ describe("rescoring on a task edit", () => {
     const { store, runs, open } = await scored();
     const smoke = { name: "smoke", command: "./smoke.sh" };
     await store.editTask(PROJECT, ada, { task: 1, checks: [smoke], metrics: [lines("smoke.report.lines")] });
-    await store.scoring.drain();
-    store.scoring.finish(at(runs(open), -1).id, done());
-    await store.editTask(PROJECT, ada, { task: 1, checks: [{ ...smoke, required: false }] });
+    await store.runs.drain();
+    store.runs.finish(at(runs(open), -1).id, done());
+    await store.editTask(PROJECT, ada, { task: 1, checks: [{ ...smoke, timeout: "5m" }] });
 
     expect(runs(open).map((r) => r.trigger)).toEqual(["open", "rescore", "rescore"]);
     expect(await code(store.editTask(PROJECT, ada, { task: 1, checks: [] }))).toBe("invalidRequest");
@@ -440,8 +458,8 @@ describe("rescoring on a task edit", () => {
   it("queues nothing when a save leaves the metrics as they were", async () => {
     const { store, runs, open } = await scored();
     await store.editTask(PROJECT, ada, { task: 1, metrics: [lines()] });
-    await store.scoring.drain();
-    store.scoring.finish(at(runs(open), -1).id, done());
+    await store.runs.drain();
+    store.runs.finish(at(runs(open), -1).id, done());
 
     await store.editTask(PROJECT, ada, { task: 1, title: "Renamed" });
     await store.editTask(PROJECT, ada, { task: 1, metrics: [lines()] });
@@ -462,9 +480,16 @@ describe("rescoring on a task edit", () => {
 
   it("queues one rescore behind a run that's running, which may have read the old definitions", async () => {
     const { store, workflow, runs, open } = await scored();
-    const sha = at(runs(open), 0).sha;
-    store.scoring.request({ project: PROJECT.id, task: 1, attempt: 1, sha, trigger: "rescore", actor: ada });
-    await store.scoring.drain();
+    const sha = defined(at(runs(open), 0).sha);
+    store.runs.request({
+      project: PROJECT.id,
+      line: "t1a1",
+      sha,
+      trigger: "rescore",
+      actor: ada,
+      pushedBy: { kind: "notAPush" },
+    });
+    await store.runs.drain();
     expect(runs(open).map((r) => [r.trigger, r.status])).toEqual([
       ["open", "done"],
       ["rescore", "running"],
@@ -472,7 +497,7 @@ describe("rescoring on a task edit", () => {
 
     await store.editTask(PROJECT, ada, { task: 1, metrics: [lines()] });
     await store.editTask(PROJECT, ada, { task: 1, metrics: [lines("test.coverage.total")] });
-    await store.scoring.drain();
+    await store.runs.drain();
     expect(runs(open).map((r) => [r.trigger, r.status])).toEqual([
       ["open", "done"],
       ["rescore", "running"],
@@ -480,22 +505,22 @@ describe("rescoring on a task edit", () => {
     ]);
 
     // The follow-up starts once the run ahead of it ends.
-    store.scoring.finish(at(runs(open), 1).id, done());
-    await store.scoring.drain();
+    store.runs.finish(at(runs(open), 1).id, done());
+    await store.runs.drain();
     expect(at(runs(open), 2).status).toBe("running");
     expect(workflow.created).toHaveLength(3);
   });
 
   it("still answers a push or score now for a head that's running with the run, queuing nothing", async () => {
     const { store, runs, open } = await scored();
-    const sha = at(runs(open), 0).sha;
-    const head = { project: PROJECT.id, task: 1, attempt: 1, sha, actor: ada };
-    store.scoring.request({ ...head, trigger: "rescore" });
-    await store.scoring.drain();
+    const sha = defined(at(runs(open), 0).sha);
+    const head = { project: PROJECT.id, line: "t1a1", sha, actor: ada, pushedBy: { kind: "notAPush" } as const };
+    store.runs.request({ ...head, trigger: "rescore" });
+    await store.runs.drain();
     const running = at(runs(open), 1);
 
     for (const trigger of ["push", "scoreNow"] as const) {
-      expect(store.scoring.request({ ...head, trigger })).toMatchObject({
+      expect(store.runs.request({ ...head, trigger })).toMatchObject({
         queued: false,
         reason: "already running",
         run: { id: running.id },
@@ -519,14 +544,13 @@ describe("results", () => {
     const { store, runs, draft, journal } = setup();
     const ref = await draft();
     await store.openAttempt(PROJECT, ada, ref);
-    await store.scoring.drain();
+    await store.runs.drain();
     const checks: CheckResult[] = [
-      { name: "_diff", source: "platform", required: false, outcome: "passed", durationMs: 2, notes: [] },
-      { name: "test", source: "project", required: true, outcome: "passed", durationMs: 9, notes: [] },
-      { name: "lint", source: "project", required: false, outcome: "failed", durationMs: 1, notes: [] },
-      { name: "_preview", source: "platform", required: false, outcome: "skipped", durationMs: 0, notes: [] },
+      { name: "_diff", source: "platform", outcome: "passed", durationMs: 2, notes: [] },
+      { name: "test", source: "project", outcome: "passed", durationMs: 9, notes: [] },
+      { name: "lint", source: "project", outcome: "failed", durationMs: 1, notes: [] },
     ];
-    expect(store.scoring.finish(at(runs(ref), 0).id, done({ config: { kind: "valid" }, checks }))).toBeTruthy();
+    expect(store.runs.finish(at(runs(ref), 0).id, done({ config: { kind: "valid" }, checks }))).toBeTruthy();
 
     const run = at(runs(ref), 0);
     expect(run).toMatchObject({ status: "done", superseded: false, error: null });
@@ -535,22 +559,12 @@ describe("results", () => {
     expect(journal().find((e) => e.kind === "scored")).toMatchObject({ gate: "passed", summary: "1 passed, 1 failed" });
   });
 
-  it("reads a result stored before runs kept logs as having none", async () => {
-    const { store, runs, draft } = setup();
-    const ref = await draft();
-    await store.openAttempt(PROJECT, ada, ref);
-    await store.scoring.drain();
+  it("reads a result stored before runs kept logs as having none", () => {
     const { logs: _logs, ...older } = result();
-    store.scoring.finish(at(runs(ref), 0).id, { status: "done", result: older as ScoringResult });
-
-    expect(at(runs(ref), 0).result).toEqual(result({ logs: [] }));
+    expect(migratedRun(older).result).toEqual(result({ logs: [] }));
   });
 
-  it("reads a result stored with builtin and preview in the current shape", async () => {
-    const { store, runs, draft } = setup();
-    const ref = await draft();
-    await store.openAttempt(PROJECT, ada, ref);
-    await store.scoring.drain();
+  it("reads a result stored with builtin and preview in the current shape, without the preview", () => {
     const legacy: LegacyResult = {
       base: null,
       config: { kind: "valid" },
@@ -562,19 +576,16 @@ describe("results", () => {
       preview: { status: "ready", url: "https://x.workers.dev" },
       logs: ["test"],
     };
-    store.scoring.finish(at(runs(ref), 0).id, { status: "done", result: legacy as unknown as ScoringResult });
-
-    const read = at(runs(ref), 0).result;
+    const read = migratedRun(legacy).result;
     expect(read?.checks.map((c) => [c.name, c.source, c.outcome])).toEqual([
       ["_diff", "platform", "passed"],
       ["test", "project", "passed"],
-      ["_preview", "platform", "passed"],
     ]);
     expect(read?.metrics).toMatchObject({
       "_diff.filesChanged": { value: 2 },
       coverage: { source: "project", type: "number", value: 80 },
-      "_preview.url": { value: "https://x.workers.dev" },
     });
+    expect(Object.keys(read?.metrics ?? {})).not.toContain("_preview.url");
     expect(read).not.toHaveProperty("builtin");
     expect(read).not.toHaveProperty("preview");
   });
@@ -583,19 +594,19 @@ describe("results", () => {
     const { store, runs, draft, journal } = setup();
     const ref = await draft();
     await store.scoreNow(PROJECT, ada, ref);
-    await store.scoring.drain();
-    store.scoring.finish(at(runs(ref), 0).id, errored());
+    await store.runs.drain();
+    store.runs.finish(at(runs(ref), 0).id, errored());
     expect(runs(ref)[0]).toMatchObject({ status: "errored", error: "sandbox lost", result: null });
     expect(store.getAttempt(PROJECT, ada, ref).scoring.status).toBe("errored");
-    expect(journal().find((e) => e.kind === "scoringErrored")).toMatchObject({ error: "sandbox lost" });
+    expect(journal().find((e) => e.kind === "runErrored")).toMatchObject({ error: "sandbox lost" });
   });
 
   it("marks results for older heads superseded, and keeps them for history", async () => {
     const { store, runs, commit, pushed, draft } = setup();
     const ref = await draft();
     await store.openAttempt(PROJECT, ada, ref);
-    await store.scoring.drain();
-    store.scoring.finish(at(runs(ref), 0).id, done());
+    await store.runs.drain();
+    store.runs.finish(at(runs(ref), 0).id, done());
     const newer = commit(ref, "newer\n");
     pushed(ref, newer);
 
@@ -611,8 +622,8 @@ describe("results", () => {
     const { store, runs, commit, pushed, draft } = setup();
     const ref = await draft();
     await store.scoreNow(PROJECT, ada, ref);
-    await store.scoring.drain();
-    store.scoring.finish(at(runs(ref), 0).id, done());
+    await store.runs.drain();
+    store.runs.finish(at(runs(ref), 0).id, done());
     const newer = commit(ref, "draft work\n");
     expect(pushed(ref, newer)).toBeNull();
     expect(runs(ref)).toMatchObject([{ status: "done", superseded: true }]);
@@ -623,8 +634,8 @@ describe("results", () => {
     const { store, runs, commit, pushed, draft, base } = setup();
     const ref = await draft();
     await store.openAttempt(PROJECT, ada, ref);
-    await store.scoring.drain();
-    store.scoring.finish(at(runs(ref), 0).id, done());
+    await store.runs.drain();
+    store.runs.finish(at(runs(ref), 0).id, done());
     pushed(ref, commit(ref, "b\n"));
     pushed(ref, base.hash);
     expect(runs(ref).map((r) => [r.sha, r.status, r.superseded])).toEqual([
@@ -641,15 +652,15 @@ describe("results", () => {
     expect(status()).toEqual({ status: "none", sha: null });
     await store.openAttempt(PROJECT, ada, ref);
     expect(status()).toEqual({ status: "queued", sha: base.hash });
-    await store.scoring.drain();
+    await store.runs.drain();
     expect(status()).toEqual({ status: "running", sha: base.hash });
-    store.scoring.finish(at(runs(ref), 0).id, done());
+    store.runs.finish(at(runs(ref), 0).id, done());
     expect(status()).toEqual({ status: "done", sha: base.hash });
     store.draftAttempt(PROJECT, ada, ref);
     expect(status()).toEqual({ status: "done", sha: base.hash });
   });
 
-  it("adds the result columns to a scoring_runs table from before results", () => {
+  it("moves a scoring_runs table from before results to pipeline runs", () => {
     const sql = testSql();
     sql.exec(`CREATE TABLE scoring_runs (
       id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, task INTEGER NOT NULL, attempt INTEGER NOT NULL,
@@ -657,8 +668,694 @@ describe("results", () => {
       instance_id TEXT NOT NULL, created_at INTEGER NOT NULL, started_at INTEGER, finished_at INTEGER,
       torn_down INTEGER NOT NULL DEFAULT 0
     )`);
-    expect(new TaskStore({ sql, repos: new FakeRepos() }).scoring).toBeDefined();
-    const columns = sql.exec<{ name: string }>("PRAGMA table_info(scoring_runs)").map((c) => c.name);
-    expect(columns.slice(-3)).toEqual(["result", "error", "superseded"]);
+    sql.exec(
+      `INSERT INTO scoring_runs (project, task, attempt, sha, trigger, user_id, agent, status, instance_id, created_at)
+       VALUES ('abc123', 1, 1, 'a', 'open', 'ada', 'claude', 'done', 'i', 1)`,
+    );
+    const store = new TaskStore({ sql, repos: new FakeRepos() });
+    expect(store.runs.listRuns("t1a1")).toMatchObject([
+      { id: 1, line: "t1a1", alias: "claude", outcome: null, result: null, error: null, superseded: false },
+    ]);
+  });
+});
+
+/** The `scoring_runs` and `scoring_heads` tables as they were before runs were keyed on their line. */
+function scoringTables(sql: ReturnType<typeof testSql>): void {
+  sql.exec(`CREATE TABLE scoring_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, task INTEGER NOT NULL, attempt INTEGER NOT NULL,
+    sha TEXT NOT NULL, trigger TEXT NOT NULL, user_id TEXT, alias TEXT, status TEXT NOT NULL,
+    instance_id TEXT NOT NULL, created_at INTEGER NOT NULL, started_at INTEGER, finished_at INTEGER,
+    torn_down INTEGER NOT NULL DEFAULT 0, result TEXT, error TEXT, superseded INTEGER NOT NULL DEFAULT 0
+  )`);
+  sql.exec(`CREATE TABLE scoring_heads (
+    task INTEGER NOT NULL, attempt INTEGER NOT NULL, sha TEXT NOT NULL, PRIMARY KEY (task, attempt)
+  )`);
+}
+
+/** The done run a project stored with `stored` as its result before runs were keyed on their line, as read since. */
+function migratedRun(stored: object): StoredRun {
+  const sql = testSql();
+  scoringTables(sql);
+  sql.exec(
+    `INSERT INTO scoring_runs (project, task, attempt, sha, trigger, status, instance_id, created_at, result)
+     VALUES ('abc123', 1, 1, 'a', 'open', 'done', 'i', 0, ?)`,
+    JSON.stringify(stored),
+  );
+  return at(new TaskStore({ sql, repos: new FakeRepos() }).runs.listRuns("t1a1"), 0);
+}
+
+describe("line-keyed runs", () => {
+  it("moves scoring runs to pipeline runs on their attempt's line, keeping their ids", () => {
+    const sql = testSql();
+    scoringTables(sql);
+    const legacy = {
+      base: null,
+      config: { kind: "valid" },
+      gate: "passed",
+      checks: [{ name: "test", required: true, outcome: "passed", durationMs: 9, metrics: {}, notes: [] }],
+      builtin: { filesChanged: 1, additions: 2, deletions: 0, durationMs: 3 },
+      preview: { status: "none" },
+      logs: ["test"],
+    };
+    sql.exec(
+      `INSERT INTO scoring_runs (id, project, task, attempt, sha, trigger, user_id, alias, status, instance_id,
+         created_at, started_at, finished_at, result, superseded)
+       VALUES (4, 'abc123', 1, 2, 'a', 'open', 'ada', 'claude', 'done', 'i4', 1, 2, 3, ?, 1),
+              (7, 'abc123', 1, 2, 'b', 'push', 'ada', NULL, 'running', 'i7', 4, 5, NULL, NULL, 0)`,
+      JSON.stringify(legacy),
+    );
+    sql.exec("INSERT INTO scoring_heads (task, attempt, sha) VALUES (1, 2, 'b')");
+
+    const store = new TaskStore({ sql, repos: new FakeRepos() });
+    expect(new TaskStore({ sql, repos: new FakeRepos() })).toBeDefined();
+
+    expect(store.runs.listRuns("t1a2")).toMatchObject([
+      {
+        id: 4,
+        line: "t1a2",
+        pipeline: "default",
+        sha: "a",
+        trigger: "open",
+        merge_request: null,
+        user_id: "ada",
+        alias: "claude",
+        trusted: false,
+        status: "done",
+        instance_id: "i4",
+        superseded: true,
+      },
+      { id: 7, line: "t1a2", pipeline: "default", sha: "b", status: "running", superseded: false },
+    ]);
+    expect(at(store.runs.listRuns("t1a2"), 0).outcome?.steps.map((s) => s.name)).toEqual(["_diff", "test"]);
+    expect(store.runs.statusFor("t1a2")).toEqual({ status: "running", sha: "b" });
+    // The project's runs list shows them beside any other line's.
+    const page = store.listRuns(PROJECT, ada, { line: "tasks", limit: 10 });
+    expect(page.runs.map((r) => [r.id, r.line, r.outcome?.gate ?? null])).toEqual([
+      [7, "t1a2", null],
+      [4, "t1a2", "passed"],
+    ]);
+    const next = store.runs.request({
+      project: PROJECT.id,
+      line: "t1a2",
+      sha: "c",
+      trigger: "push",
+      actor: ada,
+      pushedBy: { kind: "maintainer" },
+    });
+    expect(next.run.id).toBe(8);
+    const tables = sql.exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table'").map((t) => t.name);
+    expect(tables).toContain("pipeline_runs");
+    expect(tables).not.toContain("scoring_runs");
+    expect(tables).not.toContain("scoring_heads");
+  });
+
+  it("upgrades a migrated run's result to steps on read, and scoring reads the same result as before", () => {
+    const stored = {
+      base: "b".repeat(40),
+      config: { kind: "valid" },
+      gate: "failed",
+      checks: [
+        { name: "_diff", source: "platform", outcome: "passed", durationMs: 2, notes: [] },
+        { name: "test", source: "project", outcome: "timed_out", durationMs: 9, notes: [] },
+        { name: "_preview", source: "platform", outcome: "failed", durationMs: 4, notes: ["its deploy step failed"] },
+      ],
+      metrics: {
+        _diff: { source: "platform", type: "enum", value: "passed", values: ["passed"] },
+        test: { source: "project", type: "enum", value: "timedOut", values: ["passed", "timedOut"] },
+      },
+      logs: ["setup.1", "test", "preview.deploy"],
+    };
+    const run = migratedRun(stored);
+
+    const step = { group: null, notes: [], durationMs: 0 };
+    expect(run.outcome?.steps).toEqual([
+      { ...step, name: "_diff", kind: "check", source: "platform", outcome: "passed", durationMs: 2, log: null },
+      { ...step, name: "setup.1", kind: "setup", source: "project", outcome: "passed", log: "setup.1" },
+      { ...step, name: "test", kind: "check", source: "project", outcome: "failed", durationMs: 9, log: "test" },
+      {
+        ...step,
+        name: "_preview",
+        kind: "check",
+        source: "platform",
+        outcome: "failed",
+        durationMs: 4,
+        notes: ["its deploy step failed"],
+        log: "preview.deploy",
+      },
+    ]);
+    expect(run.result?.checks.map((c) => [c.name, c.outcome])).toEqual([
+      ["_diff", "passed"],
+      ["test", "timedOut"],
+      ["_preview", "failed"],
+    ]);
+    expect(run.result?.logs).toEqual(["setup.1", "test", "preview.deploy"]);
+  });
+
+  it("stores a run's outcome as steps, with the setup that failed", async () => {
+    const { store, runs, draft } = setup();
+    const ref = await draft();
+    await store.openAttempt(PROJECT, ada, ref);
+    await store.runs.drain();
+    const checks: CheckResult[] = [
+      { name: "_diff", source: "platform", outcome: "passed", durationMs: 2, notes: [] },
+      {
+        name: "test",
+        source: "project",
+        outcome: "skipped",
+        durationMs: 0,
+        notes: ["skipped: setup command 2 failed"],
+      },
+    ];
+    const failed = result({ config: { kind: "valid" }, gate: "failed", checks, logs: ["setup.1", "setup.2"] });
+    store.runs.finish(at(runs(ref), 0).id, runReport({ status: "done", result: failed }));
+
+    const run = at(runs(ref), 0);
+    expect(run.outcome?.steps.map((s) => [s.name, s.kind, s.outcome, s.log])).toEqual([
+      ["_diff", "check", "passed", null],
+      ["setup.1", "setup", "passed", "setup.1"],
+      ["setup.2", "setup", "failed", "setup.2"],
+      ["test", "check", "skipped", null],
+    ]);
+    expect(run.outcome).toMatchObject({ base: failed.base, config: { kind: "valid" }, gate: "failed", metrics: {} });
+    expect(run.result).toEqual(failed);
+  });
+
+  it("starts one run per line at a time, and runs on other lines alongside it", async () => {
+    const { store, runs, drafts, workflow } = setup();
+    const [one, two] = await drafts(2);
+    await store.openAttempt(PROJECT, ada, defined(one));
+    await store.runs.drain();
+    const sha = defined(at(runs(defined(one)), 0).sha);
+    store.runs.request({
+      project: PROJECT.id,
+      line: "t1a1",
+      sha,
+      trigger: "rescore",
+      actor: ada,
+      pushedBy: { kind: "notAPush" },
+    });
+    await store.openAttempt(PROJECT, ada, defined(two));
+    await store.runs.drain();
+    expect(workflow.created.map((c) => c.params.line)).toEqual(["t1a1", "t1a2"]);
+    expect(runs(defined(one))).toMatchObject([
+      { line: "t1a1", status: "running" },
+      { line: "t1a1", status: "queued" },
+    ]);
+  });
+
+  it("reads a migrated run's log under its old key then its line, and a new run's under its line", () => {
+    const sql = testSql();
+    scoringTables(sql);
+    sql.exec(
+      `INSERT INTO scoring_runs (project, task, attempt, sha, trigger, status, instance_id, created_at)
+       VALUES ('abc123', 1, 1, 'a', 'open', 'done', 'i', 0)`,
+    );
+    const store = new TaskStore({ sql, repos: new FakeRepos() });
+    expect(store.runLogKeys(PROJECT, ada, { run: 1, name: "test" })).toEqual([
+      "logs/abc123/t1a1/a/1/test.log",
+      "logs/abc123/t1a1/1/test.log",
+    ]);
+    store.runs.request({
+      project: PROJECT.id,
+      line: "t1a1",
+      sha: "b",
+      trigger: "push",
+      actor: ada,
+      pushedBy: { kind: "maintainer" },
+    });
+    expect(store.runLogKeys(PROJECT, ada, { run: 2, name: "test" })).toEqual(["logs/abc123/t1a1/2/test.log"]);
+  });
+});
+
+/** What a run's setups and checks name: one check naming DEPLOY. */
+const DEPLOYS = [{ step: "check deploy", secrets: ["DEPLOY"] }];
+
+/** An open attempt by `author`, whose head `who` pushed while it was a draft; its run is queued. */
+async function opened(t: ReturnType<typeof setup>, author: Actor, who: Actor = author) {
+  const task = t.store.createTask(PROJECT, author, { title: "Fix it" });
+  const [made] = await t.store.createAttempts(PROJECT, author, { task: task.number, count: 1 });
+  const ref = { task: defined(made).task, number: defined(made).number };
+  t.pushed(ref, t.commit(ref, "work\n"), who);
+  await t.store.openAttempt(PROJECT, author, ref);
+  return ref;
+}
+
+/** The owner sets DEPLOY, allowed in `pipelines`. */
+async function withSecret(t: ReturnType<typeof setup>, pipelines: ("default" | "main")[] = ["default"]) {
+  await t.store.putSecret(PROJECT, owner, { name: "DEPLOY", value: "deploy-token-0123", pipelines });
+}
+
+describe("trust and secrets", () => {
+  it("trusts a run of a head the owner pushed, as themselves or under an alias, and no one else's", async () => {
+    const t = setup();
+    const own = await opened(t, owner);
+    const agents = await opened(t, owner, actor("owner001", "claude"));
+    const adas = await opened(t, ada);
+    expect([own, agents, adas].map((ref) => at(t.runs(ref), 0).trusted)).toEqual([true, true, false]);
+
+    // The owner asking for a run of ada's head doesn't make ada's code theirs.
+    const rescore = await t.store.rescore(PROJECT, owner, adas);
+    expect(rescore.run.trusted).toBeFalsy();
+    // An owner's push after it is trusted again on its own head.
+    const head = t.commit(own, "more work\n");
+    expect(queued(t.pushed(own, head, owner)).run.trusted).toBeTruthy();
+  });
+
+  it("hands an untrusted run naming a secret to the owner: it waits and frees its slot", async () => {
+    const t = setup();
+    await withSecret(t);
+    const refs = [];
+    for (let i = 0; i <= RUN_CAP; i += 1) refs.push(await opened(t, ada));
+    await t.store.runs.drain();
+    const first = at(t.runs(defined(refs[0])), 0);
+    const last = defined(refs[RUN_CAP]);
+    expect(at(t.runs(last), 0).status).toBe("queued");
+
+    expect(t.store.pipelinePlanned(first.id, ["i/setup"], DEPLOYS)).toEqual({ kind: "waiting" });
+    expect(t.store.runs.getRun(first.id)).toMatchObject({ status: "waiting" });
+    expect(t.store.runs.statusFor(attemptRef(1, 1))).toMatchObject({ status: "waiting" });
+    await t.store.runs.drain();
+    expect(at(t.runs(last), 0).status).toBe("running");
+    expect(t.journal().find((e) => e.kind === "runWaiting")).toMatchObject({ run: first.id, secrets: ["DEPLOY"] });
+  });
+
+  it("starts an untrusted run naming no secret, and a trusted one naming some", async () => {
+    const t = setup();
+    await withSecret(t);
+    const adas = await opened(t, ada);
+    const own = await opened(t, owner);
+    await t.store.runs.drain();
+    expect(t.store.pipelinePlanned(at(t.runs(adas), 0).id, [], [])).toEqual({ kind: "start" });
+    expect(t.store.pipelinePlanned(at(t.runs(own), 0).id, [], DEPLOYS)).toEqual({ kind: "start" });
+  });
+
+  it("refuses a plan naming a secret with no value, or one not allowed in the run's pipeline, naming both", async () => {
+    const t = setup();
+    const own = await opened(t, owner);
+    await t.store.runs.drain();
+    const run = at(t.runs(own), 0).id;
+    expect(t.store.pipelinePlanned(run, [], DEPLOYS)).toEqual({
+      kind: "refused",
+      error: "check deploy: secret DEPLOY has no value in the project settings",
+    });
+    await withSecret(t, ["main"]);
+    expect(t.store.pipelinePlanned(run, [], DEPLOYS)).toEqual({
+      kind: "refused",
+      error: "check deploy: secret DEPLOY isn't allowed in the default pipeline by the project settings",
+    });
+  });
+
+  it("refuses a plan for a run a newer push cancelled, so it neither starts nor waits", async () => {
+    const t = setup();
+    await withSecret(t);
+    const adas = await opened(t, ada);
+    await t.store.runs.drain();
+    const cancelled = at(t.runs(adas), 0).id;
+    t.pushed(adas, t.commit(adas, "newer\n"));
+    expect(t.store.pipelinePlanned(cancelled, [], DEPLOYS)).toMatchObject({ kind: "refused" });
+    expect(t.store.pipelinePlanned(cancelled, [], [])).toMatchObject({ kind: "refused" });
+    expect(t.store.runs.getRun(cancelled)).toMatchObject({ status: "cancelled" });
+  });
+
+  it("replaces a waiting run with a newer push's, which waits again", async () => {
+    const t = setup();
+    await withSecret(t);
+    const adas = await opened(t, ada);
+    await t.store.runs.drain();
+    t.store.pipelinePlanned(at(t.runs(adas), 0).id, [], DEPLOYS);
+    t.pushed(adas, t.commit(adas, "newer\n"));
+    expect(t.runs(adas).map((r) => r.status)).toEqual(["cancelled", "queued"]);
+    await t.store.runs.drain();
+    expect(t.store.pipelinePlanned(at(t.runs(adas), 1).id, [], DEPLOYS)).toEqual({ kind: "waiting" });
+    expect(t.runs(adas).map((r) => r.status)).toEqual(["cancelled", "waiting"]);
+  });
+
+  it("loads a trusted running run's secrets sealed, as the settings are now, and none for any other run", async () => {
+    const t = setup();
+    await withSecret(t);
+    const own = await opened(t, owner);
+    const adas = await opened(t, ada);
+    await t.store.runs.drain();
+    const loaded = t.store.sealedSecretsFor(at(t.runs(own), 0).id, ["DEPLOY"]);
+    if (!("sealed" in loaded)) throw new Error(loaded.error);
+    expect(JSON.stringify(loaded)).not.toContain("deploy-token-0123");
+    expect(await openSealed(keyringFrom(KEYRING), PROJECT.id, at(loaded.sealed, 0))).toBe("deploy-token-0123");
+    expect(() => t.store.sealedSecretsFor(at(t.runs(adas), 0).id, ["DEPLOY"])).toThrow(/may hold no secrets/u);
+
+    t.store.deleteSecret(PROJECT, owner, { name: "DEPLOY" });
+    expect(t.store.sealedSecretsFor(at(t.runs(own), 0).id, ["DEPLOY"])).toEqual({
+      secret: "DEPLOY",
+      error: "secret DEPLOY has no value in the project settings",
+    });
+  });
+});
+
+/** `main`'s config, committed to the origin: a check `deploy` that names DEPLOY. */
+const DEPLOY_CONFIG = "checks:\n  - { name: deploy, command: ./deploy, secrets: [DEPLOY] }\n";
+
+/** Ada's open attempt whose run, naming DEPLOY in `main`'s config, waits for the owner. */
+async function waitingRun(t: ReturnType<typeof setup>) {
+  t.repos.commit(ORIGIN, { files: { ".throng/config.yml": DEPLOY_CONFIG } });
+  await withSecret(t);
+  const ref = await opened(t, ada);
+  await t.store.runs.drain();
+  const run = at(t.runs(ref), 0);
+  expect(t.store.pipelinePlanned(run.id, [`${run.instance_id}/setup`], DEPLOYS)).toEqual({ kind: "waiting" });
+  return { ref, run: defined(t.store.runs.getRun(run.id)) };
+}
+
+describe("starting a waiting run", () => {
+  it("records what a waiting run would hold, and queues it again for the owner, trusted, with a new Workflow", async () => {
+    const t = setup();
+    const { ref, run } = await waitingRun(t);
+    expect(run).toMatchObject({ status: "waiting", secrets: ["DEPLOY"], trusted: false });
+
+    const started = await t.store.startRun(PROJECT, owner, { run: run.id, sha: defined(run.sha) });
+    expect(started).toMatchObject({
+      id: run.id,
+      sha: run.sha,
+      status: "queued",
+      trusted: true,
+      trigger: "start",
+      user_id: owner.user.id,
+      alias: null,
+      started_at: null,
+      instance_id: `${run.instance_id}-started`,
+    });
+    expect(t.journal().at(-1)).toMatchObject({ kind: "runQueued", run: run.id, trigger: "start" });
+    await t.store.runs.drain();
+    expect(t.workflow.created.at(-1)).toEqual({
+      id: `${run.instance_id}-started`,
+      params: { project: PROJECT.id, line: "t1a1", sha: run.sha, run: run.id },
+    });
+    expect(at(t.runs(ref), 0).status).toBe("running");
+    expect(t.store.pipelinePlanned(run.id, [], DEPLOYS)).toEqual({ kind: "start" });
+    expect(t.store.sealedSecretsFor(run.id, ["DEPLOY"])).toMatchObject({ sealed: [{ name: "DEPLOY" }] });
+  });
+
+  it("is the owner's alone, acting as themselves", async () => {
+    const t = setup();
+    const { run } = await waitingRun(t);
+    const sha = defined(run.sha);
+    expect(await code(t.store.startRun(PROJECT, ada, { run: run.id, sha }))).toBe("forbidden");
+    expect(await code(t.store.startRun(PROJECT, actor("owner001", "claude"), { run: run.id, sha }))).toBe("forbidden");
+    expect(t.store.runs.getRun(run.id)?.status).toBe("waiting");
+  });
+
+  it("refuses a head other than the one the run waits on, and a line that moved on since", async () => {
+    const t = setup();
+    const { ref, run } = await waitingRun(t);
+    const sha = defined(run.sha);
+    expect(await code(t.store.startRun(PROJECT, owner, { run: run.id, sha: "f".repeat(40) }))).toBe("invalidState");
+    // A draft's push moves its line's head without asking for a run.
+    t.store.runs.moveHead(attemptRef(ref.task, ref.number), t.commit(ref, "moved\n"), { kind: "other" });
+    expect(await code(t.store.startRun(PROJECT, owner, { run: run.id, sha }))).toBe("invalidState");
+    expect(t.store.runs.getRun(run.id)?.status).toBe("waiting");
+  });
+
+  it("refuses a run that isn't waiting, such as one a newer push replaced", async () => {
+    const t = setup();
+    const { ref, run } = await waitingRun(t);
+    t.pushed(ref, t.commit(ref, "newer\n"));
+    await expect(t.store.startRun(PROJECT, owner, { run: run.id, sha: defined(run.sha) })).rejects.toThrow(
+      `run ${run.id} is cancelled; only a waiting run can be started`,
+    );
+  });
+
+  it("re-checks every secret the run names, as main's config is now, against the settings", async () => {
+    const t = setup();
+    const { run } = await waitingRun(t);
+    const sha = defined(run.sha);
+    await t.store.putSecret(PROJECT, owner, { name: "DEPLOY", pipelines: ["main"] });
+    await expect(t.store.startRun(PROJECT, owner, { run: run.id, sha })).rejects.toThrow(
+      `can't start run ${run.id}: check deploy: secret DEPLOY isn't allowed in the default pipeline by the project settings`,
+    );
+    t.store.deleteSecret(PROJECT, owner, { name: "DEPLOY" });
+    await expect(t.store.startRun(PROJECT, owner, { run: run.id, sha })).rejects.toThrow(
+      "check deploy: secret DEPLOY has no value in the project settings",
+    );
+    await withSecret(t);
+    expect((await t.store.startRun(PROJECT, owner, { run: run.id, sha })).status).toBe("queued");
+  });
+});
+
+/** A task's check, as a task saved through the API stores it. */
+const LINT: CheckConfig = {
+  name: "lint",
+  command: "npm run lint",
+  timeoutMs: DEFAULT_CHECK_TIMEOUT_MS,
+  after: [],
+  secrets: [],
+  group: null,
+  caches: [],
+  source: "task",
+};
+
+/**
+ * An open attempt the owner pushed, on a task `creator` made with check `lint`, while `main`'s config
+ * names DEPLOY; its run is running, and has read its task's checks as its Workflow does.
+ */
+async function ownersPushOn(t: ReturnType<typeof setup>, creator: Actor) {
+  t.repos.commit(ORIGIN, { files: { ".throng/config.yml": DEPLOY_CONFIG } });
+  await withSecret(t);
+  const task = t.store.createTask(PROJECT, creator, { title: "Fix it", checks: [LINT] });
+  const [made] = await t.store.createAttempts(PROJECT, owner, { task: task.number, count: 1 });
+  const ref = { task: defined(made).task, number: defined(made).number };
+  t.pushed(ref, t.commit(ref, "work\n"), owner);
+  await t.store.openAttempt(PROJECT, owner, ref);
+  await t.store.runs.drain();
+  const run = at(t.runs(ref), 0);
+  expect(t.store.runDefinitions(run.id).checks).toEqual([LINT]);
+  return { ref, task: task.number, run: defined(t.store.runs.getRun(run.id)) };
+}
+
+describe("trust and a task's checks", () => {
+  it("trusts a run of the owner's push whose task checks the owner wrote, as themselves or under an alias", async () => {
+    for (const creator of [owner, actor("owner001", "claude")]) {
+      const t = setup();
+      const { run } = await ownersPushOn(t, creator);
+      expect(run).toMatchObject({ trusted: true, task_check: null });
+      expect(t.store.pipelinePlanned(run.id, [], DEPLOYS)).toEqual({ kind: "start" });
+    }
+  });
+
+  it("doesn't trust a run of the owner's push that runs a task check someone else wrote", async () => {
+    const t = setup();
+    const { run } = await ownersPushOn(t, ada);
+    expect(run).toMatchObject({ trusted: false, task_check: { name: "lint", writer: ada.user.id } });
+    // It holds no secret and saves no cache: naming a secret, it waits for the owner.
+    expect(() => t.store.sealedSecretsFor(run.id, ["DEPLOY"])).toThrow(/may hold no secrets/u);
+    expect(t.store.pipelineCaches(run.id, [{ name: "pnpm", keyHash: "k1" }])).toMatchObject([{ save: null }]);
+    expect(t.store.pipelinePlanned(run.id, [], DEPLOYS)).toEqual({ kind: "waiting" });
+    expect(t.store.runs.getRun(run.id)).toMatchObject({ status: "waiting", secrets: ["DEPLOY"] });
+  });
+
+  it("runs as normal, untrusted, a run of the owner's push naming no secret that runs someone else's task check", async () => {
+    const t = setup();
+    const { run } = await ownersPushOn(t, ada);
+    expect(t.store.pipelinePlanned(run.id, [], [])).toEqual({ kind: "start" });
+    expect(t.store.runs.getRun(run.id)).toMatchObject({ status: "running", trusted: false });
+  });
+
+  it("trusts a run the owner started, whoever wrote its task's checks", async () => {
+    const t = setup();
+    const { run } = await ownersPushOn(t, ada);
+    t.store.pipelinePlanned(run.id, [], DEPLOYS);
+    t.tick();
+    await t.store.startRun(PROJECT, owner, { run: run.id, sha: defined(run.sha) });
+    await t.store.runs.drain();
+    expect(t.store.runDefinitions(run.id).checks).toEqual([LINT]);
+    expect(t.store.runs.getRun(run.id)).toMatchObject({ status: "running", trusted: true, trigger: "start" });
+    expect(t.store.pipelinePlanned(run.id, [], DEPLOYS)).toEqual({ kind: "start" });
+    expect(t.store.sealedSecretsFor(run.id, ["DEPLOY"])).toMatchObject({ sealed: [{ name: "DEPLOY" }] });
+  });
+
+  it("takes trust from a started run whose task checks someone else changed since the owner started it", async () => {
+    const t = setup();
+    const { task, run } = await ownersPushOn(t, ada);
+    t.store.pipelinePlanned(run.id, [], DEPLOYS);
+    t.tick();
+    await t.store.startRun(PROJECT, owner, { run: run.id, sha: defined(run.sha) });
+    await t.store.runs.drain();
+    t.tick();
+    await t.store.editTask(PROJECT, ada, { task, checks: [{ name: "lint", command: "cat ~/.npmrc" }] });
+    t.store.runDefinitions(run.id);
+    expect(t.store.runs.getRun(run.id)).toMatchObject({
+      trusted: false,
+      trigger: "start",
+      task_check: { name: "lint", writer: ada.user.id },
+    });
+    expect(t.store.pipelinePlanned(run.id, [], DEPLOYS)).toEqual({ kind: "waiting" });
+
+    // Started again, after the change, the owner has reviewed it.
+    t.tick();
+    await t.store.startRun(PROJECT, owner, { run: run.id, sha: defined(run.sha) });
+    await t.store.runs.drain();
+    t.store.runDefinitions(run.id);
+    expect(t.store.runs.getRun(run.id)).toMatchObject({ status: "running", trusted: true });
+  });
+
+  it("counts a change in the same millisecond as Start as after it", async () => {
+    const t = setup();
+    const { task, run } = await ownersPushOn(t, ada);
+    t.store.pipelinePlanned(run.id, [], DEPLOYS);
+    t.tick();
+    await t.store.startRun(PROJECT, owner, { run: run.id, sha: defined(run.sha) });
+    await t.store.runs.drain();
+    await t.store.editTask(PROJECT, ada, { task, checks: [{ name: "lint", command: "cat ~/.npmrc" }] });
+    t.store.runDefinitions(run.id);
+    expect(t.store.runs.getRun(run.id)).toMatchObject({ trusted: false, task_check: { name: "lint" } });
+  });
+
+  it("takes a check from before writers were recorded as its task's creator's", async () => {
+    const t = setup();
+    t.repos.commit(ORIGIN, { files: { ".throng/config.yml": DEPLOY_CONFIG } });
+    const task = t.store.createTask(PROJECT, owner, { title: "Fix it", checks: [LINT] });
+    t.sql.exec("UPDATE tasks SET check_writers = NULL WHERE number = ?", task.number);
+    expect(t.store.getTask(PROJECT, owner, { task: task.number }).check_writers).toEqual([
+      { name: "lint", user: owner.user.id, owner: false, at: 0 },
+    ]);
+  });
+
+  it("records who wrote each check: an edit that leaves one unchanged keeps its writer", async () => {
+    const t = setup();
+    const task = t.store.createTask(PROJECT, ada, { title: "Fix it", checks: [LINT] }).number;
+    const writers = () => t.store.getTask(PROJECT, owner, { task }).check_writers;
+    const at0 = Date.parse("2026-10-10T12:00:00.000Z");
+    const adas = { name: "lint", user: ada.user.id, owner: false, at: at0 };
+    expect(writers()).toEqual([adas]);
+
+    await t.store.editTask(PROJECT, owner, { task, title: "Fix it now" });
+    await t.store.editTask(PROJECT, owner, { task, checks: [{ name: "lint", command: "npm run lint" }] });
+    expect(writers()).toEqual([adas]);
+
+    t.tick();
+    const ownersAlias = actor("owner001", "claude");
+    await t.store.editTask(PROJECT, ownersAlias, {
+      task,
+      checks: [{ name: "lint", command: "npm run lint -- --fix" }],
+    });
+    const owners = { name: "lint", user: owner.user.id, owner: true, at: at0 + 1000 };
+    expect(writers()).toEqual([owners]);
+
+    await t.store.editTask(PROJECT, ada, {
+      task,
+      checks: [
+        { name: "lint", command: "npm run lint -- --fix" },
+        { name: "types", command: "npm run typecheck" },
+      ],
+    });
+    expect(writers()).toEqual([owners, { name: "types", user: ada.user.id, owner: false, at: at0 + 1000 }]);
+  });
+});
+
+/** Requests a run of `sha` on `main`, as `main` moving does. */
+const onMain = (t: ReturnType<typeof setup>, sha: string) =>
+  t.store.runs.request({
+    project: PROJECT.id,
+    line: "main",
+    sha,
+    trigger: "push",
+    actor: null,
+    pushedBy: { kind: "maintainer" },
+  });
+
+describe("runs on task branches and main", () => {
+  /** Pushes task 1's task branch to a new commit as `who`, as the git proxy records it. */
+  let n = 0;
+  const pushTaskBranch = (t: ReturnType<typeof setup>, who: Actor, task = 1) => {
+    const head = t.repos.commit(ORIGIN, { files: { "test.txt": `test ${++n}\n` }, branch: `tasks-t${task}` }).hash;
+    t.store.recordTaskBranchPush(PROJECT, who, { task, head });
+    return head;
+  };
+
+  it("runs default on a task branch's line when it's pushed, trusted as the owner's push", () => {
+    const t = setup();
+    t.store.createTask(PROJECT, ada, { title: "Fix it" });
+    const head = pushTaskBranch(t, ada);
+    const theirs = at(t.store.runs.listRuns("t1"), 0);
+    expect(theirs).toMatchObject({ line: "t1", sha: head, pipeline: "default", trigger: "push", trusted: false });
+    expect(theirs.instance_id).toBe(`abc123-t1-${head.slice(0, 12)}-${theirs.id}`);
+    expect(t.journal().find((e) => e.kind === "runQueued")).toMatchObject({ ref: "t1", sha: head });
+
+    const next = pushTaskBranch(t, owner);
+    expect(t.store.runs.listRuns("t1").map((r) => [r.sha, r.status, r.trusted])).toEqual([
+      [head, "cancelled", false],
+      [next, "queued", true],
+    ]);
+  });
+
+  it("cancels a running task-branch run, tearing it down, when a newer head arrives", async () => {
+    const t = setup();
+    t.store.createTask(PROJECT, ada, { title: "Fix it" });
+    pushTaskBranch(t, ada);
+    await t.store.runs.drain();
+    const running = at(t.store.runs.listRuns("t1"), 0);
+    t.store.runs.planned(running.id, [`${running.instance_id}/setup`]);
+    pushTaskBranch(t, ada);
+    await t.store.runs.drain();
+    expect(t.workflow.terminated).toEqual([running.instance_id]);
+    expect(t.tornDown).toEqual([[running.instance_id, [`${running.instance_id}/setup`]]]);
+    expect(t.store.runs.listRuns("t1").map((r) => r.status)).toEqual(["cancelled", "running"]);
+  });
+
+  it("runs main on main, and a newer head replaces a queued main run, never the running one", async () => {
+    const t = setup();
+    const [one, two, three] = ["1", "2", "3"].map((c) => c.repeat(40)) as [string, string, string];
+    const first = queued(onMain(t, one)).run;
+    expect(first).toMatchObject({ line: "main", pipeline: "main", trusted: true });
+    expect(first.instance_id).toBe(`abc123-main-${one.slice(0, 12)}-${first.id}`);
+    await t.store.runs.drain();
+    expect(t.store.runs.getRun(first.id)?.status).toBe("running");
+
+    // The running run may be deploying: newer heads queue behind it, the newest replacing the queued.
+    queued(onMain(t, two));
+    queued(onMain(t, three));
+    await t.store.runs.drain();
+    expect(t.workflow.terminated).toEqual([]);
+    expect(t.store.runs.listRuns("main").map((r) => [r.sha, r.status])).toEqual([
+      [one, "running"],
+      [two, "cancelled"],
+      [three, "queued"],
+    ]);
+    expect(t.store.runs.getRun(first.id)?.superseded).toBeTruthy();
+
+    // Its report still counts, and the newest head runs next.
+    expect(t.store.runs.finish(first.id, done())).toBeTruthy();
+    await t.store.runs.drain();
+    expect(t.store.runs.listRuns("main").map((r) => r.status)).toEqual(["done", "cancelled", "running"]);
+  });
+
+  it("lets the owner cancel a queued main run, but not the running one", async () => {
+    const t = setup();
+    const running = queued(onMain(t, "1".repeat(40))).run;
+    await t.store.runs.drain();
+    expect(() => t.store.cancelRun(PROJECT, owner, { run: running.id })).toThrow(/can't be cancelled/u);
+    const waiting = queued(onMain(t, "2".repeat(40))).run;
+    expect(t.store.cancelRun(PROJECT, owner, { run: waiting.id }).status).toBe("cancelled");
+  });
+
+  it("starts a main run first when a slot frees, then task-branch and attempt runs oldest first", async () => {
+    const t = setup();
+    const refs = await t.drafts(RUN_CAP);
+    for (const ref of refs) await t.store.openAttempt(PROJECT, ada, ref);
+    t.store.createTask(PROJECT, ada, { title: "Branch" });
+    pushTaskBranch(t, ada, 2);
+    const last = at(await t.drafts(), 0);
+    await t.store.openAttempt(PROJECT, ada, last);
+    await t.store.runs.drain();
+    expect(t.workflow.created.map((c) => c.params.line)).toEqual(["t1a1", "t1a2", "t1a3"]);
+
+    // `main` is queued last, and takes the first free slot.
+    queued(onMain(t, "1".repeat(40)));
+    const finish = async (ref: AttemptInput) => {
+      t.store.runs.finish(at(t.runs(ref), 0).id, done());
+      await t.store.runs.drain();
+    };
+    await finish(at(refs, 0));
+    expect(t.workflow.created.map((c) => c.params.line).slice(3)).toEqual(["main"]);
+    await finish(at(refs, 1));
+    await finish(at(refs, 2));
+    expect(t.workflow.created.map((c) => c.params.line).slice(3)).toEqual(["main", "t2", "t3a1"]);
   });
 });

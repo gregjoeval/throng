@@ -22,7 +22,6 @@ import type { Actor } from "../src/tokens.ts";
 import { userForEmail } from "../src/users.ts";
 import { testDatabase } from "./support/d1.ts";
 import { git, gitEnv, LocalGitHost, serve, tryGit } from "./support/git-host.ts";
-import { FakePreviewWorkers } from "./support/preview-workers.ts";
 import { testTaskBackends } from "./support/task-backend.ts";
 
 const cleanups: (() => Promise<void>)[] = [];
@@ -42,7 +41,7 @@ async function setup() {
   const db = testDatabase();
   const followed: FollowParams[] = [];
   const follow = { workflow: { create: async ({ params }: { params: FollowParams }) => followed.push(params) } };
-  const { backend, store } = testTaskBackends(host, now, undefined, undefined, follow);
+  const { backend, store } = testTaskBackends(host, now, undefined, follow);
   const app = new Hono().route("/git", gitRoutes({ repos: () => host, tasks: () => backend, now }));
   const server = await serve(app, { DB: db, ACCESS_TEAM_DOMAIN: "x", ACCESS_AUD: "x" });
   cleanups.push(server.close);
@@ -57,10 +56,7 @@ async function setup() {
   const ada = await person("ada@example.com");
   const bob = await person("bob@example.com");
 
-  const created = await projectService({ db, repos: host, previewWorkers: new FakePreviewWorkers() }).create(
-    greg.actor,
-    { handle: "throng" },
-  );
+  const created = await projectService({ db, repos: host }).create(greg.actor, { handle: "throng" });
   const project: ProjectContext = { id: created.id, owner: greg.user.id };
   const origin = originRepo(project.id);
 

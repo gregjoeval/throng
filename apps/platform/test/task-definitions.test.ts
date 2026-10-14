@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { parseConfig } from "../src/config.ts";
 import type { CheckConfig, MetricConfig } from "../src/config.ts";
-import { buildResult, scorePlan, scoreTimeoutMs } from "../src/results.ts";
+import { buildResult, scorePlan } from "../src/results.ts";
 import type { RawScore } from "../src/results.ts";
-import { NO_TASK_DEFINITIONS, withTask } from "../src/task-definitions.ts";
+import { NO_TASK_DEFINITIONS, taskDefinitionsFrom, withTask } from "../src/task-definitions.ts";
 
 const PROJECT = parseConfig(`checks:
   - name: test
@@ -28,8 +28,11 @@ const task = (...metrics: Partial<Pick<MetricConfig, "name" | "from">>[]) => ({
 const taskCheck = (check: Partial<CheckConfig> = {}): CheckConfig => ({
   name: "smoke",
   command: "./smoke.sh",
-  required: true,
   timeoutMs: 60_000,
+  after: [],
+  secrets: [],
+  group: null,
+  caches: [],
   source: "task",
   ...check,
 });
@@ -37,6 +40,9 @@ const taskCheck = (check: Partial<CheckConfig> = {}): CheckConfig => ({
 function raw(checks: RawScore["checks"]): RawScore {
   return { base: null, shortstat: "", builtinMs: 0, setupFailed: null, checks };
 }
+
+/** A task's definitions: one check using `caches`. */
+const uses = (caches: string[]) => ({ checks: [{ name: "smoke", command: "./smoke.sh", caches }] });
 
 describe("a run's config with its task's definitions", () => {
   it("reads a task metric over a project check, and scores it with source task", () => {
@@ -80,7 +86,7 @@ describe("a run's config with its task's definitions", () => {
   });
 
   it("runs a task's checks after the project's, under its setup and network, with source task", () => {
-    const project = parseConfig(`setup: [pnpm install]
+    const project = parseConfig(`setup: [{ name: deps, command: pnpm install }]
 network: { allow: [api.example.com] }
 checks:
   - { name: test, command: npm test, timeout: 2m }
@@ -98,13 +104,13 @@ checks:
       ],
     });
     const plan = scorePlan(config);
-    expect(plan.setup).toEqual(["pnpm install"]);
+    expect(plan.setup).toEqual([{ name: "deps", command: "pnpm install", secrets: [], caches: [] }]);
     expect(plan.allow).toEqual(["api.example.com"]);
     expect(plan.checks.map((check) => [check.name, check.metrics.map((metric) => metric.name)])).toEqual([
       ["test", []],
       ["smoke", ["smoked"]],
     ]);
-    expect(scoreTimeoutMs(plan)).toBe(scoreTimeoutMs({ ...plan, checks: plan.checks.slice(0, 1) }) + 60_000);
+    expect(plan.checks.map((check) => check.timeoutMs)).toEqual([expect.any(Number), 60_000]);
 
     const result = buildResult(
       config,
@@ -114,24 +120,21 @@ checks:
       ]),
     );
     expect(result.gate).toBe("passed");
-    expect(result.checks.map((check) => [check.name, check.source, check.required])).toEqual([
-      ["_diff", "platform", false],
-      ["test", "project", true],
-      ["smoke", "task", true],
-      ["_preview", "platform", false],
+    expect(result.checks.map((check) => [check.name, check.source])).toEqual([
+      ["_diff", "platform"],
+      ["test", "project"],
+      ["smoke", "task"],
     ]);
     expect(result.metrics["smoke"]).toMatchObject({ source: "task", type: "enum", value: "passed" });
     expect(result.metrics["smoked"]).toEqual({ source: "task", type: "boolean", order: "desc", value: true });
   });
 
-  it("fails the gate when a required task check fails, and not when an optional one does", () => {
+  it("fails the gate when a task check fails", () => {
     const failing = raw([
       { exit: 0, durationMs: 5, metrics: {} },
       { exit: 1, durationMs: 5, metrics: {} },
     ]);
     expect(buildResult(withTask(PROJECT, { checks: [taskCheck()], metrics: [] }), failing).gate).toBe("failed");
-    const optional = withTask(PROJECT, { checks: [taskCheck({ required: false })], metrics: [] });
-    expect(buildResult(optional, failing).gate).toBe("passed");
   });
 
   it("runs a task's checks on a project with no config", () => {
@@ -151,6 +154,95 @@ checks:
         "task checks[0].name: test is also a check's name in .throng/config.yml",
         "task checks[1].name: coverage is also a metric's name in .throng/config.yml",
       ].join("\n"),
+    });
+  });
+
+  it("lets a task's check wait for a project check, or another of the task's", () => {
+    const config = withTask(PROJECT, {
+      checks: [taskCheck({ name: "smoke", after: ["test"] }), taskCheck({ name: "e2e", after: ["smoke"] })],
+      metrics: [],
+    });
+    expect(scorePlan(config).checks.map((check) => [check.name, check.after])).toEqual([
+      ["test", []],
+      ["smoke", ["test"]],
+      ["e2e", ["smoke"]],
+    ]);
+  });
+
+  it("is invalid when a task's check waits for a setup, an unknown check, itself or in a circle", () => {
+    const project = parseConfig("setup: [{ name: deps, command: npm ci }]\nchecks: [{ name: test, command: x }]\n");
+    const invalid = withTask(project, {
+      checks: [
+        taskCheck({ name: "a", after: ["deps"] }),
+        taskCheck({ name: "b", after: ["nope"] }),
+        taskCheck({ name: "c", after: ["c"] }),
+        taskCheck({ name: "d", after: ["e"] }),
+        taskCheck({ name: "e", after: ["d"] }),
+        taskCheck({ name: "deps" }),
+      ],
+      metrics: [],
+    });
+    expect(invalid).toEqual({
+      kind: "invalid",
+      error: [
+        "task checks[5].name: deps is also a setup's name in .throng/config.yml",
+        "task checks[0].after: deps is a setup; every check already waits for every setup, so after only names checks",
+        "task checks[1].after: no check is named nope",
+        "task checks[2].after: a check can't wait for itself",
+        "task checks[3].after: after makes a circle: d → e → d",
+      ].join("\n"),
+    });
+  });
+});
+
+describe("a task's definitions", () => {
+  it("refuses a task's check naming a secret: tasks aren't reviewed like main's config", () => {
+    const input = { checks: [{ name: "smoke", command: "./smoke.sh", secrets: ["DEPLOY"] }] };
+    expect(taskDefinitionsFrom(input, NO_TASK_DEFINITIONS, PROJECT)).toEqual({
+      error: "checks[0].secrets: a task's checks get no secrets: tasks aren't reviewed like main's config",
+    });
+  });
+
+  it("refuses a task's check in a group: it always runs on the task's attempts", () => {
+    const input = { checks: [{ name: "smoke", command: "./smoke.sh", group: "verify" }] };
+    expect(taskDefinitionsFrom(input, NO_TASK_DEFINITIONS, PROJECT)).toEqual({
+      error: "checks[0].group: a task's checks take no group: they always run on the task's attempts",
+    });
+  });
+
+  it("refuses a task's check named like one of main's post-gate steps: they share one namespace", () => {
+    const project = parseConfig("pipelines:\n  main:\n    steps: [{ name: deploy, command: x }]\n");
+    const input = { checks: [{ name: "deploy", command: "./smoke.sh" }] };
+    expect(taskDefinitionsFrom(input, NO_TASK_DEFINITIONS, project)).toEqual({
+      error: "checks[0].name: deploy is also a post-gate step's name in .throng/config.yml",
+    });
+  });
+
+  it("lets a task's check use a cache main's config defines, and no other", () => {
+    const project = parseConfig("caches:\n  pnpm: { path: ~/.cache/pnpm, key: pnpm-lock.yaml }\n");
+    expect(taskDefinitionsFrom(uses(["pnpm"]), NO_TASK_DEFINITIONS, project)).toMatchObject({
+      definitions: { checks: [{ name: "smoke", caches: ["pnpm"] }] },
+    });
+    expect(taskDefinitionsFrom(uses(["pip"]), NO_TASK_DEFINITIONS, project)).toEqual({
+      error: "checks[0].caches[0]: no cache is named pip in .throng/config.yml",
+    });
+    expect(taskDefinitionsFrom(uses(["pnpm"]), NO_TASK_DEFINITIONS, { kind: "none" })).toEqual({
+      error: "checks[0].caches[0]: no cache is named pnpm in .throng/config.yml",
+    });
+  });
+
+  it("makes a run's config invalid when main no longer defines a cache a task's check uses", () => {
+    const defined = { checks: [taskCheck({ caches: ["pnpm"] })], metrics: [] };
+    expect(withTask(parseConfig(""), defined)).toEqual({
+      kind: "invalid",
+      error: "task checks[0].caches[0]: no cache is named pnpm in .throng/config.yml",
+    });
+  });
+
+  it("saves a task's check with no secrets", () => {
+    const input = { checks: [{ name: "smoke", command: "./smoke.sh" }] };
+    expect(taskDefinitionsFrom(input, NO_TASK_DEFINITIONS, PROJECT)).toMatchObject({
+      definitions: { checks: [{ name: "smoke", secrets: [] }] },
     });
   });
 });

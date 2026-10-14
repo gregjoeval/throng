@@ -22,6 +22,7 @@ import {
   OpenVoteSchema,
   PageQuerySchema,
   PostVerdictSchema,
+  RunsQuerySchema,
   SelectionSchema,
   VoteCandidateSchema,
   WaitQuerySchema,
@@ -34,11 +35,11 @@ import type { AuthEnv } from "./auth.ts";
 import { browseService } from "./browse.ts";
 import { DIFF_CAPS, diffCommit, unifiedPatch } from "./diff.ts";
 import { ServiceError } from "./errors.ts";
-import { missingLog } from "./logs.ts";
+import { firstLog, missingLog } from "./logs.ts";
 import type { ProjectService } from "./projects.ts";
 import { ATTEMPT_STATES, TASK_STATES } from "./task-store.ts";
 import { taskService } from "./tasks.ts";
-import type { MergeRequest, ScoringAnswer, Vote } from "./tasks.ts";
+import type { MergeRequest, RunDetail, ScoringAnswer, Vote } from "./tasks.ts";
 import type { Actor } from "./tokens.ts";
 import { DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS } from "./waiters.ts";
 
@@ -79,11 +80,7 @@ function missing(what: string): () => never {
 export function mcpRoutes(options: ApiOptions = {}) {
   const deps: Deps = {
     repos: options.repos ?? missing("repos"),
-    projects: envProjectService(
-      options.repos ?? missing("repos"),
-      options.previewWorkers ?? missing("preview Workers"),
-      options.fetch,
-    ),
+    projects: envProjectService(options.repos ?? missing("repos"), options.fetch),
     tasks: options.tasks ?? missing("a task backend"),
     logs: options.logs ?? missing("a logs bucket"),
     diffCache: options.diffCache ?? workersCache,
@@ -123,6 +120,7 @@ const UPDATE_STATES = z.enum(ATTEMPT_STATES).exclude(["merged", "obsolete"]);
 const onProject = z.object({ project: ProjectRefSchema });
 const onTask = onProject.extend({ task: TaskRefSchema });
 const onAttempt = onProject.extend({ attempt: AttemptRefSchema });
+const onRun = onProject.extend({ run: z.number().int().min(1).describe("The run's id.") });
 
 function projectPath(ref: string): { owner: string; project: string } {
   const [owner = "", project = ""] = ref.split("/");
@@ -148,6 +146,14 @@ function withHint(summary: string, hint: string | null): string {
 /** The answer to a scoring request: the run it queued, or why it queued none. */
 function scoringAnswer(scored: ScoringAnswer): CallToolResult {
   return answer(scored.queued ? `queued run ${scored.run.id}` : `not queued: ${scored.reason}`, { ...scored });
+}
+
+/** A run in a few words: `run 7 on t42a3 is done, gate passed`, or why it can't go on. */
+function runSummary(run: RunDetail): string {
+  const summary = `run ${run.id} on ${run.line} is ${run.status}`;
+  if (run.status === "waiting") return `${summary}: it needs the project owner to start it`;
+  if (run.status === "errored") return `${summary}: ${run.error ?? "no error recorded"}`;
+  return run.gate === null ? summary : `${summary}, gate ${run.gate}`;
 }
 
 /** The answer to a call that moves the task's merge request: its new state. */
@@ -420,7 +426,8 @@ function mcpServer(
     "wait_for_attempt",
     `Hold until what \`until\` watches on the attempt changes, or \`wait\` seconds (default ${DEFAULT_WAIT_SECONDS}, ` +
       `at most ${MAX_WAIT_SECONDS}) pass, then return the attempt and whether it changed. \`until: scored\` waits ` +
-      "for the current head to have a `done` or `errored` run, and answers at once if it already has one. " +
+      "for the current head to have a `done` or `errored` run, or one `waiting` for the project owner (tell your user: " +
+      "only they can start it), and answers at once if it already has one. " +
       "Call again while `changed` is false. A deploy drops waits in flight: they answer `changed: false`.",
     onAttempt.extend({
       wait: WaitSecondsSchema.default(DEFAULT_WAIT_SECONDS).describe(`Seconds to hold, 1 to ${MAX_WAIT_SECONDS}.`),
@@ -446,26 +453,71 @@ function mcpServer(
   });
 
   tool(
+    "list_runs",
+    "The project's runs on every line, newest first: each one's line, pipeline, trigger, head, status and gate. " +
+      "Filter by `line` (`main`, `tasks` for every line but `main`, a task `t42` or an attempt `t42a3`) and " +
+      "`status`; pass a page's `next` as `cursor` for the page after it.",
+    RunsQuerySchema.extend(onProject.shape),
+    async ({ project, ...query }) => {
+      const page = await service.listRuns(actor, { ...projectPath(project), ...query });
+      const more = page.next === null ? "" : `; more from cursor ${page.next}`;
+      return answer(`${page.runs.length} runs${more}`, { ...page });
+    },
+  );
+
+  tool(
+    "get_run",
+    "A run with its outcome: every step in run order (setups, checks, post-gate steps) with its outcome, " +
+      "duration, notes and the name of its log for `get_log`, and the run's metrics.",
+    onRun,
+    async ({ project, run }) => {
+      const found = await service.getRun(actor, { ...projectPath(project), run });
+      return answer(runSummary(found), { run: found });
+    },
+  );
+
+  tool(
+    "wait_for_run",
+    `Hold until the run is done (or ended otherwise) or is waiting for the project owner to start it, or \`wait\` ` +
+      `seconds (default ${DEFAULT_WAIT_SECONDS}, at most ${MAX_WAIT_SECONDS}) pass, then return the run and ` +
+      "whether it `settled`. A waiting run needs the owner: tell your user. Call again while `settled` is false. A " +
+      "deploy drops waits in flight: they answer with the run as it is.",
+    onRun.extend({
+      wait: WaitSecondsSchema.default(DEFAULT_WAIT_SECONDS).describe(`Seconds to hold, 1 to ${MAX_WAIT_SECONDS}.`),
+    }),
+    async ({ project, run, wait }) => {
+      const found = await service.waitForRun(actor, { ...projectPath(project), run, wait });
+      return answer(found.settled ? runSummary(found) : `run ${run} is still ${found.status}`, { run: found });
+    },
+  );
+
+  tool(
     "get_log",
-    `Read a scoring run's log: a check's name, \`setup.<n>\`, or \`preview.deploy\`. Returns the last ` +
-      `${MAX_LOG_SLICE_BYTES / 1024} KB by default; pass \`offset\` (bytes) to read ${MAX_LOG_SLICE_BYTES / 1024} ` +
-      "KB from there instead.",
-    onProject.extend({
-      run: z.number().int().min(1).describe("The run's id."),
-      name: z.string().min(1).describe("The log's name, e.g. `test`."),
+    `Read one step's log of a run: the \`log\` \`get_run\` gives the step, such as a check's name or \`setup.<n>\`. ` +
+      `Returns the last ${MAX_LOG_SLICE_BYTES / 1024} KB by default; pass \`offset\` (bytes) to read ` +
+      `${MAX_LOG_SLICE_BYTES / 1024} KB from there instead.`,
+    onRun.extend({
+      step: z.string().min(1).optional().describe("The step's log, e.g. `test`."),
+      name: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Deprecated: `step`'s old name, taken when `step` is absent. Use `step`."),
       offset: z.number().int().min(0).optional().describe("The byte to start at; omit for the log's tail."),
     }),
-    async ({ project, run, name, offset }) => {
-      const key = await service.runLogKey(actor, { ...projectPath(project), run, name });
-      const log = await logs(env).get(key);
-      if (log === null) throw missingLog(run, name);
+    async ({ project, run, step: given, name, offset }) => {
+      const step = given ?? name;
+      if (step === undefined) throw new ServiceError("invalidRequest", "give the log's `step`");
+      const keys = await service.runLogKeys(actor, { ...projectPath(project), run, name: step });
+      const log = await firstLog(logs(env), keys);
+      if (log === null) throw missingLog(run, step);
       const bytes = new Uint8Array(await new Response(log.body).arrayBuffer());
       const start = offset ?? Math.max(0, bytes.length - MAX_LOG_SLICE_BYTES);
       const end = Math.min(bytes.length, start + MAX_LOG_SLICE_BYTES);
       const capped = start > 0 || end < bytes.length;
       const hint = capped ? `Bytes ${start}-${end} of ${bytes.length}; pass \`offset\` to read another part.` : null;
-      const data = { run, name, size: bytes.length, offset: start, text: sliceBytes(bytes, start, end - start), hint };
-      return answer(withHint(`${name} of run ${run}: ${bytes.length} bytes`, hint), data);
+      const data = { run, step, size: bytes.length, offset: start, text: sliceBytes(bytes, start, end - start), hint };
+      return answer(withHint(`${step} of run ${run}: ${bytes.length} bytes`, hint), data);
     },
   );
 
@@ -515,7 +567,8 @@ function mcpServer(
 
   tool(
     "get_dequeue",
-    "Why the task's merge request was last dequeued, with details: for a conflict, each file's three-way hunks.",
+    "Why the task's merge request was last dequeued, and the landing's run behind it (read it with `get_run`), with " +
+      "details: for a conflict, each file's three-way hunks; for failed checks, the steps that failed.",
     onTask,
     async ({ project, task }) => {
       const dequeue = await service.getDequeue(actor, { ...projectPath(project), task });
@@ -575,6 +628,20 @@ function mcpServer(
     "The task's latest vote: each candidate's tally, your own ballot, and its winner once closed.",
     onTask,
     async ({ project, task }) => voteAnswer(await service.getVote(actor, { ...projectPath(project), task })),
+  );
+
+  tool(
+    "list_secrets",
+    "The project's secrets: each one's name, the pipelines it may be used in (`default`, `main`) and when it last " +
+      "changed, never its value, for naming them in `.throng/config.yml`; and `uses`: where main's config names " +
+      "each secret, whether it has a value and the pipelines it isn't allowed in. Only the project's maintainers " +
+      "may. Only the owner, acting as themselves in the UI or REST API, can set them.",
+    onProject,
+    async ({ project }) => {
+      const { secrets, uses } = await service.listSecrets(actor, projectPath(project));
+      const named = secrets.map((s) => `${s.name} (${s.pipelines.join(", ") || "no pipeline"})`).join(", ");
+      return answer(`${secrets.length} secrets${named === "" ? "" : `: ${named}`}`, { secrets, uses });
+    },
   );
 
   return server;

@@ -4,6 +4,8 @@
 import { queryOptions, experimental_streamedQuery as streamedQuery } from "@tanstack/react-query";
 import type { QueryKey } from "@tanstack/react-query";
 import type { AppType } from "@throng/platform/app";
+import { runEnded } from "@throng/platform/run-status";
+import type { RunStatus } from "@throng/platform/run-status";
 import { hc, parseResponse } from "hono/client";
 import type { ClientResponse, InferResponseType } from "hono/client";
 import { PlatformError } from "@/lib/errors";
@@ -183,9 +185,9 @@ async function getJson<T>(url: string, signal: AbortSignal): Promise<T> {
 }
 
 /**
- * The diff from `from`'s tree to `to`'s (two shas), with `attempt` the fork to find them in. It's
- * addressed by sha, so it's never refetched: a moved head is a new query. The route takes the range
- * as one path segment, which `hc` can't type, so the URL is built here.
+ * The diff from `from`'s tree to `to`'s (two refs, usually shas), with `attempt` the fork to find
+ * them in. Addressed by sha, it's never refetched: a moved head is a new query. The route takes the
+ * range as one path segment, which `hc` can't type, so the URL is built here.
  */
 export const compareQuery = (projectRef: ProjectRef, from: string, to: string, attempt?: string) =>
   queryOptions({
@@ -206,38 +208,45 @@ export const mergeRequestQuery = (projectRef: ProjectRef, task: string) => ({
 });
 
 /**
- * Why the merge request last left the queue, with the conflict, failed checks or error. Keyed by
- * when it happened, so a later dequeue is a new query.
+ * Why the merge request last left the queue, the landing's run behind it, and the conflict, failed
+ * steps or error that run holds. Keyed by when it happened, so a later dequeue is a new query.
  */
 export const dequeueQuery = (projectRef: ProjectRef, task: string, at: string) =>
   apiQuery([...taskKey(projectRef, task), "dequeue", at], (init) =>
     tasksApi[":t"]["merge-request"].dequeue.$get({ param: { ...projectRef, t: task } }, { init }),
   );
 
-/** The URL of a log of the checks behind a `failedChecks` dequeue. */
-export const dequeueLogUrl = (projectRef: ProjectRef, task: string, name: string) =>
-  `${projectPath(projectRef)}/tasks/${encodeURIComponent(task)}/merge-request/dequeue/logs/${encodeURIComponent(name)}`;
+/** The sides a conflicting file diffs to from its merge base: `main`, or the approved head. */
+export type ConflictSide = "main" | "attempt";
 
 /**
- * One conflicting file of the dequeue at `at`, diffed from the merge base to `main` or to the
- * attempt. The path is a tail of path segments, which `hc` can't type, so the URL is built here.
+ * A conflicting file's diff from its merge base to `side`, from the file's URL under a route that
+ * serves them (`…/files/<path>/diff`). The path is a tail of path segments, which `hc` can't type,
+ * so the URL is built here. A conflict never changes, so it's never refetched.
  */
-export const dequeueFileDiffQuery = (
+const conflictDiffQuery = (key: QueryKey, base: string, path: string, side: ConflictSide) =>
+  queryOptions({
+    queryKey: [...key, "conflict", path, side] as const,
+    staleTime: Number.POSITIVE_INFINITY,
+    queryFn: ({ signal }) => getJson<FileDiff>(`${base}/files/${encodePath(path)}/diff?side=${side}`, signal),
+  });
+
+export type ConflictDiffQueryOptions = ReturnType<typeof conflictDiffQuery>;
+
+/** One conflicting file of the task's latest dequeue (at `at`), diffed from its merge base to `side`. */
+export const dequeueConflictDiffQuery = (
   projectRef: ProjectRef,
   task: string,
   at: string,
   path: string,
-  side: "main" | "attempt",
+  side: ConflictSide,
 ) =>
-  queryOptions({
-    queryKey: [...taskKey(projectRef, task), "dequeue", at, "file", path, side] as const,
-    staleTime: Number.POSITIVE_INFINITY,
-    queryFn: ({ signal }) => {
-      const tail = path.split("/").map(encodeURIComponent).join("/");
-      const base = `${projectPath(projectRef)}/tasks/${encodeURIComponent(task)}/merge-request/dequeue`;
-      return getJson<FileDiff>(`${base}/files/${tail}/diff?side=${side}`, signal);
-    },
-  });
+  conflictDiffQuery(
+    [...taskKey(projectRef, task), "dequeue", at],
+    `${projectPath(projectRef)}/tasks/${encodeURIComponent(task)}/merge-request/dequeue`,
+    path,
+    side,
+  );
 
 /**
  * Selects `attempt` as the task's merge request, closing its other active attempts. Rejects with
@@ -392,18 +401,119 @@ export async function postVerdict(
   return parseResponse(attemptApi.verdicts.$post({ param: { ...projectRef, a: attempt }, json: verdict }));
 }
 
+/** How often a run that hasn't settled, and the runs list, are refetched while visible, in milliseconds. */
+export const RUN_POLL_MS = 3000;
+
 /**
- * One log of a scoring run, streamed: the text read so far, growing as chunks arrive. A stored log
+ * The runs list's filters and page: one line, `main` or `tasks`, a status, the cursor a page starts
+ * at, and how many runs a page holds (the platform's default when absent).
+ */
+export interface RunsFilter {
+  line?: string | undefined;
+  status?: RunStatus | undefined;
+  cursor?: number | undefined;
+  limit?: number | undefined;
+}
+
+/** One page of the project's runs, newest first. */
+const runsPage = (projectRef: ProjectRef, { line, status, cursor, limit }: RunsFilter, init: RequestInit) =>
+  parseResponse(
+    projectApi.runs.$get(
+      {
+        param: projectRef,
+        query: {
+          ...(line === undefined ? {} : { line }),
+          ...(status === undefined ? {} : { status }),
+          ...(cursor === undefined ? {} : { cursor: String(cursor) }),
+          ...(limit === undefined ? {} : { limit: String(limit) }),
+        },
+      },
+      { init },
+    ),
+  );
+
+/** A page of the project's runs, newest first, polled. */
+export const runsQuery = (projectRef: ProjectRef, filter: RunsFilter) => ({
+  ...queryOptions({
+    queryKey: [...projectKey(projectRef), "runs", filter] as const,
+    queryFn: ({ signal }) => runsPage(projectRef, filter, { signal }),
+  }),
+  refetchInterval: RUN_POLL_MS,
+});
+
+/**
+ * Every run of the project waiting for the owner, newest first: each page, following `next` to the
+ * last, so none is left out however many wait. Polled.
+ */
+export const waitingRunsQuery = (projectRef: ProjectRef) => ({
+  ...queryOptions({
+    queryKey: [...projectKey(projectRef), "runs", "waiting", "all"] as const,
+    queryFn: async ({ signal }) => {
+      const runs: Run[] = [];
+      let cursor: number | undefined;
+      do {
+        const page = await runsPage(projectRef, { status: "waiting", cursor }, { signal });
+        runs.push(...page.runs);
+        // Each page's `next` is older than its cursor; one that isn't would page forever.
+        cursor = page.next !== null && (cursor === undefined || page.next < cursor) ? page.next : undefined;
+      } while (cursor !== undefined);
+      return runs;
+    },
+  }),
+  refetchInterval: RUN_POLL_MS,
+});
+
+export type Run = InferResponseType<typeof projectApi.runs.$get, 200>["runs"][number];
+
+/** The key of one run: invalidate it after changing the run. */
+export const runKey = (projectRef: ProjectRef, run: number) => [...projectKey(projectRef), "run", run] as const;
+
+/** One conflicting file of the conflict a landing's run hit, diffed from its merge base to `side`. */
+export const runConflictDiffQuery = (projectRef: ProjectRef, run: number, path: string, side: ConflictSide) =>
+  conflictDiffQuery(runKey(projectRef, run), `${projectPath(projectRef)}/runs/${run}/conflict`, path, side);
+
+/**
+ * One run with its outcome, polled until it ended. A waiting run is still polled, though it rests
+ * until someone acts (the platform calls it settled): that someone may be the owner in another tab,
+ * or a push that replaces it.
+ */
+export const runQuery = (projectRef: ProjectRef, run: number) => ({
+  ...apiQuery([...runKey(projectRef, run), "detail"], (init) =>
+    projectApi.runs[":runId"].$get({ param: { ...projectRef, runId: String(run) } }, { init }),
+  ),
+  refetchInterval: (query: { state: { data?: { status: RunStatus } | undefined } }) =>
+    query.state.data !== undefined && runEnded(query.state.data) ? false : RUN_POLL_MS,
+});
+
+export type RunWithOutcome = InferResponseType<(typeof projectApi.runs)[":runId"]["$get"], 200>;
+
+/** Cancels a run; only the project owner may. Rejects with hono's `DetailedError` on failure. */
+export async function cancelRun(projectRef: ProjectRef, run: number) {
+  return parseResponse(projectApi.runs[":runId"].cancel.$post({ param: { ...projectRef, runId: String(run) } }));
+}
+
+/**
+ * Starts a run waiting for the owner at `sha`, the head they reviewed; only the owner acting as
+ * themselves may. Rejects with hono's `DetailedError` on failure, such as a line that moved on.
+ */
+export async function startRun(projectRef: ProjectRef, run: number, sha: string) {
+  return parseResponse(
+    projectApi.runs[":runId"].start.$post({ param: { ...projectRef, runId: String(run) }, json: { sha } }),
+  );
+}
+
+/**
+ * One step's log of a run, streamed: the text read so far, growing as chunks arrive. A stored log
  * never changes, so it's never refetched.
  */
-export const runLogQuery = (projectRef: ProjectRef, run: number, name: string) =>
+export const runLogQuery = (projectRef: ProjectRef, run: number, step: string) =>
   queryOptions({
-    queryKey: [...projectKey(projectRef), "run", run, "log", name] as const,
+    queryKey: [...runKey(projectRef, run), "log", step] as const,
     staleTime: Number.POSITIVE_INFINITY,
     queryFn: streamedQuery({
       streamFn: async function* ({ signal }) {
-        const res = await projectApi.runs[":runId"].logs[":name"].$get(
-          { param: { ...projectRef, runId: String(run), name } },
+        const res = await projectApi.runs[":runId"].logs[":step"].$get(
+          { param: { ...projectRef, runId: String(run), step } },
           { init: { signal } },
         );
         if (!res.ok || res.body === null) throw await PlatformError.from(res);
@@ -413,3 +523,28 @@ export const runLogQuery = (projectRef: ProjectRef, run: number, name: string) =
       initialValue: "",
     }),
   });
+
+const secretsApi = projectApi.secrets;
+
+/** The project's secrets by name: each one's pipelines and last change, never its value. Only maintainers may read them. */
+export const secretsQuery = (projectRef: ProjectRef) =>
+  apiQuery([...projectKey(projectRef), "secrets"], (init) => secretsApi.$get({ param: projectRef }, { init }));
+
+export type Secret = InferResponseType<typeof secretsApi.$get, 200>["secrets"][number];
+export type Pipeline = Secret["pipelines"][number];
+/** Where `main`'s config names a secret, and whether it has a value and is allowed wherever it runs. */
+export type SecretUse = InferResponseType<typeof secretsApi.$get, 200>["uses"][number];
+
+/** Sets a secret's value, its pipelines, or both; what's left out is kept. Rejects with hono's `DetailedError`. */
+export async function putSecret(
+  projectRef: ProjectRef,
+  name: string,
+  change: { value?: string; pipelines?: Pipeline[] },
+) {
+  return parseResponse(secretsApi[":name"].$put({ param: { ...projectRef, name }, json: change }));
+}
+
+/** Deletes a secret. Rejects with hono's `DetailedError` on failure. */
+export async function deleteSecret(projectRef: ProjectRef, name: string) {
+  return parseResponse(secretsApi[":name"].$delete({ param: { ...projectRef, name } }));
+}

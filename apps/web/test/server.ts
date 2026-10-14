@@ -1,8 +1,9 @@
 import type { InferResponseType } from "hono/client";
 import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
-import type { client, FileDiff } from "@/lib/api";
+import type { client, FileDiff, RunWithOutcome } from "@/lib/api";
 import type { ArenaAttempt, Metric, TaskArena } from "@/lib/arena";
+import type { RunStep } from "@/lib/runs";
 import type { Attempt, ListedTask } from "@/lib/tasks";
 
 /** `GET /api/me` for a human signed in through Access, typed from the platform's routes. */
@@ -128,19 +129,19 @@ type Result = NonNullable<ArenaAttempt["result"]>;
 const diffMetric = (value: number) => ({ source: "platform", type: "number", value, order: "asc" }) as const;
 
 /**
- * A result's metrics: `_diff`'s sizes, `values` as project numbers (higher is better), and
- * `_preview.url`, null unless a URL is given.
+ * A result's metrics: `_diff`'s sizes, `values` as project numbers (higher is better), and `urls` as
+ * project strings with the `url` format.
  */
 export function scoredMetrics({
   files = 1,
   additions = 2,
   values = {},
-  preview = null,
+  urls = {},
 }: {
   files?: number;
   additions?: number;
   values?: Record<string, number>;
-  preview?: string | null;
+  urls?: Record<string, string>;
 } = {}): Result["metrics"] {
   return {
     "_diff.filesChanged": diffMetric(files),
@@ -151,23 +152,27 @@ export function scoredMetrics({
         { source: "project", type: "number", value, order: "desc" } as const,
       ]),
     ),
-    "_preview.url": { source: "platform", type: "string", format: "url", value: preview },
+    ...Object.fromEntries(
+      Object.entries(urls).map(([name, value]) => [
+        name,
+        { source: "project", type: "string", format: "url", value } as const,
+      ]),
+    ),
   };
 }
 
-/** A config check that ran: required, or optional. */
+/** A config check that ran. */
 export function check(
   name: string,
-  required: boolean,
   outcome: Result["checks"][number]["outcome"],
   durationMs = 900,
 ): Result["checks"][number] {
-  return { name, source: "project", required, outcome, durationMs, notes: [] };
+  return { name, source: "project", outcome, durationMs, notes: [] };
 }
 
-/** One of Throng's own checks, `_diff` or `_preview`: never required. */
+/** Throng's own check, `_diff`, which never gates. */
 export function platformCheck(name: string, outcome: Result["checks"][number]["outcome"]): Result["checks"][number] {
-  return { name, source: "platform", required: false, outcome, durationMs: 0, notes: [] };
+  return { name, source: "platform", outcome, durationMs: 0, notes: [] };
 }
 
 /** A done result whose gate passed with a `test` check, its metrics as `scoredMetrics()` gives them. */
@@ -176,11 +181,57 @@ export function result(fields: Partial<Result> = {}): Result {
     base: "b".repeat(40),
     config: { kind: "valid" },
     gate: "passed",
-    checks: [check("test", true, "passed")],
+    checks: [check("test", "passed")],
     metrics: scoredMetrics(),
     logs: [],
     run: 1,
     finishedAt: me.user.createdAt,
+    ...fields,
+  };
+}
+
+/** A step of a run's outcome: a project check that passed in 0.9 s, unless `fields` say otherwise. */
+export function step(name: string, fields: Partial<RunStep> = {}): RunStep {
+  return {
+    name,
+    kind: "check",
+    source: "project",
+    group: null,
+    after: [],
+    outcome: "passed",
+    durationMs: 900,
+    notes: [],
+    log: name,
+    ...fields,
+  };
+}
+
+/**
+ * Run `id` on t1a1 at `sha` as `GET …/runs/{runId}` gives it: done, its gate passed, by `ada`, with
+ * `result()`'s metrics and `steps` (a `test` check unless given others).
+ */
+export function runDetail(id: number, sha: string, fields: Partial<RunWithOutcome> = {}): RunWithOutcome {
+  const { base, config, gate, metrics } = result();
+  return {
+    id,
+    line: "t1a1",
+    pipeline: "default",
+    sha,
+    trigger: "push",
+    status: "done",
+    trusted: true,
+    requestedBy: { id: me.user.id, handle: me.user.handle },
+    alias: null,
+    createdAt: me.user.createdAt,
+    startedAt: me.user.createdAt,
+    finishedAt: "2026-10-10T12:01:05.000Z",
+    superseded: false,
+    gate: "passed",
+    cancellable: false,
+    waiting: null,
+    error: null,
+    outcome: { base, config, gate, metrics, steps: [step("test")] },
+    result: { base, config, gate, checks: [check("test", "passed")], metrics, logs: ["test"] },
     ...fields,
   };
 }
@@ -261,6 +312,20 @@ export function serveCompare(filesFor: (to: string, from: string) => FileDiff[],
   });
 }
 
+/**
+ * Each conflicting file's diff under `route` (`…/files/<path>/diff?side=`), recording `path?side=` as
+ * asked. Main's side adds one line and the attempt's two, to tell them apart.
+ */
+export function serveConflictDiffs(route: string, asked: string[] = []) {
+  return http.get(`*/api/projects/:owner/:project/${route}/files/*`, ({ request }) => {
+    const url = new URL(request.url);
+    const path = decodeURIComponent(url.pathname.split("/files/")[1]?.replace(/\/diff$/u, "") ?? "");
+    const side = url.searchParams.get("side");
+    asked.push(`${path}?side=${side}`);
+    return HttpResponse.json({ ...addedFile(path), additions: side === "main" ? 1 : 2 });
+  });
+}
+
 /** `main`'s head in `serveRefs` unless given another. */
 export const MAIN = "3a1e".padEnd(40, "0");
 
@@ -306,6 +371,8 @@ export const handlers = [
       ? notFound(`no project ${params["owner"]}/${params["project"]}`)
       : HttpResponse.json(found);
   }),
+  // No project has run anything unless a test says so.
+  http.get("*/api/projects/:owner/:project/runs", () => HttpResponse.json({ runs: [], next: null })),
 ];
 
 export const server = setupServer(...handlers);

@@ -1,10 +1,12 @@
 // An attempt's details, in a side sheet opened from its lane's menu: its checks and their logs, its
-// metrics, its preview and run history, and its verdicts with the form to post one.
+// metrics and run history, and its verdicts with the form to post one.
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import { useState } from "react";
 import type { ReactNode } from "react";
 import { Markdown } from "@/components/markdown";
+import { RunLog } from "@/components/run-log";
 import { ChecksTable, MetricValues } from "@/components/scorecard";
 import { ErrorState, Loading } from "@/components/states";
 import { Button } from "@/components/ui/button";
@@ -15,16 +17,27 @@ import {
   attemptRunsQuery,
   meQuery,
   postVerdict,
-  runLogQuery,
+  runQuery,
   taskArenaQuery,
   taskKey,
   verdictsQuery,
 } from "@/lib/api";
-import type { ProjectRef, RunDetail, Verdict } from "@/lib/api";
-import { metricColumns, previewUrl, taskOf } from "@/lib/arena";
+import type { ProjectRef, Verdict } from "@/lib/api";
+import { metricColumns, taskOf } from "@/lib/arena";
 import type { ArenaAttempt } from "@/lib/arena";
 import { shortSha } from "@/lib/commits";
 import { apiError } from "@/lib/errors";
+import { buildPath } from "@/lib/paths";
+import {
+  failedSetup,
+  formatDuration,
+  RUN_STATUS_LABELS,
+  runHead,
+  runSections,
+  STEP_OUTCOME_LABELS,
+  TRIGGER_LABELS,
+} from "@/lib/runs";
+import type { RunStep } from "@/lib/runs";
 import { GATE_LABELS } from "@/lib/tasks";
 
 interface InProject {
@@ -49,10 +62,7 @@ export function AttemptDetails({
         </SheetHeader>
         <div className="flex flex-col gap-6 px-4 pb-4">
           {attempt.result === undefined ? null : (
-            <>
-              <Checks projectRef={projectRef} result={attempt.result} />
-              <Metrics projectRef={projectRef} attempt={attempt} />
-            </>
+            <Scored projectRef={projectRef} attempt={attempt} result={attempt.result} />
           )}
           <Runs projectRef={projectRef} attempt={attempt.ref} />
           <Verdicts projectRef={projectRef} attempt={attempt.ref} />
@@ -63,100 +73,106 @@ export function AttemptDetails({
   );
 }
 
-/** The result's checks, then its logs: one open at a time, streamed as it's read. */
-function Checks({ projectRef, result }: InProject & { result: Result }) {
-  const [shown, setShown] = useState<string | null>(null);
-  return (
-    <DetailsSection title="Checks">
-      <ChecksTable checks={result.checks} />
-      <div className="flex flex-wrap gap-1.5">
-        {result.logs.map((name) => (
-          <Button
-            key={name}
-            variant={shown === name ? "secondary" : "outline"}
-            size="xs"
-            aria-expanded={shown === name}
-            aria-label={`${name} log`}
-            onClick={() => setShown(shown === name ? null : name)}
-          >
-            {name}
-          </Button>
-        ))}
-      </div>
-      {shown === null ? null : <RunLog projectRef={projectRef} run={result.run} name={shown} />}
-    </DetailsSection>
-  );
-}
-
-/**
- * The marker the platform writes between the head and tail it keeps of a log over its size cap
- * (`readLogScript` in the platform's `logs.ts`): how many bytes it dropped, of how many.
- */
-const TRUNCATION_MARKER = /^\[throng: truncated (\d+) of (\d+) bytes\]$/mu;
-
-/** A run's log, streamed, with a notice when the platform kept only its head and tail. */
-function RunLog({ projectRef, run, name }: InProject & { run: number; name: string }) {
-  const log = useQuery(runLogQuery(projectRef, run, name));
-  if (log.isError) return <ErrorState error={log.error} />;
-  const [, dropped, size] = TRUNCATION_MARKER.exec(log.data ?? "") ?? [];
+/** The current result: its checks, its post-gate steps when the run had any, and its metrics. */
+function Scored({ projectRef, attempt, result }: InProject & { attempt: ArenaAttempt; result: Result }) {
+  // The result's run gives its steps, which the result itself doesn't keep.
+  const run = useQuery(runQuery(projectRef, result.run));
+  const steps = run.data?.outcome?.steps ?? [];
   return (
     <>
-      {size === undefined ? null : (
-        <p role="note" className="rounded-lg border border-dashed px-3 py-2 text-xs text-muted-foreground">
-          This log was too large to keep whole: {dropped} of its {size} bytes were left out of the middle.
-        </p>
-      )}
-      <LogText name={name} text={log.data ?? ""} streaming={log.fetchStatus === "fetching"} />
+      <Checks projectRef={projectRef} result={result} steps={steps} />
+      <Steps projectRef={projectRef} run={result.run} steps={steps} />
+      <Metrics projectRef={projectRef} attempt={attempt} />
     </>
   );
 }
 
-function LogText({ name, text, streaming }: { name: string; text: string; streaming: boolean }) {
+/**
+ * The result's checks, "Setup failed" when a setup did (no check ran then), then its logs: one open
+ * at a time, streamed as it's read.
+ */
+function Checks({ projectRef, result, steps }: InProject & { result: Result; steps: RunStep[] }) {
+  const [shown, setShown] = useState<string | null>(null);
+  const setup = failedSetup(steps);
   return (
-    <pre
-      role="log"
-      aria-label={name}
-      aria-busy={streaming}
-      className="max-h-96 overflow-auto rounded-lg border bg-muted/40 p-2 font-mono text-xs whitespace-pre-wrap"
-    >
-      {text}
-    </pre>
-  );
-}
-
-/** Every metric the config declares and the built-in measures, with units, then the preview link. */
-function Metrics({ projectRef, attempt }: InProject & { attempt: ArenaAttempt }) {
-  // The task's arena is already loaded (and polled) by the page this sheet opens from.
-  const arena = useQuery(taskArenaQuery(projectRef, taskOf(attempt)));
-  const preview = previewUrl(attempt.result);
-  return (
-    <DetailsSection title="Metrics">
-      <MetricValues attempt={attempt} columns={metricColumns(arena.data?.metrics ?? [])} />
-      {preview === null ? null : (
-        <a href={preview} target="_blank" rel="noreferrer" className="text-sm underline underline-offset-3">
-          Open preview
-        </a>
+    <DetailsSection title="Checks">
+      {setup === null ? null : (
+        <p role="alert" className="text-sm text-destructive">
+          Setup failed: <span className="font-mono">{setup.name}</span>
+        </p>
       )}
+      <ChecksTable checks={result.checks} />
+      <LogButtons logs={result.logs} shown={shown} onShow={setShown} />
+      {shown === null ? null : <RunLog projectRef={projectRef} run={result.run} step={shown} />}
     </DetailsSection>
   );
 }
 
-const RUN_STATUS_LABELS: Record<RunDetail["status"], string> = {
-  queued: "Queued",
-  running: "Running",
-  done: "Done",
-  cancelled: "Cancelled",
-  errored: "Errored",
-};
+/** One button per log, the shown one pressed; pressing it again hides it. */
+function LogButtons({
+  logs,
+  shown,
+  onShow,
+}: {
+  logs: string[];
+  shown: string | null;
+  onShow: (log: string | null) => void;
+}) {
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {logs.map((name) => (
+        <Button
+          key={name}
+          variant={shown === name ? "secondary" : "outline"}
+          size="xs"
+          aria-expanded={shown === name}
+          aria-label={`${name} log`}
+          onClick={() => onShow(shown === name ? null : name)}
+        >
+          {name}
+        </Button>
+      ))}
+    </div>
+  );
+}
 
-const TRIGGER_LABELS: Record<RunDetail["trigger"], string> = {
-  open: "Open",
-  push: "Push",
-  scoreNow: "Score now",
-  rescore: "Rescore",
-};
+/** The run's post-gate steps, when it had any: each one's outcome and duration, and its log. */
+function Steps({ projectRef, run, steps }: InProject & { run: number; steps: RunStep[] }) {
+  const [shown, setShown] = useState<string | null>(null);
+  const { steps: postGate } = runSections(steps);
+  if (postGate.length === 0) return null;
+  return (
+    <DetailsSection title="Steps">
+      <table className="w-full text-xs">
+        <caption className="sr-only">Steps</caption>
+        <tbody>
+          {postGate.map((step) => (
+            <tr key={step.name} aria-label={step.name}>
+              <td className="py-0.5 font-mono">{step.name}</td>
+              <td>{STEP_OUTCOME_LABELS[step.outcome]}</td>
+              <td className="text-right tabular-nums">{formatDuration(step.durationMs)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <LogButtons logs={postGate.flatMap((s) => (s.log === null ? [] : [s.log]))} shown={shown} onShow={setShown} />
+      {shown === null ? null : <RunLog projectRef={projectRef} run={run} step={shown} />}
+    </DetailsSection>
+  );
+}
 
-/** The attempt's scoring runs, newest first; those on an earlier head are dimmed. */
+/** Every metric the config declares and the built-in measures, with units; a `url` metric as a link. */
+function Metrics({ projectRef, attempt }: InProject & { attempt: ArenaAttempt }) {
+  // The task's arena is already loaded (and polled) by the page this sheet opens from.
+  const arena = useQuery(taskArenaQuery(projectRef, taskOf(attempt)));
+  return (
+    <DetailsSection title="Metrics">
+      <MetricValues attempt={attempt} columns={metricColumns(arena.data?.metrics ?? [])} />
+    </DetailsSection>
+  );
+}
+
+/** The attempt's scoring runs, newest first, each linking to its run page; those on an earlier head are dimmed. */
 function Runs({ projectRef, attempt }: InProject & { attempt: string }) {
   const runs = useQuery(attemptRunsQuery(projectRef, attempt));
   return (
@@ -172,11 +188,13 @@ function Runs({ projectRef, attempt }: InProject & { attempt: string }) {
               data-superseded={run.superseded}
               className="flex flex-wrap items-center gap-x-2 data-[superseded=true]:opacity-50"
             >
-              <span className="font-medium">Run {run.id}</span>
+              <Link to={buildPath({ view: "run", ...projectRef, run: run.id })} className="font-medium hover:underline">
+                Run {run.id}
+              </Link>
               <span className="text-muted-foreground">{TRIGGER_LABELS[run.trigger]}</span>
               <span>{RUN_STATUS_LABELS[run.status]}</span>
-              <span className="font-mono text-muted-foreground">{shortSha(run.sha)}</span>
-              {run.result === null ? null : <span>Gate {GATE_LABELS[run.result.gate].toLowerCase()}</span>}
+              <span className="font-mono text-muted-foreground">{runHead(run)}</span>
+              {run.gate === null ? null : <span>Gate {GATE_LABELS[run.gate].toLowerCase()}</span>}
               {run.superseded ? <span className="text-muted-foreground">Superseded</span> : null}
             </li>
           ))}

@@ -1,5 +1,6 @@
-// Runs the Landing Workflow's scripts against local bare repos standing in for Artifacts remotes:
-// the conflict check, the retest of the merged tree and the trusted land step.
+// Runs a landing's own scripts against local bare repos standing in for Artifacts remotes: the
+// untrusted `merge` and the trusted `land`. Its setups and checks run on the merge like any run's
+// (see the scripts tests).
 
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -8,9 +9,8 @@ import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { MAX_CONFIG_BYTES } from "../src/config.ts";
 import { conflictFiles, parseMergeTree } from "../src/conflicts.ts";
-import type { RawScore, ScorePlan } from "../src/results.ts";
-import { conflictCheckScript, landScript, parseResult, retestScript } from "../src/scripts.ts";
-import type { ConflictCheckResult, LandResult } from "../src/scripts.ts";
+import { landScript, mergeScript, parseResult } from "../src/scripts.ts";
+import type { LandResult, MergeResult } from "../src/scripts.ts";
 
 const ENV = {
   ...process.env,
@@ -68,12 +68,10 @@ function diverged(file = "b.txt", content = "attempt\n", mainFile = "c.txt", mai
 }
 
 function checked(head: string): { head: string; main: string; tree: string } {
-  const result = run<ConflictCheckResult>(conflictCheckScript(origin, fork, head));
+  const result = run<MergeResult>(mergeScript(origin, fork, head));
   if (!result.clean) throw new Error(`conflicted: ${result.output}`);
   return { head, main: result.main, tree: parseMergeTree(result.output).tree };
 }
-
-const plan = (checks: ScorePlan["checks"], setup: string[] = []): ScorePlan => ({ setup, checks, allow: [] });
 
 const landing = (merge: { head: string; main: string; tree: string }) => ({
   ...merge,
@@ -86,10 +84,10 @@ const landing = (merge: { head: string; main: string; tree: string }) => ({
 const greeting = (word: string) =>
   `export const GREETING = "${word}";\n\nexport function greet(name) {\n  return \`\${GREETING}, \${name}\`;\n}\n`;
 
-describe("conflictCheckScript", () => {
+describe("mergeScript", () => {
   it("reports main's sha and the merged tree of a clean merge", () => {
     const { head, main } = diverged();
-    const result = run<ConflictCheckResult>(conflictCheckScript(origin, fork, head));
+    const result = run<MergeResult>(mergeScript(origin, fork, head));
     expect(result).toMatchObject({ main, clean: true });
     expect(parseMergeTree(result.output)).toEqual({
       tree: git(work, "merge-tree", "--write-tree", main, head),
@@ -97,8 +95,28 @@ describe("conflictCheckScript", () => {
     });
   });
 
+  it("lists the trees the merge made, which neither main nor the head has, and no others", () => {
+    commit("lib/kept.txt", "kept\n", "a subtree both sides keep");
+    git(work, "push", "-q", origin, "main");
+    git(work, "push", "-q", fork, "main");
+    const { head, main } = diverged();
+    const result = run<MergeResult>(mergeScript(origin, fork, head));
+    const tree = git(work, "merge-tree", "--write-tree", main, head);
+    // Only the root is new: `lib` is the same tree on both sides.
+    expect(Object.keys(result.trees ?? {})).toEqual([tree]);
+    expect(result.trees?.[tree]?.map((entry) => [entry.name, entry.type])).toEqual([
+      ["a.txt", "blob"],
+      ["b.txt", "blob"],
+      ["c.txt", "blob"],
+      ["lib", "tree"],
+    ]);
+    expect(result.trees?.[tree]?.find((entry) => entry.name === "lib")?.hash).toBe(
+      git(work, "rev-parse", `${main}:lib`),
+    );
+  });
+
   it("reports the merged tree's config, not main's, and none without one", () => {
-    expect(run<ConflictCheckResult>(conflictCheckScript(origin, fork, diverged().head)).config).toBeNull();
+    expect(run<MergeResult>(mergeScript(origin, fork, diverged().head)).config).toBeNull();
 
     git(work, "reset", "-q", "--hard", git(origin, "rev-parse", "main"));
     git(work, "checkout", "-q", "-b", "side");
@@ -108,7 +126,7 @@ describe("conflictCheckScript", () => {
     // The attempt is based on the broken config and fixes it.
     const head = commit(".throng/config.yml", fixed, "fix the config");
     git(work, "push", "-q", "-f", fork, "HEAD:main");
-    const result = run<ConflictCheckResult>(conflictCheckScript(origin, fork, head));
+    const result = run<MergeResult>(mergeScript(origin, fork, head));
     expect(result).toMatchObject({ clean: true, config: fixed });
   });
 
@@ -116,13 +134,13 @@ describe("conflictCheckScript", () => {
     const big = `# ${"x".repeat(MAX_CONFIG_BYTES)}\n`;
     const head = commit(".throng/config.yml", big, "big config");
     git(work, "push", "-q", fork, "main");
-    const result = run<ConflictCheckResult>(conflictCheckScript(origin, fork, head));
+    const result = run<MergeResult>(mergeScript(origin, fork, head));
     expect(result.config).toHaveLength(MAX_CONFIG_BYTES + 1);
   });
 
   it("detects a conflict and lists the conflicting paths", () => {
     const { head, main } = diverged("a.txt", "one\nmine\nthree\n", "a.txt", "one\ntheirs\nthree\n");
-    const result = run<ConflictCheckResult>(conflictCheckScript(origin, fork, head));
+    const result = run<MergeResult>(mergeScript(origin, fork, head));
     expect(result).toMatchObject({ main, clean: false });
     expect(parseMergeTree(result.output).files).toMatchObject([{ path: "a.txt", type: "content" }]);
   });
@@ -132,7 +150,7 @@ describe("conflictCheckScript", () => {
     git(work, "push", "-q", origin, "main");
     git(work, "push", "-q", fork, "main");
     const { head, main } = diverged("greeting.js", greeting("hello from a2"), "greeting.js", greeting("hello from a1"));
-    const result = run<ConflictCheckResult>(conflictCheckScript(origin, fork, head));
+    const result = run<MergeResult>(mergeScript(origin, fork, head));
     expect(result).toMatchObject({ main, clean: false, base });
 
     const blob = (rev: string) => git(work, "rev-parse", `${rev}:greeting.js`);
@@ -169,7 +187,7 @@ describe("conflictCheckScript", () => {
     commit("long.txt", long("main"), "main");
     git(work, "push", "-q", origin, "main");
 
-    const result = run<ConflictCheckResult>(conflictCheckScript(origin, fork, head));
+    const result = run<MergeResult>(mergeScript(origin, fork, head));
     expect(parseMergeTree(result.output).files.map((f) => f.type)).toEqual(["modifyDelete", "content"]);
     expect(result.remerges).toEqual([
       {
@@ -183,7 +201,7 @@ describe("conflictCheckScript", () => {
   it("reports a re-merge over twice a cap as too large", () => {
     const { head } = diverged("a.txt", "one\nmine\nthree\n", "a.txt", "one\ntheirs\nthree\n");
     const tiny = (fileBytes: number, totalBytes: number) =>
-      run<ConflictCheckResult>(conflictCheckScript(origin, fork, head, { fileBytes, totalBytes })).remerges;
+      run<MergeResult>(mergeScript(origin, fork, head, { fileBytes, totalBytes })).remerges;
     expect(tiny(10, 1000)).toEqual([{ path: "a.txt", status: "tooLarge" }]);
     expect(tiny(1000, 10)).toEqual([{ path: "a.txt", status: "tooLarge" }]);
     expect(tiny(1000, 1000)).toMatchObject([{ path: "a.txt", status: "merged" }]);
@@ -194,47 +212,8 @@ describe("conflictCheckScript", () => {
     git(work, "push", "-q", origin, "main");
     git(work, "push", "-q", fork, "main");
     const { head } = diverged("bin.dat", "\0two", "bin.dat", "\0three");
-    const result = run<ConflictCheckResult>(conflictCheckScript(origin, fork, head));
+    const result = run<MergeResult>(mergeScript(origin, fork, head));
     expect(result.remerges).toEqual([{ path: "bin.dat", status: "failed" }]);
-  });
-});
-
-describe("retestScript", () => {
-  it("runs setup and the checks on the merged tree", () => {
-    const { head } = diverged();
-    const merge = checked(head);
-    const raw = run<RawScore>(
-      retestScript(
-        origin,
-        fork,
-        merge,
-        plan(
-          [
-            {
-              name: "both",
-              command: "test -f b.txt && test -f c.txt && test -f built",
-              timeoutMs: 60_000,
-              metrics: [],
-            },
-          ],
-          ["touch built"],
-        ),
-      ),
-    );
-    expect(raw).toMatchObject({ setupFailed: null, checks: [{ exit: 0 }] });
-  });
-
-  it("reports a failing check", () => {
-    const { head } = diverged();
-    const raw = run<RawScore>(
-      retestScript(
-        origin,
-        fork,
-        checked(head),
-        plan([{ name: "no-c", command: "test ! -f c.txt", timeoutMs: 60_000, metrics: [] }]),
-      ),
-    );
-    expect(raw.checks).toMatchObject([{ exit: 1 }]);
   });
 });
 
@@ -260,7 +239,7 @@ describe("landScript", () => {
     expect(run<LandResult>(landScript(origin, fork, landing(merge)))).toEqual(first);
   });
 
-  it("fails the lease, without pushing, when main moved after the conflict check", () => {
+  it("fails the lease, without pushing, when main moved after the merge step", () => {
     const { head } = diverged();
     const merge = checked(head);
     commit("d.txt", "later\n", "main moved again");
@@ -271,7 +250,7 @@ describe("landScript", () => {
     expect(git(origin, "rev-parse", "main")).toBe(before);
   });
 
-  it("refuses to push a tree other than the one the conflict check recorded", () => {
+  it("refuses to push a tree other than the one the merge step recorded", () => {
     const { head } = diverged();
     const merge = checked(head);
     const before = git(origin, "rev-parse", "main");

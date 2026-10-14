@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { attemptBase, readTaskBranch } from "../src/base.ts";
+import { attemptBase, lineBase, readTaskBranch } from "../src/base.ts";
 import { taskBranchRef } from "../src/task-refs.ts";
 import { FakeRepos } from "./fake-repos.ts";
 
@@ -93,6 +93,27 @@ describe("attemptBase", () => {
       parents: [head.hash, tests.hash],
     });
     expect(await base("t1a2", merged.hash)).toEqual({ sha: tests.hash, on: "task" });
+  });
+});
+
+describe("lineBase", () => {
+  it("is an attempt's base on an attempt's line", async () => {
+    const { repos, root } = await setup();
+    const head = repos.commit(FORK, { files: { "README.md": "hi\n", "a.txt": "a\n" } });
+    expect(await lineBase(repos, PROJECT, { line: "t1a1", head: head.hash })).toEqual({ sha: root.hash, on: "main" });
+  });
+
+  it("is where a task branch meets main on the task branch's line", async () => {
+    const { repos, root } = await setup();
+    const tests = repos.commit(ORIGIN, { files: { "t.test": "x\n" }, branch: "task", parents: [root.hash] });
+    repos.setRef(ORIGIN, taskBranchRef(1), tests.hash);
+    repos.commit(ORIGIN, { files: { "README.md": "main moved\n" } });
+    expect(await lineBase(repos, PROJECT, { line: "t1", head: tests.hash })).toEqual({ sha: root.hash, on: "main" });
+  });
+
+  it("is null on main", async () => {
+    const { repos, root } = await setup();
+    expect(await lineBase(repos, PROJECT, { line: "main", head: root.hash })).toBeNull();
   });
 });
 

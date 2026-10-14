@@ -55,6 +55,8 @@ const METRICS: Metric[] = [
 
 const rail = () => screen.getByRole("list", { name: "Attempts" });
 const card = (ref: string) => within(rail()).getByRole("button", { name: ref });
+/** The whole card around `card(ref)`'s toggle, with what sits outside it. */
+const cardOf = (ref: string) => card(ref).parentElement as HTMLElement;
 const railOrder = () =>
   within(rail())
     .getAllByRole("button")
@@ -111,10 +113,15 @@ describe("the arena's lanes", () => {
     expect(screen.getByRole("region", { name: "Lanes" })).toHaveClass("overflow-x-auto");
   });
 
-  it("heads each lane with its gate, verdict counts, the author's note and a menu", async () => {
+  it("heads each lane with its gate, verdict counts, the author's note, its url metrics as links and a menu", async () => {
     const t1a1 = passing(1, {
       verdicts: { head: "x", merge: 2, revise: 1, reject: 0 },
-      result: result({ metrics: scoredMetrics({ preview: "https://t1a1.preview.test" }) }),
+      result: result({
+        metrics: {
+          ...scoredMetrics({ urls: { preview_url: "https://t1a1.preview.test/" } }),
+          unsafe: { source: "project", type: "string", format: "url", value: "javascript:alert(1)" },
+        },
+      }),
     });
     const asked: string[] = [];
     server.use(
@@ -126,12 +133,14 @@ describe("the arena's lanes", () => {
     expect(header).toHaveTextContent("Gate passed");
     expect(within(header).getByLabelText("Verdicts")).toHaveTextContent("2 merge1 revise0 reject");
     expect(header).toHaveTextContent("Kept it small.");
+    expect(
+      within(header)
+        .getAllByRole("link")
+        .map((link) => [link.textContent, link.getAttribute("href")]),
+    ).toEqual([["preview_url", "https://t1a1.preview.test/"]]);
     await user.click(within(header).getByRole("button", { name: "t1a1 actions" }));
     const menu = await screen.findByRole("menu");
-    expect(within(menu).getByRole("menuitem", { name: "Open preview" })).toHaveAttribute(
-      "href",
-      "https://t1a1.preview.test",
-    );
+    expect(within(menu).queryByRole("menuitem", { name: /preview/iu })).toBeNull();
     expect(within(menu).getByRole("menuitem", { name: "Checks, logs and verdicts" })).not.toHaveAttribute(
       "aria-disabled",
     );
@@ -286,13 +295,13 @@ describe("the arena's views", () => {
   });
 });
 
-/** The one attempt of the single-attempt view: passing, with a required and an optional check. */
+/** The one attempt of the single-attempt view: passing, with two checks. */
 const only = () =>
   arenaAttempt(1, 1, {
     status: "done",
     result: result({
       metrics: scoredMetrics({ values: { coverage: 81.5 } }),
-      checks: [check("test", true, "passed", 1200), check("lint", false, "failed", 300)],
+      checks: [check("test", "passed", 1200), check("lint", "passed", 300)],
     }),
   });
 
@@ -309,8 +318,8 @@ describe("the single-attempt view", () => {
     expect(await within(lane("t1a1")).findByRole("list", { name: "Files changed" })).toHaveTextContent("11.txt");
     expect(asked).toEqual([`${BASE}...${only().sha}?attempt=t1a1`]);
     const scorecard = within(view).getByRole("region", { name: "Scorecard" });
-    expect(within(scorecard).getByRole("row", { name: /test/u })).toHaveTextContent("testRequiredPassed1.2 s");
-    expect(within(scorecard).getByRole("row", { name: /lint/u })).toHaveTextContent("lintOptionalFailed0.3 s");
+    expect(within(scorecard).getByRole("row", { name: /test/u })).toHaveTextContent("testPassed1.2 s");
+    expect(within(scorecard).getByRole("row", { name: /lint/u })).toHaveTextContent("lintPassed0.3 s");
     expect(scorecard).toHaveTextContent("coverage81.5%");
     expect(scorecard).toHaveTextContent("Files changed1");
     expect(within(view).getByRole("button", { name: "Merge" })).toBeInTheDocument();
@@ -387,6 +396,10 @@ const scored = (n: number, gate: "passed" | "failed", coverage: number, bundle: 
     }),
   });
 
+/** A passing attempt whose `report` url metric is `report`. */
+const linked = (n: number, report: string) =>
+  arenaAttempt(1, n, { status: "done", result: result({ metrics: scoredMetrics({ urls: { report } }) }) });
+
 /** Each metric row of a card, with the values marked best ending in `*`. */
 function cardMetrics(ref: string): Record<string, string> {
   return Object.fromEntries(
@@ -457,6 +470,20 @@ describe("the arena's rail", () => {
     });
   });
 
+  it("links each card's url metrics outside its toggle, and shows one that isn't http or https as text", async () => {
+    await openArena(
+      [linked(1, "https://ci.example.test/1"), linked(2, "javascript:alert(1)")],
+      [{ name: "report", from: "test.out.url", type: "string", format: "url", source: "project" }],
+    );
+    const links = (ref: string) => within(cardOf(ref)).queryAllByRole("link");
+    expect(links("t1a1").map((link) => [link.textContent, link.getAttribute("href")])).toEqual([
+      ["https://ci.example.test/1", "https://ci.example.test/1"],
+    ]);
+    expect(within(card("t1a1")).queryByRole("link")).toBeNull();
+    expect(links("t1a2")).toEqual([]);
+    expect(cardOf("t1a2")).toHaveTextContent("reportjavascript:alert(1)");
+  });
+
   it("marks nothing when every attempt ties", async () => {
     await openArena([scored(1, "passed", 80, 120, 3), scored(2, "passed", 80, 120, 3)], METRICS);
     for (const ref of ["t1a1", "t1a2"])
@@ -471,8 +498,8 @@ describe("the arena's rail", () => {
   });
 
   it("tells a gate with no checks configured from one that passed, and shows scoring in progress", async () => {
-    // A config with no checks still runs Throng's own `_diff` and `_preview`.
-    const unchecked = result({ checks: [platformCheck("_diff", "passed"), platformCheck("_preview", "skipped")] });
+    // A config with no checks still runs Throng's own `_diff`.
+    const unchecked = result({ checks: [platformCheck("_diff", "passed")] });
     await openArena([
       arenaAttempt(1, 1, { status: "done", result: unchecked }),
       passing(2),

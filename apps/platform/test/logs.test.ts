@@ -5,12 +5,10 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   isLogName,
-  landingLogKey,
+  legacyLogKey,
   logKey,
-  logNames,
   MAX_LOG_BYTES,
   MISSING_LOG_EXIT,
-  PREVIEW_LOG,
   readLogScript,
   setupLogName,
   withNotes,
@@ -19,29 +17,23 @@ import {
 const SHA = "c".repeat(40);
 
 describe("logKey", () => {
-  it("lays a run's log out under the project, attempt, head and run", () => {
-    const run = { project: "p123", attempt: "t42a3", sha: SHA, run: 7 };
-    expect(logKey(run, "test")).toBe(`logs/p123/t42a3/${SHA}/7/test.log`);
-    expect(logKey(run, setupLogName(2))).toBe(`logs/p123/t42a3/${SHA}/7/setup.2.log`);
-    expect(logKey(run, PREVIEW_LOG)).toBe(`logs/p123/t42a3/${SHA}/7/preview.deploy.log`);
+  it("lays a run's log out under the project, line and run", () => {
+    const run = { project: "p123", line: "t42a3", run: 7 };
+    expect(logKey(run, "test")).toBe("logs/p123/t42a3/7/test.log");
+    expect(logKey(run, setupLogName(2))).toBe("logs/p123/t42a3/7/setup.2.log");
   });
 });
 
-describe("landingLogKey", () => {
-  it("lays a landing's retest logs out under the approved head, apart from its scoring runs", () => {
-    const landing = { project: "p123", task: 42, attempt: 3, head: SHA, landing: 5 };
-    expect(landingLogKey(landing, "test")).toBe(`logs/p123/t42a3/${SHA}/landing-5/test.log`);
+describe("legacyLogKey", () => {
+  it("lays a log out where runs stored it before they were keyed on their line: under the head too", () => {
+    const run = { project: "p123", line: "t42a3", sha: SHA, run: 7 };
+    expect(legacyLogKey(run, "test")).toBe(`logs/p123/t42a3/${SHA}/7/test.log`);
   });
 });
 
 describe("log names", () => {
-  it("names each setup step and check of a plan, in run order", () => {
-    const plan = { setup: ["npm ci", "npm run gen"], checks: [{ name: "test" }, { name: "setup-1" }] };
-    expect(logNames(plan)).toEqual(["setup.1", "setup.2", "test", "setup-1"]);
-  });
-
-  it("can't collide: setup and preview logs use a dot, which check names can't", () => {
-    for (const name of [setupLogName(1), PREVIEW_LOG, "test", "bundle_kb", "a-b"]) expect(isLogName(name)).toBeTruthy();
+  it("can't collide: setup logs use a dot, which check names can't", () => {
+    for (const name of [setupLogName(1), "test", "bundle_kb", "a-b"]) expect(isLogName(name)).toBeTruthy();
     for (const name of ["", "../x", "a/b", ".hidden", "Test", "a b"]) expect(isLogName(name)).toBeFalsy();
   });
 });

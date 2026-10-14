@@ -9,9 +9,9 @@
 //   cancel, or the source attempt ending, from any open state ─► cancelled
 
 import { normaliseDequeue } from "./casing.ts";
-import { renameColumns } from "./columns.ts";
+import { addColumns, renameColumns } from "./columns.ts";
 import type { ConflictDetails } from "./conflicts.ts";
-import type { ErroredDetails, FailedChecksDetails, LandingOutcome } from "./landing.ts";
+import type { LegacyFailedCheck } from "./landing.ts";
 import type { Sql } from "./task-store.ts";
 import type { Actor } from "./tokens.ts";
 
@@ -33,6 +33,7 @@ export type MergeRequestEvent =
   | "queued"
   | "landing"
   | "dequeued"
+  | "heldForOwner"
   | "needsReview"
   | "merged"
   | "cancelled";
@@ -43,33 +44,37 @@ export interface ActedBy {
   alias: string | null;
 }
 
+/** The reasons a landing's run dequeues its merge request: its merge conflicted, its gate failed, or it errored. */
+export type LandingDequeueReason = Extract<DequeueReason, "conflict" | "failedChecks" | "errored">;
+
 /**
- * Why a merge request left the queue without landing, with the details its reason carries: the
- * conflict, the checks that failed, or the step that errored. A new push and a cancel carry none.
+ * Why a merge request left the queue without landing: a landing's run that conflicted, failed its
+ * gate or errored, which holds the details; or a new push or a cancel, which carry none.
  */
 export type DequeueCause =
-  | { reason: "conflict"; details: ConflictDetails }
-  | { reason: "failedChecks"; details: FailedChecksDetails }
-  | { reason: "errored"; details: ErroredDetails }
+  | { reason: LandingDequeueReason; run: number }
   | { reason: "newPush" }
   | { reason: "cancelled" };
 
-/** A merge request's last dequeue: its cause, and when. */
-export type Dequeue = DequeueCause & { at: string };
+/**
+ * The details a dequeue kept itself before its landing was a run, which a dequeue stored since
+ * leaves to its run: the conflict, the checks that failed the retest, or the step that errored.
+ */
+export type LegacyDequeueDetails =
+  | ConflictDetails
+  | { checks: LegacyFailedCheck[]; error?: string }
+  | { step: string; error: string };
 
-/** The dequeue a landing outcome other than `landed` records. */
-export function dequeueCause(outcome: Exclude<LandingOutcome, { kind: "landed" }>): DequeueCause {
-  switch (outcome.kind) {
-    case "conflict": {
-      return { reason: "conflict", details: outcome.details };
-    }
-    case "failedChecks": {
-      return { reason: "failedChecks", details: outcome.details };
-    }
-    case "errored": {
-      return { reason: "errored", details: outcome.details };
-    }
-  }
+/**
+ * A merge request's last dequeue: why, the landing's run behind it (null for a new push or a cancel,
+ * and for a dequeue whose landing ran before landings were runs), and when.
+ */
+export interface Dequeue {
+  reason: DequeueReason;
+  run: number | null;
+  at: string;
+  /** Kept by a dequeue stored before landings were runs. */
+  details?: LegacyDequeueDetails;
 }
 
 export interface StoredMergeRequest {
@@ -80,6 +85,8 @@ export interface StoredMergeRequest {
   state: MergeRequestState;
   approved_head: string;
   approved_by: ActedBy;
+  /** Whether the project owner made its latest approval: landing it is the owner's merge. */
+  approved_by_owner: boolean;
   approved_at: string;
   /** When it last entered the queue, while queued or landing. */
   queued_at: string | null;
@@ -100,6 +107,7 @@ interface MergeRequestRow {
   approved_head: string;
   approved_by_user: string;
   approved_by_alias: string | null;
+  approved_by_owner: number;
   approved_at: string;
   queued_at: string | null;
   /** 1 after a dequeue back to pending, until an approval or a push: it doesn't requeue on its own. */
@@ -138,6 +146,11 @@ const SCHEMA = [
   `CREATE UNIQUE INDEX IF NOT EXISTS merge_requests_open_task ON merge_requests (task)
     WHERE state IN ('pending', 'queued', 'landing', 'needsReview')`,
 ];
+/**
+ * Columns `merge_requests` gained after its first version: whether the project owner, as themselves
+ * and not under an alias, made the latest approval, so landing it is the owner's merge.
+ */
+const MERGE_REQUEST_COLUMNS = ["approved_by_owner INTEGER NOT NULL DEFAULT 0"];
 /** `merge_requests` columns named before an actor's alias was called an alias. */
 const RENAMES = [
   ["approved_by_agent", "approved_by_alias"],
@@ -156,9 +169,10 @@ export interface MergeRequestsDeps {
   ) => void;
 }
 
-/** A stored dequeue, read in camelCase whenever it was stored. */
-function storedDequeue(json: string): Dequeue {
-  return normaliseDequeue(JSON.parse(json) as Dequeue);
+/** A stored dequeue, read in camelCase whenever it was stored; one stored before landings were runs names none. */
+export function storedDequeue(json: string): Dequeue {
+  const dequeue = normaliseDequeue(JSON.parse(json) as Omit<Dequeue, "run"> & { run?: number | null });
+  return { ...dequeue, run: dequeue.run ?? null };
 }
 
 const sqlList = (states: readonly string[]) => states.map((s) => `'${s}'`).join(", ");
@@ -182,6 +196,13 @@ export class MergeRequests {
     if (index?.sql.includes("needs_review") === true) sql.exec("DROP INDEX merge_requests_open_task");
     for (const statement of SCHEMA) sql.exec(statement);
     renameColumns(sql, "merge_requests", RENAMES);
+    addColumns(sql, "merge_requests", MERGE_REQUEST_COLUMNS);
+  }
+
+  /** The merge request with id `id`, if any. */
+  get(id: number): StoredMergeRequest | null {
+    const [row] = this.#sql.exec<MergeRequestRow>("SELECT * FROM merge_requests WHERE id = ?", id);
+    return row === undefined ? null : this.#toMergeRequest(row);
   }
 
   /** The task's open merge request, if any. */
@@ -235,18 +256,22 @@ export class MergeRequests {
       .map((row, i) => this.#toMergeRequest(row, i + 1));
   }
 
-  /** Creates a task's merge request from a selection, approving `head`, and moves it to `pending`. */
-  select(actor: Actor, input: { task: number; attempt: number; head: string }): StoredMergeRequest {
+  /**
+   * Creates a task's merge request from a selection, approving `head`, and moves it to `pending`.
+   * `byOwner` says whether `actor` is the project's owner acting as themselves, not an alias.
+   */
+  select(actor: Actor, input: { task: number; attempt: number; head: string; byOwner: boolean }): StoredMergeRequest {
     const at = this.#stamp();
     const [row] = this.#sql.exec<MergeRequestRow>(
       `INSERT INTO merge_requests (task, attempt, state, approved_head, approved_by_user, approved_by_alias,
-         approved_at, created_at, created_by_user, created_by_alias)
-       VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+         approved_by_owner, approved_at, created_at, created_by_user, created_by_alias)
+       VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
       input.task,
       input.attempt,
       input.head,
       actor.user.id,
       actor.alias,
+      input.byOwner ? 1 : 0,
       at,
       at,
       actor.user.id,
@@ -259,14 +284,18 @@ export class MergeRequests {
     return mr;
   }
 
-  /** Approves `head`, moving the merge request to `pending` and releasing any hold. */
-  approve(actor: Actor, mr: StoredMergeRequest, head: string): StoredMergeRequest {
+  /**
+   * Approves `head`, moving the merge request to `pending` and releasing any hold. `byOwner` says
+   * whether `actor` is the project's owner acting as themselves, not an alias.
+   */
+  approve(actor: Actor, mr: StoredMergeRequest, head: string, byOwner: boolean): StoredMergeRequest {
     this.#sql.exec(
       `UPDATE merge_requests SET state = 'pending', approved_head = ?, approved_by_user = ?, approved_by_alias = ?,
-         approved_at = ?, held = 0 WHERE id = ?`,
+         approved_by_owner = ?, approved_at = ?, held = 0 WHERE id = ?`,
       head,
       actor.user.id,
       actor.alias,
+      byOwner ? 1 : 0,
       this.#stamp(),
       mr.id,
     );
@@ -289,6 +318,16 @@ export class MergeRequests {
   }
 
   /**
+   * landing → pending, out of the queue but not held after a dequeue: its landing waits for the
+   * owner, whose start queues it again.
+   */
+  holdForOwner(mr: StoredMergeRequest): StoredMergeRequest {
+    this.#sql.exec("UPDATE merge_requests SET state = 'pending', queued_at = NULL WHERE id = ?", mr.id);
+    this.#journal(null, "heldForOwner", mr, { head: mr.approved_head });
+    return this.#get(mr.id);
+  }
+
+  /**
    * Takes a queued or landing merge request out of the queue for `cause`, recording it as
    * `last_dequeue`, and moves it to `to`: `pending` (held) for conflict, failed checks and errors,
    * `needsReview` for a new push, `cancelled` for a cancel.
@@ -300,7 +339,7 @@ export class MergeRequests {
     to: "pending" | "needsReview" | "cancelled",
   ): StoredMergeRequest {
     const { reason } = cause;
-    const dequeue: Dequeue = { ...cause, at: this.#stamp() };
+    const dequeue: Dequeue = { reason, run: "run" in cause ? cause.run : null, at: this.#stamp() };
     this.#sql.exec(
       "UPDATE merge_requests SET state = ?, queued_at = NULL, last_dequeue = ?, dequeue_seen = 0, held = ? WHERE id = ?",
       to,
@@ -308,7 +347,7 @@ export class MergeRequests {
       to === "pending" ? 1 : 0,
       mr.id,
     );
-    this.#journal(actor, "dequeued", mr, { reason, from: mr.state });
+    this.#journal(actor, "dequeued", mr, { reason, from: mr.state, ...("run" in cause ? { run: cause.run } : {}) });
     if (to !== "pending") this.#journal(actor, to, mr, {});
     return this.#get(mr.id);
   }
@@ -362,6 +401,7 @@ export class MergeRequests {
       state: row.state,
       approved_head: row.approved_head,
       approved_by: { user: row.approved_by_user, alias: row.approved_by_alias },
+      approved_by_owner: row.approved_by_owner === 1,
       approved_at: row.approved_at,
       queued_at: row.queued_at,
       position: place,

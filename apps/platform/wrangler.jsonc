@@ -27,12 +27,18 @@
     },
   ],
   "workflows": [
-    { "name": "throng-scoring", "binding": "SCORING", "class_name": "ScoringWorkflow" },
-    { "name": "throng-landing", "binding": "LANDING", "class_name": "LandingWorkflow" },
+    // Keeps the name `ScoringWorkflow` ran under, so a run that started on its code resumes on this.
+    { "name": "throng-scoring", "binding": "PIPELINE", "class_name": "PipelineWorkflow" },
+    // A landing is a `main` run now. Landings that started on `LandingWorkflow`'s code resume on this,
+    // and hand their landing back to the project to land again as a run.
+    { "name": "throng-landing", "binding": "LANDING", "class_name": "PipelineWorkflow" },
     { "name": "throng-follow", "binding": "FOLLOW", "class_name": "FollowWorkflow" },
   ],
   // Scoring run logs. R2's lifecycle rule (30 days on `logs/`) isn't wrangler config: see the README.
-  "r2_buckets": [{ "binding": "LOGS", "bucket_name": "throng-logs" }],
+  "r2_buckets": [
+    { "binding": "LOGS", "bucket_name": "throng-logs" },
+    { "binding": "CACHES", "bucket_name": "throng-caches" },
+  ],
   "d1_databases": [
     {
       "binding": "DB",
@@ -43,12 +49,11 @@
     },
   ],
   "vars": {
-    "CF_ACCOUNT_ID": "9ff7e9e225aeb0ab0c56b05b42ca2b13",
     // PLACEHOLDER: the Zero Trust team domain and the Access application's audience (AUD) tag.
     "ACCESS_TEAM_DOMAIN": "gregjoeval.cloudflareaccess.com",
     "ACCESS_AUD": "2a713dce7fdf28f6d07c5954b0a9d57e867717b5af65ba730b98473b3366712b",
   },
-  "secrets": { "required": ["E2E_TOKEN", "CF_PREVIEW_TOKEN"] },
+  "secrets": { "required": ["E2E_TOKEN", "SECRETS_KEYRING"] },
   "observability": { "enabled": true },
   "env": {
     // The Worker the manual Integration workflow (.github/workflows/integration.yml) deploys and runs
@@ -78,11 +83,14 @@
       ],
       // Workflow names are account-wide, so they can't reuse production's.
       "workflows": [
-        { "name": "throng-ci-scoring", "binding": "SCORING", "class_name": "ScoringWorkflow" },
-        { "name": "throng-ci-landing", "binding": "LANDING", "class_name": "LandingWorkflow" },
+        { "name": "throng-ci-scoring", "binding": "PIPELINE", "class_name": "PipelineWorkflow" },
+        { "name": "throng-ci-landing", "binding": "LANDING", "class_name": "PipelineWorkflow" },
         { "name": "throng-ci-follow", "binding": "FOLLOW", "class_name": "FollowWorkflow" },
       ],
-      "r2_buckets": [{ "binding": "LOGS", "bucket_name": "throng-ci-logs" }],
+      "r2_buckets": [
+        { "binding": "LOGS", "bucket_name": "throng-ci-logs" },
+        { "binding": "CACHES", "bucket_name": "throng-ci-caches" },
+      ],
       "d1_databases": [
         {
           "binding": "DB",
@@ -92,11 +100,10 @@
         },
       ],
       "vars": {
-        "CF_ACCOUNT_ID": "9ff7e9e225aeb0ab0c56b05b42ca2b13",
         "ACCESS_TEAM_DOMAIN": "gregjoeval.cloudflareaccess.com",
         "ACCESS_AUD": "2a713dce7fdf28f6d07c5954b0a9d57e867717b5af65ba730b98473b3366712b",
       },
-      "secrets": { "required": ["E2E_TOKEN", "CF_PREVIEW_TOKEN"] },
+      "secrets": { "required": ["E2E_TOKEN", "SECRETS_KEYRING"] },
       "observability": { "enabled": true },
     },
   },

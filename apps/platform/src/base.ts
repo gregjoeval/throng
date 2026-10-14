@@ -4,7 +4,7 @@
 
 import { forkRepo, missingAsNull, originRepo } from "./repos.ts";
 import type { Commit, Repos } from "./repos.ts";
-import { parseAttemptRef, taskBranchRef } from "./task-refs.ts";
+import { isAttemptRef, parseAttemptRef, parseTaskRef, taskBranchRef } from "./task-refs.ts";
 
 /** What a base lies on: `main`, or the task's task branch. */
 export const BASE_LINES = ["main", "task"] as const;
@@ -37,6 +37,25 @@ export async function attemptBase(
   if (line.sha === null) return null;
   const sha = await mergeBase(repos, { repo: forkRepo(project, attempt), sha: head }, { repo: origin, sha: line.sha });
   return sha === null ? null : { sha, on: line.on };
+}
+
+/**
+ * What a pipeline run on `line` diffs its head from: an attempt's base (`attemptBase`), and for a
+ * task branch (`t42`) where it meets the origin's `main`. Null for `main`, and when they share no
+ * history.
+ */
+export async function lineBase(
+  repos: Repos,
+  project: string,
+  { line, head }: { line: string; head: string },
+): Promise<Base | null> {
+  if (isAttemptRef(line)) return attemptBase(repos, project, { attempt: line, head });
+  if (parseTaskRef(line) === null) return null;
+  const origin = originRepo(project);
+  const main = await tip(repos, origin, "main");
+  if (main === null) return null;
+  const sha = await mergeBase(repos, { repo: origin, sha: head }, { repo: origin, sha: main });
+  return sha === null ? null : { sha, on: "main" };
 }
 
 /** The head of task `task`'s task branch in the origin, or null when it has none. */

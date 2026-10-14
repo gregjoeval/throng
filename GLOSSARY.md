@@ -89,8 +89,8 @@ What a push to one of a project's repos runs: its setups, then its checks, then 
 _Avoid_: Workflow, CI, job
 
 **Pipeline run**:
-One execution of a pipeline for one pushed head.
-_Avoid_: Build, job, run (on its own)
+One execution of a pipeline for one pushed head. Where nothing else that runs is in view, as in the API's `…/runs` routes, the MCP tools `list_runs` and `get_run`, the Runs tab and "Run 7", it is a run for short.
+_Avoid_: Build, job, run (on its own, where a step or check could be meant)
 
 **Line**:
 What a project's pipeline runs follow as it moves: an attempt's fork, a task's task branch, or `origin/main`. Each pipeline run belongs to one line, and a newer head on a line replaces the runs still waiting on it.
@@ -111,6 +111,10 @@ _Avoid_: Test, job, CI step
 **Check group**:
 The one name a project's check may carry so a pipeline can choose to run it. A pipeline that names groups runs only the checks in them, plus its task's checks; one that names none runs every check.
 _Avoid_: Tag, stage, label
+
+**Cache**:
+Named paths a project's steps keep between pipeline runs, such as a dependency store, keyed by files in the pushed head. A run restores a cache only when its key matches exactly, and only a pipeline run of the owner's code on a task branch or `main` saves one.
+_Avoid_: Artifact, snapshot, store
 
 **Metric**:
 One named, typed value of a pipeline run, taken from a check or measured by Throng; it is null when nothing fits it. An attempt's score is made of them.
@@ -229,5 +233,5 @@ A fork whose head has been saved as a hidden ref in the origin (`refs/attempts/t
 _Avoid_: Backed up, stashed
 
 **Secret**:
-A value a project's owner stores for its pipelines, such as a deploy token, with the pipelines it may be used in. A step gets only the secrets it or its pipeline names, the owner allows in that pipeline, and only in a pipeline run of code from a maintainer or started by one.
+A value a project's owner stores for its pipelines, such as a deploy token, with the pipelines it may be used in. A step gets only the secrets it or its pipeline names, the owner allows in that pipeline, and only in a pipeline run of code from a maintainer, or one the owner starts acting as themselves. A run of a maintainer's code gets none if it runs a check its task added that no maintainer wrote, as that check could read what a setup left behind, unless the owner starts it and nobody else changes the check after.
 _Avoid_: Credential, env var, grant

@@ -19,7 +19,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { compareQuery, mainHeadQuery, meQuery, projectKey, scoreNow } from "@/lib/api";
 import type { Compare, ProjectRef } from "@/lib/api";
-import { GATE_STATE_LABELS, gateState, previewUrl } from "@/lib/arena";
+import { GATE_STATE_LABELS, gateState, urlLinks } from "@/lib/arena";
 import type { ArenaAttempt } from "@/lib/arena";
 import type { Layout, Reference } from "@/lib/arena-view";
 import { apiError } from "@/lib/errors";
@@ -66,6 +66,7 @@ export function Lane({
           </div>
         </div>
         <VerdictCounts verdicts={attempt.verdicts} />
+        <UrlLinks attempt={attempt} />
         {note === "" ? null : <p className="text-sm text-muted-foreground">{note}</p>}
       </header>
       <LaneChanges projectRef={projectRef} attempt={attempt} reference={reference} layout={layout} files={files} />
@@ -74,10 +75,31 @@ export function Lane({
   );
 }
 
-/** The lane's menu: the details sheet, the preview, and the attempt in the code browser. */
+/** The attempt's `url` metrics, each a link named after its metric, such as a preview a check deployed. */
+function UrlLinks({ attempt }: { attempt: ArenaAttempt }) {
+  const links = urlLinks(attempt.result);
+  if (links.length === 0) return null;
+  return (
+    <p className="flex flex-wrap gap-3 text-xs">
+      {links.map(({ name, href }) => (
+        <a
+          key={name}
+          href={href}
+          target="_blank"
+          rel="noreferrer"
+          title={href}
+          className="underline underline-offset-3"
+        >
+          {name}
+        </a>
+      ))}
+    </p>
+  );
+}
+
+/** The lane's menu: the details sheet, and the attempt in the code browser. */
 function LaneMenu({ projectRef, attempt, onDetails }: InProject & { attempt: ArenaAttempt; onDetails: () => void }) {
   const navigate = useNavigate();
-  const preview = previewUrl(attempt.result);
   return (
     <DropdownMenu>
       <DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" aria-label={`${attempt.ref} actions`} />}>
@@ -85,13 +107,6 @@ function LaneMenu({ projectRef, attempt, onDetails }: InProject & { attempt: Are
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-auto min-w-48">
         <DropdownMenuItem onClick={onDetails}>Checks, logs and verdicts</DropdownMenuItem>
-        {preview === null ? (
-          <DropdownMenuItem disabled>No preview</DropdownMenuItem>
-        ) : (
-          <DropdownMenuItem render={<a href={preview} target="_blank" rel="noreferrer" />}>
-            Open preview
-          </DropdownMenuItem>
-        )}
         <DropdownMenuItem
           onClick={() =>
             navigate({

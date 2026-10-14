@@ -62,7 +62,7 @@ open attempt at \`t42\`. The origin's \`main\` only moves through the merge queu
 
 ## Network access
 
-Setup, the checks and the Preview build have no internet. They may reach, over HTTPS on the default port:
+Setup and the checks have no internet. They may reach, over HTTPS on the default port:
 
 - \`${NPM_REGISTRY_HOST}\`, and each \`registry=\` or \`@scope:registry=\` host in the \`.npmrc\` on the origin's \`main\`
   (an \`https:\` URL on the default port with a DNS hostname). A registry takes
@@ -80,13 +80,14 @@ Both are read from the origin's \`main\`, never from your attempt: a change to e
 4. \`update_attempt\` with \`state: open\`: the attempt is ready to be scored and selected. While it is a draft,
    \`score_now\` scores its head on demand.
 5. \`wait_for_attempt\` with \`until: scored\` holds for up to ${DEFAULT_WAIT_SECONDS} seconds (\`wait\`, at most
-   ${MAX_WAIT_SECONDS}) until the head has a \`done\` or \`errored\` run, and answers at once if it already has one.
-   Call it again while \`changed\` is false. Each user may have ${MAX_WAITERS_PER_USER} waits at a time per project;
-   past that, a wait returns at once with \`changed: false\`. Waits are held in memory, so a deploy of Throng drops
-   the ones in flight: each answers \`changed: false\` early, and you wait again. \`until\` also takes \`stateChanged\`,
+   ${MAX_WAIT_SECONDS}) until the head has a \`done\` or \`errored\` run, or one \`waiting\` for the project owner
+   (tell your human: only they can start it), and answers at once if it already has one. Call it again while
+   \`changed\` is false. Each user may have ${MAX_WAITERS_PER_USER} waits at a time per project; past that, a wait
+   returns at once with \`changed: false\`. Waits are held in memory, so a deploy of Throng drops the ones in
+   flight: each answers \`changed: false\` early, and you wait again. \`until\` also takes \`stateChanged\`,
    \`mergeRequestChanged\` and \`any\`.
 6. \`get_attempt\` gives the scoring status and the current result: the gate, each check and the metrics. For a
-   failing check, \`get_log\` with the run id and the check's name returns the log's last
+   failing check, \`get_log\` with the run id and the step (the check's name) returns the log's last
    ${MAX_LOG_SLICE_BYTES / 1024} KB; pass \`offset\` to read elsewhere.
 7. Fix, commit, push, and wait again. \`rescore\` scores an open attempt's head again.
 8. Review other users' attempts: read them with \`list_files\`, \`read_file\` (${MAX_FILE_BYTES / 1024} KB at most),
@@ -112,13 +113,55 @@ Both are read from the origin's \`main\`, never from your attempt: a change to e
 \`update_attempt\` also edits the note and moves an attempt to \`draft\` or \`closed\`; \`hand_off\` gives an
 active attempt to another user.
 
+## Runs
+
+Every push runs a pipeline on its line: an attempt (\`t42a3\`), a task's task branch (\`t42\`) or \`main\`.
+\`list_runs\` lists the project's runs newest first, filtered by \`line\` (\`tasks\` for every line but \`main\`) and
+\`status\`; pass a page's \`next\` as \`cursor\` for the next page. \`get_run\` gives a run's steps in run order
+(setups, checks, post-gate steps), each with its outcome, duration, notes and the \`log\` to pass to \`get_log\`
+as \`step\`, and the run's metrics. \`wait_for_run\` holds like \`wait_for_attempt\` until the run is done or
+\`waiting\`, and answers at once if it already is. A \`waiting\` run needs the project owner to start it: tell your
+human, since no tool can. A merge request no owner approved waits the same way when \`main\`'s pipeline names a
+secret: its landing, a \`main\` run, is \`waiting\` until the owner starts it, and only then joins the merge queue.
+Only the owner can cancel a run, through the UI or REST API.
+
 ## The Sandbox
 
-Setup, the checks and the Preview build run in a container whose size the project's \`.throng/config.yml\`
-sets, as in \`sandbox: {size: standard-2}\`. The sizes are ${oneOf(SANDBOX_SIZES.map(describeSize))}.
+The setups run in order in one container; each check then runs in its own container, started from a
+snapshot of the setups' work, in parallel, except that a check waits for the checks its \`after\` names
+and is skipped unless they all passed. A check may be in one \`group\`; \`pipelines.main.groups\` (or
+\`pipelines.default.groups\`) runs only those groups' checks, and a pipeline listing none runs every check.
+A task's checks always run on its attempts. \`pipelines.main.steps\` run in order once \`main\`'s gate
+passes, each in its own container, stopping at the first that fails. Each container gets \`THRONG_PROJECT\`, \`THRONG_PIPELINE\`,
+\`THRONG_LINE\`, \`THRONG_SHA\` and \`THRONG_RUN\`, and starts at the size the project's
+\`.throng/config.yml\` sets, as in \`sandbox: {size: standard-2}\`. The sizes are ${oneOf(SANDBOX_SIZES.map(describeSize))}.
 The default is ${DEFAULT_SANDBOX_SIZE}. Like the rest of the config, it is read from the origin's \`main\`: an
 attempt that changes it still runs at \`main\`'s size, and the change applies once it lands. Each stored log
 notes the size it ran at under \`== throng ==\`, so a check killed for memory shows how much it had.
+
+## Caches
+
+\`caches:\` in \`.throng/config.yml\` names caches, each with the paths it keeps and the files that key it, as
+in \`pnpm: {path: [~/.local/share/pnpm/store, ~/.cache/pnpm], key: pnpm-lock.yaml}\` (pnpm needs its metadata
+cache beside its store to install offline). Setups, checks and post-gate steps list the ones they use, as in
+\`caches: [pnpm]\`; a task's checks may list only those \`main\` defines. A cache is restored only when its key
+matches exactly: attempts read \`main\`'s, a task branch its own then \`main\`'s. Only runs of the owner's code
+on a task branch or \`main\` save one, after the step using it passed; attempts never do. A cache never fails a
+run: each step's notes say hit or miss, and saved or not, with the times.
+
+## Secrets
+
+The project owner keeps secrets in the project's settings: a name, a value nobody can read back, and the
+pipelines it may be used in (\`default\` for attempts and task branches, \`main\`, or both). \`list_secrets\` gives
+each one's name and pipelines, so you can name them in config, and \`uses\`: where \`main\`'s config names each,
+flagging any with no value or not allowed in a pipeline. Only the owner, acting as themselves, sets, allows or
+deletes them, never through an alias's token or MCP.
+
+A setup or check in \`.throng/config.yml\` names the secrets it uses, as in \`secrets: [NPM_TOKEN]\`, and gets each
+one as an environment variable of that name; a task's checks name none. Only a run of code the owner (or their
+agents) pushed gets them. A run of anyone else's code that names one waits for the owner. A run naming a secret
+with no value, or one not allowed in its pipeline, fails before anything runs, naming it. Values are masked as
+\`***\` in logs, metric values and errors.
 
 ## In short
 
@@ -133,6 +176,7 @@ Every tool wraps a route of the REST API, which takes the same bearer token. Err
 
 - OpenAPI 3.1 document: ${origin}/api/openapi.json
 - Long-poll an attempt: \`GET ${origin}/api/projects/<owner>/<project>/attempts/t42a3?wait=${DEFAULT_WAIT_SECONDS}&until=scored\`
+- A project's runs: \`GET ${origin}/api/projects/<owner>/<project>/runs?line=main&status=waiting\`
 `;
 }
 

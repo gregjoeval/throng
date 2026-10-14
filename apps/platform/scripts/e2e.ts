@@ -4,10 +4,12 @@
 //
 // Merge queue scenarios, through the product API (`/api`) and the git proxy (`/git`) as the e2e user:
 // zeroconfig (no config: the gate passes with no checks; selecting an attempt closes its sibling, and
-// the merge request lands as a two-parent merge commit with the Throng trailers; both attempts are
-// archived under `refs/attempts/`), conflict (two tasks' attempts edit the same line: the first
-// lands, the second is dequeued with reason `conflict` and the expected hunk; its author merges main
-// and pushes, which moves it to `needsReview`; approved again, it lands), needsreview (a push to a
+// the merge request lands as a two-parent merge commit with the Throng trailers, in one `main` run
+// whose steps are `merge` then `land` and whose head is the landed sha; both attempts are archived
+// under `refs/attempts/`), conflict (two tasks' attempts edit the same line: the first lands, the
+// second is dequeued with reason `conflict`, naming its landing's run, which ended at `merge` and keeps
+// the expected hunk; its author merges main and pushes, which moves it to `needsReview`; approved
+// again, it lands), needsreview (a push to a
 // queued or landing merge request's source dequeues it with `newPush` to `needsReview`, and it
 // doesn't requeue on its own once the new head passes; its check's log notes the default Sandbox size).
 //
@@ -21,13 +23,26 @@
 // `e2e-browser.ts`): two scored attempts load as lanes against their base, by file lines up their
 // files, and selecting one there lands its merge request and closes the task.
 //
-// Scoring scenarios, through the e2e routes (`/e2e/*`): metrics (a check writes two JSON files into $THRONG_OUTPUT and fails; metrics are read from both), taskmetrics (a task adds a metric over a project check, scored with source task; a clash main later adds makes the next run invalid; through `/api`), taskchecks (a task adds a metric over a project check and a required check of its own; the gate follows the task check; making the check optional rescores the open attempts; through `/api`), failing (a required check fails the gate),
-// invalid (an invalid config fails the gate with a config entry), preview (a passing gate deploys a
-// Worker Preview built with `preview.command` under the project's own Worker, and its URL serves it; the
-// build's DELETE on its own Worker is refused), coalesce (two quick pushes; the first
-// run is cancelled and only the newest sha is scored), intrusion (an attempt's checks try to push to
-// the origin and call the Cloudflare API; both fail), deps (setup installs an npm dependency from the
-// registry), refs (attempt archive refs: pushable, listed, kept across pushes to main, and copied by
+// Scoring scenarios, through the e2e routes (`/e2e/*`): metrics (a check writes two JSON files into $THRONG_OUTPUT and exits 0; metrics are read from both), taskmetrics (a task adds a metric over a project check, scored with source task; a clash main later adds makes the next run invalid; through `/api`), taskchecks (a task adds a metric over a project check and a check of its own; the gate follows the task check; making the check only report rescores the open attempts; through `/api`), failing (a failing check fails the gate, whatever the others do),
+// invalid (an invalid config fails the gate with a config entry), preview (a check writes a fake
+// preview URL to $THRONG_OUTPUT and a `url` metric reads it; nothing deploys), coalesce (two quick
+// pushes; the first run is cancelled and only the newest sha is scored), intrusion (an attempt's checks
+// try to push to the origin and call the Cloudflare API, which `network.allow` doesn't list; both
+// fail), deps (a named setup installs an npm dependency from the registry; each check runs in its
+// own container started from the setup's snapshot, one waits for the other with `after`, and each
+// gets the run's THRONG_* variables), secrets (the owner sets a secret allowed in default; a check naming it in a run
+// of the owner's push writes a hash of it, and the stored log shows the mask, never the value; nothing deploys),
+// waiting (a second user's attempt naming a `default` secret waits for the owner and holds no slot; Start with a
+// stale sha, the owner's token under an alias and the second user's are refused; the owner's Start runs it with
+// the secret; the owner's own push to a task whose check the second user wrote waits too, naming that check;
+// through `/api`),
+// caches (an attempt lands; the trusted `main` run of it saves a cache, which the next attempt's run restores,
+// a hit in its setup's notes, and saves nothing; through `/api`),
+// pipeline (two setups and three checks, one waiting for the others with `after` in a group `main`
+// doesn't run; the owner sets a secret allowed in `main` and lands an attempt; the `main` run merges,
+// runs the setups and `main`'s checks, lands, then a post-gate step naming the secret writes a hash of
+// it, and its stored log shows the mask; through `/api`),
+// refs (attempt archive refs: pushable, listed, kept across pushes to main, and copied by
 // the Worker).
 //
 // The D1 projection, me: a task and an attempt reach the e2e user's `/api/me/tasks` and
@@ -41,11 +56,12 @@
 //
 // Every project id starts with E2E_PROJECT_PREFIX (default `e2e`; lowercase alphanumeric, starting
 // with `e2e`, which the Worker's e2e routes insist on). Each scenario deletes what its projects made
-// (D1 rows, Durable Object storage, logs, repos and preview Workers), and the run revokes its tokens when it ends.
+// (D1 rows, Durable Object storage, logs and repos), and the run revokes its tokens when it ends.
 // `pnpm e2e cleanup` deletes every project under an explicitly set E2E_PROJECT_PREFIX, including those
 // a failed or cancelled run left behind.
 
 import { execFile } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -55,7 +71,6 @@ import { ARCHIVE_REF_PREFIX, archiveRef } from "../src/archive.ts";
 import { DEFAULT_SANDBOX_SIZE } from "../src/config.ts";
 import { sandboxNote } from "../src/logs.ts";
 import { CLONE_RECIPE } from "../src/mcp.ts";
-import { previewName, previewWorkerName } from "../src/preview.ts";
 import { originRepo } from "../src/repos.ts";
 import { openBrowser } from "./e2e-browser.ts";
 import type { BrowserSession } from "./e2e-browser.ts";
@@ -67,7 +82,6 @@ import { connectionErrorCode, isIdempotent, withRetry } from "./e2e-retry.ts";
 
 const run = promisify(execFile);
 const FIXTURE = new URL("../fixtures/fixture-worker/", import.meta.url).pathname;
-const WRANGLER_CONFIG = new URL("../wrangler.jsonc", import.meta.url).pathname;
 const POLL_MS = 1000;
 /** The fixture's own tests, as a check. */
 const TEST_CHECK = `checks:
@@ -124,11 +138,10 @@ class Timeline {
   }
 }
 
-/** A check in a run's result: Throng's own (`_diff`, `_preview`) are `platform`, the config's `project`. */
+/** A check in a run's result: Throng's own (`_diff`) is `platform`, the config's `project`. */
 interface Check {
   name: string;
   source: "platform" | "project" | "task";
-  required: boolean;
   outcome: string;
   durationMs: number;
   notes: string[];
@@ -138,8 +151,43 @@ interface Check {
 interface Metric {
   source: "platform" | "project" | "task";
   type: "boolean" | "number" | "string" | "enum";
+  /** A string's `url` format: shown as a link. */
+  format?: "url";
   value: boolean | number | string | null;
   note?: string;
+}
+
+/** A run as `GET …/runs` lists it, as far as the scenarios read it (see `src/api.ts`'s `Run`). */
+interface ListedRun {
+  id: number;
+  line: string;
+  pipeline: string;
+  /** Null for a landing until it lands. */
+  sha: string | null;
+  trigger: string;
+  status: string;
+  gate: "passed" | "failed" | null;
+}
+
+/** A run as the runs routes give it while it may wait for the owner, as far as the scenarios read it. */
+interface WaitingRun extends ListedRun {
+  trusted: boolean;
+  startedAt: string | null;
+  waiting: {
+    head: string;
+    attempt: string | null;
+    base: string | null;
+    secrets: string[];
+    taskCheck: { name: string; writtenBy: { handle: string } } | null;
+  } | null;
+}
+
+/** A run's outcome as `GET …/runs/{runId}` gives it, as far as the scenarios read it. */
+interface RunOutcome {
+  outcome: {
+    steps: { name: string; kind: string; outcome: string; log: string | null; notes: string[] }[];
+    landed?: { kind: "landed"; sha: string } | { kind: "conflict"; details: Dequeue["details"] };
+  } | null;
 }
 
 /** What a run reports, as far as the scenarios read it (see `src/results.ts`). */
@@ -189,7 +237,7 @@ interface MergeRequest {
   attempt: string;
   state: "pending" | "queued" | "landing" | "needsReview" | "merged" | "cancelled";
   approvedHead: string;
-  lastDequeue: { reason: string; at: string } | null;
+  lastDequeue: { reason: string; run: number | null; at: string } | null;
   mergeSha: string | null;
 }
 
@@ -202,6 +250,8 @@ interface ConflictHunk {
 
 interface Dequeue {
   reason: string;
+  /** The landing's run behind it. */
+  run: number | null;
   at: string;
   details: {
     attempt: string;
@@ -256,7 +306,7 @@ interface MyListings {
 }
 
 interface ScoringStatus {
-  status: "none" | "queued" | "running" | "done" | "errored";
+  status: "none" | "queued" | "waiting" | "running" | "done" | "errored";
   sha: string | null;
   /** The current result, with the run it came from. */
   result?: ApiResult & { run: number };
@@ -275,6 +325,10 @@ const scenarios: Record<string, () => Promise<void>> = {
   invalid,
   preview,
   coalesce,
+  secrets,
+  waiting,
+  caches,
+  pipeline,
   intrusion,
   deps,
   refs,
@@ -338,8 +392,8 @@ async function zeroconfig(): Promise<void> {
   assert(result.config.kind === "none", `expected no config, got ${JSON.stringify(result.config)}`);
   assert(result.gate === "passed" && configChecks(result).length === 0, "expected a passing gate with no checks");
   assert(
-    JSON.stringify(result.checks.map((c) => [c.name, c.outcome])) === '[["_diff","passed"],["_preview","skipped"]]',
-    `expected only Throng's own checks, _preview skipped: ${JSON.stringify(result.checks)}`,
+    JSON.stringify(result.checks.map((c) => [c.name, c.outcome])) === '[["_diff","passed"]]',
+    `expected only Throng's own _diff: ${JSON.stringify(result.checks)}`,
   );
   assert(diffSize(result).join() === "1,1,1", `unexpected diff size ${JSON.stringify(diffSize(result))}`);
 
@@ -372,6 +426,27 @@ async function zeroconfig(): Promise<void> {
   );
   const greeting = await git(p.work, "show", `${mainSha}:src/greeting.js`);
   assert(greeting.includes("hello from a1"), "main does not contain the attempt's change");
+
+  // The landing is `main`'s one run: `merge`, then `land`, its head the landed sha.
+  const { runs } = await throng<{ runs: ListedRun[] }>(p, "GET", "/runs?line=main");
+  assert(
+    runs.length === 1 && runs[0]?.trigger === "merge" && runs[0].sha === mainSha,
+    `expected one landing run on main at ${mainSha}: ${JSON.stringify(runs)}`,
+  );
+  const landing = await poll("the landing's run to finish", async () => {
+    const found = await throng<ListedRun & RunOutcome>(p, "GET", `/runs/${runs[0]?.id ?? 0}`);
+    return found.status === "done" ? found : null;
+  });
+  const steps = landing.outcome?.steps.map((s) => [s.name, s.outcome]) ?? [];
+  assert(
+    JSON.stringify(steps) ===
+      JSON.stringify([
+        ["_diff", "passed"],
+        ["merge", "passed"],
+        ["land", "passed"],
+      ]),
+    `unexpected landing steps ${JSON.stringify(steps)}`,
+  );
 
   // Custom refs: the merged attempt and the sibling the selection closed are both archived.
   const task = await throng<{ state: string }>(p, "GET", `/tasks/${t1}`);
@@ -419,8 +494,9 @@ async function conflict(): Promise<void> {
   const attempt = await throng<Attempt>(p, "GET", `/attempts/${a2}`);
   assert(attempt.mergeRequest?.lastDequeue?.reason === "conflict", "the attempt doesn't show the conflict");
 
-  const { reason, details } = await throng<Dequeue>(p, "GET", `/tasks/${t2}/merge-request/dequeue`);
-  assert(reason === "conflict" && details !== null, `unexpected dequeue ${reason}`);
+  const { reason, run: runId, details } = await throng<Dequeue>(p, "GET", `/tasks/${t2}/merge-request/dequeue`);
+  assert(reason === "conflict" && details !== null && runId !== null, `unexpected dequeue ${reason} ${runId}`);
+  assert(dequeued.lastDequeue.run === runId, "the merge request doesn't name the dequeue's run");
   assert(
     details.attempt === a2 && details.head === second && details.main === mainSha && details.base === fixture,
     `unexpected conflict commits ${JSON.stringify({ ...details, files: undefined })}`,
@@ -446,8 +522,17 @@ async function conflict(): Promise<void> {
     JSON.stringify(files) === JSON.stringify(expectedFiles),
     `unexpected conflict files ${JSON.stringify(details.files)}`,
   );
-  const patch = await throngText(p, `/tasks/${t2}/merge-request/dequeue/files/src/greeting.js/diff?side=main`);
-  assert(patch.includes('+export const GREETING = "hello from a1";'), `unexpected main-side diff:\n${patch}`);
+  // The landing's run ended at its `merge`, and keeps the conflict.
+  const conflicted = await throng<ListedRun & RunOutcome>(p, "GET", `/runs/${runId}`);
+  assert(
+    conflicted.trigger === "merge" && conflicted.sha === null && conflicted.outcome?.landed?.kind === "conflict",
+    `unexpected conflicted run ${JSON.stringify({ ...conflicted, outcome: undefined })}`,
+  );
+  const landed = conflicted.outcome.landed;
+  assert(
+    landed.kind === "conflict" && JSON.stringify(landed.details) === JSON.stringify(details),
+    "the run's conflict isn't the dequeue's",
+  );
 
   // The author merges main into the attempt and pushes; the approved head no longer matches.
   await fetchMain(p);
@@ -491,7 +576,7 @@ async function conflict(): Promise<void> {
 /**
  * A push to a queued or landing merge request's source dequeues it with `newPush` to
  * `needsReview`, and it stays there once the new head passes: only an approval requeues it. A slow
- * required check keeps the landing in its retest long enough to push.
+ * check keeps the landing in its checks on the merged tree long enough to push.
  */
 async function needsreview(): Promise<void> {
   const timeline = new Timeline();
@@ -516,6 +601,15 @@ async function needsreview(): Promise<void> {
     slowLog.includes(`== throng ==\n${sandboxNote(DEFAULT_SANDBOX_SIZE)}\n`),
     `slow's log doesn't note the ${DEFAULT_SANDBOX_SIZE} Sandbox: ${slowLog.slice(-200)}`,
   );
+  // The project's runs list it on the attempt's line, and its page has the check as a step with that log.
+  const { runs } = await throng<{ runs: ListedRun[] }>(p, "GET", `/runs?line=${a1}&status=done`);
+  assert(
+    runs.some((r) => r.id === scoring.result.run && r.line === a1 && r.pipeline === "default" && r.gate === "passed"),
+    `${a1}'s done runs don't list run ${scoring.result.run}: ${JSON.stringify(runs)}`,
+  );
+  const detail = await throng<ListedRun & RunOutcome>(p, "GET", `/runs/${scoring.result.run}`);
+  const slow = detail.outcome?.steps.find((s) => s.name === "slow");
+  assert(slow?.kind === "check" && slow.log === "slow", `run ${detail.id}'s steps: ${JSON.stringify(detail.outcome)}`);
 
   await throng(p, "POST", `/tasks/${t1}/selection`, { attempt: a1 });
   const inQueue = await mergeRequestUntil(p, t1, (mr) => mr.state === "queued" || mr.state === "landing");
@@ -660,9 +754,9 @@ async function describePage({ page }: BrowserSession): Promise<void> {
 }
 
 /**
- * A passing project whose optional `report` check writes two JSON files into `$THRONG_OUTPUT`, then
- * fails: its metrics are still read from both files, through objects and an array, and one whose path
- * doesn't exist is null with a note naming the segment and the keys there.
+ * A passing project whose `report` check only reports: it writes two JSON files into
+ * `$THRONG_OUTPUT` and exits 0. Its metrics are read from both files, through objects and an array,
+ * and one whose path doesn't exist is null with a note naming the segment and the keys there.
  */
 async function metrics(): Promise<void> {
   const timeline = new Timeline();
@@ -681,14 +775,12 @@ writeFileSync(
   }),
 );
 writeFileSync(out + "/coverage-summary.json", JSON.stringify({ total: { lines: { pct: 87.5 } } }));
-process.exit(1);
 `,
     ".throng/config.yml": `checks:
   - name: test
     command: npm test
   - name: report
     command: node scripts/report.js
-    required: false
 metrics:
   - { name: tests, from: report.report.numTotalTests, type: number }
   - { name: slowest, from: report.report.testResults.0.duration, type: number, unit: ms, order: asc }
@@ -708,7 +800,7 @@ metrics:
   assert(result.gate === "passed", `expected the gate to pass: ${JSON.stringify(result.checks)}`);
   const [test, reporter] = configChecks(result);
   assert(
-    test?.outcome === "passed" && reporter?.outcome === "failed",
+    test?.outcome === "passed" && reporter?.outcome === "passed",
     `unexpected outcomes ${JSON.stringify(result.checks)}`,
   );
   const expected: Record<string, number> = { tests: 12, slowest: 7, coverage: 87.5 };
@@ -716,7 +808,7 @@ metrics:
     const metric = result.metrics[name];
     assert(
       metric?.source === "project" && metric.type === "number" && metric.value === value,
-      `${name} not read from the failed check's output as ${value}: ${JSON.stringify(metric)}`,
+      `${name} not read from the check's output as ${value}: ${JSON.stringify(metric)}`,
     );
   }
   const typed: Record<string, Metric> = {
@@ -834,13 +926,16 @@ writeFileSync(process.env.THRONG_OUTPUT + "/coverage-summary.json", JSON.stringi
 }
 
 /**
- * A task adds a metric over the project's `report` check and a required `smoke` check of its own,
- * which needs the greeting to say who it's from. Both attempts show the task's check and metrics with
- * `source: task`, after the project's; the gate follows `smoke`: passed for a1, failed for a2. Then
- * the task makes `smoke` optional, which rescores the open a2 at the same head: `smoke` still fails,
- * but the gate passes.
+ * A task adds a metric over the project's `report` check and a `smoke` check of its own, which needs
+ * the greeting to say who it's from. Both attempts show the task's check and metrics with
+ * `source: task`, after the project's; the gate follows `smoke`: passed for a1, failed for a2, whose
+ * `smoked` is null as `smoke` failed. Then the task makes `smoke` only report, exiting 0 whatever it
+ * finds, which rescores the open a2 at the same head: `smoke` passes, `smoked` reports false, and the
+ * gate passes.
  */
 const SMOKE = { name: "smoke", command: "node scripts/smoke.js", timeout: "2m" };
+/** `smoke`, only reporting: it writes `smoked` and exits 0. */
+const SMOKE_REPORTS = { ...SMOKE, command: "node scripts/smoke.js || true" };
 
 async function taskchecks(): Promise<void> {
   const timeline = new Timeline();
@@ -856,7 +951,7 @@ process.exit(ok ? 0 : 1);
     ".throng/config.yml": TASK_METRICS_CONFIG,
   });
   const [t1, a1, a2] = ["t1", "t1a1", "t1a2"];
-  const { ref, checks } = await throng<{ ref: string; checks: { name: string; source: string; required: boolean }[] }>(
+  const { ref, checks } = await throng<{ ref: string; checks: { name: string; source: string }[] }>(
     p,
     "POST",
     "/tasks",
@@ -870,7 +965,7 @@ process.exit(ok ? 0 : 1);
     },
   );
   assert(
-    ref === t1 && checks.map((c) => `${c.name}:${c.source}:${String(c.required)}`).join() === "smoke:task:true",
+    ref === t1 && checks.map((c) => `${c.name}:${c.source}`).join() === "smoke:task",
     `unexpected task ${ref}: ${JSON.stringify(checks)}`,
   );
   const fixture = (await git(p.work, "rev-parse", "HEAD")).trim();
@@ -882,15 +977,15 @@ process.exit(ok ? 0 : 1);
   for (const attempt of [a1, a2]) await throng(p, "POST", `/attempts/${attempt}/open`);
   const passed = (await scoredHead(p, a1, passing)).result;
   const failed = (await scoredHead(p, a2, unsigned)).result;
-  for (const [result, gate, outcome, ok] of [
+  for (const [result, gate, outcome, smokedValue] of [
     [passed, "passed", "passed", true],
-    [failed, "failed", "failed", false],
+    [failed, "failed", "failed", null],
   ] as const) {
-    const ran = configChecks(result).map((c) => `${c.name}:${c.source}:${String(c.required)}:${c.outcome}`);
+    const ran = configChecks(result).map((c) => `${c.name}:${c.source}:${c.outcome}`);
     assert(
       result.config.kind === "valid" &&
         result.gate === gate &&
-        ran.join() === `report:project:true:passed,smoke:task:true:${outcome}`,
+        ran.join() === `report:project:passed,smoke:task:${outcome}`,
       `expected the gate to follow smoke (${gate}): ${JSON.stringify({ gate: result.gate, ran, config: result.config })}`,
     );
     const { lines, smoked, smoke } = result.metrics;
@@ -898,7 +993,7 @@ process.exit(ok ? 0 : 1);
       lines?.source === "task" &&
         lines.value === 40 &&
         smoked?.source === "task" &&
-        smoked.value === ok &&
+        smoked.value === smokedValue &&
         smoke?.source === "task" &&
         smoke.value === outcome,
       `expected the task's metrics with source task: ${JSON.stringify(result.metrics)}`,
@@ -906,17 +1001,16 @@ process.exit(ok ? 0 : 1);
   }
   timeline.mark("task check gated");
 
-  await throng(p, "PATCH", `/tasks/${t1}`, { checks: [{ ...SMOKE, required: false }] });
+  await throng(p, "PATCH", `/tasks/${t1}`, { checks: [SMOKE_REPORTS] });
   const rescored = await poll(`${a2}'s rescore under the edited checks`, async () => {
     const s = await throng<ScoringStatus>(p, "GET", `/attempts/${a2}/scoring`);
     assert(s.status !== "errored", `${a2}'s rescore errored`);
     const smoke = s.result?.checks.find((c) => c.name === "smoke");
-    return s.sha === unsigned && s.status === "done" && smoke?.required === false ? (s.result ?? null) : null;
+    return s.sha === unsigned && s.status === "done" && smoke?.outcome === "passed" ? (s.result ?? null) : null;
   });
-  const smoke = rescored.checks.find((c) => c.name === "smoke");
   assert(
-    rescored.gate === "passed" && smoke?.outcome === "failed",
-    `expected the rescore to fail smoke and pass the gate: ${JSON.stringify(rescored)}`,
+    rescored.gate === "passed" && rescored.metrics["smoked"]?.value === false,
+    `expected the rescore to report smoked false and pass the gate: ${JSON.stringify(rescored)}`,
   );
   timeline.mark("edit rescored");
   await finish(p.project, p.work, timeline);
@@ -1014,7 +1108,7 @@ function pick<T, K extends keyof T>(value: T, ...keys: K[]): Pick<T, K> {
   return Object.fromEntries(keys.map((k) => [k, value[k]])) as Pick<T, K>;
 }
 
-/** A required check that fails fails the gate; an optional one that passes doesn't save it. */
+/** A check that fails fails the gate; another that passes doesn't save it. */
 async function failing(): Promise<void> {
   const timeline = new Timeline();
   const { project, work } = await setUpProject(timeline, {
@@ -1023,7 +1117,6 @@ async function failing(): Promise<void> {
     command: grep -q hello src/greeting.js
   - name: test
     command: npm test
-    required: false
 `,
   });
   const fork = await createAttempt(project, "t1a1", timeline);
@@ -1061,41 +1154,29 @@ async function invalid(): Promise<void> {
     `expected the config's error, got ${JSON.stringify(result.config)}`,
   );
   assert(configChecks(result).length === 0, `expected no config checks, got ${JSON.stringify(result.checks)}`);
-  assert(
-    result.checks.find((c) => c.name === "_preview")?.notes.join() === "skipped: the config is invalid",
-    `expected _preview skipped for the invalid config: ${JSON.stringify(result.checks)}`,
-  );
   assert(diffSize(result)[0] === 1, `_diff was not recorded: ${JSON.stringify(result.metrics)}`);
   await finish(project, work, timeline);
 }
 
 /**
- * A project with `preview` configured: once the gate passes, the head is built with
- * `preview.command` and deployed as a Worker Preview under the project's own Worker, `p<projectId>`,
- * so its host label is `<forkName>-p<projectId>`, and its URL serves the built attempt. The build's
- * DELETE on its own Worker is refused, so an attempt can't delete the other attempts' Previews.
+ * A preview is an ordinary check: after `test`, a `preview` check writes its URL (a fake one; nothing
+ * deploys) to `$THRONG_OUTPUT`, and the config declares a `url` metric from it, so the attempt's result
+ * carries the link the web app shows.
  */
 async function preview(): Promise<void> {
   const timeline = new Timeline();
+  const url = "https://t1a1.preview.example.test/";
   const { project, work } = await setUpProject(timeline, {
-    ".throng/config.yml": `${TEST_CHECK}preview:
-  command: node no-delete.mjs && sed -i 's/hello from a1/hello from a1, built/' src/greeting.js
+    "scripts/preview.js": `import { writeFileSync } from "node:fs";
+writeFileSync(process.env.THRONG_OUTPUT + "/out.json", JSON.stringify({ url: ${JSON.stringify(url)} }));
+`,
+    ".throng/config.yml": `${TEST_CHECK}  - name: preview
+    command: node scripts/preview.js
+    after: test
+metrics:
+  - { name: preview_url, from: preview.out.url, type: string, format: url }
 `,
   });
-  const accountId = await cfAccountId();
-  // The build first tries a DELETE under its own Worker, which the proxy must refuse with its own 403
-  // or the build (and so the Preview) fails. It names a secret that doesn't exist, so even a DELETE
-  // that got through would delete nothing.
-  const missing = `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/${previewWorkerName(project)}/secrets/throng-e2e-missing`;
-  const noDelete = `const response = await fetch(${JSON.stringify(missing)}, { method: "DELETE" });
-const body = await response.text();
-if (response.status !== 403 || !body.startsWith("no grant for")) {
-  console.error(\`the DELETE was not refused: \${response.status} \${body}\`);
-  process.exit(1);
-}
-`;
-  await writeFile(join(work, "no-delete.mjs"), noDelete);
-  await git(work, "add", "no-delete.mjs");
   const fork = await createAttempt(project, "t1a1", timeline);
   const sha = await commitAndPush(work, fork, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
   timeline.mark("attempt pushed");
@@ -1103,37 +1184,307 @@ if (response.status !== 403 || !body.startsWith("no grant for")) {
   const result = await scored(project, sha);
   timeline.mark("scored");
   assert(result.gate === "passed", `expected the gate to pass: ${JSON.stringify(result.checks)}`);
-  const check = result.checks.find((c) => c.name === "_preview");
   assert(
-    check?.source === "platform" && check.outcome === "passed" && result.metrics["_preview"]?.value === "passed",
-    `expected _preview to pass, got ${JSON.stringify(check)}`,
+    JSON.stringify(result.checks.map((c) => [c.name, c.outcome])) ===
+      '[["_diff","passed"],["test","passed"],["preview","passed"]]',
+    `expected the preview check to run as an ordinary check, and no _preview: ${JSON.stringify(result.checks)}`,
   );
-  const deployed = result.metrics["_preview.url"];
+  const link = result.metrics["preview_url"];
   assert(
-    deployed?.type === "string" && typeof deployed.value === "string",
-    `expected _preview.url, got ${JSON.stringify(deployed)}`,
+    link?.source === "project" && link.type === "string" && link.format === "url" && link.value === url,
+    `expected preview_url to link to ${url}, got ${JSON.stringify(link)}`,
   );
-  const previewUrl = deployed.value;
-  const label = `${previewName({ project, attempt: "t1a1" })}-${previewWorkerName(project)}`;
-  assert(
-    new URL(previewUrl).hostname.split(".")[0] === label,
-    `the Preview is not ${label}, under the project's own Worker: ${previewUrl}`,
-  );
-  assert(result.logs.includes("preview.deploy"), `expected the Preview's log stored: ${JSON.stringify(result.logs)}`);
-
-  // A new Preview's hostname can take a moment to answer.
-  const url = `${previewUrl}?name=e2e`;
-  const deadline = Date.now() + 2 * 60 * 1000;
-  let last = "";
-  while (Date.now() < deadline) {
-    const response = await fetch(url).catch((error: unknown) => error);
-    last = response instanceof Response ? `${response.status} ${await response.text()}` : String(response);
-    if (last === "200 hello from a1, built, e2e") break;
-    await new Promise((r) => setTimeout(r, 2000));
-  }
-  timeline.mark("preview answered");
-  assert(last === "200 hello from a1, built, e2e", `the Preview at ${url} answered ${last}`);
   await finish(project, work, timeline);
+}
+
+/**
+ * The owner sets a secret allowed in `default`, and an attempt they pushed runs a check naming it: the
+ * check prints a hash of the value, the value and its base64; the stored log has the hash and the mask
+ * where the value and its base64 were. Nothing deploys.
+ */
+async function secrets(): Promise<void> {
+  const timeline = new Timeline();
+  const value = `e2e-secret-${randomBytes(12).toString("hex")}`;
+  const hash = createHash("sha256").update(value).digest("hex");
+  const p = await setUpRealProject(timeline, {
+    "scripts/secret.js": `import { createHash } from "node:crypto";
+const value = process.env.E2E_SECRET ?? "";
+console.log("sha256 " + createHash("sha256").update(value).digest("hex"));
+console.log("value " + value);
+console.log("base64 " + Buffer.from(value).toString("base64"));
+`,
+    ".throng/config.yml": `checks:
+  - { name: secret, command: node scripts/secret.js, secrets: [E2E_SECRET] }
+`,
+  });
+  await throng(p, "PUT", "/secrets/E2E_SECRET", { value, pipelines: ["default"] });
+  timeline.mark("secret set");
+  const fork = await createAttempt(p.project, "t1a1", timeline);
+  const sha = await commitAndPush(p.work, fork, "src/greeting.js", (s) => s.replace('"hello"', '"hello, a1"'), "a1");
+  timeline.mark("attempt pushed");
+
+  const result = await scored(p.project, sha);
+  assert(result.gate === "passed", `expected the check holding the secret to pass: ${JSON.stringify(result.checks)}`);
+  const event = await waitFor(p.project, (e) => e.kind === "scored" && e.detail.sha === sha);
+  const log = await throngText(p, `/runs/${String(event.detail.run)}/logs/secret`, "text/plain");
+  assert(log.includes(`sha256 ${hash}`), `expected the check to have held the secret:\n${log}`);
+  assert(log.includes("value ***\n") && log.includes("base64 ***\n"), `expected the log to show the mask:\n${log}`);
+  const base64 = Buffer.from(value).toString("base64");
+  assert(!log.includes(value) && !log.includes(base64), "expected the stored log never to hold the value");
+  await finish(p.project, p.work, timeline);
+}
+
+/**
+ * A second user's attempt runs a check naming a secret allowed in `default`: its run is untrusted, so it
+ * waits for the owner and holds no slot. Start with a stale sha is refused, as is the owner's token
+ * under an alias and the second user's; the owner's Start at the run's head runs it with the secret,
+ * and the check prints a hash of it. Then the owner's own push to a task the second user gave a check
+ * waits too, naming that check.
+ */
+async function waiting(): Promise<void> {
+  const timeline = new Timeline();
+  const value = `e2e-secret-${randomBytes(12).toString("hex")}`;
+  const hash = createHash("sha256").update(value).digest("hex");
+  const p = await setUpRealProject(timeline, {
+    "scripts/secret.js": `import { createHash } from "node:crypto";
+console.log("sha256 " + createHash("sha256").update(process.env.E2E_SECRET ?? "").digest("hex"));
+`,
+    ".throng/config.yml": `checks:
+  - { name: secret, command: node scripts/secret.js, secrets: [E2E_SECRET] }
+`,
+  });
+  await throng(p, "PUT", "/secrets/E2E_SECRET", { value, pipelines: ["default"] });
+  timeline.mark("secret set");
+  const [reviewer, alias] = await Promise.all([e2eReviewerToken(), e2eAgentToken("claude")]);
+  const theirs: RealProject = { ...p, token: reviewer.token };
+  const aliased: RealProject = { ...p, token: alias.token };
+
+  // The second user's attempt, pushed and opened by them: their code, which no owner pushed.
+  const [t1, a1] = ["t1", "t1a1"];
+  await createTask(p, t1, "Someone else's change");
+  await createAttempts(theirs, t1, [a1], timeline);
+  const head = await editAndPush(theirs, a1, "src/greeting.js", (s) => s.replace('"hello"', '"hello, a1"'), "a1");
+  await throng(theirs, "POST", `/attempts/${a1}/open`);
+  const held = await poll(`${a1}'s run waiting for the owner`, async () => {
+    const { runs } = await throng<{ runs: WaitingRun[] }>(p, "GET", `/runs?line=${a1}&status=waiting`);
+    return runs.find((r) => r.sha === head) ?? null;
+  });
+  timeline.mark(`run ${held.id} waiting`);
+  // It waits from its Workflow's plan step, so it keeps that start time; the running list shows it holds no slot.
+  assert(
+    !held.trusted && held.waiting?.head === head && held.waiting.secrets.includes("E2E_SECRET"),
+    `expected an untrusted run waiting on ${head} for E2E_SECRET: ${JSON.stringify(held)}`,
+  );
+  const { runs: running } = await throng<{ runs: ListedRun[] }>(p, "GET", "/runs?status=running");
+  assert(!running.some((r) => r.id === held.id), "expected the waiting run to hold no slot");
+
+  const start = (as: RealProject, sha: string) =>
+    throng<WaitingRun>(as, "POST", `/runs/${held.id}/start`, { sha }).then(
+      () => 200,
+      (error: unknown) => (error instanceof HttpError ? error.status : Promise.reject(error)),
+    );
+  const stale = await start(p, "0".repeat(40));
+  assert(stale === 409, `expected Start with a stale sha to be refused, got ${stale}`);
+  const underAlias = await start(aliased, head);
+  assert(underAlias === 403, `expected the owner's token under an alias to be refused, got ${underAlias}`);
+  const notOwner = await start(theirs, head);
+  assert(notOwner === 403, `expected the second user to be refused, got ${notOwner}`);
+  timeline.mark("refused: a stale sha, an alias, another user");
+
+  const started = await throng<WaitingRun>(p, "POST", `/runs/${held.id}/start`, { sha: head });
+  assert(started.trusted && started.trigger === "start", `expected a trusted started run: ${JSON.stringify(started)}`);
+  timeline.mark(`owner started run ${held.id}`);
+  const result = await scoredHead(p, a1, head);
+  assert(result.result.run === held.id, `expected run ${held.id} to score ${a1}, got run ${result.result.run}`);
+  assert(result.result.gate === "passed", `expected the started run to pass: ${JSON.stringify(result.result.checks)}`);
+  const log = await throngText(p, `/runs/${held.id}/logs/secret`, "text/plain");
+  assert(log.includes(`sha256 ${hash}`), `expected the started run's check to have held the secret:\n${log}`);
+
+  // The owner's own push to a task whose check the second user wrote: that check could read what a
+  // setup left behind, so the run isn't trusted, and waits, saying why.
+  const [t2, t2a1] = ["t2", "t2a1"];
+  await throng(theirs, "POST", "/tasks", { title: "Their check", checks: [{ name: "lint", command: "true" }] });
+  await createAttempts(p, t2, [t2a1], timeline);
+  const own = await editAndPush(p, t2a1, "src/greeting.js", (s) => s.replace('"hello, a1"', '"hello, t2"'), "t2a1");
+  await throng(p, "POST", `/attempts/${t2a1}/open`);
+  const foreign = await poll(`${t2a1}'s run waiting for the owner`, async () => {
+    const { runs } = await throng<{ runs: WaitingRun[] }>(p, "GET", `/runs?line=${t2a1}&status=waiting`);
+    return runs.find((r) => r.sha === own) ?? null;
+  });
+  assert(
+    !foreign.trusted && foreign.waiting?.taskCheck?.name === "lint",
+    `expected the owner's push running their task check to wait, naming it: ${JSON.stringify(foreign)}`,
+  );
+  timeline.mark(`run ${foreign.id} waiting on ${t2}'s check by ${foreign.waiting.taskCheck.writtenBy.handle}`);
+  await finish(p.project, p.work, timeline);
+}
+
+/**
+ * A trusted `main` run saves a cache; the next attempt's run restores it and saves nothing. The
+ * cache's setup writes a stamp into the cache's path only when it's missing, and a check prints it,
+ * so the attempt's check shows the stamp `main`'s run wrote.
+ */
+async function caches(): Promise<void> {
+  const timeline = new Timeline();
+  const p = await setUpRealProject(timeline, {
+    "cache-key.txt": "v1\n",
+    ".throng/config.yml": `caches:
+  stamp: { path: ~/.cache/e2e-stamp, key: cache-key.txt }
+setup:
+  - name: stamp
+    command: test -f ~/.cache/e2e-stamp/run || { mkdir -p ~/.cache/e2e-stamp && echo "$THRONG_LINE/$THRONG_RUN" > ~/.cache/e2e-stamp/run; }
+    caches: [stamp]
+checks:
+  - { name: stamped, command: cat ~/.cache/e2e-stamp/run }
+`,
+  });
+  const notesOf = async (id: number, step: string) => {
+    const detail = await throng<ListedRun & RunOutcome>(p, "GET", `/runs/${id}`);
+    return detail.outcome?.steps.find((s) => s.name === step)?.notes ?? [];
+  };
+
+  // An attempt lands: its landing is the `main` run, trusted as the owner approved it, and saves.
+  const [t1, a1] = ["t1", "t1a1"];
+  await createTask(p, t1, "Land a change");
+  await createAttempts(p, t1, [a1], timeline);
+  const head = await editAndPush(p, a1, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
+  await throng(p, "POST", `/attempts/${a1}/open`);
+  const first = await scoredHead(p, a1, head);
+  const firstNotes = await notesOf(first.result.run, "stamp");
+  assert(
+    firstNotes.includes("cache stamp: miss") && !firstNotes.some((n) => n.includes("saved for")),
+    `expected the first attempt run to miss and save nothing: ${JSON.stringify(firstNotes)}`,
+  );
+  await throng(p, "POST", `/tasks/${t1}/selection`, { attempt: a1 });
+  const landed = await mergedSha(p, t1);
+  timeline.mark("t1 landed");
+  const mainRun = await poll("main's run of the landing", async () => {
+    const { runs } = await throng<{ runs: ListedRun[] }>(p, "GET", "/runs?line=main&status=done");
+    return runs.find((r) => r.sha === landed) ?? null;
+  });
+  const mainNotes = await notesOf(mainRun.id, "stamp");
+  assert(
+    mainNotes.some((n) => n.startsWith("cache stamp: saved for main")),
+    `expected main's run to save the cache: ${JSON.stringify(mainNotes)}`,
+  );
+  timeline.mark("main saved the cache");
+
+  // The next attempt, forked from the new main, restores main's entry and saves nothing.
+  const [t2, a2] = ["t2", "t2a1"];
+  await createTask(p, t2, "Use the cache");
+  await createAttempts(p, t2, [a2], timeline);
+  await fetchMain(p);
+  await git(p.work, "reset", "-q", "--hard", landed);
+  const next = await editAndPush(p, a2, "src/greeting.js", (s) => s.replace("from a1", "from a2"), "a2");
+  await throng(p, "POST", `/attempts/${a2}/open`);
+  const second = await scoredHead(p, a2, next);
+  assert(second.result.gate === "passed", `expected the attempt to pass: ${JSON.stringify(second.result.checks)}`);
+  const secondNotes = await notesOf(second.result.run, "stamp");
+  assert(
+    secondNotes.some((n) => n.startsWith("cache stamp: hit, main's entry restored")) &&
+      !secondNotes.some((n) => n.includes("saved for")),
+    `expected the attempt to restore main's entry and save nothing: ${JSON.stringify(secondNotes)}`,
+  );
+  const stamped = await throngText(p, `/runs/${second.result.run}/logs/stamped`, "text/plain");
+  assert(stamped.startsWith(`main/${mainRun.id}\n`), `expected main's stamp in the attempt's check:\n${stamped}`);
+  await finish(p.project, p.work, timeline);
+}
+
+/**
+ * A pipeline with two setups and three checks: `test` waits for `lint` with `after`, both in the
+ * `verify` group that `main` runs, and `extra` in a group it doesn't. The owner sets a secret allowed
+ * only in `main`, and a post-gate step of `main` names it. An attempt is opened, selected and landed
+ * by the owner. Its `default` run ran `test` after `lint`; the landing's `main` run merges, runs the
+ * setups and `verify`'s checks only, lands, then runs the step, which writes a hash of the secret to
+ * its log, where the value shows only as the mask. The landed sha is `main`'s.
+ */
+async function pipeline(): Promise<void> {
+  const timeline = new Timeline();
+  const value = `e2e-secret-${randomBytes(12).toString("hex")}`;
+  const hash = createHash("sha256").update(value).digest("hex");
+  const p = await setUpRealProject(timeline, {
+    "scripts/secret.js": `import { createHash } from "node:crypto";
+const value = process.env.E2E_SECRET ?? "";
+if (process.env.THRONG_PIPELINE !== "main") throw new Error("not main's pipeline");
+console.log("sha256 " + createHash("sha256").update(value).digest("hex"));
+console.log("value " + value);
+`,
+    ".throng/config.yml": `setup:
+  - { name: tools, command: node --version }
+  - { name: deps, command: npm --version }
+checks:
+  - { name: lint, command: "sleep 5; echo ended $(date +%s%3N)", group: verify }
+  - { name: test, command: "echo started $(date +%s%3N)", group: verify, after: lint }
+  - { name: extra, command: "true", group: extra }
+pipelines:
+  main:
+    groups: [verify]
+    steps:
+      - { name: deploy, command: node scripts/secret.js, secrets: [E2E_SECRET] }
+`,
+  });
+  await throng(p, "PUT", "/secrets/E2E_SECRET", { value, pipelines: ["main"] });
+  timeline.mark("secret set");
+
+  const [t1, a1] = ["t1", "t1a1"];
+  await createTask(p, t1, "Deploy a change");
+  await createAttempts(p, t1, [a1], timeline);
+  const head = await editAndPush(p, a1, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
+  await throng(p, "POST", `/attempts/${a1}/open`);
+  const attempt = await scoredHead(p, a1, head);
+  assert(attempt.result.gate === "passed", `expected the attempt to pass: ${JSON.stringify(attempt.result.checks)}`);
+  const logOf = (id: number, log: string) => throngText(p, `/runs/${id}/logs/${log}`, "text/plain");
+  const ended = loggedTime(await logOf(attempt.result.run, "lint"), "ended");
+  const started = loggedTime(await logOf(attempt.result.run, "test"), "started");
+  assert(started >= ended, `expected test to start after lint ended: ${started} < ${ended}`);
+  const attemptRun = await throng<ListedRun & RunOutcome>(p, "GET", `/runs/${attempt.result.run}`);
+  const attemptSteps = attemptRun.outcome?.steps ?? [];
+  assert(
+    attemptSteps.find((s) => s.name === "extra")?.outcome === "passed",
+    `expected the attempt to run every check, extra included: ${JSON.stringify(attemptSteps.map((s) => s.name))}`,
+  );
+
+  await throng(p, "POST", `/tasks/${t1}/selection`, { attempt: a1 });
+  const landed = await mergedSha(p, t1);
+  timeline.mark("t1 landed");
+  const mainRun = await poll("main's run of the landing", async () => {
+    const { runs } = await throng<{ runs: ListedRun[] }>(p, "GET", "/runs?line=main&status=done");
+    return runs.find((r) => r.sha === landed) ?? null;
+  });
+  const detail = await throng<ListedRun & RunOutcome>(p, "GET", `/runs/${mainRun.id}`);
+  const steps = detail.outcome?.steps.map((s) => [s.name, s.kind, s.outcome]) ?? [];
+  assert(
+    isDeepStrictEqual(steps, [
+      ["_diff", "check", "passed"],
+      ["merge", "step", "passed"],
+      ["tools", "setup", "passed"],
+      ["deps", "setup", "passed"],
+      ["lint", "check", "passed"],
+      ["test", "check", "passed"],
+      ["land", "step", "passed"],
+      ["deploy", "step", "passed"],
+    ]),
+    `unexpected main run steps ${JSON.stringify(steps)}`,
+  );
+  const deployLog = detail.outcome?.steps.find((s) => s.name === "deploy")?.log ?? null;
+  assert(deployLog !== null, "expected the post-gate step to store its log");
+  const log = await logOf(mainRun.id, deployLog);
+  assert(log.includes(`sha256 ${hash}`), `expected the post-gate step to have held the secret:\n${log}`);
+  assert(log.includes("value ***\n") && !log.includes(value), `expected the log to show only the mask:\n${log}`);
+
+  assert(
+    detail.outcome?.landed?.kind === "landed" && detail.outcome.landed.sha === landed,
+    `expected the run to have landed ${landed}: ${JSON.stringify(detail.outcome?.landed)}`,
+  );
+  await fetchMain(p);
+  const onMain = (await git(p.work, "rev-parse", "FETCH_HEAD")).trim();
+  assert(onMain === landed, `expected main at the landed sha ${landed}, got ${onMain}`);
+  await finish(p.project, p.work, timeline);
+}
+
+/** The time a check logged on a line `<word> <ms>`; NaN when it logged none. */
+function loggedTime(log: string, word: string): number {
+  return Number(new RegExp(`^${word} (\\d+)$`, "mu").exec(log)?.[1] ?? Number.NaN);
 }
 
 /** Two quick pushes to one attempt: the first run is cancelled; only the newest sha is scored. */
@@ -1151,7 +1502,7 @@ async function coalesce(): Promise<void> {
   const first = await commitAndPush(work, fork, "src/greeting.js", (s) => s.replace('"hello"', '"hi"'), "a1: first");
   timeline.mark("first push");
   // Wait until the first check is running, so the second push has something to cancel.
-  await waitFor(project, (e) => e.kind === "scoringStarted" && e.detail.sha === first);
+  await waitFor(project, (e) => e.kind === "runStarted" && e.detail.sha === first);
   timeline.mark("first check started");
   const second = await commitAndPush(
     work,
@@ -1167,7 +1518,7 @@ async function coalesce(): Promise<void> {
   assert(!journal.some((e) => e.kind === "scored" && e.detail.sha === first), "the superseded sha was scored");
   assert(!journal.some((e) => e.kind === "mainAdvanced" && e.detail.head === first), "the superseded sha landed");
   assert(
-    journal.some((e) => e.kind === "scoringCancelled" && e.detail.sha === first),
+    journal.some((e) => e.kind === "runCancelled" && e.detail.sha === first),
     "the first run was not cancelled",
   );
   report(timeline, journal);
@@ -1176,13 +1527,13 @@ async function coalesce(): Promise<void> {
 
 /**
  * The attempt's own test tries to push a forged commit to the origin's main and to reach the
- * Cloudflare API. The test passes only if both are blocked, so a leak fails the gate.
+ * Cloudflare API, which the config's `network.allow` doesn't list. The test passes only if both are
+ * blocked, so a leak fails the gate.
  */
 async function intrusion(): Promise<void> {
   const timeline = new Timeline();
   const { project, work } = await setUpProject(timeline, { ".throng/config.yml": TEST_CHECK });
   const origin = (await git(work, "remote", "get-url", "origin")).trim();
-  const accountId = await cfAccountId();
   const fork = await createAttempt(project, "t1a1", timeline);
 
   const probe = `import assert from "node:assert/strict";
@@ -1198,7 +1549,7 @@ test("cannot push to the origin", () => {
 });
 
 test("cannot reach the Cloudflare API", async () => {
-  const url = "https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/${previewWorkerName(project)}";
+  const url = "https://api.cloudflare.com/client/v4/user/tokens/verify";
   const status = await fetch(url, { signal: AbortSignal.timeout(5_000) }).then((r) => r.status, () => "blocked");
   assert.notEqual(status, 200);
 });
@@ -1215,13 +1566,25 @@ test("cannot reach the Cloudflare API", async () => {
   await finish(project, work, timeline);
 }
 
-/** An attempt adds an npm dependency: setup installs it from the registry and the checks use it. */
+/**
+ * An attempt adds an npm dependency: a named setup installs it from the registry, and the checks,
+ * each in its own container started from the setup's snapshot, use it without installing it again.
+ * `context` waits for `test` with `after`, and checks the run's THRONG_* variables reached it.
+ */
 async function deps(): Promise<void> {
   const timeline = new Timeline();
   const { project, work } = await setUpProject(timeline, {
+    "scripts/context.js": `const want = ["THRONG_PROJECT", "THRONG_PIPELINE", "THRONG_LINE", "THRONG_SHA", "THRONG_RUN"];
+const missing = want.filter((name) => !process.env[name]);
+if (missing.length > 0) throw new Error("missing " + missing.join(", "));
+if (process.env.THRONG_PIPELINE !== "default" || process.env.THRONG_LINE !== "t1a1") throw new Error("wrong run context");
+`,
     ".throng/config.yml": `setup:
-  - npm ci --ignore-scripts --no-audit --no-fund
-${TEST_CHECK}`,
+  - { name: deps, command: npm ci --ignore-scripts --no-audit --no-fund }
+${TEST_CHECK}  - name: context
+    command: test -d node_modules/is-number && node scripts/context.js
+    after: test
+`,
   });
   const fork = await createAttempt(project, "t1a1", timeline);
 
@@ -1256,6 +1619,11 @@ test("the dependency is installed", () => {
   assert(
     result.gate === "passed",
     `expected the dependency to install and the tests to pass: ${JSON.stringify(result.checks)}`,
+  );
+  assert(
+    JSON.stringify(result.checks.map((c) => [c.name, c.outcome])) ===
+      '[["_diff","passed"],["test","passed"],["context","passed"]]',
+    `expected context to run after test, with the run's context: ${JSON.stringify(result.checks)}`,
   );
   await finish(project, work, timeline);
 }
@@ -1445,7 +1813,7 @@ async function refs(): Promise<void> {
   // Archive pushes are internal: neither project queued any scoring.
   for (const project of [a.project, b.project]) {
     const kinds = new Set((await settle(project, 5000)).map((e) => e.kind));
-    assert(!kinds.has("scoringQueued"), `${project} queued scoring on an archive push`);
+    assert(!kinds.has("runQueued"), `${project} queued scoring on an archive push`);
   }
   timeline.print();
   await cleanUp(a.project, a.work);
@@ -1457,13 +1825,6 @@ async function lsRemote(work: string, remote: Grant, ref: string): Promise<strin
   const listed = await git(work, ...auth(remote.token), "ls-remote", remote.remote, ref);
   const line = listed.split("\n").find((l) => l.endsWith(`\t${ref}`));
   return line?.split("\t")[0] ?? null;
-}
-
-/** The Cloudflare account the deployed platform Worker uses, from `wrangler.jsonc`. */
-async function cfAccountId(): Promise<string> {
-  const accountId = /"CF_ACCOUNT_ID":\s*"(\w+)"/u.exec(await readFile(WRANGLER_CONFIG, "utf8"))?.[1];
-  assert(accountId !== undefined, "CF_ACCOUNT_ID not found in wrangler.jsonc");
-  return accountId;
 }
 
 /** A new project whose origin's `main` is the fixture plus `files` (a config, helper scripts). */
@@ -1523,17 +1884,14 @@ async function commitAndPush(
 function report(timeline: Timeline, journal: JournalEntry[]): void {
   console.log("timeline:");
   timeline.print();
-  const cancelled = journal.filter((e) => e.kind === "scoringCancelled");
+  const cancelled = journal.filter((e) => e.kind === "runCancelled");
   console.log(`cancelled runs: ${cancelled.length}`);
   for (const d of cancelled) console.log(`  ${JSON.stringify(d.detail)}`);
 }
 
 /** Waits for `sha`'s run to finish and returns its result; an errored run fails the scenario. */
 async function scored(project: string, sha: string): Promise<NonNullable<Run["result"]>> {
-  const event = await waitFor(
-    project,
-    (e) => (e.kind === "scored" || e.kind === "scoringErrored") && e.detail.sha === sha,
-  );
+  const event = await waitFor(project, (e) => (e.kind === "scored" || e.kind === "runErrored") && e.detail.sha === sha);
   const found = await api<Run>("GET", `/e2e/projects/${project}/runs/${String(event.detail.run)}`);
   const { result } = found;
   assert(found.status === "done" && result !== null, `run ${found.id} ended ${found.status}: ${found.error ?? ""}`);
@@ -1577,6 +1935,13 @@ function e2eAgentToken(alias: string, as?: "reviewer"): Promise<MintedToken> {
   const query = new URLSearchParams({ alias, ...(as === undefined ? {} : { as }) });
   // A repeat mints a second token, which expires unused with the e2e tokens' TTL.
   const minted = api<MintedToken>("POST", `/e2e/token?${query}`, { retry: true });
+  e2eAgentTokens.push(minted);
+  return minted;
+}
+
+/** Mints a Throng token for the reviewer acting as themselves: a second user, who isn't the projects' owner. */
+function e2eReviewerToken(): Promise<MintedToken> {
+  const minted = api<MintedToken>("POST", "/e2e/token?as=reviewer", { retry: true });
   e2eAgentTokens.push(minted);
   return minted;
 }
@@ -1819,7 +2184,7 @@ async function waitFor(project: string, match: (e: JournalEntry) => boolean): Pr
   throw new Error(`timed out waiting on ${project}'s journal`);
 }
 
-/** Deletes everything the project made: its rows, its Durable Object's storage, its logs, its repos and its preview Worker. */
+/** Deletes everything the project made: its rows, its Durable Object's storage, its logs and its repos. */
 async function cleanUp(project: string, work: string): Promise<void> {
   if (process.env.E2E_KEEP === "1") return;
   await api("DELETE", `/e2e/projects/${project}`).catch((error) => console.warn(`could not delete ${project}`, error));

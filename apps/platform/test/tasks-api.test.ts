@@ -7,7 +7,6 @@ import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
 import { at } from "./support/defined.ts";
 import type { Json } from "./support/json.ts";
-import { FakePreviewWorkers } from "./support/preview-workers.ts";
 import { testTaskBackends } from "./support/task-backend.ts";
 
 /** Access sessions are `as:<email>`. */
@@ -26,7 +25,6 @@ async function setup() {
     verifierFor: () => verify,
     now,
     repos: () => repos,
-    previewWorkers: () => new FakePreviewWorkers(),
     tasks: () => backend,
   };
   const api = apiRoutes(options);
@@ -281,15 +279,29 @@ describe("task checks", () => {
     const { call, ada, bob, base } = await withConfig();
     const created = await call("POST", `${base}/tasks`, ada, { title: "a", checks: [SMOKE], metrics: [SMOKED] });
     expect(created.status).toBe(201);
-    const smoke = { name: "smoke", command: "./smoke.sh", required: true, timeoutMs: 120_000, source: "task" };
+    const smoke = {
+      name: "smoke",
+      command: "./smoke.sh",
+      timeoutMs: 120_000,
+      after: [],
+      secrets: [],
+      group: null,
+      caches: [],
+      source: "task",
+    };
     expect(created.body["checks"]).toEqual([smoke]);
     expect(created.body["metrics"]).toEqual([{ ...SMOKED, order: "desc", source: "task" }]);
     expect((await call("GET", `${base}/tasks/t1`, bob)).body["checks"]).toEqual([smoke]);
 
-    const optional = await call("PATCH", `${base}/tasks/t1`, ada, { checks: [{ ...SMOKE, required: false }] });
-    expect(optional.status).toBe(200);
-    expect(optional.body["checks"]).toEqual([{ ...smoke, required: false }]);
-    expect(optional.body["metrics"]).toHaveLength(1);
+    const edited = await call("PATCH", `${base}/tasks/t1`, ada, { checks: [{ ...SMOKE, timeout: "5m" }] });
+    expect(edited.status).toBe(200);
+    expect(edited.body["checks"]).toEqual([{ ...smoke, timeoutMs: 300_000 }]);
+    expect(edited.body["metrics"]).toHaveLength(1);
+    const required = await call("PATCH", `${base}/tasks/t1`, ada, { checks: [{ ...SMOKE, required: false }] });
+    expect(required.status).toBe(400);
+    expect(JSON.stringify(required.body)).toContain(
+      "checks[0].required: required is gone: every check that runs must pass; to report without blocking, exit 0 and write a metric",
+    );
     expect((await call("POST", `${base}/tasks`, ada, { title: "b" })).body["checks"]).toEqual([]);
   });
 
@@ -462,15 +474,21 @@ describe("attempt routes", () => {
       reason: null,
       run: {
         id: 1,
-        ref: "t1a1",
+        line: "t1a1",
+        pipeline: "default",
         sha: head,
         trigger: "scoreNow",
         status: "queued",
+        trusted: false,
         requestedBy: { id: expect.any(String), handle: "ada" },
         alias: "claude",
         createdAt: "2026-10-10T12:00:00.000Z",
         startedAt: null,
         finishedAt: null,
+        superseded: false,
+        gate: null,
+        cancellable: true,
+        waiting: null,
       },
     });
     expect((await call("POST", `${a}/score`, ada)).body).toMatchObject({ queued: false, reason: "already queued" });
@@ -616,8 +634,8 @@ describe("merge request routes", () => {
     expect((await call("GET", `${base}/merge-queue`, bob)).body).toEqual({ queue: [] });
 
     const tasks = store(project["id"]);
-    await tasks.scoring.drain();
-    const run = at(tasks.scoring.listRuns({ task: 1, attempt: 2 }), -1);
+    await tasks.runs.drain();
+    const run = at(tasks.runs.listRuns("t1a2"), -1);
     tasks.scoringFinished(run.id, {
       status: "done",
       result: {
@@ -643,8 +661,8 @@ describe("the task list's summaries", () => {
   /** Finishes the latest run of t1's attempt `attempt` with `gate`. */
   async function finish(env: Env, attempt: number, gate: "passed" | "failed") {
     const tasks = env.store(env.project["id"]);
-    await tasks.scoring.drain();
-    const run = at(tasks.scoring.listRuns({ task: 1, attempt }), -1);
+    await tasks.runs.drain();
+    const run = at(tasks.runs.listRuns(`t1a${attempt}`), -1);
     tasks.scoringFinished(run.id, {
       status: "done",
       result: {
@@ -692,7 +710,6 @@ describe("over throng-web's service binding", () => {
       verifierFor: () => verify,
       now,
       repos: () => repos,
-      previewWorkers: () => new FakePreviewWorkers(),
       tasks: () => backend,
     });
     const env = { DB: testDatabase(), ACCESS_TEAM_DOMAIN: "throng.cloudflareaccess.com", ACCESS_AUD: "aud" };
@@ -722,6 +739,6 @@ describe("over throng-web's service binding", () => {
     expect((await callAs("POST", `${base}/attempts/t1a1/score`, "bob@example.com")).status).toBe(403);
     const scored = await callAs("POST", `${base}/attempts/t1a1/score`, "ada@example.com");
     expect(scored.status).toBe(200);
-    expect(scored.body).toMatchObject({ queued: true, run: { ref: "t1a1", trigger: "scoreNow", alias: null } });
+    expect(scored.body).toMatchObject({ queued: true, run: { line: "t1a1", trigger: "scoreNow", alias: null } });
   });
 });

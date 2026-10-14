@@ -5,14 +5,14 @@ import { apiRoutes } from "../src/api.ts";
 import type { ApiRoutes } from "../src/api.ts";
 import { parseConfig } from "../src/config.ts";
 import type { FollowParams } from "../src/follows.ts";
-import { buildResult, withPreview } from "../src/results.ts";
+import { buildResult } from "../src/results.ts";
 import type { LegacyResult, ScoringResult } from "../src/results.ts";
+import { runReport } from "../src/scoring.ts";
 import type { ScoringOutcome } from "../src/scoring.ts";
 import type { User } from "../src/users.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
 import type { Json } from "./support/json.ts";
-import { FakePreviewWorkers } from "./support/preview-workers.ts";
 import { testTaskBackends } from "./support/task-backend.ts";
 
 /** Access sessions are `as:<email>`. */
@@ -26,14 +26,12 @@ const CONFIG = parseConfig(`checks:
     command: npm test
   - name: bundle
     command: npm run size
-    required: false
 metrics:
   - { name: coverage, from: test.coverage.pct, type: number, unit: "%" }
   - { name: bundle_kb, from: bundle.size.kb, type: number, order: asc }
-preview: {}
 `);
 
-/** A run's result as the Workflow builds it: two checks with a metric each, and a deployed Preview. */
+/** A run's result as the Workflow builds it: two checks with a metric each. */
 function result(overrides: Partial<ScoringResult> = {}): ScoringResult {
   const scored = buildResult(CONFIG, {
     base: "b".repeat(40),
@@ -42,10 +40,10 @@ function result(overrides: Partial<ScoringResult> = {}): ScoringResult {
     setupFailed: null,
     checks: [
       { exit: 0, durationMs: 900, metrics: { coverage: { value: 81.5 } } },
-      { exit: 1, durationMs: 300, metrics: { bundle_kb: { value: 120 } } },
+      { exit: 0, durationMs: 300, metrics: { bundle_kb: { value: 120 } } },
     ],
   });
-  return { ...withPreview(scored, { ok: true, url: "https://t1a1.preview.test" }, 40), ...overrides };
+  return { ...scored, ...overrides };
 }
 
 async function setup() {
@@ -59,12 +57,11 @@ async function setup() {
   };
   const followed: FollowParams[] = [];
   const follow = { workflow: { create: async ({ params }: { params: FollowParams }) => followed.push(params) } };
-  const { backend, store } = testTaskBackends(repos, now, runner, undefined, follow);
+  const { backend, store, sql } = testTaskBackends(repos, now, runner, follow);
   const api = apiRoutes({
     verifierFor: () => verify,
     now,
     repos: () => repos,
-    previewWorkers: () => new FakePreviewWorkers(),
     tasks: () => backend,
   });
   const env = { DB: testDatabase(), ACCESS_TEAM_DOMAIN: "throng.cloudflareaccess.com", ACCESS_AUD: "aud" };
@@ -89,7 +86,7 @@ async function setup() {
   const projectId = (await call("POST", "/projects", greg, { handle: "throng" })).body["id"] as string;
   const root = repos.commit(`${projectId}-main`, { files: { "README.md": "hi\n" } }).hash;
   const base = "/projects/greg/throng";
-  const scoring = () => store(projectId).scoring;
+  const scoring = () => store(projectId).runs;
 
   /** A task by ada with `count` draft attempts by ada. */
   const drafts = async (count = 1) => {
@@ -116,7 +113,7 @@ async function setup() {
   /** Starts queued runs, then reports how run `id` ended. */
   const finish = async (id: number, outcome: ScoringOutcome) => {
     await scoring().drain();
-    expect(scoring().finish(id, outcome)).toBeTruthy();
+    expect(scoring().finish(id, runReport(outcome))).toBeTruthy();
   };
 
   /** Marks ada's attempt needs update: the task branch moves and its follow conflicts. */
@@ -134,6 +131,7 @@ async function setup() {
   };
   return {
     api,
+    sql: () => sql(projectId),
     env,
     repos,
     projectId,
@@ -281,8 +279,7 @@ describe("the arena", () => {
     expect((current["checks"] as Json[]).map((c) => [c["name"], c["source"], c["outcome"]])).toEqual([
       ["_diff", "platform", "passed"],
       ["test", "project", "passed"],
-      ["bundle", "project", "failed"],
-      ["_preview", "platform", "passed"],
+      ["bundle", "project", "passed"],
     ]);
     expect(current["metrics"]).toEqual({
       _diff: { source: "platform", type: "enum", value: "passed", values: OUTCOMES },
@@ -291,15 +288,13 @@ describe("the arena", () => {
       "_diff.deletions": { source: "platform", type: "number", value: 0, order: "asc" },
       test: { source: "project", type: "enum", value: "passed", values: OUTCOMES },
       coverage: { source: "project", type: "number", value: 81.5, order: "desc", unit: "%" },
-      bundle: { source: "project", type: "enum", value: "failed", values: OUTCOMES },
+      bundle: { source: "project", type: "enum", value: "passed", values: OUTCOMES },
       bundle_kb: { source: "project", type: "number", value: 120, order: "asc" },
-      _preview: { source: "platform", type: "enum", value: "passed", values: OUTCOMES },
-      "_preview.url": { source: "platform", type: "string", format: "url", value: "https://t1a1.preview.test" },
     });
   });
 
-  it("answers in the current shape for a result stored with builtin and preview", async () => {
-    const { call, ada, base, drafts, commit, finish } = await setup();
+  it("answers in the current shape for a result stored with builtin and preview, dropping the preview", async () => {
+    const { call, ada, base, drafts, commit, sql } = await setup();
     await drafts();
     commit("t1a1", "one\n");
     await call("POST", `${base}/attempts/t1a1/score`, ada);
@@ -314,18 +309,20 @@ describe("the arena", () => {
       preview: { status: "failed" },
       logs: ["test"],
     };
-    await finish(1, { status: "done", result: legacy as unknown as ScoringResult });
+    // As a run stored it before upgrades: only old rows hold this shape.
+    sql().exec("UPDATE pipeline_runs SET status = 'done', outcome = ? WHERE id = 1", JSON.stringify(legacy));
 
     const run = (await call("GET", `${base}/runs/1`, ada)).body["result"] as Json;
     expect(run).not.toHaveProperty("builtin");
     expect(run).toMatchObject({
-      checks: [{ name: "_diff" }, { name: "test", source: "project" }, { name: "_preview", outcome: "failed" }],
+      checks: [{ name: "_diff" }, { name: "test", source: "project" }],
       metrics: {
         "_diff.additions": { value: 5 },
         coverage: { source: "project", type: "number", value: 80 },
-        "_preview.url": { value: null },
       },
     });
+    expect(run["checks"]).toHaveLength(2);
+    expect(Object.keys(run["metrics"] as Json)).not.toContain("_preview.url");
   });
 
   it("derives each active attempt's base from its current head: the task branch when the task has one", async () => {
@@ -472,17 +469,23 @@ describe("scoring runs", () => {
     expect(one.status).toBe(200);
     expect(one.body).toEqual({
       id: 1,
-      ref: "t1a1",
+      line: "t1a1",
+      pipeline: "default",
       sha: first,
       trigger: "open",
       status: "done",
+      trusted: false,
       requestedBy: { id: expect.any(String), handle: "ada" },
       alias: null,
       createdAt: "2026-10-10T12:00:00.000Z",
       startedAt: "2026-10-10T12:00:00.000Z",
       finishedAt: "2026-10-10T12:00:00.000Z",
       superseded: true,
+      gate: "passed",
+      cancellable: false,
+      waiting: null,
       error: null,
+      outcome: expect.objectContaining({ gate: "passed" }),
       result: result(),
     });
     expect(list.body["runs"][2]).toEqual(one.body);

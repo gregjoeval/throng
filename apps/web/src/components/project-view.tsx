@@ -7,24 +7,30 @@ import type { ReactNode } from "react";
 import { RefSwitcher } from "@/components/ref-switcher";
 import { ErrorState, Loading } from "@/components/states";
 import { projectQuery } from "@/lib/api";
+import { useIsOwner } from "@/lib/owner";
 import { attemptHint, buildPath, splitPath } from "@/lib/paths";
 import type { BrowseLocation, ProjectLocation } from "@/lib/paths";
 import { cn } from "@/lib/utils";
 
 /** The header tab each view sits under. */
-const SECTIONS: Record<ProjectLocation["view"], "code" | "commits" | "tasks"> = {
+const SECTIONS: Record<ProjectLocation["view"], "code" | "commits" | "tasks" | "runs" | "settings"> = {
   home: "code",
   tree: "code",
   blob: "code",
   raw: "code",
   commits: "commits",
   commit: "commits",
+  compare: "commits",
   tasks: "tasks",
   task: "tasks",
+  runs: "runs",
+  run: "runs",
+  settings: "settings",
 };
 
 export function ProjectView({ location, children }: { location: ProjectLocation; children: ReactNode }) {
   const project = useQuery(projectQuery({ owner: location.owner, project: location.project }));
+  const isOwner = useIsOwner({ owner: location.owner, project: location.project });
   const { owner } = location;
   const ref = "ref" in location ? location.ref : "main";
   const home = buildPath({ view: "home", owner, project: location.project });
@@ -53,6 +59,14 @@ export function ProjectView({ location, children }: { location: ProjectLocation;
           <Tab to={buildPath({ view: "tasks", owner, project: location.project })} active={section === "tasks"}>
             Tasks
           </Tab>
+          <Tab to={buildPath({ view: "runs", owner, project: location.project })} active={section === "runs"}>
+            Runs
+          </Tab>
+          {isOwner && (
+            <Tab to={buildPath({ view: "settings", owner, project: location.project })} active={section === "settings"}>
+              Settings
+            </Tab>
+          )}
         </nav>
         {source === null ? null : (
           <p className="text-sm text-muted-foreground">

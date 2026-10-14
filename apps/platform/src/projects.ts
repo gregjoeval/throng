@@ -7,7 +7,6 @@
 import { ServiceError } from "./errors.ts";
 import { checkSourceUrl, importError, resolveSource } from "./import-source.ts";
 import type { SourceUrl } from "./import-source.ts";
-import type { PreviewWorkers } from "./preview-workers.ts";
 import { artifactsErrorCode, originRepo, stagingRepo } from "./repos.ts";
 import type { Repos } from "./repos.ts";
 import type { Actor } from "./tokens.ts";
@@ -40,8 +39,6 @@ interface ResolvedSource {
 export interface ProjectDeps {
   db: Database;
   repos: Repos;
-  /** Each project's own preview Worker, created with the project. */
-  previewWorkers: PreviewWorkers;
   /** Asks a source's host for its default branch; the global `fetch` by default. */
   fetch?: typeof fetch | undefined;
   /** Draws a project id; tests pass their own to force collisions. */
@@ -108,15 +105,14 @@ export async function projectsById(db: Database, ids: readonly string[]): Promis
 export function projectService({
   db,
   repos,
-  previewWorkers,
   fetch: fetcher = (input, init) => fetch(input, init),
   newId = randomProjectId,
 }: ProjectDeps) {
   return {
     /**
-     * Creates a project owned by the actor's user, its origin repo with `main` as the default branch,
-     * and its preview Worker. Both are created before the row, so a failure creating either leaves no
-     * project behind. With a `source`, the origin starts as a copy of the source's default branch,
+     * Creates a project owned by the actor's user and its origin repo with `main` as the default
+     * branch. The repo is created before the row, so a failure creating either leaves no project behind.
+     * With a `source`, the origin starts as a copy of the source's default branch,
      * renamed `main`, with its full history. The copy is made once, inline, and never refreshed.
      */
     async create(actor: Actor, input: { handle: string; source?: { url: string } | undefined }): Promise<Project> {
@@ -131,10 +127,7 @@ export function projectService({
       const url = source?.url ?? null;
       const id = await createOrigin(db, repos, newId, source);
       let row: ProjectRow | null;
-      // Only a Worker this call made is rolled back: one already there may be another environment's.
-      let createdWorker = false;
       try {
-        createdWorker = await previewWorkers.ensure(id);
         row = await db
           .prepare(
             `INSERT INTO projects (id, owner_id, handle, source) VALUES (?, ?, ?, ?)
@@ -145,11 +138,6 @@ export function projectService({
         if (row === null) throw new Error("project insert returned no row");
       } catch (error) {
         await deleteOrphan(repos, originRepo(id));
-        if (createdWorker) {
-          await previewWorkers.delete(id).catch((deleteError: unknown) => {
-            console.error({ event: "project.orphan_preview_worker", project: id, error: String(deleteError) });
-          });
-        }
         // Another request took the handle between the check and the insert.
         if (/UNIQUE constraint failed: projects\.(owner_id|handle)/u.test(String(error))) {
           throw duplicate(owner.handle, input.handle);

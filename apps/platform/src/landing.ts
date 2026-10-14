@@ -1,11 +1,11 @@
-// The Landing Workflow's pure parts: what it is started with, what it reports, and the merge
-// commit it makes. See the merge queue spec's "Landing" section.
+// A landing's pure parts: what its run's Workflow is told of the merge, the merge commit it makes,
+// and the steps it adds to the run's outcome. A merge request's landing is a `main` run (spec #257,
+// "Landing"): `merge`, setups and checks on the merged tree, `land`, then `main`'s post-gate steps.
 
-import type { ConfigResult } from "./config.ts";
 import type { ConflictDetails } from "./conflicts.ts";
-import { parseFrom } from "./metric-values.ts";
-import { CHECK_OUTCOMES } from "./results.ts";
-import type { CheckOutcome, ScoringResult } from "./results.ts";
+import type { Dequeue, LegacyDequeueDetails } from "./merge-requests.ts";
+import type { RunOutcome, RunStep, StepKind, StepOutcome } from "./run-outcome.ts";
+import type { StoredRun } from "./scoring.ts";
 import { attemptRef, taskRef } from "./task-refs.ts";
 
 /** Commits name people by a no-reply address, never their real email. */
@@ -60,11 +60,8 @@ export function mergeCommitMessage({ task, attempt, title, approver, coAuthors }
   return `${subject}\n\n${trailers.join("\n")}\n`;
 }
 
-/** What a Landing Workflow is started with. */
+/** What a landing's run is told of the merge it lands. */
 export interface LandingParams {
-  project: string;
-  /** The landing's id, which its reports name. */
-  landing: number;
   task: number;
   /** The source attempt's number within the task. */
   attempt: number;
@@ -75,8 +72,18 @@ export interface LandingParams {
   approver: { user: string; alias: string | null };
   /** Each alias that pushed to the source attempt, with its user. */
   coAuthors: { user: string; alias: string }[];
-  /** When the landing started, in ms: the merge commit's time, so a retried land step makes the same commit. */
+  /** When the landing was queued, in ms: the merge commit's time, so a retried land step makes the same commit. */
   startedAt: number;
+}
+
+/**
+ * What a Landing Workflow was started with, before landings were `main` runs. One that was under
+ * way when they became runs resumes as a Pipeline Workflow with these params.
+ */
+export interface LegacyLandingParams extends LandingParams {
+  project: string;
+  /** Its id in the `landings` table, which its reports name. */
+  landing: number;
 }
 
 /**
@@ -87,81 +94,165 @@ export function actedAlias(acted: { alias?: string | null; agent?: string | null
   return acted.alias ?? acted.agent ?? null;
 }
 
-/**
- * How a required check can fail to pass: every outcome but `passed` and `errored`, as only `_preview`
- * errors, and it is never required.
- */
-export type FailedCheckOutcome = Exclude<CheckOutcome, "passed" | "errored">;
-
-function isFailedCheckOutcome(outcome: CheckOutcome): outcome is FailedCheckOutcome {
-  return outcome !== "passed" && outcome !== "errored";
-}
-
-/** The outcomes a failed check can have, in `CHECK_OUTCOMES`'s order. */
-export const FAILED_CHECK_OUTCOMES = CHECK_OUTCOMES.filter(isFailedCheckOutcome);
-
-/** A required check that didn't pass on the merged tree, and the name of its stored log, if any. */
-export interface FailedCheck {
+/** A check that didn't pass a landing's retest, as a Landing Workflow reported it. */
+export interface LegacyFailedCheck {
   name: string;
-  outcome: FailedCheckOutcome;
+  outcome: "failed" | "timedOut" | "skipped";
   log: string | null;
 }
 
-/** What `last_dequeue.details` holds for `failedChecks`. */
-export interface FailedChecksDetails {
-  checks: FailedCheck[];
-  /** The config's errors, when the merged tree's config is invalid. */
+/** How a landing ended, as a Landing Workflow reported it before landings were runs. */
+export type LegacyLandingOutcome =
+  | { kind: "landed"; sha: string }
+  | { kind: "conflict"; details: ConflictDetails }
+  | { kind: "failedChecks"; details: { checks: LegacyFailedCheck[]; error?: string } }
+  | { kind: "errored"; details: { step: string; error: string } };
+
+/** A landing's own steps, which Throng runs (`source: "platform"`): `merge` before its checks, `land` after. */
+export const LANDING_STEPS = ["merge", "land"] as const;
+export type LandingStep = (typeof LANDING_STEPS)[number];
+
+/** One of a landing's own steps (`merge` or `land`), as its run's outcome lists it. */
+export function landingStep(name: LandingStep, outcome: StepOutcome, notes: string[] = []): RunStep {
+  return { name, kind: "step", source: "platform", group: null, outcome, durationMs: 0, notes, log: null };
+}
+
+/**
+ * A landing's outcome from its run's: `merge` passed after `_diff`, then the setups and checks, then
+ * `land` (skipped when the gate failed) before the post-gate steps, and what landed.
+ */
+export function landingOutcome(outcome: RunOutcome, landed: { sha: string } | null): RunOutcome {
+  const at = outcome.steps.findIndex((step) => step.kind === "step");
+  const end = at === -1 ? outcome.steps.length : at;
+  const diff = outcome.steps[0]?.source === "platform" ? 1 : 0;
+  const land =
+    landed === null ? landingStep("land", "skipped", ["skipped: the gate failed"]) : landingStep("land", "passed");
+  return {
+    ...outcome,
+    steps: [
+      ...outcome.steps.slice(0, diff),
+      landingStep("merge", "passed"),
+      ...outcome.steps.slice(diff, end),
+      land,
+      ...outcome.steps.slice(end),
+    ],
+    ...(landed === null ? {} : { landed }),
+  };
+}
+
+/** The outcome of a landing whose merge conflicted: nothing after `merge` ran, and the conflict is kept. */
+export function conflictOutcome(details: ConflictDetails): RunOutcome {
+  return {
+    base: details.base,
+    config: { kind: "none" },
+    gate: "failed",
+    steps: [
+      landingStep("merge", "failed", ["the merge conflicted"]),
+      landingStep("land", "skipped", ["skipped: the merge conflicted"]),
+    ],
+    metrics: {},
+    landed: "conflict",
+    conflict: details,
+  };
+}
+
+/**
+ * The outcome of a landing that pushed `sha` and recorded nothing else of its own: one a Landing
+ * Workflow ran, before landings were runs and kept their setups' and checks' steps.
+ */
+export function landedOutcome(sha: string): RunOutcome {
+  return {
+    base: null,
+    config: { kind: "none" },
+    gate: "passed",
+    steps: [landingStep("merge", "passed"), landingStep("land", "passed")],
+    metrics: {},
+    landed: { sha },
+  };
+}
+
+/** The outcome of a Landing Workflow's retest that didn't pass: the checks it reported, and nothing landed. */
+export function legacyFailedOutcome({ checks, error }: { checks: LegacyFailedCheck[]; error?: string }): RunOutcome {
+  return {
+    base: null,
+    config: error === undefined ? { kind: "valid" } : { kind: "invalid", error },
+    gate: "failed",
+    steps: [
+      landingStep("merge", "passed"),
+      ...checks.map(({ name, outcome }): RunStep => ({
+        name,
+        kind: "check",
+        source: "project",
+        group: null,
+        outcome: outcome === "skipped" ? "skipped" : "failed",
+        durationMs: 0,
+        notes: outcome === "timedOut" ? ["timed out"] : [],
+        log: null,
+      })),
+      landingStep("land", "skipped", ["skipped: the gate failed"]),
+    ],
+    metrics: {},
+  };
+}
+
+/** A setup or check that didn't pass a landing's gate. */
+export interface FailedStep {
+  name: string;
+  kind: StepKind;
+  outcome: StepOutcome;
+}
+
+/** What a `failedChecks` dequeue's details say: the steps that didn't pass, and the config's errors when it was invalid. */
+export interface FailedStepsDetails {
+  steps: FailedStep[];
   error?: string;
 }
 
-/** What `last_dequeue.details` holds for `errored`: the step that kept failing, and its last error. */
+/** What an `errored` dequeue's details say: the error that ended the landing, and the step that kept failing when one was named. */
 export interface ErroredDetails {
-  step: string;
   error: string;
+  step?: string;
 }
 
-/** How a landing ended, as its Workflow reports it. */
-export type LandingOutcome =
-  | { kind: "landed"; sha: string }
-  | { kind: "conflict"; details: ConflictDetails }
-  | { kind: "failedChecks"; details: FailedChecksDetails }
-  | { kind: "errored"; details: ErroredDetails };
+/** A dequeue's details: the conflict, the steps that failed, or the error. */
+export type DequeueDetails = ConflictDetails | FailedStepsDetails | ErroredDetails;
 
 /**
- * The config the retest runs under: the merged tree's, with only its required checks and the metrics
- * read from them. Null skips the retest: no config, or no required checks. An invalid config is kept,
- * and fails (see `buildResult`).
+ * A dequeue's details, read from the landing's run behind it (`run`): the conflict its merge hit,
+ * the setups and checks that failed its gate, or the error that ended it. A dequeue stored before
+ * landings were runs kept its own, which are read in the same shape. A new push or a cancel has none.
  */
-export function retestConfig(config: ConfigResult): ConfigResult | null {
-  if (config.kind === "none") return null;
-  if (config.kind === "invalid") return config;
-  const checks = config.config.checks.filter((check) => check.required);
-  const kept = new Set(checks.map((check) => check.name));
-  const metrics = config.config.metrics.filter((metric) => kept.has(parseFrom(metric.from).check));
-  return checks.length === 0 ? null : { kind: "valid", config: { ...config.config, checks, metrics } };
+export function dequeueDetails(dequeue: Dequeue, run: StoredRun | null): DequeueDetails | null {
+  if (dequeue.details !== undefined) return legacyDetails(dequeue.details);
+  if (run === null) return null;
+  switch (dequeue.reason) {
+    case "conflict": {
+      return run.outcome?.conflict ?? null;
+    }
+    case "failedChecks": {
+      if (run.outcome === null) return null;
+      const steps = run.outcome.steps.flatMap(({ name, kind, outcome }): FailedStep[] =>
+        kind !== "step" && (outcome === "failed" || outcome === "errored") ? [{ name, kind, outcome }] : [],
+      );
+      const { config } = run.outcome;
+      return config.kind === "invalid" ? { steps, error: config.error } : { steps };
+    }
+    case "errored": {
+      return { error: run.error ?? "the landing errored" };
+    }
+    case "newPush":
+    case "cancelled": {
+      return null;
+    }
+  }
 }
 
-/**
- * The required checks the retest's result didn't pass, each with its log when one was stored. Throng's
- * own checks are left out: the retest doesn't diff or deploy, and neither is ever required.
- */
-export function failedChecks(result: ScoringResult, stored: string[]): FailedChecksDetails {
-  const checks = result.checks.flatMap(({ name, source, outcome }): FailedCheck[] =>
-    source !== "platform" && isFailedCheckOutcome(outcome)
-      ? [{ name, outcome, log: stored.includes(name) ? name : null }]
-      : [],
-  );
-  return result.config.kind === "invalid" ? { checks, error: result.config.error } : { checks };
-}
-
-/** The part of the Landing Workflow binding the DO uses; tests pass a fake. */
-export interface LandingWorkflowBinding {
-  create: (options: { id: string; params: LandingParams }) => Promise<unknown>;
-  get: (id: string) => Promise<{ terminate: () => Promise<void> }>;
-}
-
-export interface LandingRunner {
-  workflow: LandingWorkflowBinding;
-  /** Destroys a landing's Sandboxes once its Workflow is stopped. */
-  teardown: (instanceId: string) => Promise<void>;
+function legacyDetails(details: LegacyDequeueDetails): DequeueDetails {
+  if (!("checks" in details)) return details;
+  const steps = details.checks.map(({ name, outcome }): FailedStep => ({
+    name,
+    kind: "check",
+    outcome: outcome === "skipped" ? "skipped" : "failed",
+  }));
+  return details.error === undefined ? { steps } : { steps, error: details.error };
 }

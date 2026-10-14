@@ -1,38 +1,33 @@
-// The Scoring Workflow's network access against fake bindings: what the score and preview containers
-// may reach, and where that comes from. `cloudflare:workers`, the base lookup and the preview Workers
-// are stubbed; the Artifacts binding is a `FakeRepos`, and each step retries as its config says.
+// The Pipeline Workflow's network access against fake bindings: what each container may reach,
+// and where that comes from. `cloudflare:workers` and the base lookup are stubbed; the Artifacts
+// binding is a `FakeRepos`, and each step retries as its config says.
 
 import { describe, expect, it, vi } from "vitest";
 import { CONFIG_PATH } from "../src/config.ts";
 import type { OutboundAccess } from "../src/network.ts";
 import { NPMRC_PATH } from "../src/npmrc.ts";
-import type { ScoringOutcome, ScoringParams } from "../src/scoring.ts";
+import type { PipelineParams, RunReport } from "../src/scoring.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { UnreadableRepos } from "./support/unreadable-repos.ts";
 import { importWorkerModule } from "./support/worker-module.ts";
-import { PASSED, result } from "./support/workflow-runs.ts";
+import { result } from "./support/workflow-runs.ts";
 
 const binding = vi.hoisted(() => ({ repos: null as unknown }));
 
 vi.mock("cloudflare:workers", () => import("./support/cloudflare-workers.ts"));
 vi.mock("../src/artifacts", () => ({ reposFor: () => binding.repos }));
-vi.mock("../src/base", () => ({ attemptBase: async () => null }));
-vi.mock("../src/preview-workers", () => ({ previewWorkersFor: () => ({ ensure: async () => {} }) }));
+vi.mock("../src/base", () => ({ lineBase: async () => null }));
 
 // Imported by a computed path: the module is Worker code, which this project's Node typecheck can't
 // follow (`cloudflare:workers`), so it is typed here by what the test calls.
-const { ScoringWorkflow } = await importWorkerModule<{
-  ScoringWorkflow: new (
-    ctx: unknown,
-    env: unknown,
-  ) => { run: (event: unknown, step: unknown) => Promise<ScoringOutcome> };
-}>("workflows");
+const { PipelineWorkflow } = await importWorkerModule<{
+  PipelineWorkflow: new (ctx: unknown, env: unknown) => { run: (event: unknown, step: unknown) => Promise<RunReport> };
+}>("pipeline-workflow");
 
 const ORIGIN = "abc123-main";
 const FORK = "abc123-t1a1";
-const params: ScoringParams = { project: "abc123", attempt: "t1a1", sha: "a".repeat(40), run: 7 };
-const config = (host: string) =>
-  `preview: {}\nnetwork:\n  allow: [${host}]\nchecks:\n  - { name: test, command: npm test }\n`;
+const params: PipelineParams = { project: "abc123", line: "t1a1", sha: "a".repeat(40), run: 7 };
+const config = (host: string) => `network:\n  allow: [${host}]\nchecks:\n  - { name: test, command: npm test }\n`;
 const npmrc = (host: string) => `@acme:registry=https://${host}/\n`;
 
 /** A step that runs `fn`, trying again on failure up to its config's retry limit, as Workflows does. */
@@ -48,31 +43,38 @@ async function stepDo(_name: string, ...rest: unknown[]): Promise<unknown> {
   }
 }
 
-/** Scores `t1a1` against `repos`, recording the outbound access each container started with. */
-async function score(repos: FakeRepos): Promise<{ access: Map<string, OutboundAccess>; outcome: ScoringOutcome }> {
+/** Runs `t1a1` against `repos`, recording the outbound access each container started with. */
+async function score(repos: FakeRepos): Promise<{ access: Map<string, OutboundAccess>; outcome: RunReport }> {
   binding.repos = repos;
   const access = new Map<string, OutboundAccess>();
   const env = {
-    CF_ACCOUNT_ID: "acct",
     SANDBOX: {
       getByName: (name: string) => {
-        const role = name.split("/").at(-1) ?? name;
+        const container = name.split("/").at(-1) ?? name;
         return {
           run: async (script: string, options: { access: OutboundAccess }) => {
             if (script.includes("f=logs/")) return { exitCode: 0, stdout: "log\n", stderr: "" };
-            access.set(role, options.access);
-            return role === "score" ? result(PASSED) : result({ ok: true, url: "https://preview.invalid" });
+            access.set(container, options.access);
+            return container === "setup"
+              ? result({ base: null, shortstat: "", builtinMs: 0, setups: [] })
+              : result({ exit: 0, durationMs: 1, metrics: {}, setupsRerun: false });
           },
+          snapshot: async () => null,
+          releaseSnapshot: () => {},
           destroy: async () => {},
         };
       },
     },
     PROJECT: {
-      getByName: () => ({ definitionsOf: async () => ({ checks: [], metrics: [] }), scoringFinished: async () => {} }),
+      getByName: () => ({
+        runDefinitions: async () => ({ checks: [], metrics: [] }),
+        pipelinePlanned: async () => ({ kind: "start" }),
+        pipelineFinished: async () => {},
+      }),
     },
     LOGS: { put: async () => {} },
   };
-  const outcome = await new ScoringWorkflow({}, env).run(
+  const outcome = await new PipelineWorkflow({}, env).run(
     { payload: params, instanceId: "abc123-t1a1-7" },
     { do: stepDo },
   );
@@ -90,16 +92,23 @@ async function project<R extends FakeRepos>(repos: R, files: Record<string, stri
 
 const MAIN = { [CONFIG_PATH]: config("api.example.com"), [NPMRC_PATH]: npmrc("npm.acme.dev") };
 
-describe("ScoringWorkflow network access", () => {
-  it("gives the score and preview containers main's network.allow and .npmrc registries, never the attempt's", async () => {
+describe("PipelineWorkflow network access", () => {
+  it("gives each container main's network.allow and .npmrc registries, never the attempt's", async () => {
     const { access, outcome } = await score(await project(new FakeRepos(), MAIN));
     expect(outcome.status).toBe("done");
-    for (const role of ["score", "preview"]) {
-      expect({ role, access: access.get(role) }).toMatchObject({
-        role,
-        access: { registries: ["registry.npmjs.org", "npm.acme.dev"], allow: ["api.example.com"] },
-      });
-    }
+    expect([...access.keys()]).toEqual(["setup", "check:test"]);
+    expect(access.get("check:test")).toMatchObject({
+      registries: ["registry.npmjs.org", "npm.acme.dev"],
+      allow: ["api.example.com"],
+    });
+  });
+
+  it("opens the Cloudflare API to each container only when main's network.allow lists it", async () => {
+    const listed = { ...MAIN, [CONFIG_PATH]: config("api.cloudflare.com") };
+    const { access } = await score(await project(new FakeRepos(), listed));
+    expect(access.get("check:test")?.allow).toEqual(["api.cloudflare.com"]);
+    const { access: unlisted } = await score(await project(new FakeRepos(), MAIN));
+    expect(unlisted.get("check:test")?.allow).not.toContain("api.cloudflare.com");
   });
 
   it("reads the config and the .npmrc from one commit of main, even when main moves between the reads", async () => {
@@ -120,7 +129,7 @@ describe("ScoringWorkflow network access", () => {
     const pinned = repos.ref(ORIGIN, "refs/heads/main");
     const { access, outcome } = await score(repos);
     expect(outcome.status).toBe("done");
-    expect(access.get("score")).toMatchObject({
+    expect(access.get("check:test")).toMatchObject({
       registries: ["registry.npmjs.org", "one.dev"],
       allow: ["one.example.com"],
     });
@@ -130,11 +139,11 @@ describe("ScoringWorkflow network access", () => {
     ]);
   });
 
-  it("retries a failed .npmrc read rather than scoring without its registries", async () => {
+  it("retries a failed .npmrc read rather than running without its registries", async () => {
     const repos = await project(new UnreadableRepos({ path: NPMRC_PATH, times: 1 }), MAIN);
     const { access, outcome } = await score(repos);
     expect(outcome.status).toBe("done");
-    expect(access.get("score")).toMatchObject({ registries: ["registry.npmjs.org", "npm.acme.dev"] });
+    expect(access.get("check:test")).toMatchObject({ registries: ["registry.npmjs.org", "npm.acme.dev"] });
   });
 
   it("ends the run errored, running nothing, when the .npmrc keeps failing to read", async () => {
@@ -146,6 +155,6 @@ describe("ScoringWorkflow network access", () => {
 
   it("gives only the npm registry when main has no .npmrc", async () => {
     const { access } = await score(await project(new FakeRepos(), { [CONFIG_PATH]: config("api.example.com") }));
-    expect(access.get("score")).toMatchObject({ registries: ["registry.npmjs.org"], allow: ["api.example.com"] });
+    expect(access.get("check:test")).toMatchObject({ registries: ["registry.npmjs.org"], allow: ["api.example.com"] });
   });
 });

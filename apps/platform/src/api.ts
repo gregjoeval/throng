@@ -12,21 +12,31 @@ import {
   AttemptLimitSchema,
   BallotSchema,
   CloseVoteSchema,
+  CONFLICT_DIFF_DESCRIPTION,
+  conflictDiffResponse,
+  ConflictSideQuerySchema,
   CreateAttemptsSchema,
   CreateProjectSchema,
   CreateTaskSchema,
+  diffContent,
   EditAttemptSchema,
   envProjectService,
+  FileDiffSchema,
   HandOffSchema,
   json,
   OpenVoteSchema,
+  OWNER_AS_THEMSELVES,
   pageQuerySchema,
   PageSchema,
   PostVerdictSchema,
   ProjectPathSchema,
   requestTaskService,
+  RunsQuerySchema,
   SelectionPolicyInputSchema,
   SelectionSchema,
+  StartRunSchema,
+  TAIL,
+  tailedRoutes,
   TaskChecksInputSchema,
   TaskMetricsInputSchema,
   VoteCandidateSchema,
@@ -50,20 +60,23 @@ import {
   SOURCES,
   VOTE_ELIGIBILITIES,
 } from "./config.ts";
-import { dequeueRoutes } from "./dequeue-api.ts";
+import { ConflictDetailsSchema, dequeueRoutes } from "./dequeue-api.ts";
 import type { DiffCache } from "./diff.ts";
 import { errorBody, errorResponse, ServiceError } from "./errors.ts";
 import { FORWARDED_EMAIL_HEADER } from "./forwarded.ts";
-import { LOG_CONTENT_TYPE, LOG_RETENTION_DAYS, MAX_LOG_BYTES, missingLog } from "./logs.ts";
+import { firstLog, LOG_CONTENT_TYPE, LOG_RETENTION_DAYS, MAX_LOG_BYTES, missingLog } from "./logs.ts";
 import type { LogStore } from "./logs.ts";
 import { DEQUEUE_REASONS, MERGE_REQUEST_STATES } from "./merge-requests.ts";
 import { METRIC_FORMATS, METRIC_TYPES } from "./metric-values.ts";
 import { DEFAULT_LISTING_PAGE, MAX_LISTING_PAGE, myListings } from "./my-listings.ts";
-import type { PreviewWorkers } from "./preview-workers.ts";
+import { PIPELINES } from "./pipelines.ts";
 import { MAX_PROJECTION_RETRY_MS } from "./projection.ts";
 import type { Repos } from "./repos.ts";
 import { CHECK_OUTCOMES, GATES } from "./results.ts";
+import { STEP_KINDS, STEP_OUTCOMES } from "./run-outcome.ts";
 import { ATTEMPT_SCORING_STATUSES, RUN_STATUSES, SCORING_TRIGGERS } from "./scoring.ts";
+import { secretsRoutes } from "./secrets-api.ts";
+import { SECRET_NAME } from "./secrets.ts";
 import { ATTEMPT_STATES, TASK_STATES } from "./task-store.ts";
 import type { TaskBackend } from "./tasks.ts";
 import { DEFAULT_TOKEN_TTL_SECONDS, MAX_TOKEN_TTL_SECONDS, tokenService } from "./tokens.ts";
@@ -199,19 +212,78 @@ const MetricSchema = z
       "string never ranks.",
   });
 
+const SecretNameSchema = z.string().regex(SECRET_NAME);
+
+const SecretNamesSchema = z.array(SecretNameSchema).openapi({
+  description:
+    "The secrets it uses, by name. A trusted run's container holds each one the project settings allow in its " +
+    "pipeline; a task's check names none.",
+  example: ["NPM_TOKEN"],
+});
+
+const CacheNamesSchema = z.array(ConfigNameSchema).openapi({
+  description:
+    "The caches it uses, by name: each is restored before it runs when an entry matches its key exactly, and a " +
+    "trusted run saves it once it passed. A task's check may name only caches the project's config defines.",
+  example: ["pnpm"],
+});
+
+const ConfigCacheSchema = z
+  .object({
+    name: ConfigNameSchema.openapi({ example: "pnpm" }),
+    path: z.array(z.string()).openapi({
+      description: "The paths it keeps, absolute or under `~/`.",
+      example: ["~/.local/share/pnpm/store", "~/.cache/pnpm"],
+    }),
+    key: z.array(z.string()).openapi({
+      description: "The files in the tree whose contents key it: paths or globs.",
+      example: ["pnpm-lock.yaml"],
+    }),
+  })
+  .openapi("Cache", {
+    description:
+      "A named cache the config declares. Runs restore it only on an exact match of its key; only trusted runs " +
+      "save it.",
+  });
+
 const ConfigCheckSchema = z
   .object({
     name: ConfigNameSchema.openapi({ example: "test" }),
     command: z.string().openapi({ example: "pnpm test" }),
-    required: z.boolean().openapi({ description: "Whether the gate needs it to pass." }),
     timeoutMs: z
       .number()
       .int()
       .max(MAX_CHECK_TIMEOUT_MS)
       .openapi({ description: "Defaults to 10 minutes.", example: 600_000 }),
+    after: z.array(ConfigNameSchema).openapi({
+      description: "The checks it waits for: it runs only once each of them passed, and is skipped otherwise.",
+      example: ["typecheck"],
+    }),
+    secrets: SecretNamesSchema,
+    caches: CacheNamesSchema,
+    group: ConfigNameSchema.nullable().openapi({
+      description:
+        "The one group it is in, which a pipeline's `groups` choose it by; null outside one, and always for a " +
+        "task's check, which runs on every attempt of its task.",
+      example: "verify",
+    }),
     source: ConfigLayerSchema,
   })
-  .openapi("Check", { description: "A check the config declares: a command whose exit code is its outcome." });
+  .openapi("Check", {
+    description:
+      "A check the config declares: a command whose exit code is its outcome. Every check that runs must pass.",
+  });
+
+const ConfigSetupSchema = z
+  .object({
+    name: ConfigNameSchema.openapi({ example: "deps" }),
+    command: z.string().openapi({ example: "pnpm install --frozen-lockfile" }),
+    secrets: SecretNamesSchema,
+    caches: CacheNamesSchema,
+  })
+  .openapi("Setup", {
+    description: "A setup the config declares: a command run before every check. A failed setup stops the run.",
+  });
 
 const VoteEligibilitySchema = z.enum(VOTE_ELIGIBILITIES).openapi({
   description: "Who may vote: `humans` acting as themselves, `aliases` acting under an alias, or `anyone`.",
@@ -458,18 +530,76 @@ const AttemptSchema = z
   })
   .openapi("Attempt");
 
-const ScoringRunFields = z.object({
-  id: z.number().int(),
-  ref: z.string().openapi({ description: "The attempt it scores.", example: "t42a3" }),
-  sha: z.string().openapi({ description: "The head it scores." }),
-  trigger: z.enum(SCORING_TRIGGERS),
-  status: z.enum(RUN_STATUSES),
-  requestedBy: UserRefSchema.nullable(),
-  alias: z.string().nullable(),
-  createdAt: z.string(),
-  startedAt: z.string().nullable(),
-  finishedAt: z.string().nullable(),
-});
+const RunSchema = z
+  .object({
+    id: z.number().int(),
+    line: z.string().openapi({
+      description: "The line it runs on: an attempt's fork (`t42a3`), a task's task branch (`t42`) or `main`.",
+      example: "t42a3",
+    }),
+    pipeline: z.enum(PIPELINES).openapi({ description: "`main` on the `main` line, `default` on every other." }),
+    sha: z.string().nullable().openapi({
+      description: "The head it runs; null for a merge request's landing until it lands, when it is the landed commit.",
+    }),
+    trigger: z.enum(SCORING_TRIGGERS).openapi({
+      description: "`merge` for a merge request's landing; `start` once the project owner started it after it waited.",
+    }),
+    status: z.enum(RUN_STATUSES).openapi({
+      description: "`waiting` while it needs the project owner to start it; it holds no slot meanwhile.",
+    }),
+    waiting: z
+      .object({
+        head: z.string().openapi({
+          description:
+            "The head it would run, which Start names: its own, or for a merge request's landing the approved head.",
+        }),
+        attempt: z.string().nullable().openapi({
+          description: "The attempt `head` is on: the run's own line, or a landing's source attempt; null otherwise.",
+          example: "t42a3",
+        }),
+        base: z
+          .string()
+          .nullable()
+          .openapi({
+            description:
+              "Where to diff `head` from to review it (`compare/{base}...{head}`): an attempt's base, or where a task " +
+              "branch meets `main`. Null for a merge request's landing, whose approved head is diffed from `main`, and " +
+              "when they share no history.",
+          }),
+        secrets: z.array(SecretNameSchema).openapi({ description: "The secrets it would hold once started, by name." }),
+        taskCheck: z
+          .object({
+            name: z.string().openapi({ example: "lint" }),
+            writtenBy: UserRefSchema,
+          })
+          .nullable()
+          .openapi({
+            description:
+              "Why a run of code the owner pushed waits: a task check it runs that someone other than the owner " +
+              "wrote, and who. Null when it waits because its head isn't the owner's.",
+          }),
+      })
+      .nullable()
+      .openapi({
+        description:
+          "While it waits for the project owner, what starting it means; null otherwise. A run of code that isn't the " +
+          "owner's waits when it names a secret, and a merge request no owner approved waits when `main` names one.",
+      }),
+    trusted: z.boolean().openapi({ description: "Whether it may hold the secrets its pipeline allows." }),
+    requestedBy: UserRefSchema.nullable().openapi({ description: "Who triggered it; null when no user did." }),
+    alias: z.string().nullable(),
+    createdAt: z.string(),
+    startedAt: z.string().nullable(),
+    finishedAt: z.string().nullable(),
+    superseded: z.boolean().openapi({ description: "Whether its head is no longer its line's current head." }),
+    gate: z.enum(GATES).nullable().openapi({ description: "Its gate once `done`; null until then." }),
+    cancellable: z.boolean().openapi({
+      description:
+        "Whether the project owner may cancel it now: while it is queued, waiting, or running on any line but " +
+        "`main`. Never a landing, which only its merge request leaving the queue cancels.",
+    }),
+  })
+  .openapi("Run", { description: "One pipeline run on one of the project's lines." });
 
 const ScoringSchema = z
   .object({
@@ -478,9 +608,7 @@ const ScoringSchema = z
       description: "Why nothing was queued: the head is already queued, running or scored.",
       example: "already scored",
     }),
-    run: ScoringRunFields.openapi("ScoringRun", {
-      description: "The run that was queued, or the one already covering the head.",
-    }),
+    run: RunSchema.openapi({ description: "The run that was queued, or the one already covering the head." }),
   })
   .openapi("ScoringRequest");
 
@@ -539,40 +667,37 @@ const ScoringResultSchema = z
         z.object({ kind: z.literal("invalid"), error: z.string() }),
       ])
       .openapi({ description: "How the `.throng/config.yml` on `origin/main` it was scored under parsed." }),
-    gate: z
-      .enum(GATES)
-      .openapi({ description: "Passed when every required check passed; failed on an invalid config." }),
+    gate: z.enum(GATES).openapi({
+      description:
+        "Passed when setup passed and every check that ran passed; failed on an invalid config. Throng's own " +
+        "checks never change it.",
+    }),
     checks: z
       .array(
         z
           .object({
             name: z.string().openapi({ example: "test" }),
             source: z.enum(SOURCES),
-            required: z.boolean(),
             outcome: z.enum(CHECK_OUTCOMES),
             durationMs: z.number(),
             notes: z.array(z.string()).openapi({
-              description:
-                "What the run noticed about it, such as why it was skipped or why the Preview didn't deploy.",
+              description: "What the run noticed about it, such as why it was skipped.",
             }),
           })
           .openapi("CheckResult"),
       )
       .openapi({
         description:
-          "Every check in run order: Throng's `_diff` (finding the base and diffing), the config's checks, then " +
-          "`_preview` (deploying the Preview). `_preview` is `skipped` without a `preview` section or a passing gate, " +
-          "`failed` when its build or deploy failed and `errored` when the infrastructure kept failing; it never " +
-          "changes the gate.",
+          "Every check in run order: Throng's `_diff` (finding the base and diffing), then the config's checks.",
       }),
     metrics: z.record(z.string(), MetricResultSchema).openapi({
       description:
         "Every metric by name: each check's outcome metric (an enum named after the check), followed by that " +
-        "check's own metrics, such as `_diff.filesChanged` and `_preview.url`.",
+        "check's own metrics, such as `_diff.filesChanged`.",
     }),
     logs: z.array(z.string()).openapi({
       description:
-        "The run's stored logs by name, in run order, for `GET …/runs/{runId}/logs/{name}`. A step that never ran has none.",
+        "The run's stored logs by name, in run order, for `GET …/runs/{runId}/logs/{step}`. A step that never ran has none.",
       example: ["setup.1", "test"],
     }),
   })
@@ -585,15 +710,68 @@ const CurrentResultSchema = ScoringResultSchema.extend({
   description: "The attempt's current result: the latest `done` run for its current head.",
 });
 
-const RunDetailSchema = ScoringRunFields.extend({
-  superseded: z.boolean().openapi({ description: "Whether its head is no longer the attempt's current head." }),
+const RunStepSchema = z
+  .object({
+    name: z.string().openapi({ description: "`setup.<n>`, a check's name, or a post-gate step's.", example: "test" }),
+    kind: z.enum(STEP_KINDS).openapi({ description: "A setup, a check, or a post-gate step." }),
+    source: z.enum(SOURCES),
+    group: z.string().nullable().openapi({ description: "The check's group; null outside one." }),
+    after: z.array(z.string()).openapi({ description: "The checks it waited for." }),
+    outcome: z.enum(STEP_OUTCOMES),
+    durationMs: z.number(),
+    notes: z.array(z.string()).openapi({ description: "What the run noticed about it, such as why it was skipped." }),
+    log: z.string().nullable().openapi({
+      description: "Its stored log's name, for `GET …/runs/{runId}/logs/{step}`; null when it stored none.",
+      example: "test",
+    }),
+  })
+  .openapi("RunStep");
+
+const RunOutcomeSchema = ScoringResultSchema.pick({ base: true, config: true, gate: true, metrics: true })
+  .extend({
+    steps: z.array(RunStepSchema).openapi({
+      description:
+        "Every step in run order: Throng's `_diff`, the setups, the checks, then any post-gate steps. A landing " +
+        "has Throng's `merge` after `_diff` and `land` before the post-gate steps.",
+    }),
+    landed: z
+      .discriminatedUnion("kind", [
+        z.object({ kind: z.literal("landed"), sha: z.string().openapi({ description: "The commit it landed." }) }),
+        z.object({
+          kind: z.literal("conflict"),
+          details: ConflictDetailsSchema.openapi({
+            description:
+              "The conflict its `merge` hit, file by file; `GET …/runs/{runId}/conflict/files/{path}/diff` diffs a " +
+              "file from the merge base to either side.",
+          }),
+        }),
+      ])
+      .optional()
+      .openapi({
+        description:
+          "For a landing: what it landed, or the conflict that stopped it; absent otherwise, and when its gate failed.",
+      }),
+  })
+  .openapi("RunOutcome");
+
+const RunDetailSchema = RunSchema.extend({
   error: z.string().nullable().openapi({ description: "What ended it, once `errored`." }),
-  result: ScoringResultSchema.nullable().openapi({ description: "Its result, once `done`." }),
-}).openapi("RunDetail", { description: "A scoring run, with its result or error." });
+  outcome: RunOutcomeSchema.nullable().openapi({ description: "How it went, step by step, once `done`." }),
+  result: ScoringResultSchema.nullable().openapi({
+    description: "The slice of its outcome an attempt's scoring reads, once `done`.",
+  }),
+}).openapi("RunDetail", { description: "A run, with its outcome or error." });
 
 const RunPathSchema = ProjectPathSchema.extend({
-  runId: z.coerce.number().int().min(1).openapi({ description: "A scoring run's id.", example: 7 }),
+  runId: z.coerce.number().int().min(1).openapi({ description: "A run's id.", example: 7 }),
 });
+
+const RunsListSchema = z
+  .object({
+    runs: z.array(RunSchema).openapi({ description: "Newest first." }),
+    next: z.number().int().nullable().openapi({ description: "The next page's `cursor`; null on the last page." }),
+  })
+  .openapi("RunsList");
 
 const ScoringStatusSchema = z
   .object({
@@ -664,7 +842,13 @@ const MergeRequestSchema = z
       .nullable()
       .openapi({ description: "Its 1-based place in the merge queue while queued or landing; the landing one is 1." }),
     lastDequeue: z
-      .object({ reason: z.enum(DEQUEUE_REASONS), at: z.string() })
+      .object({
+        reason: z.enum(DEQUEUE_REASONS),
+        run: z.number().int().nullable().openapi({
+          description: "The landing's run behind it; null for `newPush` and `cancelled`.",
+        }),
+        at: z.string(),
+      })
       .nullable()
       .openapi({ description: "Why it last left the queue without landing." }),
     mergeSha: z.string().nullable().openapi({ description: "The merge commit on `main`, once merged." }),
@@ -735,24 +919,51 @@ const WaitedAttemptSchema = AttemptSchema.extend({
 }).openapi("WaitedAttempt");
 
 const RunLogPathSchema = RunPathSchema.extend({
-  name: z.string().openapi({
-    description: "The log's name: a check's name, `setup.<n>` for the nth setup command, or `preview.deploy`.",
+  step: z.string().openapi({
+    description: "The step whose log to read, as its `log` names it: a check's name, or `setup.<n>` for the nth setup.",
     example: "test",
   }),
 });
 
+const ConfigStepSchema = z
+  .object({
+    name: ConfigNameSchema.openapi({ example: "deploy" }),
+    command: z.string().openapi({ example: "pnpm deploy" }),
+    caches: CacheNamesSchema,
+  })
+  .openapi("Step", {
+    description:
+      "A post-gate step `main`'s config declares: a command run once the gate passes, in order with the others, " +
+      "each in its own container. The first that fails stops the rest.",
+  });
+
+const ConfigPipelineSchema = z
+  .object({
+    groups: z
+      .array(ConfigNameSchema)
+      .nullable()
+      .openapi({
+        description:
+          "The groups whose checks it runs; null to run every check. A task's checks always run on its attempts.",
+        example: ["verify"],
+      }),
+    steps: z
+      .array(ConfigStepSchema)
+      .openapi({ description: "Run in order once the gate passes; only `main` has any." }),
+  })
+  .openapi("PipelineConfig");
+
 const ConfigSchema = z
   .object({
-    setup: z.array(z.string()).openapi({ description: "Commands run once, in order, before the checks." }),
+    caches: z.array(ConfigCacheSchema).openapi({ description: "The named caches its steps may use." }),
+    setup: z.array(ConfigSetupSchema).openapi({ description: "Run once, in order, before the checks." }),
     network: z.object({
       allow: z.array(z.string()).openapi({ description: "Extra HTTPS hosts checks may reach, lowercased." }),
     }),
-    checks: z.array(ConfigCheckSchema).openapi({ description: "Run in order." }),
+    checks: z
+      .array(ConfigCheckSchema)
+      .openapi({ description: "Run in parallel once the setups passed, each once the checks it waits for passed." }),
     metrics: z.array(MetricSchema).openapi({ description: "Read from the checks' output files, in order." }),
-    preview: z
-      .object({ command: z.string().nullable().openapi({ description: "Builds before the preview deploys." }) })
-      .nullable()
-      .openapi({ description: "Null when the project doesn't deploy previews." }),
     attempts: z.object({
       limit: z.number().int().nullable().openapi({ description: "Null to use the default cap on active attempts." }),
     }),
@@ -761,6 +972,9 @@ const ConfigSchema = z
         description: `The size of the containers that run the project's code; \`${DEFAULT_SANDBOX_SIZE}\` unless set.`,
       }),
     }),
+    pipelines: z
+      .object({ default: ConfigPipelineSchema, main: ConfigPipelineSchema })
+      .openapi({ description: "What each pipeline runs: `main` on `main`, `default` on attempts and task branches." }),
   })
   .openapi("Config");
 
@@ -787,8 +1001,6 @@ const unauthorizedBearer = errorResponse("No valid bearer token.");
 export interface ApiOptions extends AuthOptions {
   /** The environment's repos: production passes the Artifacts-backed `reposFor`, tests a fake. */
   repos?: (env: AccessBindings) => Repos;
-  /** Projects' preview Workers: production passes the Cloudflare API's, tests a fake. */
-  previewWorkers?: (env: AccessBindings) => PreviewWorkers;
   /** How a project's import source is reached: the global `fetch` by default, tests a fake host. */
   fetch?: typeof fetch;
   /** A project's task backend: production passes its Durable Object, tests an in-process store. */
@@ -804,15 +1016,6 @@ const myListingsFor = (env: AccessBindings) => myListings({ db: env.DB });
 
 function noRepos(): Repos {
   throw new Error("this API was built without repos");
-}
-
-/** Only creating a project needs preview Workers, so reading projects works without them. */
-function noPreviewWorkers(): PreviewWorkers {
-  return { ensure: refusePreviewWorkers, delete: refusePreviewWorkers };
-}
-
-async function refusePreviewWorkers(): Promise<never> {
-  throw new Error("this API was built without preview Workers");
 }
 
 function noTasks(): (projectId: string) => TaskBackend {
@@ -995,8 +1198,7 @@ export function apiRoutes(options: ApiOptions = {}) {
   const bearerRoute: RouteAuth = { middleware: bearer, security: bearerOnly };
   const webRoute: RouteAuth = { middleware: browser, security: bearerOrWeb };
   const reposFor = options.repos ?? noRepos;
-  const previewWorkersFor = options.previewWorkers ?? noPreviewWorkers;
-  const projects = envProjectService(reposFor, previewWorkersFor, options.fetch);
+  const projects = envProjectService(reposFor, options.fetch);
   const backendFor = options.tasks ?? noTasks;
   const logsFor = options.logs ?? noLogs;
   const tasks = requestTaskService(reposFor, backendFor);
@@ -1010,6 +1212,7 @@ export function apiRoutes(options: ApiOptions = {}) {
       return undefined;
     },
   });
+  const tailed = tailedRoutes(api);
 
   api.openAPIRegistry.registerComponent("securitySchemes", "bearer", {
     type: "http",
@@ -1620,10 +1823,39 @@ export function apiRoutes(options: ApiOptions = {}) {
     .openapi(
       createRoute({
         method: "get",
+        path: "/projects/{owner}/{project}/runs",
+        operationId: "listRuns",
+        tags: ["Runs"],
+        summary: "List the project's runs",
+        description:
+          "Every run on every line, newest first, migrated scoring runs included, paged by `cursor`: pass a page's " +
+          "`next` to read the one after it. Filter by `line` and `status`; `status=waiting` lists the runs waiting " +
+          "for the owner. Any signed-in user may read them.",
+        security: bearerOrWeb,
+        middleware: [browser] as const,
+        request: { params: ProjectPathSchema, query: RunsQuerySchema },
+        responses: {
+          200: { description: "A page of runs, newest first.", ...json(RunsListSchema) },
+          400: errorResponse("A filter, the cursor or the limit is invalid."),
+          401: unauthorizedBearer,
+          404: errorResponse("No such project."),
+        },
+      }),
+      async (c) => {
+        const input = { ...c.req.valid("param"), ...c.req.valid("query") };
+        return c.json(await tasks(c).listRuns(c.var.actor, input), 200);
+      },
+    )
+    .openapi(
+      createRoute({
+        method: "get",
         path: "/projects/{owner}/{project}/runs/{runId}",
         operationId: "getRun",
-        tags: ["Scoring"],
-        summary: "Get one scoring run",
+        tags: ["Runs"],
+        summary: "Get one run, with its outcome step by step",
+        description:
+          "Its outcome lists every step in run order (setups, checks with their group and `after`, then post-gate " +
+          "steps), each with its outcome, duration, notes and log, and the run's metrics.",
         security: bearerOrWeb,
         middleware: [browser] as const,
         request: { params: RunPathSchema },
@@ -1636,7 +1868,99 @@ export function apiRoutes(options: ApiOptions = {}) {
       }),
       async (c) => {
         const { runId, ...path } = c.req.valid("param");
-        return c.json(await tasks(c).getScoringRun(c.var.actor, { ...path, run: runId }), 200);
+        return c.json(await tasks(c).getRun(c.var.actor, { ...path, run: runId }), 200);
+      },
+    )
+    .openapi(
+      tailed(
+        createRoute({
+          method: "get",
+          path: `/projects/{owner}/{project}/runs/{runId}/conflict/files/${TAIL}/diff`,
+          operationId: "getRunConflictDiff",
+          tags: ["Runs"],
+          summary: "Diff a landing's conflicting file from the merge base to one side",
+          description: `One conflicting file of the conflict a landing's \`merge\` hit, ${CONFLICT_DIFF_DESCRIPTION}`,
+          security: bearerOrWeb,
+          middleware: [browser] as const,
+          request: {
+            params: RunPathSchema.extend({ path: z.string().openapi({ example: "src/app.ts" }) }),
+            query: ConflictSideQuerySchema,
+          },
+          responses: {
+            200: { description: "The file's diff.", content: diffContent(FileDiffSchema) },
+            400: errorResponse("The run id or the side is invalid."),
+            401: unauthorizedBearer,
+            404: errorResponse("No such project or run, or the run's merge didn't conflict in that path."),
+          },
+        }),
+      ),
+      async (c) => {
+        const { runId, path, ...project } = c.req.valid("param");
+        const found = await tasks(c).runConflictFile(c.var.actor, { ...project, run: runId, path });
+        return (await conflictDiffResponse(c, reposFor(c.env), found, c.req.valid("query").side)) as never;
+      },
+    )
+    .openapi(
+      createRoute({
+        method: "post",
+        path: "/projects/{owner}/{project}/runs/{runId}/cancel",
+        operationId: "cancelRun",
+        tags: ["Runs"],
+        summary: "Cancel a run",
+        description:
+          "Only the project owner may, and only while the run is `cancellable`: queued, waiting, or running on any " +
+          "line but `main`, whose running run may be deploying. A running run's containers are torn down. Journals " +
+          "`runCancelled`.",
+        security: bearerOrWeb,
+        middleware: [browser] as const,
+        request: { params: RunPathSchema },
+        responses: {
+          200: { description: "The cancelled run.", ...json(RunDetailSchema) },
+          400: errorResponse("The run id is invalid."),
+          401: unauthorizedBearer,
+          403: errorResponse(OWNER_ONLY),
+          404: errorResponse("No such project or run."),
+          409: errorResponse("`invalidState`: the run can't be cancelled now."),
+        },
+      }),
+      async (c) => {
+        const { runId, ...path } = c.req.valid("param");
+        return c.json(await tasks(c).cancelRun(c.var.actor, { ...path, run: runId }), 200);
+      },
+    )
+    .openapi(
+      createRoute({
+        method: "post",
+        path: "/projects/{owner}/{project}/runs/{runId}/start",
+        operationId: "startRun",
+        tags: ["Runs"],
+        summary: "Start a run waiting for the owner",
+        description:
+          "Starts a `waiting` run of code that isn't the owner's, after the owner reviewed its head: it is queued " +
+          "again as a trusted run, triggered `start`, and holds the secrets it names. Only the project owner acting as " +
+          "themselves may, never under an alias, and there is no MCP tool for it. `sha` pins the head reviewed: it is " +
+          "refused when the run waits on another, when its line moved on since, or, for a merge request's landing, " +
+          "when the merge request no longer approves it or can't join the queue. Each secret the run names, as " +
+          "`main`'s config is now, must have a value and be allowed in its pipeline. A started landing joins the merge " +
+          "queue and lands in its turn. Journals `runQueued`.",
+        security: bearerOrWeb,
+        middleware: [browser] as const,
+        request: { params: RunPathSchema, body: { required: true, ...json(StartRunSchema) } },
+        responses: {
+          200: { description: "The started run, queued.", ...json(RunDetailSchema) },
+          400: errorResponse("The run id or the body is invalid."),
+          401: unauthorizedBearer,
+          403: errorResponse(OWNER_AS_THEMSELVES),
+          404: errorResponse("No such project or run."),
+          409: errorResponse(
+            "`invalidState`: the run isn't waiting, waits on another head, its line or merge request moved on, or a " +
+              "secret it names has no value or isn't allowed in its pipeline.",
+          ),
+        },
+      }),
+      async (c) => {
+        const { runId, ...path } = c.req.valid("param");
+        return c.json(await tasks(c).startRun(c.var.actor, { ...path, run: runId, ...c.req.valid("json") }), 200);
       },
     )
     .openapi(
@@ -1724,12 +2048,12 @@ export function apiRoutes(options: ApiOptions = {}) {
     .openapi(
       createRoute({
         method: "get",
-        path: "/projects/{owner}/{project}/runs/{runId}/logs/{name}",
+        path: "/projects/{owner}/{project}/runs/{runId}/logs/{step}",
         operationId: "getRunLog",
-        tags: ["Scoring"],
-        summary: "Stream one log of a scoring run",
+        tags: ["Runs"],
+        summary: "Stream one step's log of a run",
         description:
-          "Each setup command, check and preview of a run writes a log. Logs over " +
+          "Each step of a run that ran writes a log, which its `log` names. Logs over " +
           `${MAX_LOG_BYTES / (1024 * 1024)} MB keep their head and tail, with a marker between them. Logs are ` +
           `deleted ${LOG_RETENTION_DAYS} days after the run; an expired log is \`notFound\`, like a missing one.`,
         security: bearerOrWeb,
@@ -1743,10 +2067,10 @@ export function apiRoutes(options: ApiOptions = {}) {
         },
       }),
       async (c) => {
-        const { runId, name, ...path } = c.req.valid("param");
-        const key = await tasks(c).runLogKey(c.var.actor, { ...path, run: runId, name });
-        const log = await logsFor(c.env).get(key);
-        if (log === null) throw missingLog(runId, name);
+        const { runId, step, ...path } = c.req.valid("param");
+        const keys = await tasks(c).runLogKeys(c.var.actor, { ...path, run: runId, name: step });
+        const log = await firstLog(logsFor(c.env), keys);
+        if (log === null) throw missingLog(runId, step);
         // Streamed straight from R2; the typed response only knows the documented string body.
         return c.body(log.body, 200, { "Content-Type": LOG_CONTENT_TYPE }) as never;
       },
@@ -2034,7 +2358,8 @@ export function apiRoutes(options: ApiOptions = {}) {
       "/",
       browseRoutes({ auth: browser, repos: reposFor, tasks: backendFor, diffCache: options.diffCache ?? workersCache }),
     )
-    .route("/", dequeueRoutes({ auth: browser, repos: reposFor, tasks: backendFor, logs: logsFor }));
+    .route("/", dequeueRoutes({ auth: browser, repos: reposFor, tasks: backendFor }))
+    .route("/", secretsRoutes({ auth: browser, repos: reposFor, tasks: backendFor }));
 
   api.doc31("/openapi.json", { openapi: "3.1.0", info: { title: "Throng API", version: "0.0.0" } });
 

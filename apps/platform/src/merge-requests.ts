@@ -33,6 +33,7 @@ export type MergeRequestEvent =
   | "queued"
   | "landing"
   | "dequeued"
+  | "heldForOwner"
   | "needsReview"
   | "merged"
   | "cancelled";
@@ -143,8 +144,8 @@ const SCHEMA = [
     WHERE state IN ('pending', 'queued', 'landing', 'needsReview')`,
 ];
 /**
- * Columns `merge_requests` gained after its first version: whether the project owner (as themselves
- * or under an alias) made the latest approval, so landing it is the owner's merge.
+ * Columns `merge_requests` gained after its first version: whether the project owner, as themselves
+ * and not under an alias, made the latest approval, so landing it is the owner's merge.
  */
 const MERGE_REQUEST_COLUMNS = ["approved_by_owner INTEGER NOT NULL DEFAULT 0"];
 /** `merge_requests` columns named before an actor's alias was called an alias. */
@@ -263,7 +264,7 @@ export class MergeRequests {
 
   /**
    * Creates a task's merge request from a selection, approving `head`, and moves it to `pending`.
-   * `byOwner` says whether `actor` is the project's owner.
+   * `byOwner` says whether `actor` is the project's owner acting as themselves, not an alias.
    */
   select(actor: Actor, input: { task: number; attempt: number; head: string; byOwner: boolean }): StoredMergeRequest {
     const at = this.#stamp();
@@ -291,7 +292,7 @@ export class MergeRequests {
 
   /**
    * Approves `head`, moving the merge request to `pending` and releasing any hold. `byOwner` says
-   * whether `actor` is the project's owner.
+   * whether `actor` is the project's owner acting as themselves, not an alias.
    */
   approve(actor: Actor, mr: StoredMergeRequest, head: string, byOwner: boolean): StoredMergeRequest {
     this.#sql.exec(
@@ -319,6 +320,16 @@ export class MergeRequests {
   startLanding(actor: Actor | null, mr: StoredMergeRequest): StoredMergeRequest {
     this.#sql.exec("UPDATE merge_requests SET state = 'landing' WHERE id = ?", mr.id);
     this.#journal(actor, "landing", mr, { head: mr.approved_head });
+    return this.#get(mr.id);
+  }
+
+  /**
+   * landing → pending, out of the queue but not held after a dequeue: its landing waits for the
+   * owner, whose start queues it again.
+   */
+  holdForOwner(mr: StoredMergeRequest): StoredMergeRequest {
+    this.#sql.exec("UPDATE merge_requests SET state = 'pending', queued_at = NULL WHERE id = ?", mr.id);
+    this.#journal(null, "heldForOwner", mr, { head: mr.approved_head });
     return this.#get(mr.id);
   }
 

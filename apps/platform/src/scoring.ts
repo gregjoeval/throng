@@ -216,7 +216,7 @@ export interface StoredRun {
   land_claimed: boolean;
   /** The secrets it named when it began to wait for the owner, which it holds once started; null if it never waited. */
   secrets: string[] | null;
-  /** For a landing: the approved head it merges, and the attempt that head is on; null for a landing from before. */
+  /** For a landing: the approved head it merges, and the attempt that head is on. */
   merge_head: string | null;
   merge_attempt: string | null;
 }
@@ -600,7 +600,8 @@ export class ScoringQueue {
    * ended when it began to wait; a held landing has had none, and keeps its id.
    */
   start(run: StoredRun, owner: Actor): StoredRun {
-    const instanceId = run.merge_request === null ? `${run.instance_id}-started` : run.instance_id;
+    // A run that waited after its Workflow began needs a new instance; a landing held before it ran has none yet.
+    const instanceId = run.started_at === null ? run.instance_id : `${run.instance_id}-started`;
     const [row] = this.#sql.exec<RunRow>(
       `UPDATE pipeline_runs SET status = 'queued', trusted = 1, trigger = 'start', user_id = ?, alias = ?,
          instance_id = ?, started_at = NULL, torn_down = 0, containers = NULL
@@ -638,6 +639,15 @@ export class ScoringQueue {
   legacyLanding(landing: number): StoredRun | null {
     const [row] = this.#sql.exec<RunRow>("SELECT * FROM pipeline_runs WHERE legacy_landing = ?", landing);
     return row === undefined ? null : toRun(row);
+  }
+
+  /** The id run `id` had in the `landings` table, if it is a landing moved from there. */
+  legacyLandingId(id: number): number | null {
+    const [row] = this.#sql.exec<{ legacy_landing: number | null }>(
+      "SELECT legacy_landing FROM pipeline_runs WHERE id = ?",
+      id,
+    );
+    return row?.legacy_landing ?? null;
   }
 
   /** Marks a running landing's push to `main` claimed: from now on nothing cancels it. */

@@ -22,7 +22,7 @@ import type { FollowOutcome, FollowParams, FollowRunner, StoredFollow } from "./
 import { conflictOutcome, dequeueDetails, landedOutcome, legacyFailedOutcome } from "./landing.ts";
 import type { DequeueDetails, LandingParams, LegacyLandingOutcome } from "./landing.ts";
 import { migrateLandings } from "./landings.ts";
-import { isLogName, legacyLogKey, logKey, missingLog } from "./logs.ts";
+import { isLogName, legacyLandingLogKey, legacyLogKey, logKey, missingLog } from "./logs.ts";
 import { MergeRequests } from "./merge-requests.ts";
 import type {
   Dequeue,
@@ -996,8 +996,10 @@ export class TaskStore {
    * as a trusted run, which holds the secrets it names. Only the project owner acting as themselves
    * may, so an agent steered by untrusted text can't. Refused unless the run still waits on `sha`
    * and its line hasn't moved on (for a held landing: its merge request still approves `sha` and may
-   * join the queue, which it then does), and unless each secret the run names, as `main`'s config
-   * is now, has a value and is allowed in its pipeline.
+   * join the queue, which it then does), and unless each secret the run's pipeline names under
+   * `main`'s config as it is now has a value and is allowed in it. That's a fail-fast only: a
+   * landing runs its merged tree's config, which `main`'s may not match, and its plan re-checks
+   * every secret that names against the settings (`pipelinePlanned`).
    */
   async startRun(project: ProjectContext, actor: Actor, input: { run: number; sha: string }): Promise<StoredRun> {
     mayGrant(project, actor);
@@ -1145,6 +1147,11 @@ export class TaskStore {
     const run = this.getScoringRun(project, actor, input);
     if (!isLogName(input.name)) throw missingLog(input.run, input.name);
     const key = { project: project.id, line: run.line, run: run.id };
+    const landing = this.scoring.legacyLandingId(run.id);
+    if (landing !== null && run.merge_attempt !== null && run.merge_head !== null) {
+      const legacy = { project: project.id, attempt: run.merge_attempt, head: run.merge_head, landing };
+      return [legacyLandingLogKey(legacy, input.name), logKey(key, input.name)];
+    }
     if (!run.legacy_logs || run.sha === null) return [logKey(key, input.name)];
     return [legacyLogKey({ ...key, sha: run.sha }, input.name), logKey(key, input.name)];
   }
@@ -1878,7 +1885,7 @@ export class TaskStore {
       throw invalidState(`${taskRef(task.number)} is selected by vote; open a vote and close it to select`);
     }
     const head = await this.#currentHead(project, current);
-    const main = isOwnersPush(project, actor) ? null : mainSecrets(project.id, config);
+    const main = isOwnerAsThemselves(project, actor) ? null : mainSecrets(project.id, config);
     const { mr, closed } = this.#sql.transaction(() => {
       // The attempt, the task or its merge requests may have moved while the head was read.
       this.#checkSelectable(this.#attempt(current));
@@ -1904,7 +1911,7 @@ export class TaskStore {
       task: attempt.task,
       attempt: attempt.number,
       head,
-      byOwner: isOwnersPush(project, actor),
+      byOwner: isOwnerAsThemselves(project, actor),
     });
     const others = this.#activeAttempts(attempt.task).filter((a) => a.number !== attempt.number);
     for (const other of others) this.#endAttempt(actor, other, "closed");
@@ -1927,13 +1934,17 @@ export class TaskStore {
     this.#expectMergeRequest(mr, ["pending", "needsReview"], "approve");
     const head =
       mr.state === "pending" ? mr.approved_head : await this.#currentHead(project, this.#attempt(sourceOf(mr)));
-    const main = isOwnersPush(project, actor) ? null : await this.#mainSecrets(project.id);
+    const main = isOwnerAsThemselves(project, actor) ? null : await this.#mainSecrets(project.id);
     return this.#sql.transaction(() => {
       const now = this.#openMergeRequest(task.number);
       if (now.id !== mr.id || now.state !== mr.state) {
         throw invalidState(`${taskRef(task.number)}'s merge request moved; try again`);
       }
-      return this.#evaluate(actor, this.mergeRequests.approve(actor, now, head, isOwnersPush(project, actor)), main);
+      return this.#evaluate(
+        actor,
+        this.mergeRequests.approve(actor, now, head, isOwnerAsThemselves(project, actor)),
+        main,
+      );
     });
   }
 
@@ -2015,7 +2026,8 @@ export class TaskStore {
    * may start (`ScoringQueue.planned`), then checks the secrets each of its setups and checks names
    * (`named`) against the settings. A secret with no value or not allowed in the run's pipeline
    * refuses the run, naming the step and the secret. An untrusted run that names any secret waits
-   * for the owner instead of starting; one that names none, and a trusted one, go ahead.
+   * for the owner instead of starting, and a landing's merge request leaves the queue meanwhile; one
+   * that names none, and a trusted one, go ahead.
    */
   pipelinePlanned(id: number, containers: readonly string[], named: readonly NamedSecrets[]): PlanVerdict {
     const verdict = this.#sql.transaction((): PlanVerdict => {
@@ -2028,14 +2040,12 @@ export class TaskStore {
       }
       const names = [...new Set(named.flatMap((n) => n.secrets))];
       if (names.length === 0 || run.trusted) return { kind: "start" };
-      // A landing no owner approved that names a secret was held for the owner before it joined the
-      // queue, unless only its merged tree's config names one: a landing that waits would hold up the
-      // queue, so it is dequeued, and lands once the owner approves it, which trusts it.
-      if (run.merge_request !== null) {
-        const error = `a landing only the project owner approved may hold secrets, and this one names ${names.join(", ")}`;
-        return { kind: "refused", error };
-      }
       this.scoring.wait(run, names);
+      // A landing no owner approved that names a secret was held for the owner before it joined the
+      // queue, unless only its merged tree's config names one: it leaves the queue to wait for the
+      // owner there, so it holds up no other landing.
+      const mr = run.merge_request === null ? null : this.mergeRequests.get(run.merge_request);
+      if (mr !== null) this.mergeRequests.holdForOwner(mr);
       return { kind: "waiting" };
     });
     // A run waiting for the owner has settled: `wait_for_run` answers.
@@ -2258,7 +2268,7 @@ export class TaskStore {
   ): Promise<{ vote: VoteDetail; selected: StoredMergeRequest | null }> {
     const task = this.#task(input.task);
     this.#mayManageTask(project, actor, task);
-    const main = isOwnersPush(project, actor) ? null : await this.#mainSecrets(project.id);
+    const main = isOwnerAsThemselves(project, actor) ? null : await this.#mainSecrets(project.id);
     const { vote, mr, closed } = this.#sql.transaction(() => {
       const open = this.#openVote(task.number);
       const detail = this.#voteDetail(open, actor);
@@ -2805,16 +2815,18 @@ export class TaskStore {
    * approved whose `main` run would name a secret (`main`, which the caller read when the approver
    * isn't the owner) is held for the owner instead: its landing waits until the owner starts it,
    * which queues it as a trusted run. When the caller couldn't say what `main` names, it joins the
-   * queue, and its landing's plan refuses it if it names one. Returns the merge request as it is
-   * afterwards.
+   * queue, and its landing's plan holds it for the owner if its merged tree names one; it stays held
+   * at that head. Returns the merge request as it is afterwards.
    */
   #evaluate(actor: Actor | null, mr: StoredMergeRequest, main: MainSecrets | null = null): StoredMergeRequest {
     this.#releaseHeld();
     if (!this.#queueable(mr)) return mr;
     if (!this.mergeRequests.ownerApproved(mr)) {
-      // A landing no owner approved holds no secret: one `main` would hand some waits for the owner.
+      // A landing no owner approved holds no secret: one `main` would hand some waits for the owner,
+      // and so does one whose plan found its merged tree's config names some (it began to run).
       const held = this.#heldLanding(mr);
-      if (main === null ? held !== null : main.names.length > 0) {
+      const heldAtPlan = held !== null && held.started_at !== null;
+      if (main === null || heldAtPlan ? held !== null : main.names.length > 0) {
         if (held === null && main !== null) {
           this.scoring.holdLanding({ ...this.#landingRequest(main.project, mr), secrets: main.names });
         }
@@ -3646,9 +3658,17 @@ function mainSecrets(project: string, config: ConfigResult): MainSecrets {
   return { project, names: [...new Set(pipelineSecrets(config, "main").flatMap((named) => named.secrets))] };
 }
 
-/** The project owner acting as themselves, never under an alias: who may grant a secret or start a waiting run. */
+/**
+ * Whether `actor` is the project owner acting as themselves, never under an alias: who may grant a
+ * secret or start a waiting run, and whose selection or approval trusts a landing.
+ */
+function isOwnerAsThemselves(project: ProjectContext, actor: Actor): boolean {
+  return actor.user.id === project.owner && actor.alias === null;
+}
+
+/** Throws unless `actor` is the project owner acting as themselves (see `isOwnerAsThemselves`). */
 function mayGrant(project: ProjectContext, actor: Actor): void {
-  if (actor.user.id !== project.owner || actor.alias !== null) {
+  if (!isOwnerAsThemselves(project, actor)) {
     throw new ServiceError("forbidden", "only the project owner, acting as themselves, may");
   }
 }

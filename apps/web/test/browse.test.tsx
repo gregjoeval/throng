@@ -71,7 +71,7 @@ describe("project home", () => {
   it("says so when main has no commits yet", async () => {
     serveRepo({}, { main: { ref: "main", sha: null }, active: [], archived: [] });
     await renderApp("/ada/alpha");
-    expect(await screen.findByText("Nothing pushed yet")).toBeInTheDocument();
+    expect(await screen.findByText("This project is empty")).toBeInTheDocument();
   });
 });
 
@@ -148,7 +148,7 @@ describe("the About sidebar", () => {
     serveRepo({}, { main: { ref: "main", sha: null }, active: [], archived: [] });
     server.use(serveStats(stats({ source: "https://github.com/ada/alpha" }, null)));
     await renderApp("/ada/alpha");
-    expect(await screen.findByText("Nothing pushed yet")).toBeInTheDocument();
+    expect(await screen.findByText("This project is empty")).toBeInTheDocument();
     const sidebar = await about();
     expect(await within(sidebar).findByText("No commits yet.")).toBeInTheDocument();
     expect(within(sidebar).getByText("No code yet.")).toBeInTheDocument();

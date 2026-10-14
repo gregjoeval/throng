@@ -34,7 +34,7 @@ function ProjectHome() {
           {refs.isError && <ErrorState error={refs.error} />}
           {tree.isError && <ErrorState error={tree.error} />}
           {refs.isSuccess && !pushed && (
-            <EmptyState title="Nothing pushed yet">Push to this project's main to see its files here.</EmptyState>
+            <EmptyState title="This project is empty">Clone it and push to main to add the first files.</EmptyState>
           )}
           {tree.isSuccess && <DirectoryEntries at={root} entries={tree.data.entries} />}
           {readme === undefined ? null : <Readme at={root} entry={readme} />}

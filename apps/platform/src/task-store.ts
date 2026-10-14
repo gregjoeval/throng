@@ -2441,9 +2441,7 @@ export class TaskStore {
     // A merge request no owner approved may enter the queue once this run passes, unless `main` names secrets.
     const source = current === null ? null : this.#sourceOf(current);
     const main =
-      current === null || source === null || this.mergeRequests.ownerApproved(source)
-        ? null
-        : await this.#mainSecrets(current.project);
+      current === null || source === null || source.approved_by_owner ? null : await this.#mainSecrets(current.project);
     return this.pipelineFinished(run, report, main);
   }
 
@@ -2682,7 +2680,7 @@ export class TaskStore {
       if (this.scoring.latestLanding(mr.id)?.status === "queued") return true;
       this.scoring.requestLanding({
         ...this.#landingRequest(project, mr),
-        trusted: this.mergeRequests.ownerApproved(mr),
+        trusted: mr.approved_by_owner,
       });
       return true;
     }
@@ -2831,7 +2829,7 @@ export class TaskStore {
   #evaluate(actor: Actor | null, mr: StoredMergeRequest, main: MainSecrets | null = null): StoredMergeRequest {
     this.#releaseHeld();
     if (!this.#queueable(mr)) return mr;
-    if (!this.mergeRequests.ownerApproved(mr)) {
+    if (!mr.approved_by_owner) {
       // A landing no owner approved holds no secret: one `main` would hand some waits for the owner,
       // and so does one whose plan found its merged tree's config names some (it began to run).
       const held = this.#heldLanding(mr);
@@ -2877,10 +2875,7 @@ export class TaskStore {
     for (const run of this.scoring.heldLandings()) {
       const mr = this.#landingMergeRequest(run);
       const current =
-        mr !== null &&
-        this.#queueable(mr) &&
-        !this.mergeRequests.ownerApproved(mr) &&
-        mr.approved_head === run.merge_head;
+        mr !== null && this.#queueable(mr) && !mr.approved_by_owner && mr.approved_head === run.merge_head;
       if (current) continue;
       this.scoring.cancel(run, "its merge request moved on");
       changed = true;

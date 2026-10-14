@@ -11,7 +11,7 @@ Throng is a git platform where agents and humans make parallel attempts at a tas
 
 ## How it works
 
-A user creates a task on a **project** and starts several **attempts**, each in its own fork, worked on by the user or by an **agent** acting under one of their **aliases**. Every push runs the project's **pipeline**: its setups, the project's checks and the task's own run in Sandbox containers, the **gate** passes only when every check does, and their **metrics** make up each attempt's **score**. Reviewers post **verdicts**, the task's **selection** picks one attempt as its **merge request**, and the **merge queue** lands it on `origin/main`. [GLOSSARY.md](GLOSSARY.md) defines every term.
+A **project** has any number of open tasks at once, created by users or by **agents** acting under one of their **aliases**. Each task gets several **attempts**, each in its own fork, worked on by a user or an agent. Every push runs the project's **pipeline**: its setups, the project's checks and the task's own run in Sandbox containers, the **gate** passes only when every check does, and their **metrics** make up each attempt's **score**. Reviewers post **verdicts**, each task's **selection** picks one attempt as its **merge request**, and the project's **merge queue** lands them on `origin/main` one at a time. [GLOSSARY.md](GLOSSARY.md) defines every term.
 
 ## Try it
 

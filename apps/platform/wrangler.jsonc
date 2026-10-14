@@ -47,7 +47,7 @@
     "ACCESS_TEAM_DOMAIN": "gregjoeval.cloudflareaccess.com",
     "ACCESS_AUD": "2a713dce7fdf28f6d07c5954b0a9d57e867717b5af65ba730b98473b3366712b",
   },
-  "secrets": { "required": ["E2E_TOKEN"] },
+  "secrets": { "required": ["E2E_TOKEN", "SECRETS_KEYRING"] },
   "observability": { "enabled": true },
   "env": {
     // The Worker the manual Integration workflow (.github/workflows/integration.yml) deploys and runs
@@ -94,7 +94,7 @@
         "ACCESS_TEAM_DOMAIN": "gregjoeval.cloudflareaccess.com",
         "ACCESS_AUD": "2a713dce7fdf28f6d07c5954b0a9d57e867717b5af65ba730b98473b3366712b",
       },
-      "secrets": { "required": ["E2E_TOKEN"] },
+      "secrets": { "required": ["E2E_TOKEN", "SECRETS_KEYRING"] },
       "observability": { "enabled": true },
     },
   },

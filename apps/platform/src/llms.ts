@@ -108,6 +108,13 @@ The default is ${DEFAULT_SANDBOX_SIZE}. Like the rest of the config, it is read 
 attempt that changes it still runs at \`main\`'s size, and the change applies once it lands. Each stored log
 notes the size it ran at under \`== throng ==\`, so a check killed for memory shows how much it had.
 
+## Secrets
+
+The project owner keeps secrets in the project's settings: a name, a value nobody can read back, and the
+pipelines it may be used in (\`default\` for attempts and task branches, \`main\`, or both). \`list_secrets\` gives
+each one's name and pipelines, so you can name them in config. Only the owner, acting as themselves, sets,
+allows or deletes them, never through an alias's token or MCP.
+
 ## In short
 
 This is what the MCP server tells clients in its \`instructions\`:

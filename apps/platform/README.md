@@ -95,6 +95,17 @@ A registry stays `GET`/`HEAD`-only even when `network.allow` lists its host too:
 
 Both are read from the origin's `main`, never from the attempt, so an attempt can't widen its own access. A scoring run or a landing pins `main`'s commit once and reads `.throng/config.yml` and `.npmrc` at it, so the two always agree. A landing reads them before its conflict check starts the `check` container, so the retest gets the same registries and `network.allow` scoring did, never the merged tree's. A missing `.npmrc` adds no registries; a read that fails is retried like the config's, and the run or landing ends `errored` if it keeps failing.
 
+## Secrets
+
+A project's secrets (`src/secrets.ts`) are a name, a write-only value and the pipelines each may be used in (`default`, `main`, or both). No run uses them yet. They live in the project Durable Object's SQLite, in a `secrets` table the D1 projection never reads.
+
+- **Sealing.** Each value is encrypted with AES-256-GCM through Web Crypto, with a random 12-byte IV and `projectId/name/keyId` as additional data, so a row can't be moved to another project, name or key. The keys come from the `SECRETS_KEYRING` Worker secret, imported non-extractable on first use: `{"current": "k1", "keys": {"k1": "<32 bytes, base64>"}}`. New values are sealed under `current`; each row keeps the id of its key.
+- **Rotating the key.** Add a new key and make it `current`, keeping the old one listed: old rows still open, and new writes use the new key. Remove the old key only once no row names it (re-sealing old rows by a sweep isn't built yet).
+- **Who acts.** `GET /api/projects/{owner}/{project}/secrets` and the MCP tool `list_secrets` give names, pipelines and last change to the project's maintainers, aliases included (for now, the owner). `PUT …/secrets/{name}` (value and/or pipelines) and `DELETE …/secrets/{name}` take the owner acting as themselves, never an alias. Values are 8 characters at least. No route ever returns one.
+- **Journal.** Every write is journaled (`secretSet`, `secretDeleted`) with the actor, the name and the pipelines, never the value.
+
+Make a keyring with `node -e 'console.log(JSON.stringify({current:"k1",keys:{k1:require("crypto").randomBytes(32).toString("base64")}}))'` and set it once for production with `pnpm wrangler secret put SECRETS_KEYRING` before the first deploy that requires it. The E2E workflow makes a fresh one for `throng-ci` on every run. Without it, setting a secret fails; nothing else does.
+
 ## E2E job
 
 The **E2E** workflow (`.github/workflows/e2e.yml`) runs `pnpm e2e` against real Artifacts. It deploys the `ci` environment in `wrangler.jsonc`: the `throng-ci` Worker, Artifacts namespace `throng-ci` and D1 database `throng-ci`. It also deploys throng-web's `ci` environment, `throng-web-ci`, bound to `throng-ci`, for the `arena` scenario. It never runs on pull requests or forks, only when started by hand on `gregjoeval/throng`. Runs queue rather than overlap.
@@ -103,7 +114,7 @@ Each run:
 
 1. Generates a random `E2E_TOKEN`.
 2. Applies D1 migrations to `throng-ci`.
-3. Builds with `CLOUDFLARE_ENV=ci` and deploys `throng-ci`, setting `E2E_TOKEN`.
+3. Builds with `CLOUDFLARE_ENV=ci` and deploys `throng-ci`, setting `E2E_TOKEN` and a fresh `SECRETS_KEYRING`.
 4. Builds and deploys `throng-web-ci` the same way, installs Playwright's Chromium, and waits for `throng-web-ci` to answer.
 5. Runs the e2e scenarios. Every project id starts with `e2eci<run id>r<attempt>p`. Each scenario deletes what its projects made, and the suite revokes its Throng tokens when it ends.
 6. Always deletes everything under that prefix with `pnpm e2e cleanup`, even when the suite fails or is cancelled: each project's D1 row, its Durable Object's storage, its logs in R2 and its repos.

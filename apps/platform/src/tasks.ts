@@ -18,6 +18,7 @@ import type { Repos } from "./repos.ts";
 import type { Gate, ScoringResult } from "./results.ts";
 import { headAttemptRef } from "./scoring.ts";
 import type { AttemptScoring, ScoringRequest, StoredRun } from "./scoring.ts";
+import type { SecretChange, SecretSummary } from "./secrets.ts";
 import { NO_TASK_DEFINITIONS, taskDefinitionsFrom, withTask } from "./task-definitions.ts";
 import type { TaskDefinitions, TaskDefinitionsInput } from "./task-definitions.ts";
 import { attemptRef, parseAttemptRef, parseTaskRef, taskRef } from "./task-refs.ts";
@@ -696,6 +697,21 @@ export function taskService({ db, repos, backend, origin }: TaskServiceDeps) {
         attempt: attemptRef(mr.task, mr.attempt),
         state: mr.state,
       }));
+    },
+
+    /** The project's secrets by name, with their pipelines and last change, never their values. */
+    async listSecrets(actor: Actor, input: ProjectPath): Promise<SecretSummary[]> {
+      return invoke("listSecrets", await project(input), actor);
+    },
+
+    /** Sets a secret's value, its pipelines, or both. */
+    async putSecret(actor: Actor, input: ProjectPath & SecretChange & { name: string }): Promise<SecretSummary> {
+      const { name, value, pipelines } = input;
+      return invoke("putSecret", await project(input), actor, { name, value, pipelines });
+    },
+
+    async deleteSecret(actor: Actor, input: ProjectPath & { name: string }): Promise<void> {
+      await invoke("deleteSecret", await project(input), actor, { name: input.name });
     },
   };
 }

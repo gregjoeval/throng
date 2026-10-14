@@ -60,8 +60,12 @@ export interface ScriptOptions<R extends SandboxRole> {
   timeoutMs?: number;
   /** The container's Sandbox name, when the role has more than one in a run; `<instance>/<role>` by default. */
   sandbox?: string;
-  /** Variables the script gets, such as a pipeline run's `THRONG_*`. */
-  env?: Record<string, string>;
+  /**
+   * Variables the script gets, such as a pipeline run's `THRONG_*`: given, or made once the container
+   * is up, from whether it came up from `snapshot`, such as the secrets a check needs only when it
+   * has to re-run the setups.
+   */
+  env?: Record<string, string> | ((fromSnapshot: boolean) => Promise<Record<string, string>>);
   /**
    * A snapshot to start the container from rather than the image. A failed restore is retried once;
    * after that the container starts from the image, and the script finds the snapshot's work missing.
@@ -93,17 +97,19 @@ export async function runInSandbox<R extends SandboxRole>(
   const sandbox = env.SANDBOX.getByName(name);
   // The trusted land container never reaches the registry.
   const access = roleAccess(role, grants, network);
+  let restored = false;
   if (snapshot !== null) {
-    const restored =
+    restored =
       (await sandbox.restore(snapshot, { access, size }, timeoutMs)) ||
       (await sandbox.restore(snapshot, { access, size }, timeoutMs));
     if (!restored) console.warn({ event: "sandbox.restore_gave_up", sandbox: name, snapshot: snapshot.id });
   }
+  const scriptEnv = typeof vars === "function" ? await vars(restored) : vars;
   const result = await sandbox.run(script(grants), {
     access,
     size,
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
-    ...(vars === undefined ? {} : { env: vars }),
+    ...(scriptEnv === undefined ? {} : { env: scriptEnv }),
   });
   if (result.exitCode >= 10) {
     throw new Error(`${name} script exited ${result.exitCode}: ${result.stderr.slice(-2000)}`);
@@ -143,6 +149,8 @@ export interface LogsToStore {
   size: SandboxSize;
   /** What the run noted about each log (see `withNotes`). */
   notes?: ReadonlyMap<string, string[]>;
+  /** Masks the secrets the container held in each log, with its notes, before it's stored. */
+  mask?: (text: string) => string;
 }
 
 /**
@@ -153,7 +161,7 @@ export interface LogsToStore {
  */
 export async function storeLogs(
   env: Env,
-  { sandbox: sandboxId, names, key, size, notes = new Map() }: LogsToStore,
+  { sandbox: sandboxId, names, key, size, notes = new Map(), mask = (text) => text }: LogsToStore,
 ): Promise<string[]> {
   const sandbox = env.SANDBOX.getByName(sandboxId);
   const stored: string[] = [];
@@ -169,10 +177,10 @@ export async function storeLogs(
       const own = notes.get(name) ?? [];
       const log = withNotes(ran ? read.stdout : null, ran ? [sandboxNote(size), ...own] : own);
       if (log === null) continue;
-      await env.LOGS.put(key(name), log, { httpMetadata: { contentType: LOG_CONTENT_TYPE } });
+      await env.LOGS.put(key(name), mask(log), { httpMetadata: { contentType: LOG_CONTENT_TYPE } });
       stored.push(name);
     } catch (error) {
-      console.error({ event: "sandbox.log_not_stored", sandbox: sandboxId, name, error: String(error) });
+      console.error({ event: "sandbox.log_not_stored", sandbox: sandboxId, name, error: mask(String(error)) });
     }
   }
   return stored;

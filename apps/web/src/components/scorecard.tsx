@@ -17,6 +17,7 @@ const OUTCOME_LABELS: Record<CheckOutcome, string> = {
 const SCORING_STATES: Record<ArenaAttempt["status"], string> = {
   none: "it hasn't been asked for",
   queued: "scoring is queued",
+  waiting: "scoring is waiting for the owner",
   running: "scoring is running",
   done: "scoring is done",
   errored: "scoring errored",

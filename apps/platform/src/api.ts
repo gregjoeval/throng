@@ -207,6 +207,13 @@ const MetricSchema = z
       "string never ranks.",
   });
 
+const SecretNamesSchema = z.array(z.string()).openapi({
+  description:
+    "The secrets it uses, by name. A trusted run's container holds each one the project settings allow in its " +
+    "pipeline; a task's check names none.",
+  example: ["NPM_TOKEN"],
+});
+
 const ConfigCheckSchema = z
   .object({
     name: ConfigNameSchema.openapi({ example: "test" }),
@@ -220,6 +227,7 @@ const ConfigCheckSchema = z
       description: "The checks it waits for: it runs only once each of them passed, and is skipped otherwise.",
       example: ["typecheck"],
     }),
+    secrets: SecretNamesSchema,
     source: ConfigLayerSchema,
   })
   .openapi("Check", {
@@ -231,6 +239,7 @@ const ConfigSetupSchema = z
   .object({
     name: ConfigNameSchema.openapi({ example: "deps" }),
     command: z.string().openapi({ example: "pnpm install --frozen-lockfile" }),
+    secrets: SecretNamesSchema,
   })
   .openapi("Setup", {
     description: "A setup the config declares: a command run before every check. A failed setup stops the run.",

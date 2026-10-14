@@ -36,9 +36,14 @@ export interface TaskDefinitionsInput {
 
 export const NO_TASK_DEFINITIONS: TaskDefinitions = { checks: [], metrics: [] };
 
+/** A task's check: a config's, naming no secrets. */
+const TaskCheckSchema = CheckSchema.extend({
+  secrets: z.never({ error: "a task's checks get no secrets: tasks aren't reviewed like main's config" }).optional(),
+});
+
 const TaskSchema = z
   .object({
-    checks: z.array(CheckSchema, { error: "checks must be a list" }).optional(),
+    checks: z.array(TaskCheckSchema, { error: "checks must be a list" }).optional(),
     metrics: z.array(MetricSchema, { error: "metrics must be a list" }).optional(),
   })
   .superRefine(({ metrics }, ctx) => {
@@ -58,7 +63,7 @@ export function taskDefinitionsFrom(
   const parsed = TaskSchema.safeParse(input);
   if (!parsed.success) return { error: parsed.error.issues.map(describeIssue).join("\n") };
   const definitions = {
-    checks: parsed.data.checks?.map((check) => checkConfig(check, "task")) ?? current.checks,
+    checks: parsed.data.checks?.map((check) => checkConfig({ ...check, secrets: [] }, "task")) ?? current.checks,
     metrics: parsed.data.metrics?.map((metric) => metricConfig(metric, "task")) ?? current.metrics,
   };
   if (defines(definitions) && project.kind === "invalid") {

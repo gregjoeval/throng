@@ -5,6 +5,7 @@ import {
   DEFAULT_SANDBOX_SIZE,
   loadConfig,
   MAX_CONFIG_BYTES,
+  namedSecrets,
   parseConfig,
   sandboxSize,
 } from "../src/config.ts";
@@ -78,7 +79,7 @@ describe("parseConfig", () => {
     expect(parseConfig(FULL)).toEqual({
       kind: "valid",
       config: {
-        setup: [{ name: "deps", command: "pnpm install --frozen-lockfile" }],
+        setup: [{ name: "deps", command: "pnpm install --frozen-lockfile", secrets: [] }],
         network: { allow: ["api.github.com", "registry.example.org"] },
         checks: [
           {
@@ -86,6 +87,7 @@ describe("parseConfig", () => {
             command: "pnpm test",
             timeoutMs: 10 * 60_000,
             after: [],
+            secrets: [],
             source: "project",
           },
           {
@@ -93,6 +95,7 @@ describe("parseConfig", () => {
             command: "pnpm build && node scripts/size.js",
             timeoutMs: 90_000,
             after: ["test"],
+            secrets: [],
             source: "project",
           },
         ],
@@ -170,6 +173,7 @@ describe("parseConfig", () => {
             command: "pnpm lint",
             timeoutMs: DEFAULT_CHECK_TIMEOUT_MS,
             after: [],
+            secrets: [],
             source: "project",
           },
         ],
@@ -303,6 +307,18 @@ describe("parseConfig", () => {
       /^checks\[0\]\.needs: needs is gone: a check names the checks it waits for with after$/u,
     ],
     ["a numeric timeout", check("timeout: 600"), /^checks\[0\]\.timeout: /u],
+    // secrets
+    [
+      "a lowercase secret's name",
+      check("secrets: [deploy]"),
+      /^checks\[0\]\.secrets\[0\]: a secret's name is up to 128 uppercase letters/u,
+    ],
+    [
+      "a secret named like Throng's variables",
+      "setup:\n  - { name: deps, command: npm ci, secrets: [THRONG_TOKEN] }\n",
+      /^setup\[0\]\.secrets\[0\]: a secret's name can't start with THRONG_$/u,
+    ],
+    ["secrets that aren't a list", check("secrets: DEPLOY"), /^checks\[0\]\.secrets: secrets must be a list/u],
     // after
     [
       "after naming a setup",
@@ -490,6 +506,19 @@ describe("parseConfig", () => {
     ]);
   });
 
+  it("reads the secrets each setup and check names, each once, and none by default", () => {
+    const result = parseConfig(
+      "setup:\n  - { name: deps, command: npm ci, secrets: [NPM_TOKEN] }\n" +
+        "checks:\n  - { name: a, command: x }\n  - { name: b, command: x, secrets: [DEPLOY, DEPLOY, SENTRY] }\n",
+    );
+    expect(result.kind === "valid" && result.config.setup.map((s) => s.secrets)).toEqual([["NPM_TOKEN"]]);
+    expect(result.kind === "valid" && result.config.checks.map((c) => c.secrets)).toEqual([[], ["DEPLOY", "SENTRY"]]);
+    expect(result.kind === "valid" && namedSecrets(result.config)).toEqual([
+      { step: "setup deps", secrets: ["NPM_TOKEN"] },
+      { step: "check b", secrets: ["DEPLOY", "SENTRY"] },
+    ]);
+  });
+
   it("reads after as one check or a list of them", () => {
     const result = parseConfig(
       "checks:\n  - { name: a, command: x }\n  - { name: b, command: x, after: a }\n  - { name: c, command: x, after: [a, b] }\n",
@@ -542,8 +571,8 @@ checks:
       config: {
         ...EMPTY,
         checks: [
-          { name: "unit", command: "pnpm test", timeoutMs: 120_000, after: [], source: "project" },
-          { name: "e2e", command: "pnpm e2e", timeoutMs: 300_000, after: [], source: "project" },
+          { name: "unit", command: "pnpm test", timeoutMs: 120_000, after: [], secrets: [], source: "project" },
+          { name: "e2e", command: "pnpm e2e", timeoutMs: 300_000, after: [], secrets: [], source: "project" },
         ],
       },
     });

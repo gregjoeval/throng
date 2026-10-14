@@ -33,6 +33,23 @@ export const SecretSchema = z
   })
   .openapi("Secret");
 
+const SecretUseSchema = z
+  .object({
+    name: z.string().openapi({ example: "CLOUDFLARE_PREVIEW" }),
+    steps: z.array(z.string()).openapi({
+      description: "The setups and checks in `main`'s config naming it, as a run's errors name them.",
+      example: ["check preview"],
+    }),
+    hasValue: z.boolean().openapi({ description: "False when no secret has this name: every run naming it fails." }),
+    notAllowedIn: z.array(z.enum(PIPELINES)).openapi({
+      description:
+        "The pipelines that run those steps but the secret isn't allowed in: their runs fail. Every setup and " +
+        "check runs in every pipeline.",
+      example: ["main"],
+    }),
+  })
+  .openapi("SecretUse");
+
 const PutSecretSchema = z
   .object({
     value: z
@@ -77,19 +94,23 @@ export function secretsRoutes({ auth, repos, tasks }: SecretsOptions) {
         tags: ["Secrets"],
         summary: "List the project's secrets, without their values",
         description:
-          "Each secret's name, the pipelines it may be used in and when it last changed, by name. Its maintainers " +
-          "may, under an alias too; for now that's only the project owner.",
+          "Each secret's name, the pipelines it may be used in and when it last changed, by name; and where " +
+          "`main`'s config names secrets, flagging each with no value or not allowed in a pipeline that runs it. " +
+          "Its maintainers may, under an alias too; for now that's only the project owner.",
         security,
         middleware: [auth] as const,
         request: { params: ProjectPathSchema },
         responses: {
-          200: { description: "The secrets.", ...json(z.object({ secrets: z.array(SecretSchema) })) },
+          200: {
+            description: "The secrets, and where main's config names them.",
+            ...json(z.object({ secrets: z.array(SecretSchema), uses: z.array(SecretUseSchema) })),
+          },
           401: unauthorized,
           403: errorResponse("Only the project's maintainers may."),
           404: errorResponse("No such project."),
         },
       }),
-      async (c) => c.json({ secrets: await service(c).listSecrets(c.var.actor, c.req.valid("param")) }, 200),
+      async (c) => c.json(await service(c).listSecrets(c.var.actor, c.req.valid("param")), 200),
     )
     .openapi(
       createRoute({

@@ -96,10 +96,20 @@ export function runOutcome(result: ScoringResult): RunOutcome {
   return { base, config, gate, steps, metrics };
 }
 
-/** How one setup went: its exit code, null when an earlier setup failed and it never ran, and how long it took. */
+/**
+ * How one setup went: its exit code, null when it never ran, and how long it took. `error` says why
+ * the setups never started, on the setup that caused it, such as a secret it names being gone.
+ */
 export interface SetupRun {
   exit: number | null;
   durationMs: number;
+  error?: string;
+}
+
+/** What a setup's step notes: why it errored, or that it was skipped for the setup that failed. */
+function setupNotes(ran: SetupRun, failed: string | null): string[] {
+  if (ran.error !== undefined) return [ran.error];
+  return ran.exit === null && failed !== null ? [`skipped: setup ${failed} failed`] : [];
 }
 
 /**
@@ -126,9 +136,10 @@ export function pipelineOutcome(
       kind: "setup",
       source: "project",
       group: null,
-      outcome: STEP_OUTCOME[ranOutcome(ran.exit, ran.durationMs, SETUP_TIMEOUT_MS)],
+      outcome:
+        ran.error === undefined ? STEP_OUTCOME[ranOutcome(ran.exit, ran.durationMs, SETUP_TIMEOUT_MS)] : "errored",
       durationMs: ran.durationMs,
-      notes: ran.exit === null && failed !== null ? [`skipped: setup ${failed} failed`] : [],
+      notes: setupNotes(ran, failed),
       log: logs.includes(log) ? log : null,
     };
   });

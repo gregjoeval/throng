@@ -10,6 +10,7 @@ import type { MetricFormat } from "./metric-values.ts";
 import { HOSTNAME } from "./network.ts";
 import { readOriginFile } from "./repos.ts";
 import type { Repos } from "./repos.ts";
+import { secretNameError } from "./secrets.ts";
 
 export const CONFIG_PATH = ".throng/config.yml";
 /** Larger configs are rejected rather than parsed. */
@@ -84,6 +85,8 @@ export type MetricConfig = {
 export interface SetupConfig {
   name: string;
   command: string;
+  /** The secrets it uses, by name: in a trusted run, the setup container holds them. */
+  secrets: string[];
 }
 
 export interface CheckConfig {
@@ -92,6 +95,8 @@ export interface CheckConfig {
   timeoutMs: number;
   /** The checks it waits for: it runs only once each of them passed. */
   after: string[];
+  /** The secrets it uses, by name: in a trusted run, its container holds them. A task's check names none. */
+  secrets: string[];
   source: ConfigLayer;
 }
 
@@ -328,15 +333,36 @@ export function metricConfig(metric: z.infer<typeof MetricSchema>, source: Confi
   }
 }
 
-/** A parsed check as stored, as the layer `source` defined it: with a 10m timeout and nothing to wait for by default. */
+/**
+ * A parsed check as stored, as the layer `source` defined it: with a 10m timeout, and nothing to wait
+ * for and no secrets by default.
+ */
 export function checkConfig(check: z.infer<typeof CheckSchema>, source: ConfigLayer): CheckConfig {
   return {
     name: check.name,
     command: check.command,
     timeoutMs: check.timeout ?? DEFAULT_CHECK_TIMEOUT_MS,
     after: check.after,
+    secrets: check.secrets,
     source,
   };
+}
+
+/** The secrets one setup or check names, with the step as a run's errors name it: `setup deps`, `check test`. */
+export interface NamedSecrets {
+  step: string;
+  secrets: string[];
+}
+
+/** The secrets each setup and check names, in run order, leaving out those that name none. */
+export function namedSecrets(stages: {
+  setup: readonly Pick<SetupConfig, "name" | "secrets">[];
+  checks: readonly Pick<CheckConfig, "name" | "secrets">[];
+}): NamedSecrets[] {
+  return [
+    ...stages.setup.map((setup) => ({ step: `setup ${setup.name}`, secrets: setup.secrets })),
+    ...stages.checks.map((check) => ({ step: `check ${check.name}`, secrets: check.secrets })),
+  ].filter((named) => named.secrets.length > 0);
 }
 
 const TimeoutSchema = z
@@ -357,11 +383,24 @@ const AfterSchema = z
   .optional()
   .transform((after) => (after === undefined ? [] : [after].flat()));
 
+/** The secrets a setup or check uses: their names, each once; none by default. */
+const SecretsSchema = z
+  .array(
+    z.string({ error: "must be a secret's name" }).superRefine((text, ctx) => {
+      const message = secretNameError(text);
+      if (message !== null) ctx.addIssue({ code: "custom", message });
+    }),
+    { error: "secrets must be a list of secrets' names" },
+  )
+  .optional()
+  .transform((secrets) => [...new Set(secrets)]);
+
 /** A setup: a name and a command, run in order before every check. */
 const SetupSchema = z.strictObject(
   {
     name: name("setup name"),
     command,
+    secrets: SecretsSchema,
     after: z.never({ error: "only checks take after; setups run in order" }).optional(),
   },
   { error: "a setup must be a mapping with a name and a command, like { name: deps, command: npm ci }" },
@@ -377,6 +416,7 @@ export const CheckSchema = z.strictObject({
     .optional(),
   needs: z.never({ error: "needs is gone: a check names the checks it waits for with after" }).optional(),
   after: AfterSchema,
+  secrets: SecretsSchema,
   timeout: TimeoutSchema.optional(),
   metrics: z
     .never({
@@ -490,7 +530,11 @@ export function parseConfig(text: string | null): ConfigResult {
   return {
     kind: "valid",
     config: {
-      setup: (config.setup ?? []).map((setup) => ({ name: setup.name, command: setup.command })),
+      setup: (config.setup ?? []).map((setup) => ({
+        name: setup.name,
+        command: setup.command,
+        secrets: setup.secrets,
+      })),
       network: { allow: config.network?.allow ?? [] },
       checks: (config.checks ?? []).map((check) => checkConfig(check, "project")),
       metrics: (config.metrics ?? []).map((metric) => metricConfig(metric, "project")),

@@ -125,8 +125,15 @@ notes the size it ran at under \`== throng ==\`, so a check killed for memory sh
 
 The project owner keeps secrets in the project's settings: a name, a value nobody can read back, and the
 pipelines it may be used in (\`default\` for attempts and task branches, \`main\`, or both). \`list_secrets\` gives
-each one's name and pipelines, so you can name them in config. Only the owner, acting as themselves, sets,
-allows or deletes them, never through an alias's token or MCP.
+each one's name and pipelines, so you can name them in config, and \`uses\`: where \`main\`'s config names each,
+flagging any with no value or not allowed in a pipeline. Only the owner, acting as themselves, sets, allows or
+deletes them, never through an alias's token or MCP.
+
+A setup or check in \`.throng/config.yml\` names the secrets it uses, as in \`secrets: [NPM_TOKEN]\`, and gets each
+one as an environment variable of that name; a task's checks name none. Only a run of code the owner (or their
+agents) pushed gets them. A run of anyone else's code that names one waits for the owner. A run naming a secret
+with no value, or one not allowed in its pipeline, fails before anything runs, naming it. Values are masked as
+\`***\` in logs, metric values and errors.
 
 ## In short
 

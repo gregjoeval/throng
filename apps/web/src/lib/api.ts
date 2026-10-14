@@ -467,6 +467,8 @@ export const secretsQuery = (projectRef: ProjectRef) =>
 
 export type Secret = InferResponseType<typeof secretsApi.$get, 200>["secrets"][number];
 export type Pipeline = Secret["pipelines"][number];
+/** Where `main`'s config names a secret, and whether it has a value and is allowed wherever it runs. */
+export type SecretUse = InferResponseType<typeof secretsApi.$get, 200>["uses"][number];
 
 /** Sets a secret's value, its pipelines, or both; what's left out is kept. Rejects with hono's `DetailedError`. */
 export async function putSecret(

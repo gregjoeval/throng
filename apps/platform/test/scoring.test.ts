@@ -3,6 +3,7 @@ import { ServiceError } from "../src/errors.ts";
 import type { CheckResult, LegacyResult, ScoringResult } from "../src/results.ts";
 import { runReport, SCORING_CAP } from "../src/scoring.ts";
 import type { PipelineParams, PipelineWorkflowBinding, RunReport, ScoringRequest, StoredRun } from "../src/scoring.ts";
+import { keyringFrom, openSealed } from "../src/secrets.ts";
 import { attemptRef } from "../src/task-refs.ts";
 import { TaskStore } from "../src/task-store.ts";
 import type { AttemptInput, ProjectContext } from "../src/task-store.ts";
@@ -13,6 +14,8 @@ import { testSql } from "./support/task-backend.ts";
 
 const PROJECT: ProjectContext = { id: "abc123", owner: "owner001" };
 const ORIGIN = "abc123-main";
+/** The keyring secrets are sealed under, as `SECRETS_KEYRING` holds it. */
+const KEYRING = JSON.stringify({ current: "k1", keys: { k1: btoa("k".repeat(32)) } });
 
 function actor(id: string, alias: string | null = null): Actor {
   return { user: { id, handle: id, email: `${id}@example.com`, created_at: "" }, alias };
@@ -56,6 +59,7 @@ function setup() {
     repos,
     now: () => new Date("2026-10-10T12:00:00.000Z"),
     scoring: { workflow, teardown: async (id, containers) => void tornDown.push([id, containers]) },
+    keyring: keyringFrom(KEYRING),
   });
   const journal = () =>
     (sql.db.prepare("SELECT kind, detail FROM journal ORDER BY id").all() as { kind: string; detail: string }[]).map(
@@ -465,7 +469,7 @@ describe("rescoring on a task edit", () => {
   it("queues one rescore behind a run that's running, which may have read the old definitions", async () => {
     const { store, workflow, runs, open } = await scored();
     const sha = at(runs(open), 0).sha;
-    store.scoring.request({ project: PROJECT.id, line: "t1a1", sha, trigger: "rescore", actor: ada });
+    store.scoring.request({ project: PROJECT.id, line: "t1a1", sha, trigger: "rescore", actor: ada, ownersPush: null });
     await store.scoring.drain();
     expect(runs(open).map((r) => [r.trigger, r.status])).toEqual([
       ["open", "done"],
@@ -491,7 +495,7 @@ describe("rescoring on a task edit", () => {
   it("still answers a push or score now for a head that's running with the run, queuing nothing", async () => {
     const { store, runs, open } = await scored();
     const sha = at(runs(open), 0).sha;
-    const head = { project: PROJECT.id, line: "t1a1", sha, actor: ada };
+    const head = { project: PROJECT.id, line: "t1a1", sha, actor: ada, ownersPush: null };
     store.scoring.request({ ...head, trigger: "rescore" });
     await store.scoring.drain();
     const running = at(runs(open), 1);
@@ -731,7 +735,14 @@ describe("line-keyed runs", () => {
       [7, "t1a2", null],
       [4, "t1a2", "passed"],
     ]);
-    const next = store.scoring.request({ project: PROJECT.id, line: "t1a2", sha: "c", trigger: "push", actor: ada });
+    const next = store.scoring.request({
+      project: PROJECT.id,
+      line: "t1a2",
+      sha: "c",
+      trigger: "push",
+      actor: ada,
+      ownersPush: true,
+    });
     expect(next.run.id).toBe(8);
     const tables = sql.exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table'").map((t) => t.name);
     expect(tables).toContain("pipeline_runs");
@@ -816,7 +827,7 @@ describe("line-keyed runs", () => {
     await store.openAttempt(PROJECT, ada, defined(one));
     await store.scoring.drain();
     const sha = at(runs(defined(one)), 0).sha;
-    store.scoring.request({ project: PROJECT.id, line: "t1a1", sha, trigger: "rescore", actor: ada });
+    store.scoring.request({ project: PROJECT.id, line: "t1a1", sha, trigger: "rescore", actor: ada, ownersPush: null });
     await store.openAttempt(PROJECT, ada, defined(two));
     await store.scoring.drain();
     expect(workflow.created.map((c) => c.params.line)).toEqual(["t1a1", "t1a2"]);
@@ -838,7 +849,122 @@ describe("line-keyed runs", () => {
       "logs/abc123/t1a1/a/1/test.log",
       "logs/abc123/t1a1/1/test.log",
     ]);
-    store.scoring.request({ project: PROJECT.id, line: "t1a1", sha: "b", trigger: "push", actor: ada });
+    store.scoring.request({
+      project: PROJECT.id,
+      line: "t1a1",
+      sha: "b",
+      trigger: "push",
+      actor: ada,
+      ownersPush: true,
+    });
     expect(store.runLogKeys(PROJECT, ada, { run: 2, name: "test" })).toEqual(["logs/abc123/t1a1/2/test.log"]);
+  });
+});
+
+/** What a run's setups and checks name: one check naming DEPLOY. */
+const DEPLOYS = [{ step: "check deploy", secrets: ["DEPLOY"] }];
+
+/** An open attempt by `author`, whose head `who` pushed while it was a draft; its run is queued. */
+async function opened(t: ReturnType<typeof setup>, author: Actor, who: Actor = author) {
+  const task = t.store.createTask(PROJECT, author, { title: "Fix it" });
+  const [made] = await t.store.createAttempts(PROJECT, author, { task: task.number, count: 1 });
+  const ref = { task: defined(made).task, number: defined(made).number };
+  t.pushed(ref, t.commit(ref, "work\n"), who);
+  await t.store.openAttempt(PROJECT, author, ref);
+  return ref;
+}
+
+/** The owner sets DEPLOY, allowed in `pipelines`. */
+async function withSecret(t: ReturnType<typeof setup>, pipelines: ("default" | "main")[] = ["default"]) {
+  await t.store.putSecret(PROJECT, owner, { name: "DEPLOY", value: "deploy-token-0123", pipelines });
+}
+
+describe("trust and secrets", () => {
+  it("trusts a run of a head the owner pushed, as themselves or under an alias, and no one else's", async () => {
+    const t = setup();
+    const own = await opened(t, owner);
+    const agents = await opened(t, owner, actor("owner001", "claude"));
+    const adas = await opened(t, ada);
+    expect([own, agents, adas].map((ref) => at(t.runs(ref), 0).trusted)).toEqual([true, true, false]);
+
+    // The owner asking for a run of ada's head doesn't make ada's code theirs.
+    const rescore = await t.store.rescore(PROJECT, owner, adas);
+    expect(rescore.run.trusted).toBeFalsy();
+    // An owner's push after it is trusted again on its own head.
+    const head = t.commit(own, "more work\n");
+    expect(queued(t.pushed(own, head, owner)).run.trusted).toBeTruthy();
+  });
+
+  it("hands an untrusted run naming a secret to the owner: it waits and frees its slot", async () => {
+    const t = setup();
+    await withSecret(t);
+    const refs = [];
+    for (let i = 0; i <= SCORING_CAP; i += 1) refs.push(await opened(t, ada));
+    await t.store.scoring.drain();
+    const first = at(t.runs(defined(refs[0])), 0);
+    const last = defined(refs[SCORING_CAP]);
+    expect(at(t.runs(last), 0).status).toBe("queued");
+
+    expect(t.store.pipelinePlanned(first.id, ["i/setup"], DEPLOYS)).toEqual({ kind: "waiting" });
+    expect(t.store.scoring.getRun(first.id)).toMatchObject({ status: "waiting" });
+    expect(t.store.scoring.statusFor(attemptRef(1, 1))).toMatchObject({ status: "waiting" });
+    await t.store.scoring.drain();
+    expect(at(t.runs(last), 0).status).toBe("running");
+    expect(t.journal().find((e) => e.kind === "scoringWaiting")).toMatchObject({ run: first.id, secrets: ["DEPLOY"] });
+  });
+
+  it("starts an untrusted run naming no secret, and a trusted one naming some", async () => {
+    const t = setup();
+    await withSecret(t);
+    const adas = await opened(t, ada);
+    const own = await opened(t, owner);
+    await t.store.scoring.drain();
+    expect(t.store.pipelinePlanned(at(t.runs(adas), 0).id, [], [])).toEqual({ kind: "start" });
+    expect(t.store.pipelinePlanned(at(t.runs(own), 0).id, [], DEPLOYS)).toEqual({ kind: "start" });
+  });
+
+  it("refuses a plan naming a secret with no value, or one not allowed in the run's pipeline, naming both", async () => {
+    const t = setup();
+    const own = await opened(t, owner);
+    await t.store.scoring.drain();
+    const run = at(t.runs(own), 0).id;
+    expect(t.store.pipelinePlanned(run, [], DEPLOYS)).toEqual({
+      kind: "refused",
+      error: "check deploy: secret DEPLOY has no value in the project settings",
+    });
+    await withSecret(t, ["main"]);
+    expect(t.store.pipelinePlanned(run, [], DEPLOYS)).toEqual({
+      kind: "refused",
+      error: "check deploy: secret DEPLOY isn't allowed in the default pipeline by the project settings",
+    });
+  });
+
+  it("replaces a waiting run with a newer push's", async () => {
+    const t = setup();
+    await withSecret(t);
+    const adas = await opened(t, ada);
+    await t.store.scoring.drain();
+    t.store.pipelinePlanned(at(t.runs(adas), 0).id, [], DEPLOYS);
+    t.pushed(adas, t.commit(adas, "newer\n"));
+    expect(t.runs(adas).map((r) => r.status)).toEqual(["cancelled", "queued"]);
+  });
+
+  it("loads a trusted running run's secrets sealed, as the settings are now, and none for any other run", async () => {
+    const t = setup();
+    await withSecret(t);
+    const own = await opened(t, owner);
+    const adas = await opened(t, ada);
+    await t.store.scoring.drain();
+    const loaded = t.store.pipelineSecrets(at(t.runs(own), 0).id, ["DEPLOY"]);
+    if (!("sealed" in loaded)) throw new Error(loaded.error);
+    expect(JSON.stringify(loaded)).not.toContain("deploy-token-0123");
+    expect(await openSealed(keyringFrom(KEYRING), PROJECT.id, at(loaded.sealed, 0))).toBe("deploy-token-0123");
+    expect(() => t.store.pipelineSecrets(at(t.runs(adas), 0).id, ["DEPLOY"])).toThrow(/may hold no secrets/u);
+
+    t.store.deleteSecret(PROJECT, owner, { name: "DEPLOY" });
+    expect(t.store.pipelineSecrets(at(t.runs(own), 0).id, ["DEPLOY"])).toEqual({
+      secret: "DEPLOY",
+      error: "secret DEPLOY has no value in the project settings",
+    });
   });
 });

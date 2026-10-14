@@ -3,7 +3,7 @@ import { parseConfig } from "../src/config.ts";
 import type { CheckConfig, MetricConfig } from "../src/config.ts";
 import { buildResult, scorePlan, scoreTimeoutMs } from "../src/results.ts";
 import type { RawScore } from "../src/results.ts";
-import { NO_TASK_DEFINITIONS, withTask } from "../src/task-definitions.ts";
+import { NO_TASK_DEFINITIONS, taskDefinitionsFrom, withTask } from "../src/task-definitions.ts";
 
 const PROJECT = parseConfig(`checks:
   - name: test
@@ -30,6 +30,7 @@ const taskCheck = (check: Partial<CheckConfig> = {}): CheckConfig => ({
   command: "./smoke.sh",
   timeoutMs: 60_000,
   after: [],
+  secrets: [],
   source: "task",
   ...check,
 });
@@ -98,7 +99,7 @@ checks:
       ],
     });
     const plan = scorePlan(config);
-    expect(plan.setup).toEqual([{ name: "deps", command: "pnpm install" }]);
+    expect(plan.setup).toEqual([{ name: "deps", command: "pnpm install", secrets: [] }]);
     expect(plan.allow).toEqual(["api.example.com"]);
     expect(plan.checks.map((check) => [check.name, check.metrics.map((metric) => metric.name)])).toEqual([
       ["test", []],
@@ -185,6 +186,22 @@ checks:
         "task checks[2].after: a check can't wait for itself",
         "task checks[3].after: after makes a circle: d → e → d",
       ].join("\n"),
+    });
+  });
+});
+
+describe("a task's definitions", () => {
+  it("refuses a task's check naming a secret: tasks aren't reviewed like main's config", () => {
+    const input = { checks: [{ name: "smoke", command: "./smoke.sh", secrets: ["DEPLOY"] }] };
+    expect(taskDefinitionsFrom(input, NO_TASK_DEFINITIONS, PROJECT)).toEqual({
+      error: "checks[0].secrets: a task's checks get no secrets: tasks aren't reviewed like main's config",
+    });
+  });
+
+  it("saves a task's check with no secrets", () => {
+    const input = { checks: [{ name: "smoke", command: "./smoke.sh" }] };
+    expect(taskDefinitionsFrom(input, NO_TASK_DEFINITIONS, PROJECT)).toMatchObject({
+      definitions: { checks: [{ name: "smoke", secrets: [] }] },
     });
   });
 });

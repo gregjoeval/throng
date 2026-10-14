@@ -684,6 +684,7 @@ describe("/mcp", () => {
     expect(listed.summary).toBe("1 secrets: DEPLOY_TOKEN (main)");
     expect(listed.data).toEqual({
       secrets: [{ name: "DEPLOY_TOKEN", pipelines: ["main"], changedAt: "2026-10-10T12:00:00.000Z" }],
+      uses: [],
     });
     expect(JSON.stringify(listed)).not.toContain(value);
     expect((await call(ada, "list_secrets", { project })).summary).toMatch(/^forbidden: /u);

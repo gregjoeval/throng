@@ -28,7 +28,9 @@
 // try to push to the origin and call the Cloudflare API, which `network.allow` doesn't list; both
 // fail), deps (a named setup installs an npm dependency from the registry; each check runs in its
 // own container started from the setup's snapshot, one waits for the other with `after`, and each
-// gets the run's THRONG_* variables), refs (attempt archive refs: pushable, listed, kept across pushes to main, and copied by
+// gets the run's THRONG_* variables), secrets (the owner sets a secret allowed in default; a check naming it in a run
+// of the owner's push writes a hash of it, and the stored log shows the mask, never the value; nothing deploys),
+// refs (attempt archive refs: pushable, listed, kept across pushes to main, and copied by
 // the Worker).
 //
 // The D1 projection, me: a task and an attempt reach the e2e user's `/api/me/tasks` and
@@ -43,6 +45,7 @@
 // a failed or cancelled run left behind.
 
 import { execFile } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -281,6 +284,7 @@ const scenarios: Record<string, () => Promise<void>> = {
   invalid,
   preview,
   coalesce,
+  secrets,
   intrusion,
   deps,
   refs,
@@ -1115,6 +1119,43 @@ metrics:
     `expected preview_url to link to ${url}, got ${JSON.stringify(link)}`,
   );
   await finish(project, work, timeline);
+}
+
+/**
+ * The owner sets a secret allowed in `default`, and an attempt they pushed runs a check naming it: the
+ * check prints a hash of the value, the value and its base64; the stored log has the hash and the mask
+ * where the value and its base64 were. Nothing deploys.
+ */
+async function secrets(): Promise<void> {
+  const timeline = new Timeline();
+  const value = `e2e-secret-${randomBytes(12).toString("hex")}`;
+  const hash = createHash("sha256").update(value).digest("hex");
+  const p = await setUpRealProject(timeline, {
+    "scripts/secret.js": `import { createHash } from "node:crypto";
+const value = process.env.E2E_SECRET ?? "";
+console.log("sha256 " + createHash("sha256").update(value).digest("hex"));
+console.log("value " + value);
+console.log("base64 " + Buffer.from(value).toString("base64"));
+`,
+    ".throng/config.yml": `checks:
+  - { name: secret, command: node scripts/secret.js, secrets: [E2E_SECRET] }
+`,
+  });
+  await throng(p, "PUT", "/secrets/E2E_SECRET", { value, pipelines: ["default"] });
+  timeline.mark("secret set");
+  const fork = await createAttempt(p.project, "t1a1", timeline);
+  const sha = await commitAndPush(p.work, fork, "src/greeting.js", (s) => s.replace('"hello"', '"hello, a1"'), "a1");
+  timeline.mark("attempt pushed");
+
+  const result = await scored(p.project, sha);
+  assert(result.gate === "passed", `expected the check holding the secret to pass: ${JSON.stringify(result.checks)}`);
+  const event = await waitFor(p.project, (e) => e.kind === "scored" && e.detail.sha === sha);
+  const log = await throngText(p, `/runs/${String(event.detail.run)}/logs/secret`, "text/plain");
+  assert(log.includes(`sha256 ${hash}`), `expected the check to have held the secret:\n${log}`);
+  assert(log.includes("value ***\n") && log.includes("base64 ***\n"), `expected the log to show the mask:\n${log}`);
+  const base64 = Buffer.from(value).toString("base64");
+  assert(!log.includes(value) && !log.includes(base64), "expected the stored log never to hold the value");
+  await finish(p.project, p.work, timeline);
 }
 
 /** Two quick pushes to one attempt: the first run is cancelled; only the newest sha is scored. */

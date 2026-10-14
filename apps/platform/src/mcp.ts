@@ -599,13 +599,14 @@ function mcpServer({ repos, tasks, logs, diffCache }: Deps, { actor, token, env,
   tool(
     "list_secrets",
     "The project's secrets: each one's name, the pipelines it may be used in (`default`, `main`) and when it last " +
-      "changed, never its value, for naming them in `.throng/config.yml`. Only the project's maintainers may. " +
-      "Only the owner, acting as themselves in the UI or REST API, can set them.",
+      "changed, never its value, for naming them in `.throng/config.yml`; and `uses`: where main's config names " +
+      "each secret, whether it has a value and the pipelines it isn't allowed in. Only the project's maintainers " +
+      "may. Only the owner, acting as themselves in the UI or REST API, can set them.",
     onProject,
     async ({ project }) => {
-      const secrets = await service.listSecrets(actor, projectPath(project));
+      const { secrets, uses } = await service.listSecrets(actor, projectPath(project));
       const named = secrets.map((s) => `${s.name} (${s.pipelines.join(", ") || "no pipeline"})`).join(", ");
-      return answer(`${secrets.length} secrets${named === "" ? "" : `: ${named}`}`, { secrets });
+      return answer(`${secrets.length} secrets${named === "" ? "" : `: ${named}`}`, { secrets, uses });
     },
   );
 

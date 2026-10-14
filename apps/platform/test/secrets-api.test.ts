@@ -67,7 +67,7 @@ async function setup() {
         "SELECT kind, detail, user_id, alias FROM journal WHERE kind LIKE 'secret%' ORDER BY id",
       )
       .map((row) => ({ ...row, detail: JSON.parse(row.detail) as Json }));
-  return { call, greg, gregClaude, ada, gregId, projectId, store, sql, answers, journal };
+  return { call, greg, gregClaude, ada, gregId, projectId, store, sql, answers, journal, repos };
 }
 
 describe("setting a secret", () => {
@@ -83,9 +83,27 @@ describe("setting a secret", () => {
       status: 200,
       body: {
         secrets: [{ name: "DEPLOY_TOKEN", pipelines: ["default", "main"], changedAt: "2026-10-10T12:00:00.000Z" }],
+        uses: [],
       },
     });
     expect(answers.join("\n")).not.toContain(VALUE);
+  });
+
+  it("lists where main's config names each secret, flagging one with no value or not allowed where it runs", async () => {
+    const { call, greg, gregClaude, projectId, repos } = await setup();
+    repos.commit(`${projectId}-main`, {
+      files: {
+        ".throng/config.yml":
+          "setup:\n  - { name: deps, command: npm ci, secrets: [NPM_TOKEN] }\n" +
+          "checks:\n  - { name: preview, command: npm run preview, secrets: [DEPLOY_TOKEN] }\n",
+      },
+    });
+    await call("PUT", `${SECRETS}/DEPLOY_TOKEN`, greg, { value: VALUE, pipelines: ["default"] });
+    const listed = await call("GET", SECRETS, gregClaude);
+    expect(listed.body["uses"]).toEqual([
+      { name: "DEPLOY_TOKEN", steps: ["check preview"], hasValue: true, notAllowedIn: ["main"] },
+      { name: "NPM_TOKEN", steps: ["setup deps"], hasValue: false, notAllowedIn: [] },
+    ]);
   });
 
   it("works for the owner signed in to throng-web", async () => {

@@ -15,14 +15,25 @@ interface Secret {
   changedAt: string;
 }
 
+interface SecretUse {
+  name: string;
+  steps: string[];
+  hasValue: boolean;
+  notAllowedIn: ("default" | "main")[];
+}
+
 /**
  * Serves `ada/alpha`'s secrets from `secrets`, applying each PUT and DELETE to it as the platform
- * would, and recording every write's method, name and body in `writes`.
+ * would, and recording every write's method, name and body in `writes`; `uses` are where main's config names them.
  */
-function serveSecrets(secrets: Secret[], writes: { method: string; name: string; body: unknown }[] = []) {
+function serveSecrets(
+  secrets: Secret[],
+  writes: { method: string; name: string; body: unknown }[] = [],
+  uses: SecretUse[] = [],
+) {
   const path = "*/api/projects/ada/alpha/secrets";
   return [
-    http.get(path, () => HttpResponse.json({ secrets })),
+    http.get(path, () => HttpResponse.json({ secrets, uses })),
     http.put(`${path}/:name`, async ({ params, request }) => {
       const name = String(params["name"]);
       const body = (await request.json()) as { value?: string; pipelines?: Secret["pipelines"] };
@@ -67,6 +78,24 @@ describe("the settings tab", () => {
 });
 
 describe("the secrets settings", () => {
+  it("shows where main's config names each secret, and flags one with no value or not allowed there", async () => {
+    const uses: SecretUse[] = [
+      { name: "DEPLOY_TOKEN", steps: ["check preview", "check smoke"], hasValue: true, notAllowedIn: ["default"] },
+      { name: "SENTRY_TOKEN", steps: ["setup deps"], hasValue: false, notAllowedIn: [] },
+    ];
+    const npm: Secret = { name: "NPM_TOKEN", pipelines: [], changedAt: "2026-10-11T08:00:00Z" };
+    server.use(...serveSecrets([deployToken(), npm], [], uses));
+    await renderApp("/ada/alpha/settings");
+    const rows = await screen.findAllByRole("row");
+    const named = (row: number) => within(rows[row] as HTMLElement).getAllByRole("cell")[3];
+    expect(named(1)).toHaveTextContent("check preview, check smoke");
+    expect(named(1)).toHaveTextContent("Not allowed in default: runs there fail");
+    expect(named(2)).toHaveTextContent("Not named");
+    const unset = screen.getByRole("alert");
+    expect(unset).toHaveTextContent("main's config names secrets with no value. Runs naming them fail.");
+    expect(unset).toHaveTextContent("SENTRY_TOKEN, named by setup deps");
+  });
+
   it("lists each secret's name, pipelines and last change, never a value", async () => {
     server.use(
       ...serveSecrets([deployToken(), { name: "NPM_TOKEN", pipelines: [], changedAt: "2026-10-11T08:00:00Z" }]),

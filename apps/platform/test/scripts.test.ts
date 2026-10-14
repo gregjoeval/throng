@@ -67,9 +67,11 @@ const check = (name: string, command: string, timeoutMs = 60_000, metrics: Plann
   command,
   timeoutMs,
   after: [],
+  secrets: [],
   metrics,
 });
-const setup = (...commands: string[]): SetupConfig[] => commands.map((command, i) => ({ name: `s${i + 1}`, command }));
+const setup = (...commands: string[]): SetupConfig[] =>
+  commands.map((command, i) => ({ name: `s${i + 1}`, command, secrets: [] }));
 const number = (name: string, from: string): PlannedMetric => ({ name, from, rule: { type: "number" } });
 const cat = (path: string) => execFileSync("cat", [path], { encoding: "utf8" });
 

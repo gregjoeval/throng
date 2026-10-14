@@ -5,8 +5,10 @@ The Throng UI: TanStack Start on a Cloudflare Worker. It reaches the platform Wo
 ## Develop
 
 ```bash
-pnpm --filter @throng/web dev
+CLOUDFLARE_ENV=ci THRONG_DEV_EMAIL=you@example.com pnpm --filter @throng/web dev
 ```
+
+Run the platform's `vite dev` beside it with the same `CLOUDFLARE_ENV`, and the `PLATFORM` binding reaches it. Access never fronts localhost, so every `/api` call is signed in as `THRONG_DEV_EMAIL` (`src/server/dev-access.ts`); without it they are 401. Don't combine it with `vite dev --host`: anyone who can reach the port would be signed in as you.
 
 ## Deploy
 

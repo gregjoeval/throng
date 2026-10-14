@@ -20,8 +20,7 @@ export interface Platform {
  * browser sent are dropped, so the forwarded email is the only identity the platform sees.
  */
 export async function forwardToPlatform(request: Request, platform: Platform, verify: AccessVerifier) {
-  const jwt = request.headers.get("Cf-Access-Jwt-Assertion");
-  const identity = jwt === null ? null : await verify(jwt);
+  const identity = await verify(request.headers.get("Cf-Access-Jwt-Assertion"));
   if (identity === null) {
     return Response.json(
       { error: { code: "unauthorized", message: "a valid Access session is required" } },

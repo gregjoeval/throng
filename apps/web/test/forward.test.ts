@@ -1,6 +1,6 @@
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from "jose";
 import { beforeAll, describe, expect, it } from "vitest";
-import { accessVerifier } from "@/server/access";
+import { accessVerifier, devAccessVerifier } from "@/server/access";
 import type { AccessVerifier } from "@/server/access";
 import { forwardToPlatform, isApiRequest } from "@/server/forward";
 import type { Platform } from "@/server/forward";
@@ -84,6 +84,17 @@ describe("forwardToPlatform", () => {
       expect(await res.json()).toEqual({ error: { code: "unauthorized", message: expect.any(String) } });
     }
     expect(received).toHaveLength(0);
+  });
+
+  it("forwards as local dev's stand-in email, with no Access JWT", async () => {
+    const { platform, received } = fakePlatform();
+    const res = await forwardToPlatform(
+      request({ "X-Throng-Access-Email": "mallory@example.com" }),
+      platform,
+      devAccessVerifier("Ada@Example.com"),
+    );
+    expect(res.status).toBe(200);
+    expect(received.map((r) => r.headers.get("X-Throng-Access-Email"))).toEqual(["ada@example.com"]);
   });
 });
 

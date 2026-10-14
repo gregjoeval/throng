@@ -244,7 +244,7 @@ gh workflow run e2e.yml --ref my-branch     # every scenario, against a branch
    - `CLOUDFLARE_ACCOUNT_ID`: the account id.
 5. **Run it once** and check the suite passes and the run's projects and repos are gone afterwards.
 
-To run `arena` from your machine, install Chromium once with `pnpm --filter @throng/platform exec playwright install chromium` and point `THRONG_WEB_URL` at any throng-web, such as `pnpm --filter @throng/web dev` (`http://localhost:5173`). Its own platform binding isn't used, since the browser sends API calls to `THRONG_URL`:
+To run `arena` from your machine, install Chromium once with `pnpm --filter @throng/platform exec playwright install chromium` and point `THRONG_WEB_URL` at any throng-web, such as `pnpm --filter @throng/web dev` (the URL Vite prints). Its own platform binding isn't used, since the browser sends API calls to `THRONG_URL`:
 
 ```bash
 THRONG_URL=https://throng-ci.<subdomain>.workers.dev E2E_TOKEN=... THRONG_WEB_URL=http://localhost:5173 pnpm e2e arena

@@ -30,6 +30,8 @@
 // own container started from the setup's snapshot, one waits for the other with `after`, and each
 // gets the run's THRONG_* variables), secrets (the owner sets a secret allowed in default; a check naming it in a run
 // of the owner's push writes a hash of it, and the stored log shows the mask, never the value; nothing deploys),
+// caches (an attempt lands; the trusted `main` run of it saves a cache, which the next attempt's run restores,
+// a hit in its setup's notes, and saves nothing; through `/api`),
 // refs (attempt archive refs: pushable, listed, kept across pushes to main, and copied by
 // the Worker).
 //
@@ -149,7 +151,7 @@ interface ListedRun {
 
 /** A run's outcome as `GET …/runs/{runId}` gives it, as far as the scenarios read it. */
 interface RunOutcome {
-  outcome: { steps: { name: string; kind: string; outcome: string; log: string | null }[] } | null;
+  outcome: { steps: { name: string; kind: string; outcome: string; log: string | null; notes: string[] }[] } | null;
 }
 
 /** What a run reports, as far as the scenarios read it (see `src/results.ts`). */
@@ -285,6 +287,7 @@ const scenarios: Record<string, () => Promise<void>> = {
   preview,
   coalesce,
   secrets,
+  caches,
   intrusion,
   deps,
   refs,
@@ -1155,6 +1158,77 @@ console.log("base64 " + Buffer.from(value).toString("base64"));
   assert(log.includes("value ***\n") && log.includes("base64 ***\n"), `expected the log to show the mask:\n${log}`);
   const base64 = Buffer.from(value).toString("base64");
   assert(!log.includes(value) && !log.includes(base64), "expected the stored log never to hold the value");
+  await finish(p.project, p.work, timeline);
+}
+
+/**
+ * A trusted `main` run saves a cache; the next attempt's run restores it and saves nothing. The
+ * cache's setup writes a stamp into the cache's path only when it's missing, and a check prints it,
+ * so the attempt's check shows the stamp `main`'s run wrote.
+ */
+async function caches(): Promise<void> {
+  const timeline = new Timeline();
+  const p = await setUpRealProject(timeline, {
+    "cache-key.txt": "v1\n",
+    ".throng/config.yml": `caches:
+  stamp: { path: ~/.cache/e2e-stamp, key: cache-key.txt }
+setup:
+  - name: stamp
+    command: test -f ~/.cache/e2e-stamp/run || { mkdir -p ~/.cache/e2e-stamp && echo "$THRONG_LINE/$THRONG_RUN" > ~/.cache/e2e-stamp/run; }
+    caches: [stamp]
+checks:
+  - { name: stamped, command: cat ~/.cache/e2e-stamp/run }
+`,
+  });
+  const notesOf = async (id: number, step: string) => {
+    const detail = await throng<ListedRun & RunOutcome>(p, "GET", `/runs/${id}`);
+    return detail.outcome?.steps.find((s) => s.name === step)?.notes ?? [];
+  };
+
+  // An attempt lands; `main` moving runs `main`, trusted as the owner approved it, and saves.
+  const [t1, a1] = ["t1", "t1a1"];
+  await createTask(p, t1, "Land a change");
+  await createAttempts(p, t1, [a1], timeline);
+  const head = await editAndPush(p, a1, "src/greeting.js", (s) => s.replace('"hello"', '"hello from a1"'), "a1");
+  await throng(p, "POST", `/attempts/${a1}/open`);
+  const first = await scoredHead(p, a1, head);
+  const firstNotes = await notesOf(first.result.run, "stamp");
+  assert(
+    firstNotes.includes("cache stamp: miss") && !firstNotes.some((n) => n.includes("saved for")),
+    `expected the first attempt run to miss and save nothing: ${JSON.stringify(firstNotes)}`,
+  );
+  await throng(p, "POST", `/tasks/${t1}/selection`, { attempt: a1 });
+  const landed = await mergedSha(p, t1);
+  timeline.mark("t1 landed");
+  const mainRun = await poll("main's run of the landing", async () => {
+    const { runs } = await throng<{ runs: (ListedRun & { sha: string })[] }>(p, "GET", "/runs?line=main&status=done");
+    return runs.find((r) => r.sha === landed) ?? null;
+  });
+  const mainNotes = await notesOf(mainRun.id, "stamp");
+  assert(
+    mainNotes.some((n) => n.startsWith("cache stamp: saved for main")),
+    `expected main's run to save the cache: ${JSON.stringify(mainNotes)}`,
+  );
+  timeline.mark("main saved the cache");
+
+  // The next attempt, forked from the new main, restores main's entry and saves nothing.
+  const [t2, a2] = ["t2", "t2a1"];
+  await createTask(p, t2, "Use the cache");
+  await createAttempts(p, t2, [a2], timeline);
+  await fetchMain(p);
+  await git(p.work, "reset", "-q", "--hard", landed);
+  const next = await editAndPush(p, a2, "src/greeting.js", (s) => s.replace("from a1", "from a2"), "a2");
+  await throng(p, "POST", `/attempts/${a2}/open`);
+  const second = await scoredHead(p, a2, next);
+  assert(second.result.gate === "passed", `expected the attempt to pass: ${JSON.stringify(second.result.checks)}`);
+  const secondNotes = await notesOf(second.result.run, "stamp");
+  assert(
+    secondNotes.some((n) => n.startsWith("cache stamp: hit, main's entry restored")) &&
+      !secondNotes.some((n) => n.includes("saved for")),
+    `expected the attempt to restore main's entry and save nothing: ${JSON.stringify(secondNotes)}`,
+  );
+  const stamped = await throngText(p, `/runs/${second.result.run}/logs/stamped`, "text/plain");
+  assert(stamped.startsWith(`main/${mainRun.id}\n`), `expected main's stamp in the attempt's check:\n${stamped}`);
   await finish(p.project, p.work, timeline);
 }
 

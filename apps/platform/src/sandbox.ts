@@ -1,4 +1,12 @@
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
+import {
+  CACHE_TRANSFER_TIMEOUT_MS,
+  cacheRestoreScript,
+  cacheSaveScript,
+  MAX_CACHE_ENTRY_BYTES,
+  NOTHING_TO_SAVE_EXIT,
+} from "./caches";
+import type { CacheRestore, CacheSave } from "./caches";
 import type { SandboxSize } from "./config";
 import { interceptedHosts, outboundDecision } from "./network";
 import type { OutboundAccess } from "./network";
@@ -14,6 +22,12 @@ const CA_PATH = "/etc/cloudflare/certs/cloudflare-containers-ca.crt";
 const LOCAL_IMAGE_PREFIX = "cloudflare-dev/";
 /** Where a container keeps the snapshot it took, until its run releases it. */
 const SNAPSHOT_KEY = "snapshot";
+/** R2 multipart parts must all be one size but the last, of at least 5 MiB; #261 streamed 16 MiB ones. */
+const CACHE_PART_BYTES = 16 * 1024 * 1024;
+/** Parts uploading while the next fills, so compressing and uploading overlap (#261). */
+const CACHE_PARTS_IN_FLIGHT = 2;
+/** The most of a failed cache command's stderr a note keeps. */
+const CACHE_ERROR_CHARS = 300;
 
 // HTTPS interception re-signs traffic with the Containers CA, and exec() does not inherit the
 // environment from start(), so every command gets this.
@@ -91,6 +105,58 @@ export class OutboundAuth extends WorkerEntrypoint<Env, OutboundAccess> {
       }
     }
   }
+}
+
+/**
+ * Reads a save's stream into multipart parts of `CACHE_PART_BYTES`, uploading up to
+ * `CACHE_PARTS_IN_FLIGHT` while the next fills; `tooLarge` once it's over `MAX_CACHE_ENTRY_BYTES`.
+ */
+async function uploadParts(
+  upload: R2MultipartUpload,
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+): Promise<{ uploaded: R2UploadedPart[]; bytes: number } | "tooLarge"> {
+  const parts: Promise<R2UploadedPart>[] = [];
+  const inFlight = new Set<Promise<unknown>>();
+  let part = new Uint8Array(CACHE_PART_BYTES);
+  let filled = 0;
+  let bytes = 0;
+  const flush = async (body: Uint8Array) => {
+    while (inFlight.size >= CACHE_PARTS_IN_FLIGHT) await Promise.race(inFlight);
+    const uploading = upload.uploadPart(parts.length + 1, body);
+    parts.push(uploading);
+    const tracked = uploading.finally(() => inFlight.delete(tracked));
+    inFlight.add(tracked);
+  };
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    bytes += value.byteLength;
+    if (bytes > MAX_CACHE_ENTRY_BYTES) {
+      await reader.cancel();
+      await Promise.allSettled(parts);
+      return "tooLarge";
+    }
+    let offset = 0;
+    while (offset < value.byteLength) {
+      const take = Math.min(CACHE_PART_BYTES - filled, value.byteLength - offset);
+      part.set(value.subarray(offset, offset + take), filled);
+      filled += take;
+      offset += take;
+      if (filled === CACHE_PART_BYTES) {
+        await flush(part);
+        part = new Uint8Array(CACHE_PART_BYTES);
+        filled = 0;
+      }
+    }
+  }
+  if (filled > 0 || parts.length === 0) await flush(part.subarray(0, filled));
+  return { uploaded: await Promise.all(parts), bytes };
+}
+
+/** A cache command's failure, for a note: its exit and the end of what it printed. */
+function cacheError(exit: number, stderr: ArrayBuffer | string): string {
+  const text = typeof stderr === "string" ? stderr : new TextDecoder().decode(stderr);
+  return `exit ${exit}: ${text.trim().slice(-CACHE_ERROR_CHARS)}`.trim();
 }
 
 function withBearer(request: Request, token: string): Request {
@@ -193,6 +259,99 @@ export class RunSandbox extends DurableObject<Env> {
 
   async destroy(): Promise<void> {
     if (this.#container.running) await this.#container.destroy();
+  }
+
+  /** The Sandbox image this container starts from, which every cache's key includes. */
+  image(): string {
+    const image = this.#container.images.sandbox;
+    if (image === undefined) throw new Error("The sandbox image is not configured");
+    return image;
+  }
+
+  /**
+   * Restores the cache entry at `key` in the `CACHES` bucket into the container, streaming the object
+   * straight into `zstd -d | tar -x` at `/`, starting the container from the image first if it isn't
+   * running (for a script with a `timeoutMs` no longer than `options`'). A failed extract leaves none
+   * of `paths` behind. Never throws for the cache: what went wrong is in the answer.
+   */
+  async restoreCache(
+    key: string,
+    paths: readonly string[],
+    options: StartOptions & { timeoutMs?: number },
+  ): Promise<CacheRestore> {
+    const began = Date.now();
+    try {
+      if (!this.#container.running) await this.#start(options, options.timeoutMs ?? COMMAND_TIMEOUT_MS, null);
+      const object = await this.env.CACHES.get(key);
+      if (object === null) return { kind: "missing" };
+      const output = await this.#cacheCommand(cacheRestoreScript(paths), (process) => process.output(), object.body);
+      if (output.exitCode !== 0) return { kind: "failed", error: cacheError(output.exitCode, output.stderr) };
+      return { kind: "restored", bytes: object.size, ms: Date.now() - began };
+    } catch (error) {
+      return { kind: "failed", error: String(error).slice(0, CACHE_ERROR_CHARS) };
+    }
+  }
+
+  /**
+   * Saves the running container's `paths` as the entry at `key`: a `tar | zstd` streamed from the
+   * container's stdout into an R2 multipart upload, never written to disk. Over
+   * `MAX_CACHE_ENTRY_BYTES` it stops and keeps nothing; so does any failure. Never throws for the
+   * cache: what went wrong is in the answer.
+   */
+  async saveCache(key: string, paths: readonly string[]): Promise<CacheSave> {
+    const began = Date.now();
+    if (!this.#container.running) return { kind: "failed", error: "its container is gone" };
+    let upload: R2MultipartUpload | null = null;
+    try {
+      return await this.#cacheCommand(cacheSaveScript(paths), async (process): Promise<CacheSave> => {
+        const stderr = process.stderr === null ? Promise.resolve("") : new Response(process.stderr).text();
+        if (process.stdout === null) throw new Error("the save gave no output");
+        const started = await this.env.CACHES.createMultipartUpload(key, {
+          httpMetadata: { contentType: "application/zstd" },
+        });
+        upload = started;
+        const parts = await uploadParts(started, process.stdout.getReader());
+        if (parts === "tooLarge") {
+          process.kill();
+          await started.abort();
+          return { kind: "tooLarge" };
+        }
+        const exit = await process.exitCode;
+        if (exit !== 0) {
+          await started.abort();
+          if (exit === NOTHING_TO_SAVE_EXIT) return { kind: "empty" };
+          return { kind: "failed", error: cacheError(exit, await stderr) };
+        }
+        await started.complete(parts.uploaded);
+        return { kind: "saved", bytes: parts.bytes, ms: Date.now() - began };
+      });
+    } catch (error) {
+      await (upload as R2MultipartUpload | null)?.abort().catch(() => {});
+      return { kind: "failed", error: String(error).slice(0, CACHE_ERROR_CHARS) };
+    }
+  }
+
+  /** Runs a cache's script from `/` under `CACHE_TRANSFER_TIMEOUT_MS`, with `stdin` if given, and hands its process to `use`. */
+  async #cacheCommand<T>(
+    script: string,
+    use: (process: ExecProcess) => Promise<T>,
+    stdin?: ReadableStream,
+  ): Promise<T> {
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), CACHE_TRANSFER_TIMEOUT_MS);
+    try {
+      const process = await this.#container.exec(["bash", "-c", script], {
+        cwd: "/",
+        env: EXEC_ENV,
+        signal: abort.signal,
+        stdout: "pipe",
+        stderr: "pipe",
+        ...(stdin === undefined ? {} : { stdin }),
+      });
+      return await use(process);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /** Starts the container from the image, or from `snapshot`, and returns how long that took. */

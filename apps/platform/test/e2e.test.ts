@@ -61,11 +61,13 @@ function setup(bindings: { E2E_TOKEN?: string } = { E2E_TOKEN: SECRET }) {
   const db = testDatabase();
   const repos = new FakeRepos();
   const logs = new FakeLogs();
+  const caches = new FakeLogs();
   const destroyed: string[] = [];
   const app = e2eRoutes<{ E2E_TOKEN?: string }>({
     db: () => db,
     repos: () => repos,
     logs: () => logs,
+    caches: () => caches,
     project: (_env, id) => ({
       note: async () => {},
       journal: async () => [],
@@ -80,7 +82,7 @@ function setup(bindings: { E2E_TOKEN?: string } = { E2E_TOKEN: SECRET }) {
     const type = res.headers.get("Content-Type") ?? "";
     return { status: res.status, body: type.startsWith("application/json") ? ((await res.json()) as Json) : null };
   };
-  return { db, repos, logs, destroyed, call };
+  return { db, repos, logs, caches, destroyed, call };
 }
 
 async function projectIds(db: Database): Promise<string[]> {
@@ -131,14 +133,16 @@ describe("the e2e routes", () => {
     expect(await repos.list("abc123")).toEqual(["abc123-main"]);
   });
 
-  it("delete everything a project made: its row, its Durable Object's storage, its logs and its repos", async () => {
-    const { db, repos, logs, destroyed, call } = setup();
+  it("delete everything a project made: its row, its Durable Object's storage, its logs, caches and repos", async () => {
+    const { db, repos, logs, caches, destroyed, call } = setup();
     await call("POST", "/e2e/projects/e2erun1a");
     await call("POST", "/e2e/projects/e2erun1ab");
     await repos.fork(originRepo("e2erun1a"), forkRepo("e2erun1a", "t1a1"));
     for (const key of ["logs/e2erun1a/t1a1/s/1/test.log", "logs/e2erun1a/t1a1/s/2/test.log", "logs/e2erun1a/x.log"])
       logs.keys.add(key);
     logs.keys.add("logs/e2erun1ab/t1a1/s/1/test.log");
+    caches.keys.add("caches/e2erun1a/main/pnpm/f00.tar.zst");
+    caches.keys.add("caches/e2erun1ab/main/pnpm/f00.tar.zst");
 
     const res = await call("DELETE", "/e2e/projects/e2erun1a");
     expect(res.status).toBe(200);
@@ -146,6 +150,7 @@ describe("the e2e routes", () => {
     expect(await projectIds(db)).toEqual(["e2erun1ab"]);
     expect(destroyed).toEqual(["e2erun1a"]);
     expect([...logs.keys]).toEqual(["logs/e2erun1ab/t1a1/s/1/test.log"]);
+    expect([...caches.keys]).toEqual(["caches/e2erun1ab/main/pnpm/f00.tar.zst"]);
     expect(await repos.list("e2erun1a")).toEqual(["e2erun1ab-main"]);
   });
 

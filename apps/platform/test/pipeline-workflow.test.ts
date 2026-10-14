@@ -6,6 +6,7 @@
 // form masking hides, into its log, its metrics and any error.
 
 import { describe, expect, it, vi } from "vitest";
+import type { CacheKey, CacheRestore, CacheSave } from "../src/caches.ts";
 import type { NamedSecrets, SandboxSize } from "../src/config.ts";
 import type { OutboundAccess } from "../src/network.ts";
 import type { RunOutcome } from "../src/run-outcome.ts";
@@ -16,8 +17,8 @@ import { result } from "./support/workflow-runs.ts";
 
 vi.mock("cloudflare:workers", () => import("./support/cloudflare-workers.ts"));
 
-/** The config on the origin's `main` for the run under way. */
-const configs = { main: "" };
+/** The config on the origin's `main` for the run under way, and the head's lockfile's blob id, which keys its caches. */
+const configs = { main: "", lockfile: "lock-1" as string | null, treeReads: [] as string[] };
 
 vi.mock("../src/artifacts", () => ({
   reposFor: () => ({
@@ -26,6 +27,14 @@ vi.mock("../src/artifacts", () => ({
     // No commits to pin `main` to, so it's read as `main`; the `.npmrc` read gets the config, and adds nothing.
     listCommits: async () => [],
     readFile: async (repo: string) => ({ text: async () => (repo === "abc123-main" ? configs.main : "") }),
+    // The head's tree holds the lockfile, unless it's null.
+    readCommit: async (_repo: string, hash: string) => ({ hash, treeHash: "root" }),
+    readTree: async (repo: string, hash: string) => {
+      configs.treeReads.push(`${repo} ${hash}`);
+      const lock = configs.lockfile;
+      if (lock === "unreadable") return null;
+      return lock === null ? [] : [{ name: "pnpm-lock.yaml", mode: "100644", hash: lock, type: "blob" }];
+    },
   }),
 }));
 vi.mock("../src/base", () => ({ lineBase: async () => null }));
@@ -85,6 +94,16 @@ interface Behaviour {
   unready?: { step: string; times: number };
   /** A post-gate step whose container is lost once readied, before its command runs. */
   lost?: string;
+  /** What the project answers for each cache: the scope it restores from and saves to; neither by default. */
+  cacheLookup?: Record<string, { restore: string | null; save: string | null; unsaved?: string }>;
+  /** How restoring a cache into a container goes, by cache name; restored by default. */
+  cacheRestore?: Record<string, CacheRestore>;
+  /** How saving a cache goes, by cache name; saved by default. */
+  cacheSave?: Record<string, CacheSave>;
+  /** The keys the project already has an entry for: a save of one is refused. */
+  cacheEntries?: string[];
+  /** The head's lockfile blob, which keys the caches; null when it has none, `unreadable` when its tree is missing. */
+  lockfile?: string | null;
 }
 
 /** The keyring the project's secrets are sealed under, as `SECRETS_KEYRING` holds it. */
@@ -121,6 +140,12 @@ interface Started {
 /** Runs the Workflow against fake bindings, recording each container's start, the order things happened and the report. */
 async function pipeline(behaviour: Behaviour = {}) {
   configs.main = behaviour.config ?? CONFIG;
+  configs.lockfile = behaviour.lockfile === undefined ? "lock-1" : behaviour.lockfile;
+  configs.treeReads = [];
+  /** Each cache call: `restore <container> <key>`, `save <container> <key>`, `saved <key> <size>`, in order. */
+  const cacheCalls: string[] = [];
+  /** The cache keys the project was asked to look up. */
+  const looked: CacheKey[][] = [];
   const started = new Map<string, Started>();
   const events: string[] = [];
   const restores = new Map<string, number>();
@@ -211,6 +236,21 @@ async function pipeline(behaviour: Behaviour = {}) {
             if (behaviour.snapshot instanceof Error) throw behaviour.snapshot;
             return behaviour.snapshot === undefined ? SNAPSHOT : behaviour.snapshot;
           },
+          image: async () => "registry.cloudflare.com/acct/throng:abc",
+          restoreCache: async (key: string): Promise<CacheRestore> => {
+            cacheCalls.push(`restore ${container} ${key}`);
+            if (!running.has(container)) {
+              running.add(container);
+              started.set(container, { from: "image", access: {} as OutboundAccess, size: "lite", env: undefined });
+            }
+            const cache = key.split("/")[3] ?? "";
+            return behaviour.cacheRestore?.[cache] ?? { kind: "restored", bytes: 2_000_000, ms: 1500 };
+          },
+          saveCache: async (key: string): Promise<CacheSave> => {
+            cacheCalls.push(`save ${container} ${key}`);
+            const cache = key.split("/")[3] ?? "";
+            return behaviour.cacheSave?.[cache] ?? { kind: "saved", bytes: 3_000_000, ms: 2500 };
+          },
           releaseSnapshot: () => void events.push(`release ${container}`),
           destroy: async () => {
             if (running.delete(container)) events.push(`destroy ${container}`);
@@ -240,6 +280,19 @@ async function pipeline(behaviour: Behaviour = {}) {
           }
           return { sealed };
         },
+        pipelineCaches: async (_run: number, keys: CacheKey[]) => {
+          looked.push(keys);
+          return keys.map((key) => ({
+            ...key,
+            ...(behaviour.cacheLookup?.[key.name] ?? { restore: null, save: null }),
+          }));
+        },
+        pipelineCacheSaving: async (_run: number, entry: { scope: string; name: string }) =>
+          !(behaviour.cacheEntries ?? []).includes(`${entry.scope}/${entry.name}`),
+        pipelineCacheSaved: async (_run: number, entry: { scope: string; name: string; size: number }) => {
+          cacheCalls.push(`saved ${entry.scope}/${entry.name} ${entry.size}`);
+          return true;
+        },
         pipelineFinished: async (_run: number, finished: RunReport) => {
           report = finished;
           events.push("report");
@@ -266,6 +319,8 @@ async function pipeline(behaviour: Behaviour = {}) {
     named: named as NamedSecrets[] | null,
     report: report as RunReport | null,
     returned,
+    cacheCalls,
+    looked,
   };
 }
 
@@ -774,6 +829,186 @@ describe("PipelineWorkflow on a task branch and main", () => {
     expect(commands).toEqual([]);
     expect(persisted.filter((p) => p === "step migrate")).toHaveLength(1);
     expect(report).toMatchObject({ status: "errored", error: expect.stringContaining("step migrate gave no result") });
+  });
+});
+
+/** The notes on the run's step `name`. */
+const notesOf = (report: RunReport | null, name: string) =>
+  outcomeOf(report).steps.find((s) => s.name === name)?.notes ?? [];
+
+describe("PipelineWorkflow caches", () => {
+  /** A config whose setup uses `pnpm`, one check `jest`, and main's deploy step `wrangler`. */
+  const CACHED = `caches:
+  pnpm: { path: [~/.local/share/pnpm/store, ~/.cache/pnpm], key: pnpm-lock.yaml }
+  jest: { path: /tmp/jest, key: pnpm-lock.yaml }
+  wrangler: { path: ~/.wrangler, key: pnpm-lock.yaml }
+  unused: { path: /tmp/unused, key: pnpm-lock.yaml }
+setup:
+  - { name: deps, command: pnpm install --offline, caches: [pnpm] }
+  - { name: gen, command: pnpm gen }
+checks:
+  - { name: lint, command: pnpm lint, caches: [pnpm] }
+  - { name: test, command: pnpm test, caches: [jest] }
+  - { name: e2e, command: pnpm e2e, caches: [jest] }
+pipelines:
+  main:
+    steps: [{ name: deploy, command: pnpm deploy, caches: [wrangler] }]
+`;
+  const onMain = { ...params, line: "main" };
+  const SAVE_ALL = {
+    pnpm: { restore: null, save: "main" },
+    jest: { restore: null, save: "main" },
+    wrangler: { restore: null, save: "main" },
+  };
+  it("keys each cache the run uses from the head's tree, before any container starts", async () => {
+    const { looked, events, cacheCalls } = await pipeline({ config: CACHED, payload: onMain });
+    expect(looked).toHaveLength(1);
+    expect(looked[0]?.map((key) => key.name)).toEqual(["pnpm", "jest", "wrangler"]);
+    for (const key of looked[0] ?? []) expect(key.keyHash).toMatch(/^[0-9a-f]{64}$/u);
+    expect(configs.treeReads).toEqual(["abc123-main root"]);
+    expect(events.indexOf("plan")).toBeLessThan(events.indexOf("run setup"));
+    expect(cacheCalls).toEqual([]);
+
+    const changed = await pipeline({ config: CACHED, payload: onMain, lockfile: "lock-2" });
+    expect(changed.looked[0]?.[0]?.keyHash).not.toBe(looked[0]?.[0]?.keyHash);
+    const same = await pipeline({ config: CACHED, payload: onMain });
+    expect(same.looked[0]?.[0]?.keyHash).toBe(looked[0]?.[0]?.keyHash);
+  });
+
+  it("reads an attempt's fork for its keys, and looks up none without caches", async () => {
+    await pipeline({ config: CACHED });
+    expect(configs.treeReads).toEqual(["abc123-t1a1 root"]);
+    const none = await pipeline();
+    expect(none.looked).toEqual([]);
+  });
+
+  it("restores a hit into the container before its command, by its scope's key, and notes the hit", async () => {
+    const { cacheCalls, looked, report, events } = await pipeline({
+      config: CACHED,
+      cacheLookup: { pnpm: { restore: "main", save: null }, jest: { restore: "main", save: null } },
+    });
+    const [pnpm, jest] = looked[0] ?? [];
+    expect(cacheCalls).toEqual([
+      `restore setup caches/abc123/main/pnpm/${pnpm?.keyHash ?? ""}.tar.zst`,
+      `restore check:test caches/abc123/main/jest/${jest?.keyHash ?? ""}.tar.zst`,
+      `restore check:e2e caches/abc123/main/jest/${jest?.keyHash ?? ""}.tar.zst`,
+    ]);
+    expect(events.indexOf("run setup")).toBeGreaterThan(-1);
+    expect(notesOf(report, "deps")).toEqual(["cache pnpm: hit, main's entry restored (2.0 MB) in 1.5 s"]);
+    expect(notesOf(report, "gen")).toEqual([]);
+    // The setups' caches are in the snapshot each check starts from.
+    expect(notesOf(report, "lint")).toEqual(["cache pnpm: in the setups' snapshot"]);
+    expect(notesOf(report, "test")).toEqual(["cache jest: hit, main's entry restored (2.0 MB) in 1.5 s"]);
+  });
+
+  it("restores the setups' caches too into a check's container that re-runs the setups", async () => {
+    const { cacheCalls, report } = await pipeline({
+      config: CACHED,
+      snapshot: null,
+      cacheLookup: { pnpm: { restore: "main", save: null } },
+    });
+    expect(cacheCalls.filter((c) => c.startsWith("restore check:test"))).toHaveLength(1);
+    expect(notesOf(report, "test")).toEqual([
+      "setups re-run in this check's container: the run took no snapshot of them",
+      "cache pnpm: hit, main's entry restored (2.0 MB) in 1.5 s",
+      "cache jest: miss",
+    ]);
+  });
+
+  it("runs without the cache when a restore fails, noting it as a miss", async () => {
+    const { report } = await pipeline({
+      config: CACHED,
+      cacheLookup: { pnpm: { restore: "main", save: null } },
+      cacheRestore: { pnpm: { kind: "failed", error: "exit 1: zstd: corrupted block" } },
+    });
+    expect(outcomeOf(report).gate).toBe("passed");
+    expect(notesOf(report, "deps")).toEqual([
+      "cache pnpm: miss: the restore failed, so this ran without it (exit 1: zstd: corrupted block)",
+    ]);
+  });
+
+  it("notes a miss on every cache, and saves none, when the keys can't be read", async () => {
+    const { report, cacheCalls, looked } = await pipeline({
+      config: CACHED,
+      payload: onMain,
+      cacheLookup: SAVE_ALL,
+      lockfile: "unreadable",
+    });
+    expect(looked).toEqual([]);
+    expect(cacheCalls).toEqual([]);
+    expect(outcomeOf(report).gate).toBe("passed");
+    expect(notesOf(report, "deps")).toEqual(["cache pnpm: miss: its key couldn't be read (tree root is missing)"]);
+  });
+
+  it("saves each cache once its command passed, from one container each, and records it", async () => {
+    const { cacheCalls, report, looked } = await pipeline({ config: CACHED, payload: onMain, cacheLookup: SAVE_ALL });
+    const [pnpm, jest, wrangler] = (looked[0] ?? []).map((key) => key.keyHash);
+    expect(cacheCalls.filter((c) => !c.startsWith("restore"))).toEqual([
+      `save setup caches/abc123/main/pnpm/${pnpm ?? ""}.tar.zst`,
+      "saved main/pnpm 3000000",
+      `save check:test caches/abc123/main/jest/${jest ?? ""}.tar.zst`,
+      "saved main/jest 3000000",
+      `save step:deploy caches/abc123/main/wrangler/${wrangler ?? ""}.tar.zst`,
+      "saved main/wrangler 3000000",
+    ]);
+    expect(notesOf(report, "deps")).toEqual(["cache pnpm: miss", "cache pnpm: saved for main (3.0 MB) in 2.5 s"]);
+    expect(notesOf(report, "e2e")).toEqual(["cache jest: miss"]);
+    expect(notesOf(report, "deploy")).toEqual([
+      "cache wrangler: miss",
+      "cache wrangler: saved for main (3.0 MB) in 2.5 s",
+    ]);
+  });
+
+  it("saves nothing after a failed command", async () => {
+    const { cacheCalls } = await pipeline({
+      config: CACHED,
+      payload: onMain,
+      cacheLookup: SAVE_ALL,
+      setups: { deps: 1 },
+    });
+    expect(cacheCalls.filter((c) => c.startsWith("save "))).toEqual([]);
+    const failedCheck = await pipeline({ config: CACHED, payload: onMain, cacheLookup: SAVE_ALL, checks: { test: 1 } });
+    expect(failedCheck.cacheCalls.filter((c) => c.startsWith("save ")).map((c) => c.split(" ")[1])).toEqual(["setup"]);
+  });
+
+  it("saves nothing where the project says the run doesn't save, saying why when it isn't trusted", async () => {
+    const { cacheCalls, report } = await pipeline({
+      config: CACHED,
+      payload: { ...params, line: "t1" },
+      cacheLookup: { pnpm: { restore: null, save: null, unsaved: "this run isn't trusted" } },
+    });
+    expect(cacheCalls.filter((c) => c.startsWith("save "))).toEqual([]);
+    expect(notesOf(report, "deps")).toEqual(["cache pnpm: miss", "cache pnpm: not saved: this run isn't trusted"]);
+  });
+
+  it("never writes over an entry the project already has, and notes a save that failed", async () => {
+    const { cacheCalls, report } = await pipeline({
+      config: CACHED,
+      payload: onMain,
+      cacheLookup: SAVE_ALL,
+      cacheEntries: ["main/pnpm"],
+      cacheSave: { jest: { kind: "tooLarge" }, wrangler: { kind: "failed", error: "exit 2: tar: Broken pipe" } },
+    });
+    expect(cacheCalls.filter((c) => c.startsWith("save setup"))).toEqual([]);
+    expect(cacheCalls.filter((c) => c.startsWith("saved"))).toEqual([]);
+    expect(notesOf(report, "deps")).toEqual([
+      "cache pnpm: miss",
+      "cache pnpm: not saved: main already has an entry for its key",
+    ]);
+    expect(notesOf(report, "test")).toEqual(["cache jest: miss", "cache jest: not saved: over 2 GB"]);
+    expect(notesOf(report, "deploy")).toEqual([
+      "cache wrangler: miss",
+      "cache wrangler: not saved: exit 2: tar: Broken pipe",
+    ]);
+    expect(outcomeOf(report).gate).toBe("passed");
+    expect(outcomeOf(report).steps.find((s) => s.name === "deploy")?.outcome).toBe("passed");
+  });
+
+  it("stores each step's cache notes in its log", async () => {
+    const { stored } = await pipeline({ config: CACHED, payload: onMain, cacheLookup: SAVE_ALL });
+    expect(stored.get("logs/abc123/main/7/setup.1.log")).toContain(
+      "== throng ==\nsandbox: standard-1\ncache pnpm: miss\ncache pnpm: saved for main (3.0 MB) in 2.5 s\n",
+    );
   });
 });
 

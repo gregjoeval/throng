@@ -214,6 +214,31 @@ const SecretNamesSchema = z.array(z.string()).openapi({
   example: ["NPM_TOKEN"],
 });
 
+const CacheNamesSchema = z.array(ConfigNameSchema).openapi({
+  description:
+    "The caches it uses, by name: each is restored before it runs when an entry matches its key exactly, and a " +
+    "trusted run saves it once it passed. A task's check may name only caches the project's config defines.",
+  example: ["pnpm"],
+});
+
+const ConfigCacheSchema = z
+  .object({
+    name: ConfigNameSchema.openapi({ example: "pnpm" }),
+    path: z.array(z.string()).openapi({
+      description: "The paths it keeps, absolute or under `~/`.",
+      example: ["~/.local/share/pnpm/store", "~/.cache/pnpm"],
+    }),
+    key: z.array(z.string()).openapi({
+      description: "The files in the tree whose contents key it: paths or globs.",
+      example: ["pnpm-lock.yaml"],
+    }),
+  })
+  .openapi("Cache", {
+    description:
+      "A named cache the config declares. Runs restore it only on an exact match of its key; only trusted runs " +
+      "save it.",
+  });
+
 const ConfigCheckSchema = z
   .object({
     name: ConfigNameSchema.openapi({ example: "test" }),
@@ -228,6 +253,7 @@ const ConfigCheckSchema = z
       example: ["typecheck"],
     }),
     secrets: SecretNamesSchema,
+    caches: CacheNamesSchema,
     group: ConfigNameSchema.nullable().openapi({
       description:
         "The one group it is in, which a pipeline's `groups` choose it by; null outside one, and always for a " +
@@ -246,6 +272,7 @@ const ConfigSetupSchema = z
     name: ConfigNameSchema.openapi({ example: "deps" }),
     command: z.string().openapi({ example: "pnpm install --frozen-lockfile" }),
     secrets: SecretNamesSchema,
+    caches: CacheNamesSchema,
   })
   .openapi("Setup", {
     description: "A setup the config declares: a command run before every check. A failed setup stops the run.",
@@ -827,6 +854,7 @@ const ConfigStepSchema = z
   .object({
     name: ConfigNameSchema.openapi({ example: "deploy" }),
     command: z.string().openapi({ example: "pnpm deploy" }),
+    caches: CacheNamesSchema,
   })
   .openapi("Step", {
     description:
@@ -852,6 +880,7 @@ const ConfigPipelineSchema = z
 
 const ConfigSchema = z
   .object({
+    caches: z.array(ConfigCacheSchema).openapi({ description: "The named caches its steps may use." }),
     setup: z.array(ConfigSetupSchema).openapi({ description: "Run once, in order, before the checks." }),
     network: z.object({
       allow: z.array(z.string()).openapi({ description: "Extra HTTPS hosts checks may reach, lowercased." }),

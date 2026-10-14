@@ -69,6 +69,9 @@ jobs:
         run: |
           pnpm exec wrangler r2 bucket info throng-ci-logs >/dev/null 2>&1 || pnpm exec wrangler r2 bucket create throng-ci-logs
           pnpm exec wrangler r2 bucket lifecycle set throng-ci-logs --file r2-lifecycle.json --force
+      # Pipeline caches: the project Durable Objects evict them, so the bucket keeps R2's default rules.
+      - name: Create the caches bucket
+        run: pnpm exec wrangler r2 bucket info throng-ci-caches >/dev/null 2>&1 || pnpm exec wrangler r2 bucket create throng-ci-caches
       - name: Deploy throng-ci
         run: |
           pnpm exec vite build

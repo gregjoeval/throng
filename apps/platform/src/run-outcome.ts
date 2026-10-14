@@ -105,17 +105,23 @@ export function runOutcome(result: ScoringResult): RunOutcome {
 /**
  * How one setup went: its exit code, null when it never ran, and how long it took. `error` says why
  * the setups never started, on the setup that caused it, such as a secret it names being gone.
+ * `notes` are what the run noted besides, such as how restoring and saving its caches went.
  */
 export interface SetupRun {
   exit: number | null;
   durationMs: number;
   error?: string;
+  notes?: string[];
 }
 
-/** What a setup's step notes: why it errored, or that it was skipped for the setup that failed. */
+/**
+ * What a setup's step notes: why it errored, or that it was skipped for the setup that failed, then
+ * what the run noted besides.
+ */
 function setupNotes(ran: SetupRun, failed: string | null): string[] {
   if (ran.error !== undefined) return [ran.error];
-  return ran.exit === null && failed !== null ? [`skipped: setup ${failed} failed`] : [];
+  const skipped = ran.exit === null && failed !== null ? [`skipped: setup ${failed} failed`] : [];
+  return [...skipped, ...(ran.notes ?? [])];
 }
 
 /**

@@ -48,6 +48,10 @@ app.route(
       list: (options) => env.LOGS.list(options),
       delete: (keys) => env.LOGS.delete(keys),
     }),
+    caches: (env) => ({
+      list: (options) => env.CACHES.list(options),
+      delete: (keys) => env.CACHES.delete(keys),
+    }),
     project: (env, id) => {
       const stub = env.PROJECT.getByName(id);
       return {

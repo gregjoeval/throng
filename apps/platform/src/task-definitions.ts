@@ -7,6 +7,7 @@
 
 import { z } from "zod";
 import {
+  cacheProblems,
   checkConfig,
   checkMetricFields,
   CheckSchema,
@@ -94,6 +95,7 @@ export function withTask(project: ConfigResult, task: TaskDefinitions): ConfigRe
   const problems = clashes(config, task);
   if (problems.length > 0) return { kind: "invalid", error: problems.map((line) => `task ${line}`).join("\n") };
   const base: Config = config ?? {
+    caches: [],
     setup: [],
     network: { allow: [] },
     checks: [],
@@ -110,10 +112,14 @@ export function withTask(project: ConfigResult, task: TaskDefinitions): ConfigRe
 }
 
 /**
- * Each name rule the task's checks and metrics break over the project's config (`nameProblems`), one
- * line each: `metrics[0].from: no check is named lint`.
+ * Each name rule the task's checks and metrics break over the project's config (`nameProblems`), and
+ * each cache its checks use that the project's config doesn't define, one line each:
+ * `metrics[0].from: no check is named lint`.
  */
 function clashes(project: Config | null, task: TaskDefinitions): string[] {
   const layer = project === null ? null : { ...project, steps: project.pipelines.main.steps };
-  return nameProblems(task, layer).map(({ path, message }) => `${describePath(path)}: ${message}`);
+  const caches = new Set(project?.caches.map((cache) => cache.name));
+  return [...nameProblems(task, layer), ...cacheProblems(task, caches)].map(
+    ({ path, message }) => `${describePath(path)}: ${message}`,
+  );
 }

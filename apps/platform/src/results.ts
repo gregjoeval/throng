@@ -94,6 +94,8 @@ export interface PlannedCheck {
   after: string[];
   /** The secrets its container holds in a trusted run, by name. */
   secrets: string[];
+  /** The caches its container restores before it runs, and saves once it passed, by name. */
+  caches: string[];
   metrics: PlannedMetric[];
 }
 
@@ -136,12 +138,13 @@ export function scorePlan(config: ConfigResult): ScorePlan {
   if (config.kind !== "valid") return { setup: [], checks: [], allow: [] };
   return {
     setup: config.config.setup,
-    checks: config.config.checks.map(({ name, command, timeoutMs, after, secrets }) => ({
+    checks: config.config.checks.map(({ name, command, timeoutMs, after, secrets, caches }) => ({
       name,
       command,
       timeoutMs,
       after,
       secrets,
+      caches,
       metrics: metricsFrom(name, config.config.metrics).map((metric) => ({
         name: metric.name,
         from: metric.from,

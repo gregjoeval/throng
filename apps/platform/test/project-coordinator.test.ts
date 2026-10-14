@@ -1,5 +1,5 @@
-// The project Durable Object's publishing to the D1 projection: when its alarm is set, and what the
-// alarm publishes. `cloudflare:workers` and the Artifacts binding are stubbed, and its storage is
+// The project Durable Object's alarm: when it is set, what it publishes to the D1 projection, and the
+// cache entries it evicts. `cloudflare:workers` and the Artifacts binding are stubbed, and its storage is
 // in-memory SQLite.
 
 import { describe, expect, it, vi } from "vitest";
@@ -54,11 +54,13 @@ async function setup() {
     .bind(PROJECT.id, "owner001", "throng")
     .all();
   const storage = testStorage();
+  const deleted: string[] = [];
+  const CACHES = { delete: async (keys: string[]) => void deleted.push(...keys) };
   /** A fresh instance over the same storage, as after an eviction. */
-  const start = () => new ProjectCoordinator({ storage }, { DB: db });
+  const start = () => new ProjectCoordinator({ storage }, { DB: db, CACHES });
   const titles = async () =>
     (await myListings({ db }).tasks(ada, { offset: 0, limit: MAX_LISTING_PAGE })).tasks.map((t) => t.title);
-  return { storage, start, titles };
+  return { storage, start, titles, deleted };
 }
 
 describe("the project Durable Object's projection alarm", () => {
@@ -84,5 +86,51 @@ describe("the project Durable Object's projection alarm", () => {
     expect(await storage.getAlarm()).not.toBeNull();
     await restarted.alarm();
     expect(await titles()).toEqual(["Fix login"]);
+  });
+});
+
+const DAY = 24 * 60 * 60 * 1000;
+
+/** Puts an entry of cache `pnpm` in the index, last used `ago` ms ago, as a run's save would. */
+function cacheEntry(storage: ReturnType<typeof testStorage>, scope: string, key: string, ago: number): void {
+  const at = Date.now() - ago;
+  storage.sql
+    .exec(
+      "INSERT INTO cache_entries (scope, name, key_hash, size, created_at, last_used_at) VALUES (?, 'pnpm', ?, 1, ?, ?)",
+      scope,
+      key,
+      at,
+      at,
+    )
+    .toArray();
+}
+
+describe("the project Durable Object's cache eviction", () => {
+  it("deletes entries unused for 7 days when its alarm runs, and sets itself for the next to fall unused", async () => {
+    const { storage, start, deleted } = await setup();
+    const coordinator = start();
+    await coordinator.tasks("createTask", [PROJECT, ada, { title: "Fix login" }]);
+    cacheEntry(storage, "t1", "old", 8 * DAY);
+    cacheEntry(storage, "t1", "new", DAY);
+    cacheEntry(storage, "main", "latest", 30 * DAY);
+
+    await coordinator.alarm();
+    expect(deleted).toEqual(["caches/abc123/t1/pnpm/old.tar.zst"]);
+    const alarm = (await storage.getAlarm()) ?? 0;
+    expect(alarm).toBeGreaterThan(Date.now() + 5 * DAY);
+    expect(alarm).toBeLessThanOrEqual(Date.now() + 6 * DAY);
+  });
+
+  it("sets its alarm for the next entry to fall unused after a call, when none is set sooner", async () => {
+    const { storage, start } = await setup();
+    const coordinator = start();
+    await coordinator.tasks("createTask", [PROJECT, ada, { title: "Fix login" }]);
+    await coordinator.alarm();
+    await storage.deleteAlarm();
+    cacheEntry(storage, "t1", "new", DAY);
+    await coordinator.scoringFinished(999, { status: "errored", error: "gone" });
+    const alarm = (await storage.getAlarm()) ?? 0;
+    expect(alarm).toBeGreaterThan(Date.now() + 5 * DAY);
+    expect(alarm).toBeLessThanOrEqual(Date.now() + 6 * DAY);
   });
 });

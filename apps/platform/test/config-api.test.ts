@@ -37,6 +37,7 @@ describe("POST /api/config/validate", () => {
         body: {
           kind: "valid",
           config: {
+            caches: [],
             setup: [],
             network: { allow: [] },
             checks: [
@@ -47,6 +48,7 @@ describe("POST /api/config/validate", () => {
                 after: [],
                 secrets: [],
                 group: null,
+                caches: [],
                 source: "project",
               },
             ],

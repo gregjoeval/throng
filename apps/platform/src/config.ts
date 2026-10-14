@@ -89,6 +89,18 @@ export interface SetupConfig {
   command: string;
   /** The secrets it uses, by name: in a trusted run, the setup container holds them. */
   secrets: string[];
+  /** The caches it uses, by name: restored before the setups run, and saved once each setup using one passed. */
+  caches: string[];
+}
+
+/**
+ * A named cache: the paths it keeps, absolute or under `~/`, and the files in the tree whose contents
+ * key it (paths or globs). A run restores it only on an exact match of its key (see `caches.ts`).
+ */
+export interface CacheConfig {
+  name: string;
+  path: string[];
+  key: string[];
 }
 
 export interface CheckConfig {
@@ -101,6 +113,8 @@ export interface CheckConfig {
   secrets: string[];
   /** The one group it is in, which a pipeline may choose it by; null outside one, and always for a task's check. */
   group: string | null;
+  /** The caches it uses, by name: restored before it runs, and saved once it passed. A task's check may name `main`'s. */
+  caches: string[];
   source: ConfigLayer;
 }
 
@@ -108,6 +122,8 @@ export interface CheckConfig {
 export interface StepConfig {
   name: string;
   command: string;
+  /** The caches it uses, by name: restored before it runs, and saved once it passed. */
+  caches: string[];
 }
 
 /** What one pipeline runs besides the setups: which checks, and the post-gate steps after its gate. */
@@ -119,6 +135,8 @@ export interface PipelineConfig {
 }
 
 export interface Config {
+  /** The named caches setups, checks and post-gate steps may use, in order. */
+  caches: CacheConfig[];
   /** Run once, in order, before the checks; a failed one stops the run. */
   setup: SetupConfig[];
   /** Extra HTTPS hosts checks may reach, lowercased. */
@@ -385,6 +403,7 @@ export function checkConfig(check: z.infer<typeof CheckSchema>, source: ConfigLa
     after: check.after,
     secrets: check.secrets,
     group: check.group ?? null,
+    caches: check.caches,
     source,
   };
 }
@@ -436,6 +455,97 @@ const SecretsSchema = z
   .optional()
   .transform((secrets) => [...new Set(secrets)]);
 
+/** The caches a setup, check or post-gate step uses: their names, each once; none by default. */
+const CachesSchema = z
+  .array(z.string({ error: "must be a cache's name" }), { error: "caches must be a list of caches' names" })
+  .optional()
+  .transform((caches) => [...new Set(caches)]);
+
+/** Where the checkout and its logs live in a container: wiped as each container starts, so no cache may be there. */
+const WORKSPACE = "/workspace";
+const CACHE_PATH_ERROR = "a cache's path must be absolute or start with ~/, like ~/.cache/pnpm";
+
+/** What's wrong with a cache's path; null when nothing. */
+function cachePathError(path: string): string | null {
+  if (!path.startsWith("/") && !path.startsWith("~/")) return CACHE_PATH_ERROR;
+  const parts = path.split("/").slice(1);
+  if (parts.every((part) => part === "")) return "a cache's path must name a directory or file, not / or ~";
+  if (parts.includes("..") || parts.includes(".")) return "a cache's path must not contain . or .. parts";
+  if (path === WORKSPACE || path.startsWith(`${WORKSPACE}/`)) {
+    return `a cache's path must be outside ${WORKSPACE}, where each container checks the tree out afresh`;
+  }
+  return null;
+}
+
+/** What's wrong with an entry of a cache's key; null when nothing. */
+function cacheKeyError(entry: string): string | null {
+  if (entry === "" || entry.startsWith("/")) return "a key entry is a path or glob in the tree, like pnpm-lock.yaml";
+  if (entry.split("/").includes("..")) return "a key entry must not contain .. parts";
+  return null;
+}
+
+/** One string or a list of them, as a list. */
+const oneOrList = (what: string, error: (text: string) => string | null) =>
+  z
+    .union(
+      [
+        z.string(),
+        z.array(z.string({ error: "must be a string" }), { error: `${what} must be a string or a list of them` }),
+      ],
+      { error: `${what} must be a string or a list of them` },
+    )
+    .transform((value) => [value].flat())
+    .superRefine((values, ctx) => {
+      if (values.length === 0) ctx.addIssue({ code: "custom", message: `${what} must name at least one` });
+      values.forEach((value, i) => {
+        const message = error(value);
+        if (message !== null) ctx.addIssue({ code: "custom", path: [i], message });
+      });
+    });
+
+/** A cache as a config writes it: the paths it keeps and the files that key it, each one or a list. */
+const CacheSchema = z.strictObject(
+  {
+    path: oneOrList("path", cachePathError),
+    key: oneOrList("key", cacheKeyError),
+  },
+  { error: "a cache must be a mapping with a path and a key, like { path: ~/.cache/pip, key: requirements.txt }" },
+);
+
+/** The caches a config defines, by name. */
+const CachesConfigSchema = z
+  .record(z.string(), CacheSchema, { error: "caches must be a mapping of caches by name" })
+  .superRefine((caches, ctx) => {
+    for (const cache of Object.keys(caches).filter((key) => !CONFIG_NAME.test(key))) {
+      ctx.addIssue({ code: "custom", path: [cache], message: `cache name must match ${CONFIG_NAME.source}` });
+    }
+  });
+
+/** Where each setup, check and post-gate step lists its caches, as far as `cacheProblems` reads them. */
+export interface CacheUsers {
+  setup?: readonly { caches: readonly string[] }[];
+  checks: readonly { caches: readonly string[] }[];
+  steps?: readonly { caches: readonly string[] }[];
+}
+
+/**
+ * Each cache a setup, check or post-gate step lists that `defined` doesn't name. A task's checks may
+ * use only the caches `main`'s config defines.
+ */
+export function cacheProblems(layer: CacheUsers, defined: ReadonlySet<string>): NameProblem[] {
+  const problems: NameProblem[] = [];
+  const unknown = (path: (string | number)[], caches: readonly string[]) =>
+    caches.forEach((cache, j) => {
+      if (!defined.has(cache)) {
+        problems.push({ path: [...path, "caches", j], message: `no cache is named ${cache} in ${CONFIG_PATH}` });
+      }
+    });
+  layer.setup?.forEach((setup, i) => unknown(["setup", i], setup.caches));
+  layer.checks.forEach((check, i) => unknown(["checks", i], check.caches));
+  layer.steps?.forEach((step, i) => unknown([...MAIN_STEPS, i], step.caches));
+  return problems;
+}
+
 /** Only a check is in a group, which a pipeline chooses it by. */
 const NO_GROUP = z.never({ error: "only checks take a group; a pipeline's groups choose which checks it runs" });
 
@@ -445,6 +555,7 @@ const SetupSchema = z.strictObject(
     name: name("setup name"),
     command,
     secrets: SecretsSchema,
+    caches: CachesSchema,
     after: z.never({ error: "only checks take after; setups run in order" }).optional(),
     group: NO_GROUP.optional(),
   },
@@ -462,6 +573,7 @@ export const CheckSchema = z.strictObject({
   needs: z.never({ error: "needs is gone: a check names the checks it waits for with after" }).optional(),
   after: AfterSchema,
   secrets: SecretsSchema,
+  caches: CachesSchema,
   group: name("group").optional(),
   groups: z.never({ error: "a check is in at most one group: use group" }).optional(),
   timeout: TimeoutSchema.optional(),
@@ -502,6 +614,7 @@ const StepSchema = z.strictObject(
   {
     name: name("step name"),
     command,
+    caches: CachesSchema,
     after: z.never({ error: "only checks take after; steps run in order" }).optional(),
     group: NO_GROUP.optional(),
   },
@@ -585,6 +698,7 @@ const ConfigSchema = z
     {
       /** Where a config keeps the anchors it reuses; Throng reads nothing in it. */
       definitions: z.unknown().optional(),
+      caches: CachesConfigSchema.optional(),
       setup: z.array(SetupSchema, { error: "setup must be a list of setups" }).optional(),
       network: z
         .strictObject({
@@ -634,6 +748,9 @@ const ConfigSchema = z
       steps: config.pipelines?.main?.steps ?? [],
     };
     for (const problem of nameProblems(layer, null)) ctx.addIssue({ code: "custom", ...problem });
+    for (const problem of cacheProblems(layer, new Set(Object.keys(config.caches ?? {})))) {
+      ctx.addIssue({ code: "custom", ...problem });
+    }
     for (const problem of groupProblems(layer.checks, config.pipelines ?? {})) {
       ctx.addIssue({ code: "custom", ...problem });
     }
@@ -669,10 +786,12 @@ export function parseConfig(text: string | null): ConfigResult {
   return {
     kind: "valid",
     config: {
+      caches: Object.entries(config.caches ?? {}).map(([cache, { path, key }]) => ({ name: cache, path, key })),
       setup: (config.setup ?? []).map((setup) => ({
         name: setup.name,
         command: setup.command,
         secrets: setup.secrets,
+        caches: setup.caches,
       })),
       network: { allow: config.network?.allow ?? [] },
       checks: (config.checks ?? []).map((check) => checkConfig(check, "project")),
@@ -684,7 +803,11 @@ export function parseConfig(text: string | null): ConfigResult {
         default: { groups: config.pipelines?.default?.groups ?? null, steps: [] },
         main: {
           groups: config.pipelines?.main?.groups ?? null,
-          steps: (config.pipelines?.main?.steps ?? []).map((step) => ({ name: step.name, command: step.command })),
+          steps: (config.pipelines?.main?.steps ?? []).map((step) => ({
+            name: step.name,
+            command: step.command,
+            caches: step.caches,
+          })),
         },
       },
     },

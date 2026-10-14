@@ -76,10 +76,11 @@ const check = (name: string, command: string, timeoutMs = 60_000, metrics: Plann
   timeoutMs,
   after: [],
   secrets: [],
+  caches: [],
   metrics,
 });
 const setup = (...commands: string[]): SetupConfig[] =>
-  commands.map((command, i) => ({ name: `s${i + 1}`, command, secrets: [] }));
+  commands.map((command, i) => ({ name: `s${i + 1}`, command, secrets: [], caches: [] }));
 const number = (name: string, from: string): PlannedMetric => ({ name, from, rule: { type: "number" } });
 const cat = (path: string) => execFileSync("cat", [path], { encoding: "utf8" });
 
@@ -194,7 +195,7 @@ describe("setupScript", () => {
 });
 
 describe("post-gate step scripts", () => {
-  const deploy = { name: "deploy", command: "echo deploying >> ../deploys && test -f built && echo done" };
+  const deploy = { name: "deploy", command: "echo deploying >> ../deploys && test -f built && echo done", caches: [] };
 
   it("readies a step's container from the setups' snapshot, then runs its command once in the tree", () => {
     const head = attemptHead();
@@ -224,7 +225,9 @@ describe("post-gate step scripts", () => {
       expect.objectContaining({ status: STEP_NOT_READY_EXIT }),
     );
     runScript<StepReady>(stepReadyScript(fork, head, [], deploy), sandbox);
-    expect(runScript<StepRun>(stepScript({ name: "deploy", command: "exit 4" }, 60_000), sandbox)).toMatchObject({
+    expect(
+      runScript<StepRun>(stepScript({ name: "deploy", command: "exit 4", caches: [] }, 60_000), sandbox),
+    ).toMatchObject({
       exit: 4,
     });
   });

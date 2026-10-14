@@ -143,6 +143,7 @@ function Metrics({ projectRef, attempt }: InProject & { attempt: ArenaAttempt })
 
 const RUN_STATUS_LABELS: Record<RunDetail["status"], string> = {
   queued: "Queued",
+  waiting: "Waiting for the owner",
   running: "Running",
   done: "Done",
   cancelled: "Cancelled",

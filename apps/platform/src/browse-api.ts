@@ -192,10 +192,6 @@ const StatsSchema = z
   .object({
     ref: z.literal("main"),
     sha: z.string().nullable().openapi({ description: "`main`'s head; null before the first push." }),
-    source: z
-      .string()
-      .nullable()
-      .openapi({ description: "The public git URL the project was imported from; null when it started empty." }),
     description: z
       .string()
       .nullable()
@@ -204,12 +200,15 @@ const StatsSchema = z
           `The root README's first paragraph as plain text, cut to ${MAX_DESCRIPTION} characters; ` +
           "null when there's no README or it has no paragraph.",
       }),
-    contributors: z
+    commitAuthors: z
       .array(
         z.object({
           name: z.string().openapi({ description: "The name on their newest commit." }),
-          email: z.string().openapi({ description: "Lowercased; what their commits are counted by." }),
+          email: z.string().openapi({
+            description: "Lowercased; what their commits are counted by, so one person with two emails is two authors.",
+          }),
           commits: z.number().int(),
+          newestAt: z.number().int().openapi({ description: "Unix seconds of their newest commit." }),
         }),
       )
       .openapi({ description: "Authors of the commits reachable from `main`, most commits first." }),
@@ -224,18 +223,28 @@ const StatsSchema = z
       .openapi({
         description:
           "The bytes of code in each language, most first, by file extension. Data and prose (JSON, YAML, " +
-          "Markdown) and `node_modules`, `vendor` and `dist` are left out.",
+          "Markdown) and build output and vendored directories (`node_modules`, `vendor`, `dist`, `build`, " +
+          "`out`, `coverage`) are left out.",
       }),
-    truncated: z.boolean().openapi({
+    commitsTruncated: z.boolean().openapi({
+      description: `More than ${STATS_CAPS.maxCommits} commits, so \`commitAuthors\` counts only those read.`,
+    }),
+    filesTruncated: z.boolean().openapi({
       description:
-        `More than ${STATS_CAPS.maxCommits} commits or ${STATS_CAPS.maxFiles} code files, so the counts ` +
-        "cover only the newest commits and the files nearest the root.",
+        `More than ${STATS_CAPS.maxFiles} code files or ${STATS_CAPS.maxTrees} directories, so \`languages\` ` +
+        "covers only the files nearest the root.",
     }),
   })
   .openapi("ProjectStats");
 
 /** A project's stats before anything is pushed: nothing to count. */
-const NO_STATS: CommitStats = { description: null, contributors: [], languages: [], truncated: false };
+const NO_STATS: CommitStats = {
+  description: null,
+  commitAuthors: [],
+  languages: [],
+  commitsTruncated: false,
+  filesTruncated: false,
+};
 
 const CompareParamSchema = ProjectPathSchema.extend({
   from: z.string().openapi({ description: "The old side: a ref or sha, as `{ref}` takes.", example: "main" }),
@@ -317,11 +326,10 @@ export function browseRoutes({ auth, repos, tasks, diffCache }: BrowseOptions) {
         method: "get",
         path: "/projects/{owner}/{project}/stats",
         operationId: "getProjectStats",
-        summary: "Get a project's stats at `main`: contributors, languages, description and source",
+        summary: "Get a project's stats at `main`: commit authors, languages and description",
         description:
-          "For the project home's About box. Computed from `main`'s history and tree, and cached by its " +
-          "head: the ETag is the head's sha. Before the first push there is nothing to count, but `source` " +
-          "is still given.",
+          "For the project home's About sidebar. Computed from `main`'s history and tree, and cached by " +
+          "its head: the ETag is the head's sha. Before the first push there is nothing to count.",
         tags: ["Browse"],
         security,
         middleware: [auth] as const,
@@ -334,10 +342,10 @@ export function browseRoutes({ auth, repos, tasks, diffCache }: BrowseOptions) {
         },
       }),
       async (c) => {
-        const { source, main } = await browse(c.env).home(c.req.valid("param"));
+        const main = await browse(c.env).mainHead(c.req.valid("param"));
         if (main === null) {
           c.header("Cache-Control", REF_CACHE);
-          return c.json({ ref: "main" as const, sha: null, source, ...NO_STATS }, 200);
+          return c.json({ ref: "main" as const, sha: null, ...NO_STATS }, 200);
         }
         if (matches(c.req.header("If-None-Match"), etag(main))) {
           cacheFor(c, main);
@@ -345,7 +353,7 @@ export function browseRoutes({ auth, repos, tasks, diffCache }: BrowseOptions) {
         }
         const stats = await commitStats(repos(c.env), main, { cache: diffCache(c.env) });
         cacheFor(c, main);
-        return c.json({ ref: "main" as const, sha: main.sha, source, ...stats }, 200);
+        return c.json({ ref: "main" as const, sha: main.sha, ...stats }, 200);
       },
     )
     .openapi(

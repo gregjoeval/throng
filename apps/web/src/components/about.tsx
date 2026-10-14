@@ -1,16 +1,16 @@
 // The project home's About sidebar, like a GitHub repository's: a description, where the project
-// came from, who has committed to `main` and the languages its code is in. The platform computes
-// all of it in one call (`/stats`), so the browser never walks the tree.
+// came from, who authored the commits on `main` and the languages its code is in. The platform
+// computes the stats in one call (`/stats`), so the browser never walks the tree.
 
 import { useQuery } from "@tanstack/react-query";
 import { LinkIcon } from "lucide-react";
 import type { CSSProperties } from "react";
 import { ErrorState, Loading } from "@/components/states";
-import { statsQuery } from "@/lib/api";
+import { projectQuery, statsQuery } from "@/lib/api";
 import type { ProjectRef, ProjectStats } from "@/lib/api";
 
-/** Contributors listed by name; the rest are counted. */
-export const SHOWN_CONTRIBUTORS = 10;
+/** Commit authors listed by name; the rest are counted. */
+const SHOWN_AUTHORS = 10;
 /** Languages given a colour of their own; the rest are summed as `Other`. */
 const SHOWN_LANGUAGES = 4;
 /** The theme's chart colours, one per shown language, then one for `Other`. */
@@ -20,18 +20,19 @@ type Language = ProjectStats["languages"][number];
 
 export function About({ projectRef }: { projectRef: ProjectRef }) {
   const stats = useQuery(statsQuery(projectRef));
+  const project = useQuery(projectQuery(projectRef));
   return (
     <aside aria-label="About" className="flex flex-col gap-4 rounded-xl border p-4 text-sm">
       <h2 className="font-heading font-medium">About</h2>
       {stats.isPending && <Loading />}
       {stats.isError && <ErrorState error={stats.error} />}
-      {stats.isSuccess && <AboutBody stats={stats.data} />}
+      {stats.isSuccess && <AboutBody stats={stats.data} source={project.data?.source ?? null} />}
     </aside>
   );
 }
 
-function AboutBody({ stats }: { stats: ProjectStats }) {
-  const { description, source, contributors, languages } = stats;
+function AboutBody({ stats, source }: { stats: ProjectStats; source: string | null }) {
+  const { description, commitAuthors, languages } = stats;
   return (
     <>
       {description === null ? <p className="text-muted-foreground italic">No description.</p> : <p>{description}</p>}
@@ -42,15 +43,19 @@ function AboutBody({ stats }: { stats: ProjectStats }) {
           <span className="truncate">{source.replace(/^https:\/\//u, "")}</span>
         </a>
       )}
-      <section aria-label="Contributors" className="flex flex-col gap-2 border-t pt-4">
+      <section aria-label="Commit authors" className="flex flex-col gap-2 border-t pt-4">
         <h3 className="font-medium">
-          Contributors <span className="text-muted-foreground">{contributors.length}</span>
+          Commit authors{" "}
+          <span className="text-muted-foreground">
+            {commitAuthors.length}
+            {stats.commitsTruncated ? "+" : null}
+          </span>
         </h3>
-        {contributors.length === 0 ? (
+        {commitAuthors.length === 0 ? (
           <p className="text-muted-foreground">No commits yet.</p>
         ) : (
           <ol className="flex flex-col gap-1">
-            {contributors.slice(0, SHOWN_CONTRIBUTORS).map((c) => (
+            {commitAuthors.slice(0, SHOWN_AUTHORS).map((c) => (
               <li key={c.email} className="flex justify-between gap-2">
                 <span className="truncate" title={c.email}>
                   {c.name}
@@ -62,17 +67,20 @@ function AboutBody({ stats }: { stats: ProjectStats }) {
             ))}
           </ol>
         )}
-        {contributors.length > SHOWN_CONTRIBUTORS && (
-          <p className="text-muted-foreground">and {contributors.length - SHOWN_CONTRIBUTORS} more</p>
+        {commitAuthors.length > SHOWN_AUTHORS && (
+          <p className="text-muted-foreground">and {commitAuthors.length - SHOWN_AUTHORS} more</p>
+        )}
+        {stats.commitsTruncated && (
+          <p className="text-xs text-muted-foreground">Counted from the newest commits only.</p>
         )}
       </section>
       <section aria-label="Languages" className="flex flex-col gap-2 border-t pt-4">
         <h3 className="font-medium">Languages</h3>
         {languages.length === 0 ? <p className="text-muted-foreground">No code yet.</p> : <Languages all={languages} />}
+        {stats.filesTruncated && (
+          <p className="text-xs text-muted-foreground">Counted from the files nearest the root only.</p>
+        )}
       </section>
-      {stats.truncated && (
-        <p className="text-xs text-muted-foreground">Counted from the newest commits and the files nearest the root.</p>
-      )}
     </>
   );
 }

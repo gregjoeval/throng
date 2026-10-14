@@ -368,13 +368,18 @@ export function stats(fields: Partial<ProjectStats> = {}, sha: string | null = M
   return {
     ref: "main",
     sha,
-    source: null,
     description: null,
-    contributors: [],
+    commitAuthors: [],
     languages: [],
-    truncated: false,
+    commitsTruncated: false,
+    filesTruncated: false,
     ...fields,
   };
+}
+
+/** A handler serving `ada`'s project `alpha`, imported from `source`. */
+export function serveImported(source: string) {
+  return http.get("*/api/projects/ada/alpha", () => HttpResponse.json(project("alpha", me.user, source)));
 }
 
 /** A handler serving the project's About stats. */

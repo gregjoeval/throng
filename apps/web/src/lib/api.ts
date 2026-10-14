@@ -314,7 +314,7 @@ export const mainHeadQuery = (projectRef: ProjectRef) => ({
   refetchInterval: TASK_POLL_MS,
 });
 
-/** The About box's stats at `main`: contributors, languages, a description and where the project came from. */
+/** The About sidebar's stats at `main`: commit authors, languages and a description. */
 export const statsQuery = (projectRef: ProjectRef) =>
   apiQuery([...projectKey(projectRef), "stats"], (init) => projectApi.stats.$get({ param: projectRef }, { init }));
 

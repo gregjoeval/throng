@@ -117,6 +117,14 @@ setup:
 - **Errors.** A private or missing source is `notFound` (GitHub answers both with 401, so they can't be told apart), one that isn't a git repository or is too large (Artifacts' `MEMORY_LIMIT`) is `invalidRequest`, and an unreachable host is `unavailable` (503). A failed import leaves no project row, origin or staging repo.
 - **Killed mid-import.** The import is synchronous, so a request killed while it runs (the client gives up, the Worker is evicted) skips the rollback and can leave the empty origin and the staging repo behind with no project row. Nothing reads them; they are orphans until removed by hand. A later creation that draws the same id reuses neither: it draws another id when the origin is taken, and deletes a leftover staging repo.
 
+## Project stats
+
+`GET /api/projects/{owner}/{project}/stats` (`src/stats.ts`) feeds the project home's About sidebar: `main`'s commit authors, the share of its code in each language, and its root README's first paragraph. It's computed from `Repos` reads, never a clone, and is costly the first time a head is seen:
+
+- **Commit authors.** History is read 100 commits a page from `main`, each page starting at the last one's first parent, and each merge's other parents start a walk of their own; at most 1,000 commits are read (`commitsTruncated`).
+- **Languages.** The tree is read breadth first, skipping `node_modules`, `vendor`, `dist`, `build`, `out` and `coverage`, at most 500 directories, and at most 1,000 files of a known language (by extension) are sized (`filesTruncated`). `readTree` gives no sizes, so each file's blob is read for its size, two at a time, and the size is kept in the Cache API by the blob's hash (`src/blob-size.ts`, 30 days), which directory listings share.
+- **Caching.** The stats of a commit never change, so they're kept in the Cache API by its sha and the caps (`commit-stats.throng.invalid`, 7 days, keyed with a version to bump when the stats change). The response's ETag is `main`'s head, so an unchanged `main` answers 304 after one `listCommits` call.
+
 ## Deleting a project
 
 `DELETE /api/projects/{owner}/{project}` (and the Danger zone on the web app's Settings page) deletes a project and everything it holds, for good. Only its owner, acting as themselves, may; there is no MCP tool. `src/project-deletion.ts` deletes in this order, and the e2e cleanup deletes through it too:

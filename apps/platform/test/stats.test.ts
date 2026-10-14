@@ -20,12 +20,12 @@ describe("commitStats", () => {
     repos.commit("p-main", { files: { "a.ts": "c" }, author: { name: "Ada L.", email: "ADA@example.com" } });
     const head = repos.commit("p-main", { files: { "a.ts": "d" }, author: CY });
     const stats = await commitStats(repos, { repo: "p-main", sha: head.hash });
-    expect(stats.contributors).toEqual([
+    expect(stats.commitAuthors.map(({ name, email, commits }) => ({ name, email, commits }))).toEqual([
       { name: "Ada L.", email: "ada@example.com", commits: 2 },
       { name: "Bob", email: "bob@example.com", commits: 1 },
       { name: "Cy", email: "cy@example.com", commits: 1 },
     ]);
-    expect(stats.truncated).toBeFalsy();
+    expect(stats.commitsTruncated).toBeFalsy();
   });
 
   it("counts the commits a merge brought in, once each", async () => {
@@ -38,23 +38,50 @@ describe("commitStats", () => {
     // A second merge of the same side brings in nothing new.
     const again = repos.commit("p-main", { parents: [merge.hash, side1.hash], files: { "a.ts": "aa" }, author: CY });
     const stats = await commitStats(repos, { repo: "p-main", sha: again.hash });
-    expect(stats.contributors.map((c) => [c.name, c.commits])).toEqual([
+    expect(stats.commitAuthors.map((c) => [c.name, c.commits])).toEqual([
       ["Ada", 3],
       ["Bob", 2],
       ["Cy", 1],
     ]);
   });
 
-  it("walks history a page at a time and stops at the commit cap, saying so", async () => {
+  it("names each author by their newest commit, even one a merge brought in", async () => {
+    const repos = await repo();
+    const base = repos.commit("p-main", { files: { "a.ts": "a" }, author: BOB });
+    const main = repos.commit("p-main", { files: { "a.ts": "aa" }, author: ADA });
+    const side = repos.commit("p-main", {
+      branch: "side",
+      parents: [base.hash],
+      files: { "b.ts": "b" },
+      author: { name: "Robert", email: "bob@example.com" },
+    });
+    const merge = repos.commit("p-main", { parents: [main.hash, side.hash], files: { "a.ts": "aa", "b.ts": "b" } });
+    const stats = await commitStats(repos, { repo: "p-main", sha: merge.hash });
+    expect(stats.commitAuthors.find((a) => a.email === "bob@example.com")).toMatchObject({
+      name: "Robert",
+      commits: 2,
+      newestAt: side.authoredAt,
+    });
+  });
+
+  it("walks history a page at a time from the last commit read, and stops at the commit cap, saying so", async () => {
     const repos = await repo();
     let head = "";
     for (let i = 0; i < 250; i++) head = repos.commit("p-main", { files: { "a.ts": String(i) } }).hash;
     const all = await commitStats(repos, { repo: "p-main", sha: head });
-    expect(all.contributors).toEqual([{ name: "Ada", email: "ada@example.com", commits: 250 }]);
-    expect(all.truncated).toBeFalsy();
-    const capped = await commitStats(repos, { repo: "p-main", sha: head }, { caps: { maxCommits: 120, maxFiles: 10 } });
-    expect(capped.contributors).toEqual([{ name: "Ada", email: "ada@example.com", commits: 120 }]);
-    expect(capped.truncated).toBeTruthy();
+    expect(all.commitAuthors.map((a) => a.commits)).toEqual([250]);
+    expect(all.commitsTruncated).toBeFalsy();
+    const pages = repos.calls.filter((call) => call.method === "listCommits");
+    expect(pages).toHaveLength(3);
+    expect(pages.every((call) => !("offset" in (call.args[1] as object)))).toBeTruthy();
+    const capped = await commitStats(
+      repos,
+      { repo: "p-main", sha: head },
+      { caps: { maxCommits: 120, maxFiles: 10, maxTrees: 10 } },
+    );
+    expect(capped.commitAuthors.map((a) => a.commits)).toEqual([120]);
+    expect(capped.commitsTruncated).toBeTruthy();
+    expect(capped.filesTruncated).toBeFalsy();
   });
 
   it("shares the code's bytes among its languages, leaving out data, prose and vendored code", async () => {
@@ -68,6 +95,7 @@ describe("commitStats", () => {
         "package.json": "x".repeat(500),
         "README.md": "x".repeat(500),
         "node_modules/dep/index.js": "x".repeat(500),
+        "build/out.js": "x".repeat(500),
         "public/app.min.js": "x".repeat(500),
         "link.ts": { content: "src/app.ts", type: "symlink" },
         "empty.py": "",
@@ -90,10 +118,26 @@ describe("commitStats", () => {
     const stats = await commitStats(
       repos,
       { repo: "p-main", sha: head.hash },
-      { caps: { maxCommits: 10, maxFiles: 2 } },
+      { caps: { maxCommits: 10, maxFiles: 2, maxTrees: 10 } },
     );
     expect(stats.languages.map((l) => l.name)).toEqual(["TypeScript", "Python"]);
-    expect(stats.truncated).toBeTruthy();
+    expect(stats.filesTruncated).toBeTruthy();
+    expect(stats.commitsTruncated).toBeFalsy();
+  });
+
+  it("reads at most the tree cap's directories, whatever they hold, saying so", async () => {
+    const repos = await repo();
+    const head = repos.commit("p-main", {
+      files: { "a.ts": "aaaa", "data/x.json": "{}", "data/deep/y.json": "{}", "src/b.go": "bb" },
+    });
+    const stats = await commitStats(
+      repos,
+      { repo: "p-main", sha: head.hash },
+      { caps: { maxCommits: 10, maxFiles: 100, maxTrees: 2 } },
+    );
+    expect(stats.languages.map((l) => l.name)).toEqual(["TypeScript"]);
+    expect(stats.filesTruncated).toBeTruthy();
+    expect(repos.calls.filter((call) => call.method === "readTree")).toHaveLength(2);
   });
 
   it("describes the commit by its root README's first paragraph", async () => {
@@ -104,15 +148,16 @@ describe("commitStats", () => {
     expect((await commitStats(repos, { repo: "p-main", sha: head.hash })).description).toBe("A tool for things.");
   });
 
-  it("has no description, contributors' code or languages for an empty commit", async () => {
+  it("has no description or languages for a commit with no README text or code", async () => {
     const repos = await repo();
     const head = repos.commit("p-main", { files: { "notes.txt": "hi\n", README: "\0binary" } });
     const stats = await commitStats(repos, { repo: "p-main", sha: head.hash });
     expect(stats).toEqual({
       description: null,
-      contributors: [{ name: "Ada", email: "ada@example.com", commits: 1 }],
+      commitAuthors: [{ name: "Ada", email: "ada@example.com", commits: 1, newestAt: head.authoredAt }],
       languages: [],
-      truncated: false,
+      commitsTruncated: false,
+      filesTruncated: false,
     });
   });
 

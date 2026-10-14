@@ -7,10 +7,10 @@
 // Each read resolves the ref to a commit in one repo first, so a response can say which sha it read.
 
 import { archiveRef } from "./archive.ts";
+import { blobSizer, SIZE_CONCURRENCY } from "./blob-size.ts";
 import type { DiffCache } from "./diff.ts";
 import { ServiceError } from "./errors.ts";
 import { resolveProject } from "./projects.ts";
-import type { Project } from "./projects.ts";
 import { forkRepo, missingAsNull, originRepo } from "./repos.ts";
 import type { Commit, Repos, TreeEntry } from "./repos.ts";
 import { attemptRef, parseAttemptRef } from "./task-refs.ts";
@@ -29,10 +29,6 @@ export const MAX_COMMITS_PAGE = 100;
 const HEAD_CONCURRENCY = 6;
 /** A listing sizes at most this many files, in its order; the rest get a null size. Each is a blob read. */
 export const MAX_SIZED_FILES = 100;
-/** Blob reads for a listing's sizes run at most this many at a time. A blob may be tens of MB, so few. */
-export const SIZE_CONCURRENCY = 2;
-/** How long a blob's size stays cached. A blob never changes, so this only bounds the cache. */
-const SIZE_CACHE_SECONDS = 30 * 24 * 60 * 60;
 
 const TEXT_TYPE = "text/plain; charset=utf-8";
 const BINARY_TYPE = "application/octet-stream";
@@ -118,15 +114,11 @@ export interface CommitPage {
 
 /** The browse services. Any signed-in actor may read any project in P0. */
 export function browseService({ db, repos, backend, cache }: BrowseDeps) {
-  async function findProject(path: ProjectPath): Promise<Project> {
-    const resolved = await resolveProject(db, path.owner, path.project);
-    if (resolved === null) throw new ServiceError("notFound", `no project ${path.owner}/${path.project}`);
-    return resolved;
-  }
-
+  const sizeOf = blobSizer(repos, cache);
   async function project(path: ProjectPath): Promise<ProjectContext> {
-    const { id, owner } = await findProject(path);
-    return { id, owner: owner.id };
+    const found = await resolveProject(db, path.owner, path.project);
+    if (found === null) throw new ServiceError("notFound", `no project ${path.owner}/${path.project}`);
+    return { id: found.id, owner: found.owner.id };
   }
 
   async function store<T>(ctx: ProjectContext, method: TaskMethod, ...args: unknown[]): Promise<T> {
@@ -221,12 +213,11 @@ export function browseService({ db, repos, backend, cache }: BrowseDeps) {
       };
     },
 
-    /** Where the project came from, and its `main`, null before the first push. */
-    async home(input: ProjectPath): Promise<{ source: string | null; main: Resolved | null }> {
-      const { id, source } = await findProject(input);
-      const origin = originRepo(id);
+    /** The project's `main`, or null before the first push. */
+    async mainHead(input: ProjectPath): Promise<Resolved | null> {
+      const origin = originRepo((await project(input)).id);
       const sha = await head(origin, "main");
-      return { source, main: sha === null ? null : { repo: origin, sha, immutable: false } };
+      return sha === null ? null : { repo: origin, sha, immutable: false };
     },
 
     /** A directory's entries, folders first and then by name. */
@@ -249,7 +240,7 @@ export function browseService({ db, repos, backend, cache }: BrowseDeps) {
       const sizing = new Set(files.slice(0, MAX_SIZED_FILES));
       return mapLimit(entries, SIZE_CONCURRENCY, async (e) => ({
         ...e,
-        size: sizing.has(e) ? await blobSize(repos, cache, at.repo, e.hash) : null,
+        size: sizing.has(e) ? await sizeOf(at.repo, e.hash) : null,
       }));
     },
 
@@ -291,24 +282,6 @@ export function browseService({ db, repos, backend, cache }: BrowseDeps) {
     if (blob === null) throw new ServiceError("notFound", `no blob ${entry.hash}`);
     return { entry, blob };
   }
-}
-
-/** A blob's bytes, or null when the repo has no such blob. Kept in `cache`, keyed by the hash. */
-export async function blobSize(
-  repos: Repos,
-  cache: DiffCache | undefined,
-  repo: string,
-  hash: string,
-): Promise<number | null> {
-  const key = new Request(`https://blob-size.throng.invalid/${hash}`);
-  const hit = await cache?.match(key);
-  if (hit !== undefined) return Number(await hit.text());
-  const size = (await repos.readBlob(repo, hash))?.size ?? null;
-  if (size !== null) {
-    const headers = { "Cache-Control": `public, max-age=${SIZE_CACHE_SECONDS}` };
-    await cache?.put(key, new Response(String(size), { headers }));
-  }
-  return size;
 }
 
 export type BrowseService = ReturnType<typeof browseService>;

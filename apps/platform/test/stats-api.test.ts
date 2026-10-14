@@ -45,7 +45,7 @@ async function setup() {
 }
 
 describe("GET /projects/{owner}/{project}/stats", () => {
-  it("gives main's contributors, languages and description, and where the project came from", async () => {
+  it("gives main's commit authors, languages and description", async () => {
     const { repos, create, get } = await setup();
     await repos.create("upstream");
     repos.commit("upstream", {
@@ -58,22 +58,23 @@ describe("GET /projects/{owner}/{project}/stats", () => {
     const head = repos.commit(`${id}-main`, {
       files: { "README.md": "# Hello\n\nSays hello.\n", "hello.ts": "x".repeat(30), "hello.py": "x".repeat(10) },
     });
+    const [bob] = await repos.listCommits(`${id}-main`, { ref: head.parents[0] ?? "", limit: 1 });
     const res = await get("/projects/greg/hello/stats");
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
       ref: "main",
       sha: head.hash,
-      source: SOURCE,
       description: "Says hello.",
-      contributors: [
-        { name: "Ada", email: "ada@example.com", commits: 1 },
-        { name: "Bob", email: "bob@example.com", commits: 1 },
+      commitAuthors: [
+        { name: "Ada", email: "ada@example.com", commits: 1, newestAt: head.authoredAt },
+        { name: "Bob", email: "bob@example.com", commits: 1, newestAt: bob?.authoredAt },
       ],
       languages: [
         { name: "TypeScript", bytes: 30, share: 0.75 },
         { name: "Python", bytes: 10, share: 0.25 },
       ],
-      truncated: false,
+      commitsTruncated: false,
+      filesTruncated: false,
     });
     expect(res.headers.get("ETag")).toBe(`"${head.hash}"`);
     expect(res.headers.get("Cache-Control")).toBe(`private, max-age=${REF_MAX_AGE_SECONDS}`);
@@ -87,11 +88,11 @@ describe("GET /projects/{owner}/{project}/stats", () => {
     expect(res.body).toEqual({
       ref: "main",
       sha: null,
-      source: null,
       description: null,
-      contributors: [],
+      commitAuthors: [],
       languages: [],
-      truncated: false,
+      commitsTruncated: false,
+      filesTruncated: false,
     });
   });
 

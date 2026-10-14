@@ -3,7 +3,7 @@ import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
 import { renderApp } from "./app";
 import { serveRepo } from "./repo";
-import { server, serveStats, stats } from "./server";
+import { serveImported, server, serveStats, stats } from "./server";
 
 const FILES = {
   "README.md": "# Alpha\n\nSee the [guide](docs/guide.md).\n\n![logo](docs/logo.png)\n",
@@ -78,16 +78,16 @@ describe("project home", () => {
 const about = () => screen.findByRole("complementary", { name: "About" });
 
 describe("the About sidebar", () => {
-  it("shows the description, source, contributors most first and each language's share", async () => {
+  it("shows the description, source, commit authors most first and each language's share", async () => {
     serveRepo({ main: FILES });
     server.use(
+      serveImported("https://github.com/ada/alpha"),
       serveStats(
         stats({
           description: "Alpha does one thing well.",
-          source: "https://github.com/ada/alpha",
-          contributors: [
-            { name: "Ada", email: "ada@example.com", commits: 12 },
-            { name: "Bob", email: "bob@example.com", commits: 1 },
+          commitAuthors: [
+            { name: "Ada", email: "ada@example.com", commits: 12, newestAt: 2 },
+            { name: "Bob", email: "bob@example.com", commits: 1, newestAt: 1 },
           ],
           languages: [
             { name: "TypeScript", bytes: 900, share: 0.9 },
@@ -104,9 +104,9 @@ describe("the About sidebar", () => {
       "href",
       "https://github.com/ada/alpha",
     );
-    const contributors = within(sidebar).getByRole("region", { name: "Contributors" });
+    const authors = within(sidebar).getByRole("region", { name: "Commit authors" });
     expect(
-      within(contributors)
+      within(authors)
         .getAllByRole("listitem")
         .map((li) => li.textContent),
     ).toEqual(["Ada12 commits", "Bob1 commit"]);
@@ -120,13 +120,18 @@ describe("the About sidebar", () => {
     expect(await entriesList()).toBeInTheDocument();
   });
 
-  it("sums the languages past the fourth as Other, and counts the contributors past the tenth", async () => {
+  it("sums the languages past the fourth as Other, and counts the commit authors past the tenth", async () => {
     serveRepo({ main: FILES });
     const names = ["A", "B", "C", "D", "E", "F"];
     server.use(
       serveStats(
         stats({
-          contributors: Array.from({ length: 12 }, (_, i) => ({ name: `P${i}`, email: `p${i}@x`, commits: 12 - i })),
+          commitAuthors: Array.from({ length: 12 }, (_, i) => ({
+            name: `P${i}`,
+            email: `p${i}@x`,
+            commits: 12 - i,
+            newestAt: i,
+          })),
           languages: names.map((name, i) => ({ name, bytes: 6 - i, share: (6 - i) / 21 })),
         }),
       ),
@@ -139,14 +144,36 @@ describe("the About sidebar", () => {
         .getAllByRole("listitem")
         .map((li) => li.textContent),
     ).toEqual(["A28.6%", "B23.8%", "C19.0%", "D14.3%", "Other14.3%"]);
-    const contributors = within(sidebar).getByRole("region", { name: "Contributors" });
-    expect(within(contributors).getAllByRole("listitem")).toHaveLength(10);
-    expect(contributors).toHaveTextContent("and 2 more");
+    const authors = within(sidebar).getByRole("region", { name: "Commit authors" });
+    expect(within(authors).getAllByRole("listitem")).toHaveLength(10);
+    expect(authors).toHaveTextContent("and 2 more");
+  });
+
+  it("marks the commit author count and the languages as partial when history or the tree was cut off", async () => {
+    serveRepo({ main: FILES });
+    server.use(
+      serveStats(
+        stats({
+          commitAuthors: [{ name: "Ada", email: "ada@example.com", commits: 1000, newestAt: 1 }],
+          languages: [{ name: "TypeScript", bytes: 1, share: 1 }],
+          commitsTruncated: true,
+          filesTruncated: true,
+        }),
+      ),
+    );
+    await renderApp("/ada/alpha");
+    const sidebar = await about();
+    const authors = await within(sidebar).findByRole("region", { name: "Commit authors" });
+    expect(within(authors).getByRole("heading")).toHaveTextContent("Commit authors 1+");
+    expect(authors).toHaveTextContent("Counted from the newest commits only.");
+    expect(within(sidebar).getByRole("region", { name: "Languages" })).toHaveTextContent(
+      "Counted from the files nearest the root only.",
+    );
   });
 
   it("still shows, with the source, when nothing is pushed yet", async () => {
     serveRepo({}, { main: { ref: "main", sha: null }, active: [], archived: [] });
-    server.use(serveStats(stats({ source: "https://github.com/ada/alpha" }, null)));
+    server.use(serveImported("https://github.com/ada/alpha"), serveStats(stats({}, null)));
     await renderApp("/ada/alpha");
     expect(await screen.findByText("This project is empty")).toBeInTheDocument();
     const sidebar = await about();

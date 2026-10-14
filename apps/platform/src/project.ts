@@ -103,9 +103,13 @@ export class ProjectCoordinator extends DurableObject<Env> {
     return this.#tasks.runs.getRun(id);
   }
 
-  /** Called by a run's Pipeline Workflow when it starts: what the task defines over the project's config. */
-  definitionsOf(task: number): TaskDefinitions {
-    return this.#tasks.definitionsOf(task);
+  /**
+   * Called by a run's Pipeline Workflow when it starts: what its line's task defines over the
+   * project's config, taking trust from it if it runs a task check the owner didn't write (see
+   * `TaskStore.runDefinitions`).
+   */
+  runDefinitions(run: number): TaskDefinitions {
+    return this.#tasks.runDefinitions(run);
   }
 
   /**

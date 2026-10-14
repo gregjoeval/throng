@@ -186,6 +186,12 @@ export interface PipelineRunner {
   teardown: (instanceId: string, containers: readonly string[]) => Promise<void>;
 }
 
+/** A task check, by name, and the user id of who wrote it. */
+export interface TaskCheckWriter {
+  name: string;
+  writer: string;
+}
+
 /** A pipeline run, as the project stores it. */
 export interface StoredRun {
   id: number;
@@ -224,6 +230,13 @@ export interface StoredRun {
   land_claimed: boolean;
   /** The secrets it named when it began to wait for the owner, which it holds once started; null if it never waited. */
   secrets: string[] | null;
+  /**
+   * For a run of the owner's push that stopped being trusted as it read its config: the task check
+   * someone else wrote that it runs, and that writer's user id. Null otherwise.
+   */
+  task_check: TaskCheckWriter | null;
+  /** When the owner last started it (ms), after it waited; null if they never did. */
+  owner_started_at: number | null;
   /** For a landing: the approved head it merges, and the attempt that head is on. */
   merge_head: string | null;
   merge_attempt: string | null;
@@ -241,6 +254,7 @@ interface RunRow extends Omit<
   | "legacy_logs"
   | "land_claimed"
   | "secrets"
+  | "task_check"
 > {
   pipeline: string;
   trigger: string;
@@ -251,6 +265,7 @@ interface RunRow extends Omit<
   legacy_logs: number;
   land_claimed: number;
   secrets: string | null;
+  task_check: string | null;
   torn_down: number;
   /** The containers the run's plan named (JSON), once its Workflow planned them. */
   containers: string | null;
@@ -320,6 +335,8 @@ const PIPELINE_RUN_COLUMNS = [
   "secrets TEXT",
   "merge_head TEXT",
   "merge_attempt TEXT",
+  "task_check TEXT",
+  "owner_started_at INTEGER",
 ];
 /** Columns `pipeline_heads` gained after its first version: whether the owner pushed the head. */
 const PIPELINE_HEAD_COLUMNS = ["owners_push INTEGER NOT NULL DEFAULT 0"];
@@ -615,11 +632,12 @@ export class PipelineRuns {
     const instanceId = run.started_at === null ? run.instance_id : `${run.instance_id}-started`;
     const [row] = this.#sql.exec<RunRow>(
       `UPDATE pipeline_runs SET status = 'queued', trusted = 1, trigger = 'start', user_id = ?, alias = ?,
-         instance_id = ?, started_at = NULL, torn_down = 0, containers = NULL
+         instance_id = ?, started_at = NULL, torn_down = 0, containers = NULL, owner_started_at = ?
        WHERE id = ? AND status = 'waiting' RETURNING *`,
       owner.user.id,
       owner.alias,
       instanceId,
+      this.#ms(),
       run.id,
     );
     if (row === undefined) throw new Error(`run ${run.id} isn't waiting`);
@@ -776,6 +794,14 @@ export class PipelineRuns {
    */
   planned(id: number, containers: readonly string[]): void {
     this.#sql.exec("UPDATE pipeline_runs SET containers = ? WHERE id = ?", JSON.stringify(containers), id);
+  }
+
+  /**
+   * Takes trust from a run: it runs task check `taskCheck.name`, which `taskCheck.writer` wrote and
+   * not the owner (see `TaskStore.runDefinitions`). It then holds no secret and saves no cache.
+   */
+  distrust(id: number, taskCheck: TaskCheckWriter): void {
+    this.#sql.exec("UPDATE pipeline_runs SET trusted = 0, task_check = ? WHERE id = ?", JSON.stringify(taskCheck), id);
   }
 
   /**
@@ -958,6 +984,7 @@ function toRun(row: RunRow): StoredRun {
     legacy_logs: row.legacy_logs === 1,
     land_claimed: row.land_claimed === 1,
     secrets: row.secrets === null ? null : (JSON.parse(row.secrets) as string[]),
+    task_check: row.task_check === null ? null : (JSON.parse(row.task_check) as TaskCheckWriter),
   };
 }
 

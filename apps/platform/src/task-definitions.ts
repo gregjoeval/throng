@@ -123,3 +123,42 @@ function clashes(project: Config | null, task: TaskDefinitions): string[] {
     ({ path, message }) => `${describePath(path)}: ${message}`,
   );
 }
+
+/**
+ * Who wrote one of a task's checks: the user whose create or edit last changed it, and whether that
+ * user was the project's owner, as themselves or under an alias, as for a push.
+ */
+export interface CheckWriter {
+  /** The check's name. */
+  name: string;
+  user: string;
+  owner: boolean;
+  /** When they wrote it (ms); 0 for a check saved before writers were. */
+  at: number;
+}
+
+/**
+ * Who wrote each of `checks`, a task's checks once `editor` set them: a check `current` holds
+ * unchanged keeps its writer in `writers`, and every other one is `editor`'s.
+ */
+export function checkWriters(
+  checks: readonly CheckConfig[],
+  current: readonly CheckConfig[],
+  writers: readonly CheckWriter[],
+  editor: Omit<CheckWriter, "name">,
+): CheckWriter[] {
+  return checks.map((check) => {
+    const kept = current.some((old) => canonicalCheck(old) === canonicalCheck(check));
+    const writer = kept ? writers.find((w) => w.name === check.name) : undefined;
+    return writer ?? { name: check.name, ...editor };
+  });
+}
+
+/** A check as JSON with its fields in name order, so two equal checks match whatever order a stored one keeps. */
+function canonicalCheck(check: CheckConfig): string {
+  return JSON.stringify(
+    Object.entries(check)
+      .filter(([, value]) => value !== undefined)
+      .toSorted(([x], [y]) => x.localeCompare(y)),
+  );
+}

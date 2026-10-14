@@ -27,6 +27,7 @@ import {
   STEP_OUTCOME_LABELS,
   TRIGGER_LABELS,
   triggeredBy,
+  waitingReason,
 } from "@/lib/runs";
 import type { RunStep } from "@/lib/runs";
 import { GATE_LABELS } from "@/lib/tasks";
@@ -57,6 +58,7 @@ export function RunPage({ projectRef, run }: InRun) {
 
 function Header({ projectRef, run }: { projectRef: ProjectRef; run: RunWithOutcome }) {
   const duration = runDuration(run);
+  const reason = run.waiting === null ? null : waitingReason(run.waiting);
   return (
     <header className="flex flex-col gap-3">
       <div className="flex flex-wrap items-center gap-3">
@@ -97,6 +99,7 @@ function Header({ projectRef, run }: { projectRef: ProjectRef; run: RunWithOutco
             {run.waiting.secrets.length === 0 ? "No secrets" : run.waiting.secrets.join(", ")}
           </Field>
         )}
+        {reason === null ? null : <Field label="Waits because">{reason}</Field>}
       </dl>
       {run.error === null ? null : (
         <p role="alert" className="rounded-lg border border-destructive/40 px-3 py-2 text-sm text-destructive">

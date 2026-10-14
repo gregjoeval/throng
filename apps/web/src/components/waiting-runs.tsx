@@ -14,7 +14,7 @@ import type { ProjectRef, Run } from "@/lib/api";
 import { shortSha } from "@/lib/commits";
 import { useIsOwner } from "@/lib/owner";
 import { buildPath } from "@/lib/paths";
-import { runTask, waitingHref } from "@/lib/runs";
+import { runTask, waitingHref, waitingReason } from "@/lib/runs";
 import type { Waiting } from "@/lib/runs";
 
 /** The project's runs waiting for the owner, for the owner alone; nothing while there are none. */
@@ -70,6 +70,7 @@ function WaitingList({
 }
 
 function WaitingItem({ projectRef, run, waiting }: { projectRef: ProjectRef; run: Run; waiting: Waiting }) {
+  const reason = waitingReason(waiting);
   return (
     <li aria-label={`Run ${run.id}`} className="flex flex-wrap items-center gap-x-3 gap-y-1">
       <Link to={buildPath({ view: "run", ...projectRef, run: run.id })} className="font-medium hover:underline">
@@ -83,6 +84,7 @@ function WaitingItem({ projectRef, run, waiting }: { projectRef: ProjectRef; run
       <span className="text-muted-foreground">
         {waiting.secrets.length === 0 ? "No secrets" : `Secrets: ${waiting.secrets.join(", ")}`}
       </span>
+      {reason === null ? null : <span className="text-muted-foreground">{reason}</span>}
       <StartRun projectRef={projectRef} run={run} />
     </li>
   );

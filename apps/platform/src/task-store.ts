@@ -1019,14 +1019,16 @@ export class TaskStore {
   }
 
   /**
-   * Where a run's log named `name` is stored in R2. Anyone signed in may read a run's logs. An
-   * unknown run, or a name no log can have, is `notFound`; whether the log itself exists is R2's.
+   * Where a run's log named `name` may be stored in R2, in the order to try. A migrated run tries its
+   * old key, then its line's: one still going at the migration stores the logs it hadn't yet under its
+   * line. Anyone signed in may read a run's logs. An unknown run, or a name no log can have, is
+   * `notFound`; whether the log itself exists is R2's.
    */
-  runLogKey(project: ProjectContext, actor: Actor, input: { run: number; name: string }): string {
+  runLogKeys(project: ProjectContext, actor: Actor, input: { run: number; name: string }): string[] {
     const run = this.getScoringRun(project, actor, input);
     if (!isLogName(input.name)) throw missingLog(input.run, input.name);
     const key = { project: project.id, line: run.line, sha: run.sha, run: run.id };
-    return run.legacy_logs ? legacyLogKey(key, input.name) : logKey(key, input.name);
+    return run.legacy_logs ? [legacyLogKey(key, input.name), logKey(key, input.name)] : [logKey(key, input.name)];
   }
 
   /** open → draft: takes the attempt back out of consideration. Only its author may. */
@@ -3045,7 +3047,7 @@ export const TASK_METHODS = [
   "deleteSecret",
   "scoreNow",
   "rescore",
-  "runLogKey",
+  "runLogKeys",
   "authorizePush",
   "authorizeTaskBranchPush",
   "recordTaskBranchPush",

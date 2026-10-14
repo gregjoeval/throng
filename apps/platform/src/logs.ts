@@ -21,6 +21,15 @@ export interface LogStore {
   put: (key: string, value: string) => Promise<unknown>;
 }
 
+/** The log under the first of `keys` the store holds, or `null` if it holds none. */
+export async function firstLog(store: LogStore, keys: string[]): Promise<{ body: ReadableStream } | null> {
+  for (const key of keys) {
+    const log = await store.get(key);
+    if (log !== null) return log;
+  }
+  return null;
+}
+
 /** What R2 and the log endpoint serve a log as. */
 export const LOG_CONTENT_TYPE = "text/plain; charset=utf-8";
 

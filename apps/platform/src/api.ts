@@ -52,7 +52,7 @@ import { dequeueRoutes } from "./dequeue-api.ts";
 import type { DiffCache } from "./diff.ts";
 import { errorBody, errorResponse, ServiceError } from "./errors.ts";
 import { FORWARDED_EMAIL_HEADER } from "./forwarded.ts";
-import { LOG_CONTENT_TYPE, LOG_RETENTION_DAYS, MAX_LOG_BYTES, missingLog } from "./logs.ts";
+import { firstLog, LOG_CONTENT_TYPE, LOG_RETENTION_DAYS, MAX_LOG_BYTES, missingLog } from "./logs.ts";
 import type { LogStore } from "./logs.ts";
 import { DEQUEUE_REASONS, MERGE_REQUEST_STATES } from "./merge-requests.ts";
 import { METRIC_FORMATS, METRIC_TYPES } from "./metric-values.ts";
@@ -1724,8 +1724,8 @@ export function apiRoutes(options: ApiOptions = {}) {
       }),
       async (c) => {
         const { runId, name, ...path } = c.req.valid("param");
-        const key = await tasks(c).runLogKey(c.var.actor, { ...path, run: runId, name });
-        const log = await logsFor(c.env).get(key);
+        const keys = await tasks(c).runLogKeys(c.var.actor, { ...path, run: runId, name });
+        const log = await firstLog(logsFor(c.env), keys);
         if (log === null) throw missingLog(runId, name);
         // Streamed straight from R2; the typed response only knows the documented string body.
         return c.body(log.body, 200, { "Content-Type": LOG_CONTENT_TYPE }) as never;

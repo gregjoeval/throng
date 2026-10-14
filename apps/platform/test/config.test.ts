@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   CONFIG_PATH,
+  configSecrets,
   DEFAULT_CHECK_TIMEOUT_MS,
   DEFAULT_SANDBOX_SIZE,
   loadConfig,
@@ -633,9 +634,7 @@ pipelines:
     ]);
     // A pipeline's secrets reach only its steps, never the setups or checks every pipeline shares.
     expect(result.kind === "valid" && result.config.setup.map((s) => s.secrets)).toEqual([["NPM_TOKEN"]]);
-    expect(
-      result.kind === "valid" && namedSecrets({ ...result.config, steps: result.config.pipelines.main.steps }),
-    ).toEqual([
+    expect(configSecrets(result)).toEqual([
       { step: "setup deps", secrets: ["NPM_TOKEN"] },
       { step: "step migrate", secrets: ["CLOUDFLARE_PROD"], pipeline: "main" },
       { step: "step deploy", secrets: ["CLOUDFLARE_PROD", "SENTRY_TOKEN"], pipeline: "main" },

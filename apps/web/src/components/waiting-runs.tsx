@@ -4,15 +4,14 @@
 // The project home and the runs tab list them as "Waiting for you"; a task page lists its own as
 // "Waiting for the owner".
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import type { UseQueryResult } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
+import { StartRun } from "@/components/run-actions";
 import { ErrorState } from "@/components/states";
-import { Button } from "@/components/ui/button";
-import { projectKey, runsQuery, startRun } from "@/lib/api";
+import { waitingRunsQuery } from "@/lib/api";
 import type { ProjectRef, Run } from "@/lib/api";
 import { shortSha } from "@/lib/commits";
-import { apiError } from "@/lib/errors";
 import { useIsOwner } from "@/lib/owner";
 import { buildPath } from "@/lib/paths";
 import { runTask, waitingHref } from "@/lib/runs";
@@ -21,7 +20,7 @@ import type { Waiting } from "@/lib/runs";
 /** The project's runs waiting for the owner, for the owner alone; nothing while there are none. */
 export function WaitingForYou({ projectRef }: { projectRef: ProjectRef }) {
   const isOwner = useIsOwner(projectRef);
-  const runs = useQuery({ ...runsQuery(projectRef, { status: "waiting" }), select: waitingOf, enabled: isOwner });
+  const runs = useQuery({ ...waitingRunsQuery(projectRef), select: waitingOf, enabled: isOwner });
   if (!isOwner) return null;
   return <WaitingList projectRef={projectRef} title="Waiting for you" runs={runs} />;
 }
@@ -29,8 +28,8 @@ export function WaitingForYou({ projectRef }: { projectRef: ProjectRef }) {
 /** The task's runs waiting for the owner: its attempts', its task branch's and its merge request's landing. */
 export function TaskWaitingRuns({ projectRef, task }: { projectRef: ProjectRef; task: string }) {
   const runs = useQuery({
-    ...runsQuery(projectRef, { status: "waiting" }),
-    select: (page: { runs: Run[] }) => waitingOf(page).filter(({ run }) => runTask(run) === task),
+    ...waitingRunsQuery(projectRef),
+    select: (all: Run[]) => waitingOf(all).filter(({ run }) => runTask(run) === task),
   });
   return <WaitingList projectRef={projectRef} title="Waiting for the owner" runs={runs} />;
 }
@@ -41,9 +40,9 @@ interface WaitingRun {
   waiting: Waiting;
 }
 
-/** The runs of a page that wait for the owner. */
-function waitingOf(page: { runs: Run[] }): WaitingRun[] {
-  return page.runs.flatMap((run) => (run.waiting === null ? [] : [{ run, waiting: run.waiting }]));
+/** The runs that wait for the owner, with what starting each means. */
+function waitingOf(runs: Run[]): WaitingRun[] {
+  return runs.flatMap((run) => (run.waiting === null ? [] : [{ run, waiting: run.waiting }]));
 }
 
 function WaitingList({
@@ -86,35 +85,5 @@ function WaitingItem({ projectRef, run, waiting }: { projectRef: ProjectRef; run
       </span>
       <StartRun projectRef={projectRef} run={run} />
     </li>
-  );
-}
-
-/** The owner's Start, pinned to the head the run waits on; nothing for anyone else, or a run that isn't waiting. */
-export function StartRun({ projectRef, run }: { projectRef: ProjectRef; run: Pick<Run, "id" | "waiting"> }) {
-  const isOwner = useIsOwner(projectRef);
-  const queryClient = useQueryClient();
-  const start = useMutation({
-    mutationFn: (sha: string) => startRun(projectRef, run.id, sha),
-    // The run and every list it shows in change, and so may its merge request.
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: projectKey(projectRef) }),
-  });
-  if (!isOwner || run.waiting === null) return null;
-  const { head } = run.waiting;
-  return (
-    <>
-      <Button
-        size="sm"
-        disabled={start.isPending}
-        aria-label={`Start run ${run.id}`}
-        onClick={() => start.mutate(head)}
-      >
-        {start.isPending ? "Starting…" : "Start"}
-      </Button>
-      {start.isError ? (
-        <p role="alert" className="text-sm text-destructive">
-          {apiError(start.error).message}
-        </p>
-      ) : null}
-    </>
   );
 }

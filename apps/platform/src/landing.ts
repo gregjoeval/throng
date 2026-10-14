@@ -108,8 +108,12 @@ export type LegacyLandingOutcome =
   | { kind: "failedChecks"; details: { checks: LegacyFailedCheck[]; error?: string } }
   | { kind: "errored"; details: { step: string; error: string } };
 
+/** A landing's own steps, which Throng runs (`source: "platform"`): `merge` before its checks, `land` after. */
+export const LANDING_STEPS = ["merge", "land"] as const;
+export type LandingStep = (typeof LANDING_STEPS)[number];
+
 /** One of a landing's own steps (`merge` or `land`), as its run's outcome lists it. */
-export function landingStep(name: "merge" | "land", outcome: StepOutcome, notes: string[] = []): RunStep {
+export function landingStep(name: LandingStep, outcome: StepOutcome, notes: string[] = []): RunStep {
   return { name, kind: "step", source: "platform", group: null, outcome, durationMs: 0, notes, log: null };
 }
 

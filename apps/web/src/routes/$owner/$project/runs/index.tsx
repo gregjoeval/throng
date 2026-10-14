@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
+import { RUN_STATUSES } from "@throng/platform/run-status";
 import type { ReactNode } from "react";
 import { ProjectView } from "@/components/project-view";
 import { EmptyState, ErrorState, Loading } from "@/components/states";
@@ -30,7 +31,7 @@ export const Route = createFileRoute("/$owner/$project/runs/")({
 /** The status filter's choices: every status, then each one. */
 const STATUS_FILTERS = [
   { value: undefined, label: "All statuses" },
-  ...Object.entries(RUN_STATUS_LABELS).map(([value, label]) => ({ value, label })),
+  ...RUN_STATUSES.map((value) => ({ value, label: RUN_STATUS_LABELS[value] })),
 ];
 
 /**

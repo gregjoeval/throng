@@ -67,6 +67,13 @@ describe("the settings tab", () => {
     expect(within(views()).getByRole("link", { name: "Settings" })).toHaveAttribute("aria-current", "page");
   });
 
+  it("is hidden from the owner acting under an alias, whom the platform refuses", async () => {
+    server.use(http.get("*/api/me", () => HttpResponse.json({ ...me, alias: "claude" })));
+    await renderApp("/ada/alpha");
+    await within(views()).findByRole("link", { name: "Runs" });
+    expect(within(views()).queryByRole("link", { name: "Settings" })).toBeNull();
+  });
+
   it("is hidden from everyone else, and the page says why", async () => {
     server.use(http.get("*/api/projects/bob/gamma", () => HttpResponse.json(project("gamma", { ...me.user, ...bob }))));
     await renderApp("/bob/gamma");
@@ -172,6 +179,17 @@ describe("the secrets settings", () => {
         { method: "PUT", name: "DEPLOY_TOKEN", body: { value: "cf-token-replaced", pipelines: ["main"] } },
       ]),
     );
+  });
+
+  it("closes the edit form once the secret it edits is gone, rather than turn it into a new one", async () => {
+    server.use(...serveSecrets([deployToken()]));
+    const { user } = await renderApp("/ada/alpha/settings");
+    await user.click(await screen.findByRole("button", { name: "Edit DEPLOY_TOKEN" }));
+    expect(screen.getByRole("form", { name: "Edit DEPLOY_TOKEN" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Delete DEPLOY_TOKEN" }));
+    await user.click(screen.getByRole("button", { name: "Confirm delete DEPLOY_TOKEN" }));
+    expect(await screen.findByText("No secrets yet")).toBeInTheDocument();
+    expect(screen.queryByRole("form")).toBeNull();
   });
 
   it("shows the platform's refusal", async () => {

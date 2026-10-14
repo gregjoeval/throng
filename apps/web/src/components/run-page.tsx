@@ -1,21 +1,22 @@
 // One run's page: a header with its line, head, pipeline, trigger, trust, status and gate; then its
 // steps by stage (setups, checks by group, the landing's `merge` and `land`, post-gate steps), each
-// with its outcome, duration, notes and a log to expand; then its metrics.
+// with its outcome, duration, notes and a log to expand; a landing's conflict, when its merge hit
+// one; then its metrics.
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useState } from "react";
 import type { ReactNode } from "react";
+import { ConflictFiles } from "@/components/conflict-files";
+import type { ConflictDetails } from "@/components/conflict-files";
+import { CancelRun, StartRun } from "@/components/run-actions";
 import { RunLog } from "@/components/run-log";
 import { ErrorState, Loading } from "@/components/states";
 import { Button } from "@/components/ui/button";
-import { StartRun } from "@/components/waiting-runs";
-import { cancelRun, projectKey, runQuery } from "@/lib/api";
+import { runConflictDiffQuery, runQuery } from "@/lib/api";
 import type { ProjectRef, RunWithOutcome } from "@/lib/api";
-import { formatValue, linkTarget } from "@/lib/arena";
+import { formatValue, metricLink } from "@/lib/arena";
 import { shortSha } from "@/lib/commits";
-import { apiError } from "@/lib/errors";
-import { useIsOwner } from "@/lib/owner";
 import { buildPath } from "@/lib/paths";
 import {
   formatDuration,
@@ -46,6 +47,9 @@ export function RunPage({ projectRef, run }: InRun) {
     <div className="flex flex-col gap-6">
       <Header projectRef={projectRef} run={found.data} />
       {outcome === null ? null : <Stages projectRef={projectRef} run={run} outcome={outcome} />}
+      {outcome?.landed?.kind === "conflict" ? (
+        <Conflict projectRef={projectRef} run={run} details={outcome.landed.details} />
+      ) : null}
       {outcome === null ? null : <Metrics metrics={outcome.metrics} />}
     </div>
   );
@@ -58,7 +62,7 @@ function Header({ projectRef, run }: { projectRef: ProjectRef; run: RunWithOutco
       <div className="flex flex-wrap items-center gap-3">
         <h2 className="font-heading text-lg font-medium">Run {run.id}</h2>
         <StartRun projectRef={projectRef} run={run} />
-        <Cancel projectRef={projectRef} run={run} />
+        <CancelRun projectRef={projectRef} run={run} />
       </div>
       <dl
         aria-label="Run"
@@ -71,7 +75,9 @@ function Header({ projectRef, run }: { projectRef: ProjectRef; run: RunWithOutco
         </Field>
         <Field label="Head">
           {run.sha === null ? (
-            <span className="text-muted-foreground">Not landed</span>
+            <span className="text-muted-foreground">
+              {run.outcome?.landed?.kind === "conflict" ? "Not landed: the merge conflicted" : "Not landed"}
+            </span>
           ) : (
             <Link to={buildPath({ view: "commit", ...projectRef, sha: run.sha })} className="font-mono hover:underline">
               {shortSha(run.sha)}
@@ -106,30 +112,6 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
     <>
       <dt className="text-muted-foreground">{label}</dt>
       <dd>{children}</dd>
-    </>
-  );
-}
-
-/** The owner's Cancel, while the run can be cancelled. */
-function Cancel({ projectRef, run }: { projectRef: ProjectRef; run: RunWithOutcome }) {
-  const isOwner = useIsOwner(projectRef);
-  const queryClient = useQueryClient();
-  const cancel = useMutation({
-    mutationFn: () => cancelRun(projectRef, run.id),
-    // The run and every list it shows in change.
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: projectKey(projectRef) }),
-  });
-  if (!isOwner || !run.cancellable) return null;
-  return (
-    <>
-      <Button variant="outline" size="sm" disabled={cancel.isPending} onClick={() => cancel.mutate()}>
-        {cancel.isPending ? "Cancelling…" : "Cancel run"}
-      </Button>
-      {cancel.isError ? (
-        <p role="alert" className="text-sm text-destructive">
-          {apiError(cancel.error).message}
-        </p>
-      ) : null}
     </>
   );
 }
@@ -202,6 +184,24 @@ function StepItem({ projectRef, run, step }: InRun & { step: RunStep }) {
   );
 }
 
+/**
+ * The conflict a landing's `merge` hit, which ended the run there: each file's hunks, and its diffs
+ * from the merge base to `main` and to the approved head, so the attempt's author can fix it.
+ */
+function Conflict({ projectRef, run, details }: InRun & { details: ConflictDetails }) {
+  return (
+    <section aria-label="Conflict" className="flex flex-col gap-2 text-sm">
+      <h3 className="font-heading text-sm font-medium">Conflict</h3>
+      <p>
+        Merging <span className="font-mono">{details.attempt}</span> at{" "}
+        <span className="font-mono">{shortSha(details.head)}</span> into main at{" "}
+        <span className="font-mono">{shortSha(details.main)}</span> conflicted.
+      </p>
+      <ConflictFiles details={details} diffQuery={(path, side) => runConflictDiffQuery(projectRef, run, path, side)} />
+    </section>
+  );
+}
+
 /** Every metric the run reported, by name, with its unit; a `url` metric as a link. */
 function Metrics({ metrics }: { metrics: Outcome["metrics"] }) {
   const entries = Object.entries(metrics);
@@ -213,7 +213,7 @@ function Metrics({ metrics }: { metrics: Outcome["metrics"] }) {
         <caption className="sr-only">Metrics</caption>
         <tbody>
           {entries.map(([name, metric]) => {
-            const href = metric.type === "string" && metric.format === "url" ? linkTarget(metric.value) : null;
+            const href = metricLink(metric);
             const unit = metric.type === "number" ? (metric.unit ?? null) : null;
             return (
               <tr key={name} aria-label={name} className="border-b last:border-0">

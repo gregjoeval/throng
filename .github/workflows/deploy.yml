@@ -32,6 +32,16 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # wrangler.jsonc requires SECRETS_KEYRING, which an operator sets once by hand (see
+      # apps/platform/README.md, "Secrets"). Without it the deploy would fail after the migrations ran.
+      - name: Check the platform's required secrets are set
+        working-directory: apps/platform
+        run: |
+          held=$(pnpm --silent wrangler secret list --format json | jq -r '.[].name')
+          if ! grep -qx SECRETS_KEYRING <<<"$held"; then
+            echo "::error::throng has no SECRETS_KEYRING; set it with 'pnpm wrangler secret put SECRETS_KEYRING' (apps/platform/README.md, Secrets)"
+            exit 1
+          fi
       - name: Apply D1 migrations
         if: hashFiles('apps/platform/migrations/*.sql') != ''
         working-directory: apps/platform

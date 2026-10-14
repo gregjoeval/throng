@@ -1,8 +1,9 @@
 import { QueryClient } from "@tanstack/react-query";
+import type { RunStatus } from "@throng/platform/run-status";
 import { DetailedError } from "hono/client";
 import { http, HttpResponse } from "msw";
 import { describe, expect, expectTypeOf, it } from "vitest";
-import { apiQuery, client, meQuery } from "@/lib/api";
+import { apiQuery, client, meQuery, RUN_POLL_MS, runQuery } from "@/lib/api";
 import { me, server } from "./server";
 
 const query = () => new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -37,5 +38,18 @@ describe("apiQuery", () => {
       .catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(DetailedError);
     expect(failure).toMatchObject({ statusCode: 401, detail: { data: body } });
+  });
+});
+
+/** How often a run with `status` is polled, or false once it isn't. */
+const pollInterval = (status: RunStatus) =>
+  runQuery({ owner: "ada", project: "alpha" }, 7).refetchInterval({ state: { data: { status } } });
+
+describe("a run's polling", () => {
+  it("stops once the run ended, and goes on while it waits for the owner, who may start it elsewhere", () => {
+    for (const status of ["done", "cancelled", "errored"] as const) expect(pollInterval(status), status).toBeFalsy();
+    for (const status of ["queued", "waiting", "running"] as const) {
+      expect(pollInterval(status), status).toBe(RUN_POLL_MS);
+    }
   });
 });

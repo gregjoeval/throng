@@ -163,7 +163,9 @@ A project's secrets (`src/secrets.ts`) are a name, a write-only value and the pi
 - **Masking.** Each value, its base64 (with or without padding) and its URL encoding are replaced with `***` in the logs a step stores, its metric values and the errors it ends with. Masking is a courtesy: trust is what keeps a value from anyone else's code.
 - **Snapshots.** Whatever a setup writes to disk, such as a token in `~/.npmrc`, is in the snapshot the run's checks start from, so every check of a trusted run can read it, and Cloudflare keeps the snapshot until 30 days after its last restore. A setup that writes a secret to disk should remove it before it ends.
 
-Make a keyring with `node -e 'console.log(JSON.stringify({current:"k1",keys:{k1:require("crypto").randomBytes(32).toString("base64")}}))'` and set it once for production with `pnpm wrangler secret put SECRETS_KEYRING` before the first deploy that requires it. The E2E workflow makes a fresh one for `throng-ci` on every run. Without it, setting a secret fails; nothing else does.
+Make a keyring with `node -e 'console.log(JSON.stringify({current:"k1",keys:{k1:require("crypto").randomBytes(32).toString("base64")}}))'` and set it once for production with `pnpm wrangler secret put SECRETS_KEYRING` before the first deploy that requires it. The E2E workflow makes a fresh one for `throng-ci` on every run. `wrangler.jsonc` lists it under `secrets.required` in both environments, so a deploy without it fails: the Deploy workflow checks for it first and stops, naming it, before it migrates or deploys anything.
+
+Before #257, previews were deployed with Throng's own Cloudflare token, held by the Worker as `CF_PREVIEW_TOKEN` (with `CF_ACCOUNT_ID` beside it). Nothing reads either now, and a deploy never deletes a secret, so each stays on a Worker until someone deletes it. Production's are deleted by hand, as #265's manual step: `pnpm wrangler secret delete CF_PREVIEW_TOKEN` (and `CF_ACCOUNT_ID`, if it's there). `throng-ci`'s are deleted the same way, with `--env ci`.
 
 ## E2E job
 

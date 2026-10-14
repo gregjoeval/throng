@@ -3,7 +3,7 @@ import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
 import type { Attempt, ListedTask } from "@/lib/tasks";
 import { renderApp } from "./app";
-import { attempt, bob, me, runDetail, server, serveTasks, task } from "./server";
+import { attempt, BASE, bob, me, runDetail, server, serveTasks, task } from "./server";
 
 const SHA = "c0ffee".padEnd(40, "0");
 const ARCHIVED = "a1".padEnd(40, "0");
@@ -165,7 +165,8 @@ describe("the task page body", () => {
       attempt(1, 2, { state: "merged", mergedSha: SHA, mergeRequest: { state: "merged", lastDequeue: null } }),
     ]);
     const runs = await within(body()).findByRole("region", { name: "Task branch runs" });
-    expect(asked).toContain("?line=t1");
+    // It asks only for the few it shows.
+    expect(asked).toContain("?line=t1&limit=3");
     expect(within(runs).getByRole("listitem", { name: "Run 9" })).toHaveTextContent(
       `Run 9${SHA.slice(0, 7)}DoneGate passed`,
     );
@@ -191,7 +192,7 @@ describe("the task page body", () => {
         status: "waiting",
         gate: null,
         ...(line === "main" ? { sha: null, pipeline: "main" as const, trigger: "merge" as const } : {}),
-        waiting: { head: SHA, attempt: on, secrets: ["DEPLOY"] },
+        waiting: { head: SHA, attempt: on, base: line === "main" ? null : BASE, secrets: ["DEPLOY"] },
       });
       return run;
     };
@@ -223,11 +224,12 @@ describe("the task page body", () => {
     expect(item).toHaveTextContent(`Run 7t1a2${SHA.slice(0, 7)}DiffSecrets: DEPLOY`);
     expect(within(item).getByRole("link", { name: "Diff" })).toHaveAttribute(
       "href",
-      `/ada/alpha/commit/${SHA}?attempt=t1a2`,
+      `/ada/alpha/compare/${BASE}...${SHA}?attempt=t1a2`,
     );
-    expect(
-      within(within(list).getByRole("listitem", { name: "Run 4" })).getByRole("link", { name: "Diff" }),
-    ).toHaveAttribute("href", `/ada/alpha/commit/${SHA}`);
+    const diff = (id: number) =>
+      within(within(list).getByRole("listitem", { name: `Run ${id}` })).getByRole("link", { name: "Diff" });
+    expect(diff(4)).toHaveAttribute("href", `/ada/alpha/compare/${BASE}...${SHA}`);
+    expect(diff(5)).toHaveAttribute("href", `/ada/alpha/compare/main...${SHA}?attempt=t1a2`);
     await user.click(within(item).getByRole("button", { name: "Start run 7" }));
     await waitFor(() => expect(started).toEqual([{ id: "7", sha: SHA }]));
   });
@@ -246,7 +248,7 @@ describe("the task page body", () => {
         } = runDetail(7, SHA, {
           line: "t1a1",
           status: "waiting",
-          waiting: { head: SHA, attempt: "t1a1", secrets: ["DEPLOY"] },
+          waiting: { head: SHA, attempt: "t1a1", base: BASE, secrets: ["DEPLOY"] },
         });
         return HttpResponse.json({ runs: [run], next: null });
       }),

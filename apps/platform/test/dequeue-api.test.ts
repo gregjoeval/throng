@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import type { AccessVerifier } from "../src/access.ts";
 import { apiRoutes } from "../src/api.ts";
 import type { ConflictDetails } from "../src/conflicts.ts";
-import { conflictOutcome } from "../src/landing.ts";
+import { conflictOutcome, landedOutcome } from "../src/landing.ts";
 import type { LogStore } from "../src/logs.ts";
 import type { ScoringResult } from "../src/results.ts";
 import type { RunOutcome, RunStep } from "../src/run-outcome.ts";
@@ -229,7 +229,16 @@ describe("GET …/tasks/{t}/merge-request/dequeue", () => {
       at: "2026-10-10T12:00:00.000Z",
     });
     const detail = await call("GET", `${p}/runs/${run}`, bob);
-    expect(detail.body["outcome"]).toMatchObject({ landed: "conflict", conflict: { files: [{}, {}] } });
+    expect(detail.body["outcome"]["landed"]).toMatchObject({ kind: "conflict", details: { files: [{}, {}] } });
+    expect(detail.body["outcome"]).not.toHaveProperty("conflict");
+  });
+
+  it("keys a landing run's `landed` on what happened: the commit it landed", async () => {
+    const env = await setup();
+    const { call, finish, bob, p } = env;
+    const sha = "e".repeat(40);
+    const run = await finish({ status: "done", outcome: landedOutcome(sha) });
+    expect((await call("GET", `${p}/runs/${run}`, bob)).body["outcome"]["landed"]).toEqual({ kind: "landed", sha });
   });
 
   it("serves a failed gate's failed steps from its landing's run", async () => {
@@ -276,12 +285,88 @@ describe("GET …/tasks/{t}/merge-request/dequeue", () => {
     expect((await call("GET", `${p}/tasks/t1/merge-request/dequeue`)).status).toBe(401);
   });
 
-  it("has no per-file diff or log routes: the run's own routes serve its steps", async () => {
+  it("has no log route: the run's own routes serve its steps' logs", async () => {
     const env = await setup();
     const { request, finish, bob, p } = env;
     await finish({ status: "done", outcome: conflictOutcome(greetingConflict(env)) });
-    for (const path of ["files/src/greeting.js/diff?side=main", "logs/test"]) {
-      expect((await request(`${p}/tasks/t1/merge-request/dequeue/${path}`, bob)).status, path).toBe(404);
-    }
+    expect((await request(`${p}/tasks/t1/merge-request/dequeue/logs/test`, bob)).status).toBe(404);
+  });
+});
+
+/** The two routes that diff a landing's conflicting file: by its task's latest dequeue, and by its run. */
+const CONFLICT_DIFFS = [
+  {
+    route: "dequeue",
+    url: (p: string, _run: number, path: string) => `${p}/tasks/t1/merge-request/dequeue/files/${path}/diff`,
+  },
+  { route: "run", url: (p: string, run: number, path: string) => `${p}/runs/${run}/conflict/files/${path}/diff` },
+] as const;
+
+describe.each(CONFLICT_DIFFS)("a conflicting file's diff, by its $route", ({ url }) => {
+  it("diffs one conflicting file from the base to main, or to the attempt", async () => {
+    const env = await setup();
+    const { call, finish, bob, p } = env;
+    const run = await finish({ status: "done", outcome: conflictOutcome(greetingConflict(env)) });
+
+    const toMain = await call("GET", `${url(p, run, "src/greeting.js")}?side=main`, bob);
+    expect(toMain.status).toBe(200);
+    expect(toMain.body).toMatchObject({
+      path: "src/greeting.js",
+      status: "modified",
+      oldMode: "100644",
+      newMode: "100644",
+      oldHash: blobSha(greeting("hello")),
+      newHash: blobSha(greeting("hello from a1")),
+      additions: 1,
+      deletions: 1,
+      flags: [],
+    });
+    expect(toMain.body["patch"]).toContain(
+      '-export const GREETING = "hello";\n+export const GREETING = "hello from a1";\n',
+    );
+    const toAttempt = await call("GET", `${url(p, run, "src/greeting.js")}?side=attempt`, bob);
+    expect(toAttempt.body["patch"]).toContain('+export const GREETING = "hello from a2";\n');
+  });
+
+  it("gives the unified patch for Accept: text/x-diff", async () => {
+    const env = await setup();
+    const { request, finish, bob, p } = env;
+    const run = await finish({ status: "done", outcome: conflictOutcome(greetingConflict(env)) });
+    const res = await request(`${url(p, run, "src/greeting.js")}?side=attempt`, bob, {
+      headers: { Accept: "text/x-diff" },
+    });
+    expect(res.headers.get("Content-Type")).toBe("text/x-diff; charset=utf-8");
+    expect(await res.text()).toMatch(/^diff --git a\/src\/greeting.js b\/src\/greeting.js\n/u);
+  });
+
+  it("shows a file deleted on main as deleted", async () => {
+    const env = await setup();
+    const { call, finish, bob, p } = env;
+    const run = await finish({ status: "done", outcome: conflictOutcome(greetingConflict(env)) });
+    expect((await call("GET", `${url(p, run, "src/gone.js")}?side=main`, bob)).body).toMatchObject({
+      path: "src/gone.js",
+      status: "deleted",
+      oldHash: blobSha("x\n"),
+      newHash: null,
+    });
+    const toAttempt = await call("GET", `${url(p, run, "src/gone.js")}?side=attempt`, bob);
+    expect(toAttempt.body).toMatchObject({ status: "modified", additions: 1, deletions: 1 });
+  });
+
+  it("is 404 for a path that isn't conflicting or a landing that didn't conflict, 400 for a bad side", async () => {
+    const env = await setup();
+    const { call, finish, bob, p } = env;
+    const diff = (run: number, path: string, side = "main") => call("GET", `${url(p, run, path)}?side=${side}`, bob);
+    const failed = await finish({ status: "errored", error: "land: main moved" });
+    expect((await diff(failed, "src/greeting.js")).status).toBe(404);
+    expect((await diff(failed, "src/greeting.js", "base")).status).toBe(400);
+  });
+
+  it("is 404 for a path the conflict didn't touch", async () => {
+    const env = await setup();
+    const { call, finish, bob, p } = env;
+    const run = await finish({ status: "done", outcome: conflictOutcome(greetingConflict(env)) });
+    const res = await call("GET", `${url(p, run, "src/other.js")}?side=main`, bob);
+    expect(res.body["error"]["code"]).toBe("notFound");
   });
 });

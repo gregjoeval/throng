@@ -16,7 +16,7 @@ const SHOWN = 3;
 
 /** The task branch's latest runs, each linking to its run page; nothing while it has none. */
 export function TaskBranchRuns({ projectRef, task }: { projectRef: ProjectRef; task: Pick<Task, "ref"> }) {
-  const runs = useQuery(runsQuery(projectRef, { line: task.ref }));
+  const runs = useQuery(runsQuery(projectRef, { line: task.ref, limit: SHOWN }));
   if (runs.isError) return <ErrorState error={runs.error} />;
   if (!runs.isSuccess || runs.data.runs.length === 0) return null;
   return (
@@ -31,7 +31,7 @@ export function TaskBranchRuns({ projectRef, task }: { projectRef: ProjectRef; t
         </Link>
       </h3>
       <ul className="flex flex-col gap-1 text-xs">
-        {runs.data.runs.slice(0, SHOWN).map((run) => (
+        {runs.data.runs.map((run) => (
           <li
             key={run.id}
             aria-label={`Run ${run.id}`}

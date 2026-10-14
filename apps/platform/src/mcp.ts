@@ -446,7 +446,7 @@ function mcpServer({ repos, tasks, logs, diffCache }: Deps, { actor, token, env,
       "duration, notes and the name of its log for `get_log`, and the run's metrics.",
     onRun,
     async ({ project, run }) => {
-      const found = await service.getScoringRun(actor, { ...projectPath(project), run });
+      const found = await service.getRun(actor, { ...projectPath(project), run });
       return answer(runSummary(found), { run: found });
     },
   );
@@ -472,10 +472,17 @@ function mcpServer({ repos, tasks, logs, diffCache }: Deps, { actor, token, env,
       `Returns the last ${MAX_LOG_SLICE_BYTES / 1024} KB by default; pass \`offset\` (bytes) to read ` +
       `${MAX_LOG_SLICE_BYTES / 1024} KB from there instead.`,
     onRun.extend({
-      step: z.string().min(1).describe("The step's log, e.g. `test`."),
+      step: z.string().min(1).optional().describe("The step's log, e.g. `test`."),
+      name: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Deprecated: `step`'s old name, taken when `step` is absent. Use `step`."),
       offset: z.number().int().min(0).optional().describe("The byte to start at; omit for the log's tail."),
     }),
-    async ({ project, run, step, offset }) => {
+    async ({ project, run, step: given, name, offset }) => {
+      const step = given ?? name;
+      if (step === undefined) throw new ServiceError("invalidRequest", "give the log's `step`");
       const keys = await service.runLogKeys(actor, { ...projectPath(project), run, name: step });
       const log = await firstLog(logs(env), keys);
       if (log === null) throw missingLog(run, step);

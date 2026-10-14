@@ -35,6 +35,7 @@ import { upgradeResult } from "./results.ts";
 import type { ScoringResult, StoredResult } from "./results.ts";
 import { runOutcome, scoringResult } from "./run-outcome.ts";
 import type { RunOutcome } from "./run-outcome.ts";
+import type { RunStatus } from "./run-status.ts";
 import { isAttemptRef, parseAttemptRef, parseTaskRef } from "./task-refs.ts";
 import type { Sql } from "./task-store.ts";
 import type { Actor } from "./tokens.ts";
@@ -47,14 +48,9 @@ export const SCORING_CAP = 3;
  * (`merge`), or the owner starting a run that waited for them (`start`).
  */
 export const SCORING_TRIGGERS = ["open", "push", "scoreNow", "rescore", "merge", "start"] as const;
-/** A run is `waiting` while it needs the owner to start it, and holds no slot meanwhile. */
-export const RUN_STATUSES = ["queued", "waiting", "running", "done", "cancelled", "errored"] as const;
 export type ScoringTrigger = (typeof SCORING_TRIGGERS)[number];
-export type RunStatus = (typeof RUN_STATUSES)[number];
-/** Whether the run rests until someone acts: it ended, or it waits for the owner. What `wait_for_run` waits for. */
-export function runSettled(run: Pick<StoredRun, "status">): boolean {
-  return run.status !== "queued" && run.status !== "running";
-}
+export { RUN_STATUSES, runSettled } from "./run-status.ts";
+export type { RunStatus } from "./run-status.ts";
 
 /** How many runs one page of a project's runs lists unless asked, and at most. */
 export const DEFAULT_RUNS_PAGE = 50;

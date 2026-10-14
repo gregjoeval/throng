@@ -3,7 +3,19 @@ import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
 import type { Run, RunWithOutcome } from "@/lib/api";
 import { renderApp } from "./app";
-import { bob, me, notFound, project, result, runDetail, server, step } from "./server";
+import {
+  addedFile,
+  bob,
+  me,
+  notFound,
+  project,
+  result,
+  runDetail,
+  serveCompare,
+  serveConflictDiffs,
+  server,
+  step,
+} from "./server";
 
 const views = () => screen.getByRole("navigation", { name: "Project views" });
 
@@ -28,14 +40,21 @@ function listed(id: number, fields: Partial<RunWithOutcome> = {}): Run {
   return run;
 }
 
+/** How many runs a page of the waiting list serves in these tests. */
+const PAGE = 2;
+
 /** What the owner's Waiting for you list asks the runs list for. */
 const WAITING = "?status=waiting";
 
-/** Serves `runs` as the list's one page, recording each query it was asked with in `asked`. */
+/**
+ * Serves `runs` as the list's one page, recording each query it was asked with in `asked`. The
+ * owner's Waiting for you list, which asks for every waiting run on any line, gets none.
+ */
 function serveRuns(runs: Run[], next: number | null = null, asked: string[] = []) {
   return http.get("*/api/projects/:owner/:project/runs", ({ request }) => {
-    asked.push(new URL(request.url).search);
-    return HttpResponse.json({ runs, next });
+    const { search } = new URL(request.url);
+    asked.push(search);
+    return HttpResponse.json(search === WAITING ? { runs: [], next: null } : { runs, next });
   });
 }
 
@@ -272,11 +291,66 @@ describe("a run's page", () => {
     expect(screen.queryByRole("button", { name: "Cancel run" })).toBeNull();
   });
 
-  it("is not found for an id that isn't a run's", async () => {
-    await renderApp("/ada/alpha/runs/abc");
-    expect(await screen.findByRole("alert")).toHaveTextContent("Not found");
+  it("is not found for an id that isn't a run's, or too long to be one", async () => {
+    for (const id of ["abc", "9".repeat(16)]) {
+      await renderApp(`/ada/alpha/runs/${id}`);
+      expect(await screen.findByRole("alert"), id).toHaveTextContent("Not found");
+    }
+  });
+
+  it("shows the conflict a landing's merge hit, with each file's diff to both sides", async () => {
+    const asked: string[] = [];
+    const conflicted = runDetail(16, SHA, {
+      line: "main",
+      pipeline: "main",
+      trigger: "merge",
+      sha: null,
+      gate: "failed",
+      outcome: {
+        ...result(),
+        gate: "failed",
+        steps: [
+          step("merge", { source: "platform", kind: "step", outcome: "failed", log: null }),
+          step("land", { source: "platform", kind: "step", outcome: "skipped", log: null }),
+        ],
+        metrics: {},
+        landed: {
+          kind: "conflict",
+          details: {
+            attempt: "t1a1",
+            head: "c".repeat(40),
+            main: "e".repeat(40),
+            base: "d".repeat(40),
+            files: [
+              {
+                path: "big.json",
+                type: "content",
+                blobs: { base: "1".repeat(40), main: "2".repeat(40), attempt: "3".repeat(40) },
+                modes: { base: "100644", main: "100644", attempt: "100644" },
+                truncated: true,
+              },
+            ],
+          },
+        },
+      },
+    });
+    server.use(serveRun(conflicted), serveConflictDiffs("runs/16/conflict", asked));
+    await renderApp("/ada/alpha/runs/16");
+    expect(await screen.findByLabelText("Run")).toHaveTextContent("HeadNot landed: the merge conflicted");
+    const conflict = await section("Conflict");
+    expect(conflict).toHaveTextContent("Merging t1a1 at ccccccc into main at eeeeeee conflicted.");
+    const file = within(conflict).getByRole("region", { name: "Conflict in big.json" });
+    expect(within(file).getByRole("note")).toHaveTextContent("Its hunks were left out");
+    const toMain = within(file).getByRole("region", { name: "Base → main" });
+    expect(await within(toMain).findByRole("listitem", { name: "big.json" })).toHaveTextContent("+1");
+    const toAttempt = within(file).getByRole("region", { name: "Base → t1a1" });
+    expect(await within(toAttempt).findByRole("listitem", { name: "big.json" })).toHaveTextContent("+2");
+    expect(asked.toSorted()).toEqual(["big.json?side=attempt", "big.json?side=main"]);
   });
 });
+
+/** Where `t2a1`'s head meets `main`: what its waiting run's diff starts from. */
+const BASE = "ba5e".padEnd(40, "1");
 
 /** Run `id` waiting for the owner on `t2a1` at `SHA`, naming DEPLOY and PREVIEW, as the runs list gives it. */
 function waitingRun(id: number, fields: Partial<RunWithOutcome> = {}): Run {
@@ -288,17 +362,26 @@ function waitingRun(id: number, fields: Partial<RunWithOutcome> = {}): Run {
     finishedAt: null,
     gate: null,
     cancellable: true,
-    waiting: { head: SHA, attempt: "t2a1", secrets: ["DEPLOY", "PREVIEW"] },
+    waiting: { head: SHA, attempt: "t2a1", base: BASE, secrets: ["DEPLOY", "PREVIEW"] },
     ...fields,
   });
 }
 
-/** Serves `runs` to `?status=waiting`, and starts a run at the sha posted, recording each; any sha but `SHA` is stale. */
+/**
+ * Serves `runs` to `?status=waiting`, a page of `PAGE` at a time, and starts a run at the sha posted,
+ * recording each; any sha but `SHA` is stale.
+ */
 function serveWaiting(runs: Run[], started: { id: number; sha: string }[] = []) {
   return [
-    http.get("*/api/projects/:owner/:project/runs", ({ request }) =>
-      HttpResponse.json({ runs: new URL(request.url).search === WAITING ? runs : [], next: null }),
-    ),
+    http.get("*/api/projects/:owner/:project/runs", ({ request }) => {
+      const query = new URL(request.url).searchParams;
+      if (query.get("status") !== "waiting") return HttpResponse.json({ runs: [], next: null });
+      const cursor = query.get("cursor");
+      const from = cursor === null ? 0 : runs.findIndex((run) => run.id < Number(cursor));
+      const page = runs.slice(from, from + PAGE);
+      const last = page.at(-1);
+      return HttpResponse.json({ runs: page, next: from + PAGE < runs.length && last ? last.id : null });
+    }),
     http.post("*/api/projects/:owner/:project/runs/:id/start", async ({ params, request }) => {
       const { sha } = (await request.json()) as { sha: string };
       const id = Number(params["id"]);
@@ -313,35 +396,74 @@ function serveWaiting(runs: Run[], started: { id: number; sha: string }[] = []) 
 }
 
 describe("runs waiting for you", () => {
-  it("lists them on the runs tab, each with its line, head, a diff link, its secrets and Start", async () => {
+  it("lists them on the runs tab, each with its line, head, a diff from its base, its secrets and Start", async () => {
     const started: { id: number; sha: string }[] = [];
     server.use(...serveWaiting([waitingRun(8)], started));
     const { user } = await renderApp("/ada/alpha/runs");
     const waiting = within(await section("Waiting for you")).getByRole("listitem", { name: "Run 8" });
     expect(waiting).toHaveTextContent("Run 8t2a1a1b2c3dDiffSecrets: DEPLOY, PREVIEW");
     expect(within(waiting).getByRole("link", { name: "Run 8" })).toHaveAttribute("href", "/ada/alpha/runs/8");
+    // Every commit Start would run, not just the head's last: a change can't hide in an earlier one.
     expect(within(waiting).getByRole("link", { name: "Diff" })).toHaveAttribute(
       "href",
-      `/ada/alpha/commit/${SHA}?attempt=t2a1`,
+      `/ada/alpha/compare/${BASE}...${SHA}?attempt=t2a1`,
     );
     await user.click(within(waiting).getByRole("button", { name: "Start run 8" }));
     await waitFor(() => expect(started).toEqual([{ id: 8, sha: SHA }]));
   });
 
-  it("lists them on the project home too, a held landing's head on its source attempt", async () => {
-    server.use(...serveWaiting([waitingRun(9, { line: "main", pipeline: "main", trigger: "merge", sha: null })]));
+  it("lists them on the project home too, a held landing's approved head diffed from main", async () => {
+    const landing = waitingRun(9, {
+      line: "main",
+      pipeline: "main",
+      trigger: "merge",
+      sha: null,
+      waiting: { head: SHA, attempt: "t2a1", base: null, secrets: ["DEPLOY"] },
+    });
+    server.use(...serveWaiting([landing]));
     await renderApp("/ada/alpha");
     const waiting = within(await section("Waiting for you")).getByRole("listitem", { name: "Run 9" });
     expect(waiting).toHaveTextContent("Run 9maina1b2c3d");
     expect(within(waiting).getByRole("link", { name: "Diff" })).toHaveAttribute(
       "href",
-      `/ada/alpha/commit/${SHA}?attempt=t2a1`,
+      `/ada/alpha/compare/main...${SHA}?attempt=t2a1`,
     );
     expect(within(waiting).getByRole("button", { name: "Start run 9" })).toBeInTheDocument();
   });
 
+  it("lists every one waiting, past the first page", async () => {
+    server.use(...serveWaiting([waitingRun(8), waitingRun(7), waitingRun(6), waitingRun(5), waitingRun(4)]));
+    await renderApp("/ada/alpha/runs");
+    const list = await section("Waiting for you");
+    await waitFor(() =>
+      expect(
+        within(list)
+          .getAllByRole("listitem")
+          .map((li) => li.getAttribute("aria-label")),
+      ).toEqual(["Run 8", "Run 7", "Run 6", "Run 5", "Run 4"]),
+    );
+  });
+
+  it("opens the diff from the run's base to its head, every file Start would run", async () => {
+    const asked: string[] = [];
+    server.use(
+      ...serveWaiting([waitingRun(8)]),
+      serveCompare((to, from) => [addedFile(`${from.slice(0, 4)}-${to.slice(0, 4)}.ts`)], asked),
+    );
+    const { user, path } = await renderApp("/ada/alpha/runs");
+    const waiting = within(await section("Waiting for you")).getByRole("listitem", { name: "Run 8" });
+    await user.click(within(waiting).getByRole("link", { name: "Diff" }));
+    await waitFor(() => expect(path()).toBe(`/ada/alpha/compare/${BASE}...${SHA}?attempt=t2a1`));
+    expect(await screen.findByRole("heading", { name: "Changes from ba5e111 to a1b2c3d" })).toBeInTheDocument();
+    expect(await screen.findByRole("listitem", { name: "ba5e-a1b2.ts" })).toBeInTheDocument();
+    expect(asked).toEqual([`${BASE}...${SHA}?attempt=t2a1`]);
+    expect(within(views()).getByRole("link", { name: "Commits" })).toHaveAttribute("aria-current", "page");
+  });
+
   it("shows why Start was refused", async () => {
-    const stale = waitingRun(8, { waiting: { head: "b".repeat(40), attempt: "t2a1", secrets: ["DEPLOY"] } });
+    const stale = waitingRun(8, {
+      waiting: { head: "b".repeat(40), attempt: "t2a1", base: BASE, secrets: ["DEPLOY"] },
+    });
     server.use(...serveWaiting([stale]));
     const { user } = await renderApp("/ada/alpha/runs");
     await user.click(await screen.findByRole("button", { name: "Start run 8" }));

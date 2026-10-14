@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildPath, parsePath, rawApiUrl } from "@/lib/paths";
+import { buildPath, parsePath, rawApiUrl, runId } from "@/lib/paths";
 import type { ProjectLocation } from "@/lib/paths";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
@@ -41,6 +41,11 @@ describe("buildPath and parsePath", () => {
     ],
     [{ ...at, view: "commit", sha: SHA }, `/greg/throng/commit/${SHA}`],
     [{ ...at, view: "commit", sha: SHA, attempt: "t42a3" }, `/greg/throng/commit/${SHA}?attempt=t42a3`],
+    [{ ...at, view: "compare", from: "main", to: SHA }, `/greg/throng/compare/main...${SHA}`],
+    [
+      { ...at, view: "compare", from: SHA, to: "b".repeat(40), attempt: "t42a3" },
+      `/greg/throng/compare/${SHA}...${"b".repeat(40)}?attempt=t42a3`,
+    ],
   ];
 
   it.each(cases)("round-trips %o", (location, path) => {
@@ -80,6 +85,20 @@ describe("buildPath and parsePath", () => {
       });
     }
     expect(buildPath({ ...at, view: "commits", ref: "main", offset: 0 })).toBe("/greg/throng/commits/main");
+  });
+
+  it("is null for a compare that isn't two refs", () => {
+    for (const range of ["main", "main...", "...main", "a...b...c"]) {
+      expect(parsePath(`/greg/throng/compare/${range}`), range).toBeNull();
+    }
+  });
+
+  it("drops a status that isn't a run's, and a run id too long to be exact", () => {
+    expect(parsePath("/greg/throng/runs?status=bogus")).toEqual({ ...at, view: "runs" });
+    expect(parsePath("/greg/throng/runs?status=waiting")).toEqual({ ...at, view: "runs", status: "waiting" });
+    expect(runId("9".repeat(15))).toBe(999_999_999_999_999);
+    expect(runId("9".repeat(16))).toBeNull();
+    expect(parsePath(`/greg/throng/runs/${"9".repeat(16)}`)).toBeNull();
   });
 
   it("drops a runs list cursor that isn't a positive integer, and empty filters", () => {

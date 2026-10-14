@@ -2618,7 +2618,9 @@ export class TaskStore {
     const mr = this.mergeRequests.get(run.merge_request);
     if (mr?.state !== "landing") return;
     let reason: LandingDequeueReason = "errored";
-    if (run.status === "done") reason = run.outcome?.landed === "conflict" ? "conflict" : "failedChecks";
+    // A done landing that passed its gate yet recorded no landing errored: no step failed it.
+    if (run.status === "done" && run.outcome?.landed === "conflict") reason = "conflict";
+    else if (run.status === "done" && run.outcome?.gate !== "passed") reason = "failedChecks";
     const source = this.#attempt(sourceOf(mr));
     const moved = this.scoring.statusFor(attemptLine(source)).sha !== mr.approved_head;
     this.mergeRequests.dequeue(null, mr, { reason, run: run.id }, moved ? "needsReview" : "pending");

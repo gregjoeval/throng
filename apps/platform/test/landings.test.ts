@@ -663,6 +663,16 @@ describe("a landing that doesn't land", () => {
     });
   });
 
+  it("dequeues a landing whose gate passed but that recorded no landing as errored", async () => {
+    const { store, drain, queued, mr, landing } = setup();
+    const t1 = await queued("First");
+    await drain();
+    const run = landing().id;
+    const unlanded = landingOutcome({ ...failedGate, gate: "passed", steps: [] }, null);
+    await store.pipelineReported(run, { status: "done", outcome: unlanded });
+    expect(mr(t1.task)).toMatchObject({ state: "pending", last_dequeue: { reason: "errored", run } });
+  });
+
   it("still dequeues an errored landing that never claimed its push, whatever main holds", async () => {
     const { repos, base, drain, queued, mr, report } = setup();
     const t1 = await queued("First");

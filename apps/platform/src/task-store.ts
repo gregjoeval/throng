@@ -2034,13 +2034,15 @@ export class TaskStore {
       this.scoring.planned(id, containers);
       const run = this.scoring.getRun(id);
       if (run === null) throw new Error(`no run ${id}`);
+      // A newer head may have cancelled it meanwhile: it starts nothing.
+      if (run.status !== "running") return { kind: "refused", error: `run ${id} is ${run.status}, not running` };
       for (const { step, secrets } of named) {
         const refused = this.#secrets.sealedFor(secrets, run.pipeline);
         if ("error" in refused) return { kind: "refused", error: `${step}: ${refused.error}` };
       }
       const names = [...new Set(named.flatMap((n) => n.secrets))];
       if (names.length === 0 || run.trusted) return { kind: "start" };
-      this.scoring.wait(run, names);
+      if (!this.scoring.wait(run, names)) return { kind: "refused", error: `run ${id} is no longer running` };
       // A landing no owner approved that names a secret was held for the owner before it joined the
       // queue, unless only its merged tree's config names one: it leaves the queue to wait for the
       // owner there, so it holds up no other landing.

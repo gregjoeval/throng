@@ -946,6 +946,18 @@ describe("trust and secrets", () => {
     });
   });
 
+  it("refuses a plan for a run a newer push cancelled, so it neither starts nor waits", async () => {
+    const t = setup();
+    await withSecret(t);
+    const adas = await opened(t, ada);
+    await t.store.scoring.drain();
+    const cancelled = at(t.runs(adas), 0).id;
+    t.pushed(adas, t.commit(adas, "newer\n"));
+    expect(t.store.pipelinePlanned(cancelled, [], DEPLOYS)).toMatchObject({ kind: "refused" });
+    expect(t.store.pipelinePlanned(cancelled, [], [])).toMatchObject({ kind: "refused" });
+    expect(t.store.scoring.getRun(cancelled)).toMatchObject({ status: "cancelled" });
+  });
+
   it("replaces a waiting run with a newer push's, which waits again", async () => {
     const t = setup();
     await withSecret(t);

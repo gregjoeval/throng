@@ -39,6 +39,7 @@ import type {
 } from "./task-store.ts";
 import { isActive } from "./task-store.ts";
 import type { Actor } from "./tokens.ts";
+import { userHandles as handles } from "./users.ts";
 import type { Database } from "./users.ts";
 import type { VerdictRecommendation, VerdictSummary } from "./verdicts.ts";
 import type { VoteDetail, VoteState } from "./votes.ts";
@@ -804,17 +805,6 @@ function attemptRefOf(ref: string): AttemptInput {
   const parsed = parseAttemptRef(ref);
   if (parsed === null) throw new ServiceError("invalidRequest", `not an attempt reference: ${ref}`);
   return parsed;
-}
-
-/** Handles for user ids, read from D1 in one query. */
-async function handles(db: Database, ids: (string | null)[]): Promise<Map<string, string>> {
-  const unique = [...new Set(ids.filter((id): id is string => id !== null))];
-  if (unique.length === 0) return new Map();
-  const { results } = await db
-    .prepare(`SELECT id, handle FROM users WHERE id IN (${unique.map(() => "?").join(", ")})`)
-    .bind(...unique)
-    .all<UserRef>();
-  return new Map(results.map((u) => [u.id, u.handle]));
 }
 
 function userRef(id: string, users: Map<string, string>): UserRef {

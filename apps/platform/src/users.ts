@@ -23,6 +23,17 @@ export interface User {
   created_at: string;
 }
 
+/** Handles for user ids, by id, read in one query; an id with no user (or null) has none. */
+export async function userHandles(db: Database, ids: readonly (string | null)[]): Promise<Map<string, string>> {
+  const unique = [...new Set(ids.filter((id): id is string => id !== null))];
+  if (unique.length === 0) return new Map();
+  const { results } = await db
+    .prepare(`SELECT id, handle FROM users WHERE id IN (${unique.map(() => "?").join(", ")})`)
+    .bind(...unique)
+    .all<Pick<User, "id" | "handle">>();
+  return new Map(results.map((u) => [u.id, u.handle]));
+}
+
 const ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
 const USER_ID_LENGTH = 8;
 /** Bytes at or above this would bias the alphabet (256 isn't a multiple of 36), so they are redrawn. */

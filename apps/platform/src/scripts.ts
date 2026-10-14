@@ -12,14 +12,13 @@ import type { MetricValue } from "./metric-values.ts";
 import type { TreeEntry } from "./repos.ts";
 import { MAX_OUTPUT_BYTES, SETUP_TIMEOUT_MS } from "./results.ts";
 import type { PlannedCheck, PlannedMetric } from "./results.ts";
+import { quote } from "./shell.ts";
 import { taskBranchRef } from "./task-refs.ts";
 
 export const RESULT_PREFIX = "THRONG_RESULT ";
 
 /** Where a script that runs repo code failed: installing dependencies, or running/building the repo. */
 export type FailureStage = "install" | "test";
-
-const quote = (s: string): string => `'${s.replaceAll("'", "'\\''")}'`;
 
 const PRELUDE = `
 set -uo pipefail
@@ -45,14 +44,42 @@ export const STEP_NOT_READY_EXIT = 18;
  */
 export type Checkout =
   | { kind: "line"; remote: string; sha: string }
-  | { kind: "merge"; origin: string; fork: string; merge: MergePlan };
+  | { kind: "merge"; origin: string; fork: string; merge: MergeCheckout };
+
+/**
+ * The merge a landing's containers make again before it lands: its plan, committed by Throng at
+ * `committedAt` (Unix seconds) with a fixed message, so every container makes the same commit, whose
+ * sha `mergeCheckoutSha` gives. It's never pushed.
+ */
+export interface MergeCheckout extends MergePlan {
+  committedAt: number;
+}
+
+/** The message of the merge commit a landing's containers make. */
+const MERGE_CHECKOUT_MESSAGE = "Merge for the landing";
+
+/** The sha of the merge commit a landing's containers make for `merge` (see `checkoutTree`). */
+export async function mergeCheckoutSha(merge: MergeCheckout): Promise<string> {
+  const { name, email } = THRONG_COMMITTER;
+  const who = `${name} <${email}> ${merge.committedAt} +0000`;
+  const body = new TextEncoder().encode(
+    `tree ${merge.tree}\nparent ${merge.main}\nparent ${merge.head}\nauthor ${who}\ncommitter ${who}\n\n${MERGE_CHECKOUT_MESSAGE}\n`,
+  );
+  const header = new TextEncoder().encode(`commit ${body.byteLength}\0`);
+  const object = new Uint8Array(header.byteLength + body.byteLength);
+  object.set(header);
+  object.set(body, header.byteLength);
+  const digest = await crypto.subtle.digest("SHA-1", object);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
 
 /**
  * Bash that checks `checkout` out into `tree`, in a clean `/workspace` with `logs` and `out` beside
  * it. A line's head is fetched with the repo's branches and its task branches (`refs/tasks/*`), as a
  * task branch's head is only under the latter. A landing's merge is made again from `main` and the
  * approved head, which must give the tree its `merge` step recorded, and committed here only (never
- * pushed), so `HEAD` holds the merged tree with `main` and the head as its parents. Needs `PRELUDE`.
+ * pushed), so `HEAD` holds the merged tree with `main` and the head as its parents. That commit is
+ * the same in every container, at `mergeCheckoutSha`. Needs `PRELUDE`.
  */
 function checkoutTree(checkout: Checkout): string {
   const fresh = `rm -rf tree logs out ${SETUP_DONE} ${STEP_READY} && mkdir logs out && git init -q tree && cd tree`;
@@ -61,15 +88,16 @@ function checkoutTree(checkout: Checkout): string {
 git fetch -q ${quote(checkout.remote)} '+refs/heads/*:refs/remotes/line/*' '+refs/tasks/*:refs/remotes/tasks/*' || exit 10
 git checkout -q --detach ${quote(checkout.sha)} || exit 11`;
   }
-  const { head, main, tree } = checkout.merge;
+  const { head, main, tree, committedAt } = checkout.merge;
   const { name, email } = THRONG_COMMITTER;
-  const who = `GIT_AUTHOR_NAME=${quote(name)} GIT_AUTHOR_EMAIL=${quote(email)} GIT_COMMITTER_NAME=${quote(name)} GIT_COMMITTER_EMAIL=${quote(email)}`;
+  const date = quote(`@${committedAt} +0000`);
+  const who = `GIT_AUTHOR_NAME=${quote(name)} GIT_AUTHOR_EMAIL=${quote(email)} GIT_AUTHOR_DATE=${date} GIT_COMMITTER_NAME=${quote(name)} GIT_COMMITTER_EMAIL=${quote(email)} GIT_COMMITTER_DATE=${date}`;
   return `${fresh}
 git fetch -q ${quote(checkout.fork)} '+refs/heads/*:refs/remotes/fork/*' || exit 10
 git fetch -q ${quote(checkout.origin)} '+refs/heads/main:refs/remotes/origin/main' || exit 12
 git cat-file -e ${quote(`${head}^{commit}`)} && git cat-file -e ${quote(`${main}^{commit}`)} || exit 11
 [ "$(git merge-tree --write-tree ${quote(main)} ${quote(head)} | head -n 1)" = ${quote(tree)} ] || exit 14
-merged=$(${who} git commit-tree ${quote(tree)} -p ${quote(main)} -p ${quote(head)} -m 'Merge for the landing') || exit 14
+merged=$(${who} git commit-tree ${quote(tree)} -p ${quote(main)} -p ${quote(head)} -m ${quote(MERGE_CHECKOUT_MESSAGE)}) || exit 14
 git checkout -q --detach "$merged" || exit 11`;
 }
 

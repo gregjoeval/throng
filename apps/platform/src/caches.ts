@@ -13,6 +13,7 @@
 import type { CacheConfig } from "./config.ts";
 import type { TreeEntry } from "./repos.ts";
 import { MAIN_LINE } from "./scoring.ts";
+import { quote } from "./shell.ts";
 import { isAttemptRef } from "./task-refs.ts";
 
 /** The key prefix every cache entry is stored under. */
@@ -23,8 +24,12 @@ export const MAX_CACHE_ENTRY_BYTES = 2 * 1000 ** 3;
 export const PROJECT_CACHE_BYTES = 10 * 1000 ** 3;
 /** An entry nobody restored for this long is deleted, unless it's `main`'s latest of its cache. */
 export const CACHE_UNUSED_MS = 7 * 24 * 60 * 60 * 1000;
+/** The most of a cache problem's message a note keeps. */
+export const CACHE_ERROR_CHARS = 300;
 /** How long restoring or saving one cache may take. */
 export const CACHE_TRANSFER_TIMEOUT_MS = 10 * 60 * 1000;
+/** A key reserved for a save that hasn't finished in this long is let go: its run is gone. */
+export const CACHE_RESERVATION_MS = 6 * CACHE_TRANSFER_TIMEOUT_MS;
 /** The zstd level entries are compressed at: #261 found -3 the best trade of save time and size. */
 export const CACHE_ZSTD_LEVEL = 3;
 /** Most trees one run reads to resolve its caches' keys, so a broad glob can't walk a huge repo. */
@@ -175,8 +180,6 @@ async function sha256Hex(text: string): Promise<string> {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-const quote = (s: string): string => `'${s.replaceAll("'", "'\\''")}'`;
-
 /** Bash that sets `$home` to the home directory relative to `/`, for `fromRoot`. */
 const HOME = 'home="${HOME:-/root}" && home="${home#/}"';
 
@@ -234,14 +237,30 @@ export type CacheSave =
 /** One cache as a run uses it: what keys it, where it's restored from and saved to (see `CacheLookup`). */
 export type RunCache = CacheConfig &
   (
-    | { keyHash: string; restore: string | null; save: string | null; unsaved?: string }
+    | ({ kind: "keyed" } & Omit<CacheLookup, "name">)
     /** Its key couldn't be computed, or looked up: the run neither restores nor saves it. */
-    | { error: string }
+    | { kind: "unkeyed"; error: string }
   );
+
+/** The run's `caches` as the project answered `lookups` for them; one it didn't answer for is unkeyed. */
+export function runCachesFrom(caches: readonly CacheConfig[], lookups: readonly CacheLookup[]): RunCache[] {
+  return caches.map((cache): RunCache => {
+    const lookup = lookups.find((found) => found.name === cache.name);
+    if (lookup === undefined) return { ...cache, kind: "unkeyed", error: "the project didn't look it up" };
+    const { name: _name, ...found } = lookup;
+    return { ...cache, kind: "keyed", ...found };
+  });
+}
+
+/** The run's `caches` when their keys couldn't be had: every one unkeyed, saying why. */
+export function unkeyedCaches(caches: readonly CacheConfig[], error: unknown): RunCache[] {
+  const message = (error instanceof Error ? error.message : String(error)).slice(0, CACHE_ERROR_CHARS);
+  return caches.map((cache) => ({ ...cache, kind: "unkeyed", error: message }));
+}
 
 /** The note on a step about restoring `cache`. */
 export function restoreNote(cache: RunCache, restored: CacheRestore | null): string {
-  if ("error" in cache) return `cache ${cache.name}: miss: its key couldn't be read (${cache.error})`;
+  if (cache.kind === "unkeyed") return `cache ${cache.name}: miss: its key couldn't be read (${cache.error})`;
   if (cache.restore === null || restored === null) return `cache ${cache.name}: miss`;
   switch (restored.kind) {
     case "restored": {
@@ -258,7 +277,7 @@ export function restoreNote(cache: RunCache, restored: CacheRestore | null): str
 
 /** The note on a step about saving `cache`, or null when there's nothing to say: the run never saves it. */
 export function saveNote(cache: RunCache, saved: CacheSave | null): string | null {
-  if ("error" in cache) return null;
+  if (cache.kind === "unkeyed") return null;
   if (saved === null) return cache.unsaved === undefined ? null : `cache ${cache.name}: not saved: ${cache.unsaved}`;
   switch (saved.kind) {
     case "saved": {

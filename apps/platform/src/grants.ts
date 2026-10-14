@@ -94,9 +94,13 @@ export function pipelineSandboxName(instanceId: string, container: PipelineConta
   return container.kind === "setup" ? `${instanceId}/setup` : `${instanceId}/${container.kind}:${container.name}`;
 }
 
-/** The one container a run's Workflow scored in before each check got its own. */
-export function legacyScoreSandboxName(instanceId: string): string {
-  return `${instanceId}/score`;
+/**
+ * The containers a run's `ScoringWorkflow` started, which a run that resumed as a pipeline run may
+ * still hold: `<instance>/score`, where it scored before each check got its own, and
+ * `<instance>/preview`, which deployed its Preview with Throng's deploy token.
+ */
+export function legacyScoringSandboxNames(instanceId: string): string[] {
+  return [`${instanceId}/score`, `${instanceId}/preview`];
 }
 
 /**

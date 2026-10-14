@@ -2082,12 +2082,15 @@ export class TaskStore {
   }
 
   /**
-   * For a running run's Workflow, right before it saves an entry's object: whether it may. Only a
-   * trusted run saves, only to its own line's scope, and never over an entry already there, as
-   * entries are immutable.
+   * For a running run's Workflow, right before it saves an entry's object: whether it may, reserving
+   * the key for it when it may. Only a trusted run saves, only to its own line's scope, and never over
+   * an entry already there or another run's save of it, as entries are immutable.
    */
   pipelineCacheSaving(id: number, entry: Pick<CacheEntry, "scope" | "name" | "keyHash">): boolean {
-    return this.#maySaveCache(id, entry) && !this.caches.has(entry);
+    return (
+      this.#maySaveCache(id, entry) &&
+      this.caches.reserve(entry, id, (holder) => this.scoring.getRun(holder)?.status === "running")
+    );
   }
 
   /**
@@ -2095,7 +2098,12 @@ export class TaskStore {
    * False when it isn't recorded: an entry for its key was saved first, or the run may not save there.
    */
   pipelineCacheSaved(id: number, entry: Pick<CacheEntry, "scope" | "name" | "keyHash" | "size">): boolean {
-    return this.#maySaveCache(id, entry) && this.caches.record(entry);
+    return this.#maySaveCache(id, entry) && this.caches.record(entry, id);
+  }
+
+  /** For a run's Workflow whose save of an entry it reserved failed: lets the key go for a later run. */
+  pipelineCacheUnsaved(id: number, entry: Pick<CacheEntry, "scope" | "name" | "keyHash">): void {
+    this.caches.release(entry, id);
   }
 
   #maySaveCache(id: number, entry: Pick<CacheEntry, "scope">): boolean {

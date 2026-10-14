@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { randomUserId, userForEmail } from "../src/users.ts";
+import { randomUserId, userForEmail, userHandles } from "../src/users.ts";
 import { testDatabase } from "./support/d1.ts";
 
 describe("userForEmail", () => {
@@ -35,5 +35,20 @@ describe("userForEmail", () => {
 describe("randomUserId", () => {
   it("is 8 lowercase alphanumeric characters", () => {
     for (let i = 0; i < 100; i++) expect(randomUserId()).toMatch(/^[a-z0-9]{8}$/u);
+  });
+});
+
+describe("userHandles", () => {
+  it("reads each user's handle by id, once each, skipping unknown ids and nulls", async () => {
+    const db = testDatabase();
+    const greg = await userForEmail(db, "greg@example.com");
+    const ada = await userForEmail(db, "ada@example.com");
+    expect(await userHandles(db, [greg.id, ada.id, greg.id, null, "nobody01"])).toEqual(
+      new Map([
+        [greg.id, "greg"],
+        [ada.id, "ada"],
+      ]),
+    );
+    expect(await userHandles(db, [])).toEqual(new Map());
   });
 });

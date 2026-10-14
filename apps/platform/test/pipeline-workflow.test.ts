@@ -12,6 +12,7 @@ import type { OutboundAccess } from "../src/network.ts";
 import type { TreeEntry } from "../src/repos.ts";
 import type { RunOutcome } from "../src/run-outcome.ts";
 import type { LandingRunParams, PipelineParams, PlanVerdict, RunReport } from "../src/scoring.ts";
+import { mergeCheckoutSha } from "../src/scripts.ts";
 import type { LandResult } from "../src/scripts.ts";
 import { keyringFrom, sealSecret } from "../src/secrets.ts";
 import { importWorkerModule } from "./support/worker-module.ts";
@@ -85,6 +86,8 @@ interface Behaviour {
   failedRestores?: number;
   /** A check whose container fails as infrastructure on every try. */
   broken?: string;
+  /** A container whose script fails as infrastructure this many times, after it ran. */
+  flaky?: { container: string; times: number };
   /** The params the Workflow was started with; a run started by the Scoring Workflow's code named its line `attempt`. */
   payload?: unknown;
   /** The project's secrets with values, by name. */
@@ -99,8 +102,14 @@ interface Behaviour {
   postGate?: Record<string, number>;
   /** A post-gate step whose container fails as infrastructure this many times while being readied. */
   unready?: { step: string; times: number };
-  /** A post-gate step whose container is lost once readied, before its command runs. */
-  lost?: string;
+  /** A post-gate step whose container is lost once readied, before its command runs, this many times. */
+  lost?: { step: string; times: number };
+  /** A post-gate step whose command's container fails as infrastructure once the command started. */
+  brokenStep?: string;
+  /** Steps a run that started under older code already finished, by name: what Workflows kept of each. */
+  replayed?: Record<string, unknown>;
+  /** Secrets each container prints besides those it holds, by container: what a setup left in the snapshot. */
+  prints?: Record<string, string[]>;
   /** For a landing: what its `merge` and `land` do, and what the project answers it. */
   landing?: LandingBehaviour;
   /** What the project answers for each cache: the scope it restores from and saves to; neither by default. */
@@ -197,6 +206,12 @@ async function pipeline(behaviour: Behaviour = {}) {
   const loads: string[][] = [];
   /** How many times each post-gate step's container was readied, and each command that ran, in order. */
   const readied = new Map<string, number>();
+  /** How many times each post-gate step's readied container was lost. */
+  const lostTimes = new Map<string, number>();
+  /** How many times each flaky container's script failed. */
+  const flakes = new Map<string, number>();
+  /** What a container prints of secrets: those it holds, and any its behaviour says it finds on disk. */
+  const printed = (container: string) => [...(held.get(container) ?? []), ...(behaviour.prints?.[container] ?? [])];
   const commands: string[] = [];
   let planned: string[] | null = null;
   let named: NamedSecrets[] | null = null;
@@ -208,7 +223,7 @@ async function pipeline(behaviour: Behaviour = {}) {
     SANDBOX: {
       getByName: (name: string) => {
         const container = name.slice(INSTANCE.length + 1);
-        return {
+        const box = {
           restore: async (snapshot: Snapshot) => {
             const tries = (restores.get(container) ?? 0) + 1;
             restores.set(container, tries);
@@ -224,7 +239,7 @@ async function pipeline(behaviour: Behaviour = {}) {
           ) => {
             if (script.includes("f=logs/")) {
               const log = /f=logs\/([^\n]+)\.log/u.exec(script)?.[1] ?? "";
-              const leaked = held.get(container)?.length ? `${leak(held.get(container) ?? [])}\n` : "";
+              const leaked = printed(container).length > 0 ? `${leak(printed(container))}\n` : "";
               return { exitCode: 0, stdout: `${container} ${log}\n${leaked}`, stderr: "" };
             }
             const from = started.get(container)?.from ?? "image";
@@ -240,6 +255,10 @@ async function pipeline(behaviour: Behaviour = {}) {
             }
             running.add(container);
             events.push(`run ${container}`);
+            if (behaviour.flaky?.container === container && (flakes.get(container) ?? 0) < behaviour.flaky.times) {
+              flakes.set(container, (flakes.get(container) ?? 0) + 1);
+              return { exitCode: 12, stdout: "", stderr: "lost its connection" };
+            }
             if (container === "merge") {
               if (behaviour.landing?.conflict === true) {
                 const entries = ["1", "2", "3"].map((stage) => `100644 ${stage.repeat(40)} ${stage}\tREADME.md`);
@@ -281,8 +300,10 @@ async function pipeline(behaviour: Behaviour = {}) {
                   return { exitCode: 10, stdout: "", stderr: "fetch failed" };
                 return result({ setupsRerun: from === "image" });
               }
-              if (behaviour.lost === postGate) return { exitCode: 18, stdout: "", stderr: "" };
               commands.push(postGate);
+              if (behaviour.brokenStep === postGate) {
+                return { exitCode: 0, stdout: "", stderr: `deploy crashed ${leak(printed(container))}` };
+              }
               return result({ exit: behaviour.postGate?.[postGate] ?? 0, durationMs: 4 });
             }
             if (container === "setup") {
@@ -296,7 +317,7 @@ async function pipeline(behaviour: Behaviour = {}) {
               return result({ base: null, shortstat: " 1 file changed, 1 insertion(+)", builtinMs: 1, setups });
             }
             const check = container.slice("check:".length);
-            const values = held.get(container) ?? [];
+            const values = printed(container);
             if (check === behaviour.broken) {
               return { exitCode: 11, stdout: "", stderr: `checkout failed ${leak(values)}` };
             }
@@ -330,6 +351,19 @@ async function pipeline(behaviour: Behaviour = {}) {
           releaseSnapshot: () => void events.push(`release ${container}`),
           destroy: async () => {
             if (running.delete(container)) events.push(`destroy ${container}`);
+          },
+        };
+        return {
+          ...box,
+          // A post-gate step's command runs only in the container its ready step left running.
+          runIfRunning: async (script: string, options: { env?: Record<string, string> }) => {
+            const postGate = container.slice("step:".length);
+            if (behaviour.lost?.step === postGate && (lostTimes.get(postGate) ?? 0) < behaviour.lost.times) {
+              lostTimes.set(postGate, (lostTimes.get(postGate) ?? 0) + 1);
+              running.delete(container);
+            }
+            if (!running.has(container)) return null;
+            return box.run(script, { access: {} as OutboundAccess, size: "lite", ...options });
           },
         };
       },
@@ -370,6 +404,8 @@ async function pipeline(behaviour: Behaviour = {}) {
           cacheCalls.push(`saved ${entry.scope}/${entry.name} ${entry.size}`);
           return true;
         },
+        pipelineCacheUnsaved: async (_run: number, entry: { scope: string; name: string }) =>
+          void cacheCalls.push(`unsaved ${entry.scope}/${entry.name}`),
         pipelineFinished: async (_run: number, finished: RunReport) => {
           report = finished;
           events.push("report");
@@ -395,7 +431,7 @@ async function pipeline(behaviour: Behaviour = {}) {
   };
   const returned = await new PipelineWorkflow({}, env).run(
     { payload: behaviour.payload ?? params, instanceId: INSTANCE },
-    { do: recordingStepDo(persisted) },
+    { do: recordingStepDo(persisted, behaviour.replayed) },
   );
   return {
     started,
@@ -427,8 +463,9 @@ function setupNamesOf(config: string): string[] {
  * recording into `persisted` what Workflows would keep: its name, its config, and what each try
  * returned or threw.
  */
-function recordingStepDo(persisted: unknown[]) {
+function recordingStepDo(persisted: unknown[], replayed: Record<string, unknown> = {}) {
   return async (name: string, ...rest: unknown[]): Promise<unknown> => {
+    if (name in replayed) return replayed[name];
     const fn = rest.at(-1) as () => Promise<unknown>;
     const config = rest.length > 1 ? (rest[0] as { retries?: { limit: number } }) : {};
     persisted.push(name, config);
@@ -555,6 +592,29 @@ describe("PipelineWorkflow", () => {
     for (const check of ["lint", "test", "build", "smoke"]) expect(started.get(`check:${check}`)?.from).toBe("image");
     expect(outcomeOf(report).steps.find((s) => s.name === "test")?.notes).toEqual([
       "setups re-run in this check's container: the run took no snapshot of them",
+    ]);
+  });
+
+  it("starts a retried setup's or check's container afresh, never on what a failed try left", async () => {
+    const check = await pipeline({ flaky: { container: "check:lint", times: 1 } });
+    expect(check.events.filter((e) => e.endsWith("check:lint snap-1") || e.endsWith(" check:lint"))).toEqual([
+      "restore check:lint snap-1",
+      "run check:lint",
+      "destroy check:lint",
+      "restore check:lint snap-1",
+      "run check:lint",
+      "destroy check:lint",
+    ]);
+    expect(outcomeOf(check.report).steps.find((s) => s.name === "lint")?.notes).toEqual([]);
+
+    const setup = await pipeline({ flaky: { container: "setup", times: 1 } });
+    expect(setup.events.filter((e) => e.endsWith(" setup"))).toEqual([
+      "run setup",
+      "destroy setup",
+      "run setup",
+      "snapshot setup",
+      "destroy setup",
+      "release setup",
     ]);
   });
 
@@ -717,8 +777,9 @@ describe("PipelineWorkflow secrets", () => {
     expect(secretsOf(started.get("check:lint")?.env)).toEqual({});
     expect(secretsOf(started.get("check:deploy")?.env)).toEqual({ DEPLOY_TOKEN: DEPLOY });
     expect(started.get("check:deploy")?.env).toMatchObject({ THRONG_RUN: "7" });
-    // Loaded per container, not for the run: none for a check that names none.
-    expect(loads).toEqual([["NPM_TOKEN"], ["DEPLOY_TOKEN"]]);
+    // Loaded per container, not for the run; a check restored from the setups' snapshot loads theirs
+    // only to mask them, as the snapshot may hold them.
+    expect(loads).toEqual([["NPM_TOKEN"], ["NPM_TOKEN"], ["DEPLOY_TOKEN", "NPM_TOKEN"]]);
     expect(events.indexOf("run setup")).toBeGreaterThan(events.indexOf("plan"));
   });
 
@@ -742,6 +803,18 @@ describe("PipelineWorkflow secrets", () => {
     expect(leaks(JSON.stringify(broken.report))).toBeFalsy();
   });
 
+  it("masks the setups' secrets in what a container restored from their snapshot prints, never giving it them", async () => {
+    const { started, stored, persisted, commandEnvs } = await stepSecretsRun({
+      prints: { "check:lint": [NPM], "step:deploy": [NPM] },
+    });
+    expect(secretsOf(started.get("check:lint")?.env)).toEqual({});
+    expect(secretsOf(started.get("step:deploy")?.env)).toEqual({});
+    expect(secretsOf(commandEnvs.get("step:deploy"))).toEqual({ PROD_TOKEN: PROD, DEPLOY_TOKEN: DEPLOY });
+    expect(stored.get("logs/abc123/main/7/lint.log")).toContain("***");
+    for (const log of stored.values()) expect(leaks(log)).toBeFalsy();
+    expect(leaks(JSON.stringify(persisted))).toBeFalsy();
+  });
+
   it("persists no secret in any step's params or results, raw, base64 or URL-encoded", async () => {
     for (const behaviour of [{}, { snapshot: null }, { broken: "deploy" }, { gone: ["DEPLOY_TOKEN"] }]) {
       const { persisted, report, returned, started } = await secretsRun(behaviour);
@@ -754,7 +827,8 @@ describe("PipelineWorkflow secrets", () => {
       {},
       { snapshot: null },
       { gone: ["DEPLOY_TOKEN"], goneAfter: 2 },
-      { lost: "deploy" },
+      { lost: { step: "deploy", times: 1 } },
+      { brokenStep: "deploy" },
       { unready: { step: "deploy", times: 1 } },
       { postGate: { migrate: 1 } },
     ]) {
@@ -774,7 +848,7 @@ describe("PipelineWorkflow secrets", () => {
     // A task branch runs `default`, which has no post-gate steps: main's secrets are never named there.
     const branch = await stepSecretsRun({ payload: { ...params, line: "t1" } });
     expect(branch.named).toEqual([{ step: "setup deps", secrets: ["NPM_TOKEN"] }]);
-    expect(branch.loads).toEqual([["NPM_TOKEN"]]);
+    expect(branch.loads).toEqual([["NPM_TOKEN"], ["NPM_TOKEN"]]);
   });
 
   it("gives each post-gate step's command only its own secrets, loaded as it starts, never its ready step", async () => {
@@ -788,7 +862,15 @@ describe("PipelineWorkflow secrets", () => {
     expect(secretsOf(commandEnvs.get("step:migrate"))).toEqual({ PROD_TOKEN: PROD });
     expect(secretsOf(commandEnvs.get("step:deploy"))).toEqual({ PROD_TOKEN: PROD, DEPLOY_TOKEN: DEPLOY });
     expect(commandEnvs.get("step:deploy")).toMatchObject({ THRONG_PIPELINE: "main", THRONG_RUN: "7" });
-    expect(loads).toEqual([["NPM_TOKEN"], ["PROD_TOKEN"], ["PROD_TOKEN", "DEPLOY_TOKEN"]]);
+    // The setups' secrets are loaded beside them only to mask them: the snapshot may hold them.
+    expect(loads).toEqual([
+      ["NPM_TOKEN"],
+      ["NPM_TOKEN"],
+      ["NPM_TOKEN"],
+      ["PROD_TOKEN", "NPM_TOKEN"],
+      ["NPM_TOKEN"],
+      ["PROD_TOKEN", "DEPLOY_TOKEN", "NPM_TOKEN"],
+    ]);
     expect(events.indexOf("run step:deploy")).toBeGreaterThan(events.indexOf("destroy step:migrate"));
   });
 
@@ -808,17 +890,17 @@ describe("PipelineWorkflow secrets", () => {
     expect(log).toMatch(/^step:deploy step\.deploy\n\*\*\*( \*\*\*)+\n/u);
     for (const text of stored.values()) expect(leaks(text)).toBeFalsy();
 
-    const lost = await stepSecretsRun({ lost: "deploy" });
-    expect(lost.report).toMatchObject({
+    const broken = await stepSecretsRun({ brokenStep: "deploy" });
+    expect(broken.report).toMatchObject({
       status: "errored",
-      error: expect.stringContaining("step deploy gave no result"),
+      error: expect.stringContaining("step deploy gave no result (exit 0): deploy crashed ***"),
     });
-    expect(leaks(JSON.stringify(lost.report))).toBeFalsy();
+    expect(leaks(JSON.stringify(broken.report))).toBeFalsy();
   });
 
   it("fails a post-gate step whose secret is gone as its command starts, naming it, and runs none after it", async () => {
-    // Found by the setup's load and migrate's; gone by deploy's.
-    const { commands, events, report } = await stepSecretsRun({ gone: ["PROD_TOKEN"], goneAfter: 2 });
+    // Found by the loads of the setup, the check, migrate's ready step and its command; gone by deploy's.
+    const { commands, events, report } = await stepSecretsRun({ gone: ["PROD_TOKEN"], goneAfter: 4 });
     expect(commands).toEqual(["migrate"]);
     expect(events).toContain("destroy step:deploy");
     const outcome = outcomeOf(report);
@@ -1025,10 +1107,63 @@ describe("PipelineWorkflow on a task branch and main", () => {
   });
 
   it("never runs a post-gate step's command twice: an infrastructure error once it started ends the run errored", async () => {
-    const { commands, persisted, report } = await pipeline({ config: MAIN_CONFIG, payload: onMain, lost: "migrate" });
-    expect(commands).toEqual([]);
-    expect(persisted.filter((p) => p === "step migrate")).toHaveLength(1);
+    const { commands, persisted, report } = await pipeline({
+      config: MAIN_CONFIG,
+      payload: onMain,
+      brokenStep: "migrate",
+    });
+    expect(commands).toEqual(["migrate"]);
+    expect(persisted.filter((p) => p === "step migrate" || p === "step migrate (2)")).toEqual(["step migrate"]);
     expect(report).toMatchObject({ status: "errored", error: expect.stringContaining("step migrate gave no result") });
+  });
+
+  it("resumes a run whose post-gate steps finished under older code, never running their commands again", async () => {
+    const { commands, report } = await pipeline({
+      config: MAIN_CONFIG,
+      payload: onMain,
+      replayed: {
+        "step migrate ready": { setupsRerun: false, cacheNotes: [] },
+        "step migrate": { exit: 0, durationMs: 4, logged: true, notes: [] },
+        "step deploy ready": { error: "secret PROD_TOKEN has no value in the project settings" },
+      },
+    });
+    expect(commands).toEqual([]);
+    expect(
+      outcomeOf(report)
+        .steps.filter((s) => s.kind === "step")
+        .map((s) => [s.name, s.outcome]),
+    ).toEqual([
+      ["migrate", "passed"],
+      ["deploy", "errored"],
+    ]);
+  });
+
+  it("readies a post-gate step's container again when it was lost before its command started", async () => {
+    const { commands, readied, persisted, report, events } = await pipeline({
+      config: MAIN_CONFIG,
+      payload: onMain,
+      lost: { step: "deploy", times: 2 },
+    });
+    expect(readied.get("deploy")).toBe(3);
+    expect(commands).toEqual(["migrate", "deploy"]);
+    // Each try is a step of its own, as Workflows remembers a step by its name.
+    expect(persisted.filter((p) => typeof p === "string" && p.startsWith("step deploy"))).toEqual([
+      "step deploy ready",
+      "step deploy",
+      "step deploy ready (2)",
+      "step deploy (2)",
+      "step deploy ready (3)",
+      "step deploy (3)",
+    ]);
+    expect(events.filter((e) => e === "restore step:deploy snap-1")).toHaveLength(3);
+    expect(outcomeOf(report).steps.find((s) => s.name === "deploy")?.outcome).toBe("passed");
+
+    const gone = await pipeline({ config: MAIN_CONFIG, payload: onMain, lost: { step: "deploy", times: 3 } });
+    expect(gone.commands).toEqual(["migrate"]);
+    expect(gone.report).toMatchObject({
+      status: "errored",
+      error: expect.stringContaining("step deploy: its container was lost before its command started"),
+    });
   });
 });
 
@@ -1124,9 +1259,21 @@ checks:
     expect(started.get("step:deploy")?.access.grants).toEqual([READ_ORIGIN]);
   });
 
-  it("tells setups and checks it has no head yet, and the post-gate steps the landed sha", async () => {
+  it("tells setups and checks the merge commit their containers make, and the post-gate steps the landed sha", async () => {
     const { started } = await land({}, { snapshot: null });
-    expect(started.get("setup")?.env).toMatchObject({ THRONG_PIPELINE: "main", THRONG_LINE: "main", THRONG_SHA: "" });
+    const merge = await mergeCheckoutSha({
+      head: HEAD,
+      main: MAIN_SHA,
+      tree: TREE,
+      committedAt: Math.floor(landingParams.landing.startedAt / 1000),
+    });
+    expect(merge).toMatch(/^[0-9a-f]{40}$/u);
+    expect(started.get("setup")?.env).toMatchObject({
+      THRONG_PIPELINE: "main",
+      THRONG_LINE: "main",
+      THRONG_SHA: merge,
+    });
+    expect(started.get("check:lint")?.env).toMatchObject({ THRONG_SHA: merge });
     expect(started.get("step:deploy")?.env).toMatchObject({ THRONG_SHA: LANDED });
   });
 
@@ -1143,7 +1290,14 @@ checks:
       ).toEqual([]);
     }
     expect(heldIn(commandEnvs.get("step:deploy"))).toEqual([PROD, DEPLOY]);
-    expect(loads).toEqual([["NPM_TOKEN"], ["PROD_TOKEN"], ["PROD_TOKEN", "DEPLOY_TOKEN"]]);
+    expect(loads.map((names) => names.filter((name) => name !== "NPM_TOKEN"))).toEqual([
+      [],
+      [],
+      [],
+      ["PROD_TOKEN"],
+      [],
+      ["PROD_TOKEN", "DEPLOY_TOKEN"],
+    ]);
     expect(events.indexOf("run step:migrate")).toBeGreaterThan(events.indexOf("landed"));
   });
 
@@ -1416,7 +1570,7 @@ pipelines:
     expect(cacheCalls.filter((c) => c.startsWith("saved"))).toEqual([]);
     expect(notesOf(report, "deps")).toEqual([
       "cache pnpm: miss",
-      "cache pnpm: not saved: main already has an entry for its key",
+      "cache pnpm: not saved: main already has an entry for its key, or another run is saving one",
     ]);
     expect(notesOf(report, "test")).toEqual(["cache jest: miss", "cache jest: not saved: over 2 GB"]);
     expect(notesOf(report, "deploy")).toEqual([
@@ -1436,7 +1590,7 @@ pipelines:
 });
 
 describe("teardownPipeline", () => {
-  it("destroys every planned container, the setup one and an old run's score container, then releases the snapshot", async () => {
+  it("destroys every planned container, the setup one and an old run's score and preview containers, then releases the snapshot", async () => {
     const events: string[] = [];
     const sandboxes: SandboxNamespace = {
       getByName: (name) => ({
@@ -1448,6 +1602,7 @@ describe("teardownPipeline", () => {
     expect(events.slice(0, -1).toSorted()).toEqual([
       "destroy i/check:a",
       "destroy i/check:b",
+      "destroy i/preview",
       "destroy i/score",
       "destroy i/setup",
     ]);

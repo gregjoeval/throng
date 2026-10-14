@@ -121,9 +121,28 @@ describe("a run's caches", () => {
     expect(t.store.pipelineCacheSaved(trusted, { scope: "t1", ...PNPM, size: 5 })).toBeTruthy();
     expect(t.store.pipelineCacheSaving(trusted, { scope: "t1", ...PNPM })).toBeFalsy();
     expect(t.store.pipelineCacheSaved(trusted, { scope: "t1", ...PNPM, size: 6 })).toBeFalsy();
+    // A run's save of a key it reserved failed: the key goes back for a later run.
+    const pip = { scope: "t1", name: "pip", keyHash: "p1" };
+    expect(t.store.pipelineCacheSaving(trusted, pip)).toBeTruthy();
+    t.store.pipelineCacheUnsaved(trusted, pip);
+    expect(t.store.caches.list().map((e) => e.name)).toEqual(["pnpm"]);
+    expect(t.store.pipelineCacheSaving(trusted, pip)).toBeTruthy();
     t.store.pipelineFinished(trusted, { status: "errored", error: "x" });
     // A run that ended saves nothing.
     expect(t.store.pipelineCacheSaving(trusted, { scope: "t1", name: "pip", keyHash: "p" })).toBeFalsy();
+  });
+
+  it("lets only one run write a key's object: a cancelled run saving it is refused once a newer one took it", async () => {
+    const t = setup();
+    const pip = { scope: "t1", name: "pip", keyHash: "p1" };
+    const first = await t.running("t1");
+    expect(t.store.pipelineCacheSaving(first, pip)).toBeTruthy();
+    // A newer head cancels it while it uploads; the newer run takes the key over.
+    const second = await t.running("t1");
+    expect(t.store.pipelineCacheSaving(second, pip)).toBeTruthy();
+    expect(t.store.pipelineCacheSaved(first, { ...pip, size: 1 })).toBeFalsy();
+    expect(t.store.pipelineCacheSaved(second, { ...pip, size: 9 })).toBeTruthy();
+    expect(t.store.caches.list().map((e) => [e.name, e.size])).toEqual([["pip", 9]]);
   });
 });
 

@@ -6,7 +6,6 @@
 import { z } from "@hono/zod-openapi";
 import type { OpenAPIHono, RouteConfig } from "@hono/zod-openapi";
 import type { Context } from "hono";
-import { publicOrigin } from "./access.ts";
 import type { AccessBindings } from "./access.ts";
 import { DEFAULT_COMMITS_PAGE, MAX_COMMITS_PAGE } from "./browse.ts";
 import { SelectionPolicySchema } from "./config.ts";
@@ -15,6 +14,8 @@ import type { DiffCache, FileSide } from "./diff.ts";
 import { ServiceError } from "./errors.ts";
 import { MAX_SOURCE_URL } from "./import-source.ts";
 import { MAX_PROJECT_HANDLE, PROJECT_HANDLE, projectService } from "./projects.ts";
+import { publicOrigin } from "./public-origin.ts";
+import type { PublicOriginBindings } from "./public-origin.ts";
 import type { Repos } from "./repos.ts";
 import { DEFAULT_RUNS_PAGE, isLineFilter, MAX_RUNS_PAGE, RUN_STATUSES } from "./scoring.ts";
 import { taskService } from "./tasks.ts";
@@ -166,7 +167,7 @@ export function requestTaskService(
   repos: (env: AccessBindings) => Repos,
   tasks: (env: AccessBindings) => (projectId: string) => TaskBackend,
 ) {
-  return ({ env, req }: { env: AccessBindings; req: { url: string } }) =>
+  return ({ env, req }: { env: AccessBindings & PublicOriginBindings; req: { url: string } }) =>
     taskService({ db: env.DB, repos: repos(env), backend: tasks(env), origin: publicOrigin(env, req.url) });
 }
 

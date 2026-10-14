@@ -3,13 +3,13 @@
 // this is the long form, step by step.
 
 import { Hono } from "hono";
-import { publicOrigin } from "./access.ts";
-import type { AccessBindings } from "./access.ts";
 import { DEFAULT_SANDBOX_SIZE, oneOf, SANDBOX_RESOURCES, SANDBOX_SIZES } from "./config.ts";
 import type { SandboxSize } from "./config.ts";
 import { attemptRemote } from "./git-remotes.ts";
 import { CLONE_RECIPE, MAX_FILE_BYTES, MAX_LOG_SLICE_BYTES, MCP_INSTRUCTIONS } from "./mcp.ts";
 import { NPM_REGISTRY_HOST } from "./network.ts";
+import { publicOrigin } from "./public-origin.ts";
+import type { PublicOriginBindings } from "./public-origin.ts";
 import { DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS, MAX_WAITERS_PER_USER } from "./waiters.ts";
 
 /** The guide, for a platform served at `origin`. */
@@ -190,7 +190,7 @@ function describeSize(size: SandboxSize): string {
 
 /** `/llms.txt`, public. */
 export function llmsRoutes() {
-  return new Hono<{ Bindings: Pick<AccessBindings, "PUBLIC_URL"> }>().get("/", (c) =>
+  return new Hono<{ Bindings: PublicOriginBindings }>().get("/", (c) =>
     c.text(llmsText(publicOrigin(c.env, c.req.url))),
   );
 }

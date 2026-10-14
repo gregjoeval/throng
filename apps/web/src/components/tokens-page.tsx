@@ -95,9 +95,9 @@ function MintForm({ onMinted }: { onMinted: (minted: MintedToken) => void }) {
 
 /** A just-minted token's plaintext, shown this once, and the setup that uses it. */
 function NewToken({ minted }: { minted: MintedToken }) {
-  const mcp = `${minted.url}/mcp`;
+  const mcpUrl = `${minted.url}/mcp`;
   const bearer = `Bearer ${minted.token}`;
-  const config = { mcpServers: { throng: { type: "http", url: mcp, headers: { Authorization: bearer } } } };
+  const config = { mcpServers: { throng: { type: "http", url: mcpUrl, headers: { Authorization: bearer } } } };
   return (
     <section aria-labelledby="new-token-heading" className="flex flex-col gap-3 rounded-xl border p-4">
       <div>
@@ -109,7 +109,7 @@ function NewToken({ minted }: { minted: MintedToken }) {
       <Snippet label="Token" text={minted.token} />
       <Snippet
         label="Claude Code"
-        text={`claude mcp add --transport http throng ${mcp} --header "Authorization: ${bearer}"`}
+        text={`claude mcp add --transport http throng ${mcpUrl} --header "Authorization: ${bearer}"`}
       />
       <Snippet label="Other MCP clients" text={JSON.stringify(config, null, 2)} />
       <Snippet label="Point the agent at" text={`${minted.url}/llms.txt`} />
@@ -144,10 +144,14 @@ function TokenList() {
   );
 }
 
-/** Whether a token still works: `Active`, or why it doesn't. */
-function tokenStatus(token: Token): "Active" | "Expired" | "Revoked" {
-  if (token.revokedAt !== null) return "Revoked";
-  return Date.parse(token.expiresAt) <= Date.now() ? "Expired" : "Active";
+type TokenStatus = "active" | "expired" | "revoked";
+
+const TOKEN_STATUS_LABELS: Record<TokenStatus, string> = { active: "Active", expired: "Expired", revoked: "Revoked" };
+
+/** Whether a token still works: `active`, or why it doesn't. */
+function tokenStatus(token: Token): TokenStatus {
+  if (token.revokedAt !== null) return "revoked";
+  return Date.parse(token.expiresAt) <= Date.now() ? "expired" : "active";
 }
 
 function TokenRow({ token }: { token: Token }) {
@@ -158,7 +162,7 @@ function TokenRow({ token }: { token: Token }) {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: tokensQuery.queryKey }),
   });
   const status = tokenStatus(token);
-  const name = `${token.alias ?? "your"} token ${token.id}`;
+  const label = `${token.alias ?? "your"} token ${token.id}`;
   return (
     <tr>
       <td className="px-2 py-2">
@@ -170,16 +174,18 @@ function TokenRow({ token }: { token: Token }) {
       <td className="px-2 py-2 text-muted-foreground">
         <RelativeTime date={token.expiresAt} />
       </td>
-      <td className={status === "Active" ? "px-2 py-2" : "px-2 py-2 text-muted-foreground"}>{status}</td>
+      <td className={status === "active" ? "px-2 py-2" : "px-2 py-2 text-muted-foreground"}>
+        {TOKEN_STATUS_LABELS[status]}
+      </td>
       <td className="px-2 py-2">
         <div className="flex justify-end gap-2">
-          {status === "Active" &&
+          {status === "active" &&
             (confirming ? (
               <>
                 <Button
                   size="sm"
                   variant="destructive"
-                  aria-label={`Confirm revoke ${name}`}
+                  aria-label={`Confirm revoke ${label}`}
                   disabled={revoke.isPending}
                   onClick={() => revoke.mutate()}
                 >
@@ -190,7 +196,7 @@ function TokenRow({ token }: { token: Token }) {
                 </Button>
               </>
             ) : (
-              <Button size="sm" variant="ghost" aria-label={`Revoke ${name}`} onClick={() => setConfirming(true)}>
+              <Button size="sm" variant="ghost" aria-label={`Revoke ${label}`} onClick={() => setConfirming(true)}>
                 Revoke
               </Button>
             ))}

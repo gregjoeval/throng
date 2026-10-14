@@ -8,7 +8,6 @@ import { z } from "@hono/zod-openapi";
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import type { CallToolResult, ToolCallback } from "@modelcontextprotocol/server";
 import { Hono } from "hono";
-import { publicOrigin } from "./access.ts";
 import type { AccessBindings } from "./access.ts";
 import {
   AttemptQuerySchema,
@@ -38,6 +37,7 @@ import { DIFF_CAPS, diffCommit, unifiedPatch } from "./diff.ts";
 import { ServiceError } from "./errors.ts";
 import { firstLog, missingLog } from "./logs.ts";
 import type { ProjectService } from "./projects.ts";
+import { publicOrigin } from "./public-origin.ts";
 import { ATTEMPT_STATES, TASK_STATES } from "./task-store.ts";
 import { taskService } from "./tasks.ts";
 import type { MergeRequest, RunDetail, ScoringAnswer, Vote } from "./tasks.ts";

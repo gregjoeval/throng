@@ -7,7 +7,6 @@
 // `ServiceError`s that `onError` turns into the error shape.
 
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
-import { publicOrigin } from "./access.ts";
 import type { AccessBindings } from "./access.ts";
 import {
   AttemptLimitSchema,
@@ -72,6 +71,7 @@ import { METRIC_FORMATS, METRIC_TYPES } from "./metric-values.ts";
 import { DEFAULT_LISTING_PAGE, MAX_LISTING_PAGE, myListings } from "./my-listings.ts";
 import { PIPELINES } from "./pipelines.ts";
 import { MAX_PROJECTION_RETRY_MS } from "./projection.ts";
+import { publicOrigin } from "./public-origin.ts";
 import type { Repos } from "./repos.ts";
 import { CHECK_OUTCOMES, GATES } from "./results.ts";
 import { STEP_KINDS, STEP_OUTCOMES } from "./run-outcome.ts";

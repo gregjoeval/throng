@@ -81,7 +81,7 @@ pnpm install
 
 Artifacts has no local simulator, so local dev always reads and writes real repos in the namespace `wrangler.jsonc` names, and they outlive the local database. Use the `ci` environment (`throng-ci`) rather than production's. Everything else (D1, Durable Objects, Workflows, R2, Containers) runs locally. Run each command from the repo root.
 
-1. Give the platform its required secrets in `apps/platform/.dev.vars` (ignored by git). `E2E_TOKEN` is any string; `SECRETS_KEYRING` holds a 32-byte key. `PUBLIC_URL` is the platform's local URL, which the UI's **Tokens** page puts in the setup it shows:
+1. Give the platform its required secrets in `apps/platform/.dev.vars` (ignored by git). `E2E_TOKEN` is any string; `SECRETS_KEYRING` holds a 32-byte key. `PUBLIC_URL` is the platform's local URL, which the UI's **Tokens** page puts in the setup it shows; without it the page names the UI's own URL, since that's where the request came in:
 
    ```bash
    printf "E2E_TOKEN=%s\nSECRETS_KEYRING='{\"current\":\"k1\",\"keys\":{\"k1\":\"%s\"}}'\nPUBLIC_URL=http://localhost:5173\n" \

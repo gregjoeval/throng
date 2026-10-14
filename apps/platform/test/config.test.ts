@@ -16,7 +16,6 @@ const EMPTY: Config = {
   network: { allow: [] },
   checks: [],
   metrics: [],
-  preview: null,
   attempts: { limit: null },
   selection: { policy: "creator" },
   sandbox: { size: "standard-1" },
@@ -46,13 +45,15 @@ metrics:
   - { name: grade, from: test.report.grade, type: enum, values: [a, b, c] }
   - { name: summary, from: test.report.summary, type: string }
   - { name: report-url, from: test.report.url, type: string, format: url }
-preview:
-  command: pnpm build
 attempts:
   limit: 4
 sandbox:
   size: standard-2
 `;
+
+/** The error an old `preview:` section gets, whatever it holds. */
+const MOVE_PREVIEW =
+  /^preview: previews are now a check: move it under `checks`, with `after` naming the checks it waits for$/u;
 
 const check = (fields: string) => `checks:\n  - { name: test, command: pnpm test, ${fields} }\n`;
 const metric = (fields: string) => `checks:\n  - { name: test, command: pnpm test }\nmetrics:\n  - { ${fields} }\n`;
@@ -117,7 +118,6 @@ describe("parseConfig", () => {
           { name: "summary", from: "test.report.summary", type: "string", format: null, source: "project" },
           { name: "report-url", from: "test.report.url", type: "string", format: "url", source: "project" },
         ],
-        preview: { command: "pnpm build" },
         attempts: { limit: 4 },
         selection: { policy: "creator" },
         sandbox: { size: "standard-2" },
@@ -173,12 +173,12 @@ describe("parseConfig", () => {
     });
   });
 
-  it.each([
-    ["empty sections", "setup: []\nnetwork: {}\nchecks: []\nmetrics: []\nattempts: {}\n", EMPTY],
-    ["a preview without a command", "preview: {}\n", { ...EMPTY, preview: { command: null } }],
-  ])("accepts %s", (_, text, config) => {
-    expect(parseConfig(text)).toEqual({ kind: "valid", config });
-  });
+  it.each([["empty sections", "setup: []\nnetwork: {}\nchecks: []\nmetrics: []\nattempts: {}\n", EMPTY]])(
+    "accepts %s",
+    (_, text, config) => {
+      expect(parseConfig(text)).toEqual({ kind: "valid", config });
+    },
+  );
 
   it.each([
     ["1s", 1000],
@@ -212,7 +212,6 @@ describe("parseConfig", () => {
       metric(`name: x, ${FROM}, type: number, weight: 2`),
       /^metrics\[0\]\.weight: unknown key$/u,
     ],
-    ["an unknown preview key", "preview: { url: x }\n", /^preview\.url: unknown key$/u],
     ["an unknown attempts key", "attempts: { max: 2 }\n", /^attempts\.max: unknown key$/u],
     // target
     [
@@ -383,8 +382,9 @@ describe("parseConfig", () => {
       metric(`name: test, ${FROM}, type: number`),
       /^metrics\[0\]\.name: metric name test is also a check's name$/u,
     ],
-    ["a preview that isn't a mapping", "preview: pnpm build\n", /^preview: preview must be a mapping$/u],
-    ["an empty preview command", "preview: { command: '' }\n", /^preview\.command: must not be empty$/u],
+    ["a preview section", "preview: { command: pnpm build }\n", MOVE_PREVIEW],
+    ["an empty preview section", "preview: {}\n", MOVE_PREVIEW],
+    ["a preview that isn't a mapping", "preview: pnpm build\n", MOVE_PREVIEW],
     ["a zero limit", "attempts: { limit: 0 }\n", /^attempts\.limit: limit must be a positive integer$/u],
     ["a fractional limit", "attempts: { limit: 1.5 }\n", /^attempts\.limit: limit must be a positive integer$/u],
     ["a string limit", "attempts: { limit: two }\n", /^attempts\.limit: limit must be a positive integer$/u],

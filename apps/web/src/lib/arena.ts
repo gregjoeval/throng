@@ -38,12 +38,6 @@ function metricValue(result: Result | undefined, name: string): MetricValue | nu
   return result?.metrics[name]?.value ?? null;
 }
 
-/** Where the attempt's Preview is served: `_preview.url`, null unless `_preview` passed. */
-export function previewUrl(result: Result | undefined): string | null {
-  const metric = result?.metrics["_preview.url"];
-  return metric?.type === "string" ? metric.value : null;
-}
-
 /**
  * A `url` metric's value as a link's target, or null when it isn't an http or https URL: a
  * project's checks run the attempt's code, so the value may be anything.
@@ -52,6 +46,14 @@ export function linkTarget(value: MetricValue | null): string | null {
   if (typeof value !== "string" || !URL.canParse(value)) return null;
   const { protocol } = new URL(value);
   return protocol === "https:" || protocol === "http:" ? value : null;
+}
+
+/** Every `url` metric of a result that `linkTarget` can link, by name, in the result's order. */
+export function urlLinks(result: Result | undefined): { name: string; href: string }[] {
+  return Object.entries(result?.metrics ?? {}).flatMap(([name, metric]) => {
+    const href = metric.type === "string" && metric.format === "url" ? linkTarget(metric.value) : null;
+    return href === null ? [] : [{ name, href }];
+  });
 }
 
 export const GATE_STATE_LABELS: Record<GateState, string> = {

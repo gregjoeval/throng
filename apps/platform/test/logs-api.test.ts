@@ -7,7 +7,6 @@ import type { LogStore } from "../src/logs.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
 import type { Json } from "./support/json.ts";
-import { FakePreviewWorkers } from "./support/preview-workers.ts";
 import { testTaskBackends } from "./support/task-backend.ts";
 
 const verify: AccessVerifier = async (token) => (token.startsWith("as:") ? { email: token.slice(3) } : null);
@@ -33,7 +32,6 @@ async function setup() {
     verifierFor: () => verify,
     now,
     repos: () => repos,
-    previewWorkers: () => new FakePreviewWorkers(),
     tasks: () => backend,
     logs: () => logs,
   };

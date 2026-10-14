@@ -6,48 +6,31 @@ import { loadConfig, networkAllow, sandboxSize } from "./config";
 import type { ConfigResult, SandboxSize } from "./config";
 import { GRANT_SOURCES, ROLE_GRANTS, sandboxName, SCORING_ROLES, TRUSTED_SIZE } from "./grants";
 import type { RepoCodeRole, RoleGrants, RunGrants, SandboxRole } from "./grants";
-import {
-  LOG_CONTENT_TYPE,
-  logKey,
-  logNames,
-  MISSING_LOG_EXIT,
-  PREVIEW_LOG,
-  readLogScript,
-  sandboxNote,
-  withNotes,
-} from "./logs";
+import { LOG_CONTENT_TYPE, logKey, logNames, MISSING_LOG_EXIT, readLogScript, sandboxNote, withNotes } from "./logs";
 import { NO_NETWORK, roleAccess } from "./network";
 import type { NetworkAccess } from "./network";
 import { loadRegistries } from "./npmrc";
-import { previewGrant, previewName } from "./preview";
-import { previewWorkersFor } from "./preview-workers";
 import { forkRepo, originMainRef, originRepo } from "./repos";
-import { buildResult, previewPlan, scorePlan, scoreTimeoutMs, withPreview } from "./results";
-import type { PreviewPlan, RawScore, ScorePlan, ScoringResult } from "./results";
+import { buildResult, scorePlan, scoreTimeoutMs } from "./results";
+import type { RawScore, ScorePlan, ScoringResult } from "./results";
 import type { RunResult } from "./sandbox";
 import type { ScoringOutcome, ScoringParams } from "./scoring";
-import { parseResult, PREVIEW_BUILD_TIMEOUT_MS, previewScript, scoreScript } from "./scripts";
-import type { PreviewScriptResult } from "./scripts";
+import { parseResult, scoreScript } from "./scripts";
 import { NO_TASK_DEFINITIONS, withTask } from "./task-definitions";
 import { parseAttemptRef } from "./task-refs";
 
 const TOKEN_TTL_SECONDS = 30 * 60;
-/** The preview step: fetching, installing and the build step at its timeout, then the deploy. */
-const PREVIEW_STEP_TIMEOUT_MS = PREVIEW_BUILD_TIMEOUT_MS + 10 * 60 * 1000;
 /** Each step's retries after its first try, for infrastructure errors; then the run ends `errored`. */
 export const STEP_RETRIES = { limit: 2, delay: "5 seconds", backoff: "constant" } as const;
 /** What a container may reach while its logs are read: nothing. It is already running by then. */
-const NO_ACCESS = { grants: [], preview: null, ...NO_NETWORK };
+const NO_ACCESS = { grants: [], ...NO_NETWORK };
 /**
  * One scoring run: scores an attempt's head in a Sandbox and reports the result to the project's
  * Durable Object. The config and the `.npmrc` registry hosts are read from one commit of the origin's
  * `main`, so an attempt can't change its own checks or widen its own network access, and the two always
  * agree. The container that runs repo code holds read grants only (see `grants.ts`).
  *
- * When the config has a `preview` section and the gate passed, the head is then deployed as a Worker
- * Preview from a separate container (see `#preview`); a failed Preview never changes the gate.
- *
- * Each setup step's, check's and Preview's log is copied to R2 (`logs.ts`) within the step that
+ * Each setup step's and check's log is copied to R2 (`logs.ts`) within the step that
  * wrote it, while its container still runs, so the result names the logs that were stored.
  */
 export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
@@ -73,15 +56,9 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
       const base = await step.do("base", { retries: STEP_RETRIES, timeout: "1 minute" }, () =>
         attemptBase(reposFor(this.env), params.project, { attempt: params.attempt, head: params.sha }),
       );
-      const scored = await step.do("score", { retries: STEP_RETRIES, timeout: settings.timeoutMs }, () =>
+      const result = await step.do("score", { retries: STEP_RETRIES, timeout: settings.timeoutMs }, () =>
         this.#score(instanceId, params, base?.sha ?? null, settings),
       );
-      const preview = previewPlan(config, scored);
-      let result = scored;
-      if (preview !== null) {
-        const { deployed, durationMs, logs } = await this.#preview(instanceId, params, preview, settings, step);
-        result = { ...withPreview(scored, deployed, durationMs), logs: [...scored.logs, ...logs] };
-      }
       outcome = { status: "done", result };
     } catch (error) {
       outcome = { status: "errored", error: String(error).slice(0, 4000) };
@@ -144,76 +121,6 @@ export class ScoringWorkflow extends WorkflowEntrypoint<Env, ScoringParams> {
     });
     return { ...result, logs };
   }
-
-  /**
-   * Deploys the head as a Worker Preview under the project's own Worker (`p<projectId>`, created here
-   * if the project predates it) from the preview container, which holds that Worker's Preview deploy
-   * grant and only a read grant on the fork, and stores its log. `deployed` is null when it gave no
-   * result, and the error when the step kept failing on infrastructure; then whatever log the
-   * container wrote is still stored. A failed Preview is recorded on the result and never changes the gate.
-   * `durationMs` is how long its last try took, timed within the step so a replay keeps it; 0 once it errored.
-   */
-  async #preview(
-    instanceId: string,
-    params: ScoringParams,
-    { command }: PreviewPlan,
-    { size, network }: MainSettings,
-    step: WorkflowStep,
-  ): Promise<{ deployed: PreviewScriptResult | null | { error: string }; durationMs: number; logs: string[] }> {
-    const { accountId, workerName } = previewGrant(this.env.CF_ACCOUNT_ID, params.project);
-    const name = previewName(params);
-    const previewLogs: LogsToStore = {
-      sandbox: sandboxName(instanceId, "preview"),
-      names: [PREVIEW_LOG],
-      key: (log) => logKey(params, log),
-      size,
-    };
-    try {
-      const { run, durationMs, logs } = await step.do(
-        "preview",
-        { retries: STEP_RETRIES, timeout: PREVIEW_STEP_TIMEOUT_MS },
-        async () => {
-          const started = Date.now();
-          // Projects made before their Worker was created with them get it here.
-          await previewWorkersFor(this.env).ensure(params.project);
-          const deploy = await runInSandbox(
-            this.env,
-            instanceId,
-            params,
-            "preview",
-            (g) =>
-              previewScript(g.forkRead.remote, params.sha, {
-                accountId,
-                workerName,
-                previewName: name,
-                command,
-              }),
-            { network, timeoutMs: PREVIEW_STEP_TIMEOUT_MS, size },
-          );
-          return {
-            run: deploy,
-            durationMs: Date.now() - started,
-            logs: await storeLogs(this.env, previewLogs),
-          };
-        },
-      );
-      const deployed = parseResult<PreviewScriptResult>(run.stdout);
-      if (deployed === null) {
-        console.warn({ event: "scoring.preview_no_result", exit: run.exitCode, stderr: run.stderr.slice(-2000) });
-      } else if (!deployed.ok) {
-        console.log({ event: "scoring.preview_failed", stage: deployed.stage, output: deployed.output.slice(-2000) });
-      }
-      return { deployed, durationMs, logs };
-    } catch (error) {
-      const message = String(error).slice(0, 2000);
-      console.warn({ event: "scoring.preview_errored", error: message });
-      // A lost Sandbox can't give its log back either; that still mustn't end the run.
-      const logs = await step
-        .do("preview logs", { retries: STEP_RETRIES }, () => storeLogs(this.env, previewLogs))
-        .catch(() => []);
-      return { deployed: { error: message }, durationMs: 0, logs };
-    }
-  }
 }
 
 /** The repos a run's grants are for: the project's origin and one attempt's fork (`t42a3`). */
@@ -274,12 +181,8 @@ export async function runInSandbox<R extends SandboxRole>(
   const grants = (await mintGrants(env, repos, ROLE_GRANTS[role])) as RoleGrants<R>;
   const sandbox = env.SANDBOX.getByName(sandboxName(instanceId, role));
   const result = await sandbox.run(script(grants), {
-    // Only the preview container gets the Preview deploy grant; the trusted land container never
-    // reaches the registry.
-    access: roleAccess(role, grants, {
-      preview: previewGrant(env.CF_ACCOUNT_ID, repos.project),
-      network,
-    }),
+    // The trusted land container never reaches the registry.
+    access: roleAccess(role, grants, network),
     size,
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
   });

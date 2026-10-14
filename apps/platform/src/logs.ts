@@ -1,4 +1,4 @@
-// A scoring run's logs: one per `setup` step, check and preview, stored in R2 under the run. The key
+// A scoring run's logs: one per `setup` step and check, stored in R2 under the run. The key
 // layout, the log names and the script that reads a log out of the Sandbox (truncated to fit) live
 // here; the R2 lifecycle deletes logs after `LOG_RETENTION_DAYS` (see the README's setup).
 
@@ -13,9 +13,7 @@ export const LOG_RETENTION_DAYS = 30;
 /** The key prefix every log is stored under, and the lifecycle rule applies to. */
 export const LOG_PREFIX = "logs/";
 
-/** The preview's log. Check names can't contain a dot, so it never collides with a check's. */
-export const PREVIEW_LOG = "preview.deploy";
-/** A check's log name is its own name; setup steps, the preview and checks never share one. */
+/** A check's log name is its own name; setup steps and checks never share one. */
 const LOG_NAME = /^[a-z0-9][a-z0-9_-]*(\.[a-z0-9_-]+)?$/u;
 
 /** The part of the logs R2 bucket Throng uses; tests pass one in memory. */

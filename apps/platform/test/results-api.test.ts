@@ -5,14 +5,13 @@ import { apiRoutes } from "../src/api.ts";
 import type { ApiRoutes } from "../src/api.ts";
 import { parseConfig } from "../src/config.ts";
 import type { FollowParams } from "../src/follows.ts";
-import { buildResult, withPreview } from "../src/results.ts";
+import { buildResult } from "../src/results.ts";
 import type { LegacyResult, ScoringResult } from "../src/results.ts";
 import type { ScoringOutcome } from "../src/scoring.ts";
 import type { User } from "../src/users.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
 import type { Json } from "./support/json.ts";
-import { FakePreviewWorkers } from "./support/preview-workers.ts";
 import { testTaskBackends } from "./support/task-backend.ts";
 
 /** Access sessions are `as:<email>`. */
@@ -29,10 +28,9 @@ const CONFIG = parseConfig(`checks:
 metrics:
   - { name: coverage, from: test.coverage.pct, type: number, unit: "%" }
   - { name: bundle_kb, from: bundle.size.kb, type: number, order: asc }
-preview: {}
 `);
 
-/** A run's result as the Workflow builds it: two checks with a metric each, and a deployed Preview. */
+/** A run's result as the Workflow builds it: two checks with a metric each. */
 function result(overrides: Partial<ScoringResult> = {}): ScoringResult {
   const scored = buildResult(CONFIG, {
     base: "b".repeat(40),
@@ -44,7 +42,7 @@ function result(overrides: Partial<ScoringResult> = {}): ScoringResult {
       { exit: 0, durationMs: 300, metrics: { bundle_kb: { value: 120 } } },
     ],
   });
-  return { ...withPreview(scored, { ok: true, url: "https://t1a1.preview.test" }, 40), ...overrides };
+  return { ...scored, ...overrides };
 }
 
 async function setup() {
@@ -63,7 +61,6 @@ async function setup() {
     verifierFor: () => verify,
     now,
     repos: () => repos,
-    previewWorkers: () => new FakePreviewWorkers(),
     tasks: () => backend,
   });
   const env = { DB: testDatabase(), ACCESS_TEAM_DOMAIN: "throng.cloudflareaccess.com", ACCESS_AUD: "aud" };
@@ -281,7 +278,6 @@ describe("the arena", () => {
       ["_diff", "platform", "passed"],
       ["test", "project", "passed"],
       ["bundle", "project", "passed"],
-      ["_preview", "platform", "passed"],
     ]);
     expect(current["metrics"]).toEqual({
       _diff: { source: "platform", type: "enum", value: "passed", values: OUTCOMES },
@@ -292,12 +288,10 @@ describe("the arena", () => {
       coverage: { source: "project", type: "number", value: 81.5, order: "desc", unit: "%" },
       bundle: { source: "project", type: "enum", value: "passed", values: OUTCOMES },
       bundle_kb: { source: "project", type: "number", value: 120, order: "asc" },
-      _preview: { source: "platform", type: "enum", value: "passed", values: OUTCOMES },
-      "_preview.url": { source: "platform", type: "string", format: "url", value: "https://t1a1.preview.test" },
     });
   });
 
-  it("answers in the current shape for a result stored with builtin and preview", async () => {
+  it("answers in the current shape for a result stored with builtin and preview, dropping the preview", async () => {
     const { call, ada, base, drafts, commit, finish } = await setup();
     await drafts();
     commit("t1a1", "one\n");
@@ -318,13 +312,14 @@ describe("the arena", () => {
     const run = (await call("GET", `${base}/runs/1`, ada)).body["result"] as Json;
     expect(run).not.toHaveProperty("builtin");
     expect(run).toMatchObject({
-      checks: [{ name: "_diff" }, { name: "test", source: "project" }, { name: "_preview", outcome: "failed" }],
+      checks: [{ name: "_diff" }, { name: "test", source: "project" }],
       metrics: {
         "_diff.additions": { value: 5 },
         coverage: { source: "project", type: "number", value: 80 },
-        "_preview.url": { value: null },
       },
     });
+    expect(run["checks"]).toHaveLength(2);
+    expect(Object.keys(run["metrics"] as Json)).not.toContain("_preview.url");
   });
 
   it("derives each active attempt's base from its current head: the task branch when the task has one", async () => {

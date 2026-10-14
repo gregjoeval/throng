@@ -1,6 +1,6 @@
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import type { SandboxSize } from "./config";
-import { CLOUDFLARE_API_HOST, interceptedHosts, outboundDecision } from "./network";
+import { interceptedHosts, outboundDecision } from "./network";
 import type { OutboundAccess } from "./network";
 
 const INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000;
@@ -56,9 +56,6 @@ export class OutboundAuth extends WorkerEntrypoint<Env, OutboundAccess> {
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const decision = outboundDecision(request.method, url, this.ctx.props);
-    if (url.host === CLOUDFLARE_API_HOST) {
-      console.log({ event: "sandbox.cloudflare-api", method: request.method, path: url.pathname, decision });
-    }
     switch (decision.action) {
       case "deny": {
         return new Response(`no grant for ${request.method} ${url.host}${url.pathname}\n`, { status: 403 });
@@ -68,9 +65,6 @@ export class OutboundAuth extends WorkerEntrypoint<Env, OutboundAccess> {
       }
       case "bearer": {
         return fetch(withBearer(request, decision.token));
-      }
-      case "preview-token": {
-        return fetch(withBearer(request, this.env.CF_PREVIEW_TOKEN));
       }
     }
   }

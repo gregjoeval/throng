@@ -9,7 +9,6 @@ import type { User } from "../src/users.ts";
 import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
 import type { Json } from "./support/json.ts";
-import { FakePreviewWorkers } from "./support/preview-workers.ts";
 import { testTaskBackends } from "./support/task-backend.ts";
 
 /** Access sessions are `as:<email>`. */
@@ -27,7 +26,6 @@ async function setup() {
     verifierFor: () => verify,
     now,
     repos: () => repos,
-    previewWorkers: () => new FakePreviewWorkers(),
     tasks: () => backend,
     trustForwardedIdentity: true,
   });

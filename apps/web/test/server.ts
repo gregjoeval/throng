@@ -122,19 +122,19 @@ type Result = NonNullable<ArenaAttempt["result"]>;
 const diffMetric = (value: number) => ({ source: "platform", type: "number", value, order: "asc" }) as const;
 
 /**
- * A result's metrics: `_diff`'s sizes, `values` as project numbers (higher is better), and
- * `_preview.url`, null unless a URL is given.
+ * A result's metrics: `_diff`'s sizes, `values` as project numbers (higher is better), and `urls` as
+ * project strings with the `url` format.
  */
 export function scoredMetrics({
   files = 1,
   additions = 2,
   values = {},
-  preview = null,
+  urls = {},
 }: {
   files?: number;
   additions?: number;
   values?: Record<string, number>;
-  preview?: string | null;
+  urls?: Record<string, string>;
 } = {}): Result["metrics"] {
   return {
     "_diff.filesChanged": diffMetric(files),
@@ -145,7 +145,12 @@ export function scoredMetrics({
         { source: "project", type: "number", value, order: "desc" } as const,
       ]),
     ),
-    "_preview.url": { source: "platform", type: "string", format: "url", value: preview },
+    ...Object.fromEntries(
+      Object.entries(urls).map(([name, value]) => [
+        name,
+        { source: "project", type: "string", format: "url", value } as const,
+      ]),
+    ),
   };
 }
 
@@ -158,7 +163,7 @@ export function check(
   return { name, source: "project", outcome, durationMs, notes: [] };
 }
 
-/** One of Throng's own checks, `_diff` or `_preview`, which never gate. */
+/** Throng's own check, `_diff`, which never gates. */
 export function platformCheck(name: string, outcome: Result["checks"][number]["outcome"]): Result["checks"][number] {
   return { name, source: "platform", outcome, durationMs: 0, notes: [] };
 }

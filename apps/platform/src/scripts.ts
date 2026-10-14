@@ -5,7 +5,7 @@ import { CONFIG_PATH, MAX_CONFIG_BYTES } from "./config.ts";
 import { CONFLICT_CAPS, MERGE_LABELS } from "./conflicts.ts";
 import type { ConflictCaps, Remerge } from "./conflicts.ts";
 import { THRONG_COMMITTER } from "./landing.ts";
-import { PREVIEW_LOG, setupLogName } from "./logs.ts";
+import { setupLogName } from "./logs.ts";
 import { METRIC_VALUES_SOURCE, metricValue, parseFrom } from "./metric-values.ts";
 import { MAX_OUTPUT_BYTES, SETUP_TIMEOUT_MS } from "./results.ts";
 import type { PlannedMetric, ScorePlan } from "./results.ts";
@@ -16,32 +16,12 @@ export const RESULT_PREFIX = "THRONG_RESULT ";
 /** Where a script that runs repo code failed: installing dependencies, or running/building the repo. */
 export type FailureStage = "install" | "test";
 
-export type PreviewScriptResult =
-  | { ok: true; url: string }
-  | { ok: false; stage: "install" | "build" | "deploy"; output: string };
-
-/** Longest `preview.command` may run; the spec gives it no timeout of its own, so a check's default. */
-export const PREVIEW_BUILD_TIMEOUT_MS = SETUP_TIMEOUT_MS;
-
 const quote = (s: string): string => `'${s.replaceAll("'", "'\\''")}'`;
 
 const PRELUDE = `
 set -uo pipefail
 result() { printf '${RESULT_PREFIX}%s\\n' "$1"; exit 0; }
-json() { node -e 'process.stdout.write(JSON.stringify(require("fs").readFileSync(0, "utf8").slice(-8000)))'; }
 `;
-
-/**
- * Install the repo's npm dependencies from its lockfile, if it has one. Install scripts never run:
- * the binaries common packages need ship as ordinary platform-specific packages. If the install fails,
- * the script ends with a result made of `fields` (the caller's JSON fields, e.g. `"ok":false`) plus
- * `"stage":"install"` and the install log as `output`.
- */
-function install(fields: string): string {
-  return `if [ -f package-lock.json ] && ! npm ci --ignore-scripts --no-audit --no-fund > ../install.log 2>&1; then
-  result "{${fields.replaceAll('"', '\\"')},\\"stage\\":\\"install\\",\\"output\\":$(json < ../install.log)}"
-fi`;
-}
 
 /**
  * Scores the attempt's head `sha`: fetches it from the fork and records the diff size from `base`, the
@@ -174,43 +154,6 @@ for (const { name, from, rule } of JSON.parse(metrics)) {
 }
 process.stdout.write(JSON.stringify(values));
 NODE`;
-}
-
-/**
- * Deploy the attempt's commit as a Worker Preview named `previewName`: install its dependencies, run
- * the config's `preview.command` (if any) as the build step, then `wrangler preview`. The API token
- * is a placeholder: the Worker's outbound intercept replaces it on requests it allows. However it
- * ends, the install's, build's and deploy's output is left in `logs/preview.deploy.log` for storing.
- */
-export function previewScript(
-  forkRemote: string,
-  sha: string,
-  preview: { accountId: string; workerName: string; previewName: string; command: string | null },
-): string {
-  const build =
-    preview.command === null
-      ? ""
-      : `if ! timeout -k 10s ${seconds(PREVIEW_BUILD_TIMEOUT_MS)} bash -c ${quote(preview.command)} < /dev/null > ../build.log 2>&1; then
-  result "{\\"ok\\":false,\\"stage\\":\\"build\\",\\"output\\":$(json < ../build.log)}"
-fi`;
-  return `${PRELUDE}
-ws=$PWD
-rm -rf preview logs install.log build.log preview.log preview.json && mkdir logs
-trap 'cat "$ws/install.log" "$ws/build.log" "$ws/preview.log" > "$ws/logs/${PREVIEW_LOG}.log" 2> /dev/null' EXIT
-git init -q preview && cd preview
-git fetch -q ${quote(forkRemote)} '+refs/heads/*:refs/remotes/fork/*' || exit 10
-git checkout -q --detach ${quote(sha)} || exit 11
-${install('"ok":false')}
-${build}
-export CLOUDFLARE_API_TOKEN=added-by-worker CLOUDFLARE_ACCOUNT_ID=${quote(preview.accountId)}
-export WRANGLER_SEND_METRICS=false CI=1
-if wrangler preview --worker-name ${quote(preview.workerName)} --name ${quote(preview.previewName)} --json > ../preview.json 2> ../preview.log; then
-  url=$(node -e 'const p = JSON.parse(require("fs").readFileSync(0, "utf8")); process.stdout.write(JSON.stringify(p.preview.urls[0]))' < ../preview.json) || exit 13
-  result "{\\"ok\\":true,\\"url\\":$url}"
-fi
-cat ../preview.json >> ../preview.log
-result "{\\"ok\\":false,\\"stage\\":\\"deploy\\",\\"output\\":$(json < ../preview.log)}"
-`;
 }
 
 /**

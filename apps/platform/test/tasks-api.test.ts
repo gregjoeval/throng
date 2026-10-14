@@ -7,7 +7,6 @@ import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
 import { at } from "./support/defined.ts";
 import type { Json } from "./support/json.ts";
-import { FakePreviewWorkers } from "./support/preview-workers.ts";
 import { testTaskBackends } from "./support/task-backend.ts";
 
 /** Access sessions are `as:<email>`. */
@@ -26,7 +25,6 @@ async function setup() {
     verifierFor: () => verify,
     now,
     repos: () => repos,
-    previewWorkers: () => new FakePreviewWorkers(),
     tasks: () => backend,
   };
   const api = apiRoutes(options);
@@ -697,7 +695,6 @@ describe("over throng-web's service binding", () => {
       verifierFor: () => verify,
       now,
       repos: () => repos,
-      previewWorkers: () => new FakePreviewWorkers(),
       tasks: () => backend,
     });
     const env = { DB: testDatabase(), ACCESS_TEAM_DOMAIN: "throng.cloudflareaccess.com", ACCESS_AUD: "aud" };

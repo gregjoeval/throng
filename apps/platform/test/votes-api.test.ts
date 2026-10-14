@@ -13,7 +13,6 @@ import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
 import { at } from "./support/defined.ts";
 import type { Json } from "./support/json.ts";
-import { FakePreviewWorkers } from "./support/preview-workers.ts";
 import { PASSED } from "./support/results.ts";
 import { testTaskBackends } from "./support/task-backend.ts";
 
@@ -50,7 +49,6 @@ async function setup(selection = "selection: { policy: vote }\n") {
     verifierFor: () => verify,
     now,
     repos: () => repos,
-    previewWorkers: () => new FakePreviewWorkers(),
     tasks: () => backend,
     trustForwardedIdentity: true,
   });

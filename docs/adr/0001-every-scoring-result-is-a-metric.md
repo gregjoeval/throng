@@ -16,3 +16,7 @@ Scoring used to produce two kinds of result: a check's pass/fail outcome, which 
 - A missing path, a value that doesn't fit its type, or a skipped check makes a metric null. Null ranks last, and a condition on a null metric fails.
 - Only the values and notes are kept; a null's note says which part of the path failed and which keys were there instead. Raw output can't be inspected after the run, and adding a metric means re-running the checks.
 - Inline `metrics:` under a check and `$THRONG_METRICS` are replaced outright, with no compatibility period.
+
+## Amendment: no `_preview`
+
+Throng no longer deploys previews ([#258](https://github.com/gregjoeval/throng/issues/258)), so `_diff` is its only built-in check and `_preview` and `_preview.url` are gone. A preview is an ordinary check the project writes, and its link is a project `url` metric: the case this ADR made room for, with no special place in the result.

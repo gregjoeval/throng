@@ -20,7 +20,6 @@ import { FakeRepos } from "./fake-repos.ts";
 import { testDatabase } from "./support/d1.ts";
 import { git, gitEnv, LocalGitHost, serve, tryGit } from "./support/git-host.ts";
 import type { Json } from "./support/json.ts";
-import { FakePreviewWorkers } from "./support/preview-workers.ts";
 import { testSql, testTaskBackends } from "./support/task-backend.ts";
 
 const PROJECT: ProjectContext = { id: "abc123", owner: "owner001" };
@@ -158,7 +157,6 @@ async function e2eSetup() {
     verifierFor: () => async () => null,
     now,
     repos: () => host,
-    previewWorkers: () => new FakePreviewWorkers(),
     tasks: () => backend,
   });
   const app = new Hono().route("/git", gitRoutes({ repos: () => host, tasks: () => backend, now }));
@@ -175,10 +173,7 @@ async function e2eSetup() {
   const adaClaude = await person("ada@example.com", "claude");
   const bob = await person("bob@example.com");
 
-  const created = await projectService({ db, repos: host, previewWorkers: new FakePreviewWorkers() }).create(
-    greg.actor,
-    { handle: "throng" },
-  );
+  const created = await projectService({ db, repos: host }).create(greg.actor, { handle: "throng" });
   const project: ProjectContext = { id: created.id, owner: greg.user.id };
   const seed = join(work, "seed");
   await git(work, env, "init", "-q", "-b", "main", seed);

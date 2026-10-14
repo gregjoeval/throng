@@ -71,6 +71,7 @@ import { METRIC_FORMATS, METRIC_TYPES } from "./metric-values.ts";
 import { DEFAULT_LISTING_PAGE, MAX_LISTING_PAGE, myListings } from "./my-listings.ts";
 import { PIPELINES } from "./pipelines.ts";
 import { MAX_PROJECTION_RETRY_MS } from "./projection.ts";
+import { publicOrigin } from "./public-origin.ts";
 import type { Repos } from "./repos.ts";
 import { CHECK_OUTCOMES, GATES } from "./results.ts";
 import { STEP_KINDS, STEP_OUTCOMES } from "./run-outcome.ts";
@@ -79,7 +80,8 @@ import { secretsRoutes } from "./secrets-api.ts";
 import { SECRET_NAME } from "./secrets.ts";
 import { ATTEMPT_STATES, TASK_STATES } from "./task-store.ts";
 import type { TaskBackend } from "./tasks.ts";
-import { DEFAULT_TOKEN_TTL_SECONDS, MAX_TOKEN_TTL_SECONDS, tokenService } from "./tokens.ts";
+import { DEFAULT_TOKEN_TTL_SECONDS, MAX_TOKEN_TTL_SECONDS } from "./token-ttl.ts";
+import { tokenService } from "./tokens.ts";
 import type { Token } from "./tokens.ts";
 import type { User } from "./users.ts";
 import { VERDICT_RECOMMENDATIONS } from "./verdicts.ts";
@@ -123,7 +125,7 @@ const MintTokenSchema = z
       .optional()
       .openapi({
         description:
-          "An alias of the caller, e.g. `claude`, or null for the caller as themselves. Omitted, it is the alias the " +
+          "An alias of the caller, e.g. `agent`, or null for the caller as themselves. Omitted, it is the alias the " +
           "caller's token acts under, if any.",
       }),
     expiresIn: z
@@ -138,6 +140,10 @@ const MintTokenSchema = z
 
 const MintedTokenSchema = TokenSchema.extend({
   token: z.string().openapi({ description: "The plaintext `thr_…` token. It is shown only in this response." }),
+  url: z.string().openapi({
+    description: "The platform's public URL, which the token is for: its MCP server is at `<url>/mcp`.",
+    example: "https://throng.example.workers.dev",
+  }),
 }).openapi("MintedToken");
 
 const ProjectSchema = z
@@ -465,7 +471,7 @@ const MyTaskSchema = TaskSchema.pick({
 /** Where an attempt was copied from: provenance only, never its base. */
 const AliasSchema = z.string().nullable().openapi({
   description:
-    "The alias its author started it under (`claude`); null when they acted as themselves, or after a hand-off.",
+    "The alias its author started it under (`agent`); null when they acted as themselves, or after a hand-off.",
 });
 
 const ForkedFromSchema = z
@@ -1332,7 +1338,8 @@ export function apiRoutes(options: ApiOptions = {}) {
       async (c) => {
         const input = { ...c.req.valid("json"), via: c.var.token };
         const { token, plaintext } = await tokens(c.env).mint(c.var.actor, input);
-        return c.json({ ...publicToken(token), token: plaintext }, 201);
+        const url = publicOrigin(c.env, c.req.url);
+        return c.json({ ...publicToken(token), token: plaintext, url }, 201);
       },
     )
     .openapi(

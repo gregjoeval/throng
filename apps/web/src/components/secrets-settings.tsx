@@ -7,14 +7,15 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { PIPELINES } from "@throng/platform/pipelines";
 import { PlusIcon } from "lucide-react";
 import { useState } from "react";
-import type { ReactNode } from "react";
+import { RelativeTime } from "@/components/commit-meta";
+import { ConfirmAction } from "@/components/confirm-action";
 import { EmptyState, ErrorState, Loading } from "@/components/states";
+import { Th } from "@/components/table";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { deleteSecret, putSecret, secretsQuery } from "@/lib/api";
 import type { Pipeline, ProjectRef, Secret, SecretUse } from "@/lib/api";
-import { relativeDate } from "@/lib/commits";
 import { apiError } from "@/lib/errors";
 
 /** Shown while a change allows a secret in `default` that wasn't before. */
@@ -123,7 +124,6 @@ function SecretRow({
   onEdit: () => void;
 }) {
   const queryClient = useQueryClient();
-  const [confirming, setConfirming] = useState(false);
   const remove = useMutation({
     mutationFn: () => deleteSecret(projectRef, secret.name),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: secretsQuery(projectRef).queryKey }),
@@ -139,9 +139,7 @@ function SecretRow({
         )}
       </td>
       <td className="px-2 py-2 text-muted-foreground">
-        <time dateTime={secret.changedAt} title={secret.changedAt}>
-          {relativeDate(secret.changedAt)}
-        </time>
+        <RelativeTime date={secret.changedAt} />
       </td>
       <td className="px-2 py-2">
         {use === undefined ? (
@@ -158,43 +156,11 @@ function SecretRow({
         )}
       </td>
       <td className="px-2 py-2">
-        <div className="flex justify-end gap-2">
-          {confirming ? (
-            <>
-              <Button
-                size="sm"
-                variant="destructive"
-                aria-label={`Confirm delete ${secret.name}`}
-                disabled={remove.isPending}
-                onClick={() => remove.mutate()}
-              >
-                Delete
-              </Button>
-              <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>
-                Cancel
-              </Button>
-            </>
-          ) : (
-            <>
-              <Button size="sm" variant="outline" aria-label={`Edit ${secret.name}`} onClick={onEdit}>
-                Edit
-              </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                aria-label={`Delete ${secret.name}`}
-                onClick={() => setConfirming(true)}
-              >
-                Delete
-              </Button>
-            </>
-          )}
-        </div>
-        {remove.isError && (
-          <p role="alert" className="text-right text-sm text-destructive">
-            {apiError(remove.error).message}
-          </p>
-        )}
+        <ConfirmAction verb="Delete" subject={secret.name} action={remove}>
+          <Button size="sm" variant="outline" aria-label={`Edit ${secret.name}`} onClick={onEdit}>
+            Edit
+          </Button>
+        </ConfirmAction>
       </td>
     </tr>
   );
@@ -301,8 +267,4 @@ function SecretForm({
       </div>
     </form>
   );
-}
-
-function Th({ children }: { children: ReactNode }) {
-  return <th className="px-2 py-2 font-medium">{children}</th>;
 }

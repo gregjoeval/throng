@@ -56,6 +56,11 @@ jobs:
       - name: Create the caches bucket
         working-directory: apps/platform
         run: pnpm wrangler r2 bucket info throng-caches >/dev/null 2>&1 || pnpm wrangler r2 bucket create throng-caches
-      # The platform first: throng-web binds to it.
-      - run: pnpm --filter @throng/platform run deploy
+      # The platform first: throng-web binds to it. Its build is checked before it deploys.
+      - name: Deploy throng
+        working-directory: apps/platform
+        run: |
+          pnpm exec vite build
+          scripts/check-public-url.sh dist/throng/wrangler.json
+          pnpm exec wrangler deploy --config dist/throng/wrangler.json
       - run: pnpm --filter @throng/web run deploy

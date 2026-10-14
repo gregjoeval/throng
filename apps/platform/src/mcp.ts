@@ -37,6 +37,7 @@ import { DIFF_CAPS, diffCommit, unifiedPatch } from "./diff.ts";
 import { ServiceError } from "./errors.ts";
 import { firstLog, missingLog } from "./logs.ts";
 import type { ProjectService } from "./projects.ts";
+import { publicOrigin } from "./public-origin.ts";
 import { ATTEMPT_STATES, TASK_STATES } from "./task-store.ts";
 import { taskService } from "./tasks.ts";
 import type { MergeRequest, RunDetail, ScoringAnswer, Vote } from "./tasks.ts";
@@ -92,7 +93,7 @@ export function mcpRoutes(options: ApiOptions = {}) {
         actor: c.var.actor,
         token: c.var.token,
         env: c.env,
-        origin: new URL(c.req.url).origin,
+        origin: publicOrigin(c.env, c.req.url),
       };
       const handler = createMcpHandler(() => mcpServer(deps, context));
       return handler.fetch(c.req.raw);

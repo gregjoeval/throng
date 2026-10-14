@@ -56,7 +56,7 @@ export function runDuration(run: Pick<Run, "startedAt" | "finishedAt">, now = Da
   return Math.max(0, end - Date.parse(run.startedAt));
 }
 
-/** Who triggered the run: `ada`, `ada (claude)` under an alias, or Throng when no user did. */
+/** Who triggered the run: `ada`, `ada (agent)` under an alias, or Throng when no user did. */
 export function triggeredBy(run: Pick<Run, "requestedBy" | "alias">): string {
   if (run.requestedBy === null) return "Throng";
   return run.alias === null ? run.requestedBy.handle : `${run.requestedBy.handle} (${run.alias})`;

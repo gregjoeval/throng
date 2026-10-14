@@ -548,3 +548,25 @@ export async function putSecret(
 export async function deleteSecret(projectRef: ProjectRef, name: string) {
   return parseResponse(secretsApi[":name"].$delete({ param: { ...projectRef, name } }));
 }
+
+const tokensApi = client.api.tokens;
+
+/** The signed-in user's Throng tokens, newest first, expired and revoked ones included; never a plaintext. */
+export const tokensQuery = apiQuery(["tokens"], (init) => tokensApi.$get(undefined, { init }));
+
+export type Token = InferResponseType<typeof tokensApi.$get, 200>["tokens"][number];
+
+/**
+ * Mints a token for `alias` (null: the user as themselves) that expires in `expiresIn` seconds. The
+ * plaintext and the platform's public URL are only in this response. Rejects with hono's `DetailedError`.
+ */
+export async function mintToken(input: { alias: string | null; expiresIn: number }) {
+  return parseResponse(tokensApi.$post({ json: input }));
+}
+
+export type MintedToken = Awaited<ReturnType<typeof mintToken>>;
+
+/** Revokes one of the signed-in user's tokens. Rejects with hono's `DetailedError` on failure. */
+export async function revokeToken(id: string) {
+  return parseResponse(tokensApi[":id"].$delete({ param: { id } }));
+}

@@ -7,12 +7,13 @@ import { verifierFromEnv } from "./access.ts";
 import type { AccessBindings, AccessVerifier } from "./access.ts";
 import { errorBody } from "./errors.ts";
 import { FORWARDED_EMAIL_HEADER } from "./forwarded.ts";
+import type { PublicOriginBindings } from "./public-origin.ts";
 import { authenticateToken } from "./tokens.ts";
 import type { Actor, Token } from "./tokens.ts";
 import { userForEmail } from "./users.ts";
 
 export interface AuthEnv {
-  Bindings: AccessBindings;
+  Bindings: AccessBindings & PublicOriginBindings;
   Variables: { actor: Actor; token: Token | null };
 }
 

@@ -75,6 +75,7 @@ jobs:
       - name: Deploy throng-ci
         run: |
           pnpm exec vite build
+          scripts/check-public-url.sh dist/throng/wrangler.json
           secrets="$RUNNER_TEMP/throng-ci-secrets.env"
           trap 'rm -f "$secrets"' EXIT
           printf 'E2E_TOKEN=%s\nSECRETS_KEYRING=%s\n' "$E2E_TOKEN" "$SECRETS_KEYRING" > "$secrets"

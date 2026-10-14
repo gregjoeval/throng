@@ -1,13 +1,6 @@
 import { describe, expect, it } from "vitest";
-import {
-  authenticateToken,
-  DEFAULT_TOKEN_TTL_SECONDS,
-  hashToken,
-  listTokens,
-  mintToken,
-  revokeToken,
-  tokenService,
-} from "../src/tokens.ts";
+import { DEFAULT_TOKEN_TTL_SECONDS } from "../src/token-ttl.ts";
+import { authenticateToken, hashToken, listTokens, mintToken, revokeToken, tokenService } from "../src/tokens.ts";
 import { userForEmail } from "../src/users.ts";
 import { testDatabase } from "./support/d1.ts";
 

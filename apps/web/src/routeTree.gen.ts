@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as TokensRouteImport } from './routes/tokens'
 import { Route as OwnerProjectIndexRouteImport } from './routes/$owner/$project/index'
 import { Route as OwnerProjectSettingsRouteImport } from './routes/$owner/$project/settings'
 import { Route as OwnerProjectCommitShaRouteImport } from './routes/$owner/$project/commit/$sha'
@@ -26,6 +27,11 @@ import { Route as OwnerProjectTreeRefSplatRouteImport } from './routes/$owner/$p
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const TokensRoute = TokensRouteImport.update({
+  id: '/tokens',
+  path: '/tokens',
   getParentRoute: () => rootRouteImport,
 } as any)
 const OwnerProjectIndexRoute = OwnerProjectIndexRouteImport.update({
@@ -94,6 +100,7 @@ const OwnerProjectTreeRefSplatRoute =
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/tokens': typeof TokensRoute
   '/$owner/$project/settings': typeof OwnerProjectSettingsRoute
   '/$owner/$project/': typeof OwnerProjectIndexRoute
   '/$owner/$project/commit/$sha': typeof OwnerProjectCommitShaRoute
@@ -109,6 +116,7 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/tokens': typeof TokensRoute
   '/$owner/$project/settings': typeof OwnerProjectSettingsRoute
   '/$owner/$project': typeof OwnerProjectIndexRoute
   '/$owner/$project/commit/$sha': typeof OwnerProjectCommitShaRoute
@@ -125,6 +133,7 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/tokens': typeof TokensRoute
   '/$owner/$project/settings': typeof OwnerProjectSettingsRoute
   '/$owner/$project/': typeof OwnerProjectIndexRoute
   '/$owner/$project/commit/$sha': typeof OwnerProjectCommitShaRoute
@@ -142,6 +151,7 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/tokens'
     | '/$owner/$project/settings'
     | '/$owner/$project/'
     | '/$owner/$project/commit/$sha'
@@ -157,6 +167,7 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/tokens'
     | '/$owner/$project/settings'
     | '/$owner/$project'
     | '/$owner/$project/commit/$sha'
@@ -172,6 +183,7 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/'
+    | '/tokens'
     | '/$owner/$project/settings'
     | '/$owner/$project/'
     | '/$owner/$project/commit/$sha'
@@ -188,6 +200,7 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  TokensRoute: typeof TokensRoute
   OwnerProjectSettingsRoute: typeof OwnerProjectSettingsRoute
   OwnerProjectIndexRoute: typeof OwnerProjectIndexRoute
   OwnerProjectCommitShaRoute: typeof OwnerProjectCommitShaRoute
@@ -209,6 +222,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/tokens': {
+      id: '/tokens'
+      path: '/tokens'
+      fullPath: '/tokens'
+      preLoaderRoute: typeof TokensRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/$owner/$project/': {
@@ -300,6 +320,7 @@ declare module '@tanstack/react-router' {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  TokensRoute: TokensRoute,
   OwnerProjectSettingsRoute: OwnerProjectSettingsRoute,
   OwnerProjectIndexRoute: OwnerProjectIndexRoute,
   OwnerProjectCommitShaRoute: OwnerProjectCommitShaRoute,

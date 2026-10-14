@@ -8,9 +8,11 @@
     "./app": "./src/app.ts",
     "./forwarded": "./src/forwarded.ts",
     "./landing": "./src/landing.ts",
+    "./mcp-setup": "./src/mcp-setup.ts",
     "./pipelines": "./src/pipelines.ts",
     "./run-status": "./src/run-status.ts",
     "./task-refs": "./src/task-refs.ts",
+    "./token-ttl": "./src/token-ttl.ts",
     "./votes": "./src/votes.ts"
   },
   "scripts": {

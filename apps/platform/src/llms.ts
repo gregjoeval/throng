@@ -1,4 +1,4 @@
-// `GET /llms.txt`: the public guide an agent reads before it has a token. It names this host's URLs, so
+// `GET /llms.txt`: the public guide an agent reads before it has a token. It names the platform's public URLs, so
 // an agent can copy them as they are. The agent loop in short is the MCP server's own `instructions`;
 // this is the long form, step by step.
 
@@ -6,8 +6,11 @@ import { Hono } from "hono";
 import { DEFAULT_SANDBOX_SIZE, oneOf, SANDBOX_RESOURCES, SANDBOX_SIZES } from "./config.ts";
 import type { SandboxSize } from "./config.ts";
 import { attemptRemote } from "./git-remotes.ts";
+import { claudeMcpAdd, MCP_PATH } from "./mcp-setup.ts";
 import { CLONE_RECIPE, MAX_FILE_BYTES, MAX_LOG_SLICE_BYTES, MCP_INSTRUCTIONS } from "./mcp.ts";
 import { NPM_REGISTRY_HOST } from "./network.ts";
+import { publicOrigin } from "./public-origin.ts";
+import type { PublicOriginBindings } from "./public-origin.ts";
 import { DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS, MAX_WAITERS_PER_USER } from "./waiters.ts";
 
 /** The guide, for a platform served at `origin`. */
@@ -20,16 +23,16 @@ export function llmsText(origin: string): string {
 
 ## Get a token
 
-A human mints a Throng token for one of their aliases (\`claude\`, say) while signed in, with
-\`POST /api/tokens {"alias": "claude"}\`. The response carries the token once; keep it in \`$THRONG_TOKEN\`. Work
-done with it is that human's, under the alias: \`greg (claude)\`. \`whoami\` (or \`GET ${origin}/api/me\`) says who
+A human mints a Throng token for one of their aliases (\`agent\`, say) while signed in to the web UI, on its
+**Tokens** page, or with \`POST /api/tokens {"alias": "agent"}\`. The response carries the token once; keep it in \`$THRONG_TOKEN\`. Work
+done with it is that human's, under the alias: \`greg (agent)\`. \`whoami\` (or \`GET ${origin}/api/me\`) says who
 a token acts as and when it expires.
 
 ## MCP
 
-- URL: ${origin}/mcp (streamable HTTP, stateless)
+- URL: ${origin}${MCP_PATH} (streamable HTTP, stateless)
 - Header: \`Authorization: Bearer $THRONG_TOKEN\`. No token, or a bad one, is a 401. There is no OAuth.
-- Claude Code: \`claude mcp add --transport http throng ${origin}/mcp --header "Authorization: Bearer $THRONG_TOKEN"\`
+- Claude Code: \`${claudeMcpAdd(origin, "$THRONG_TOKEN")}\`
 
 Every tool but \`whoami\` and \`create_project\` takes \`project\` as \`owner/project\`. Tasks are \`t42\` (or \`42\`),
 attempts \`t42a3\`. A tool answers with a one-line summary and the data as JSON; a refusal is a tool error,
@@ -188,5 +191,7 @@ function describeSize(size: SandboxSize): string {
 
 /** `/llms.txt`, public. */
 export function llmsRoutes() {
-  return new Hono().get("/", (c) => c.text(llmsText(new URL(c.req.url).origin)));
+  return new Hono<{ Bindings: PublicOriginBindings }>().get("/", (c) =>
+    c.text(llmsText(publicOrigin(c.env, c.req.url))),
+  );
 }

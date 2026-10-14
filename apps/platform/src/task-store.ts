@@ -130,7 +130,7 @@ export interface StoredAttempt {
   number: number;
   /** The author's user id. */
   author: string;
-  /** The alias the author started it under (`claude`), or null: started as themselves, or handed off since. */
+  /** The alias the author started it under (`agent`), or null: started as themselves, or handed off since. */
   alias: string | null;
   state: AttemptState;
   /** The logical fork name, `t42a3`; its repo is `<projectId>-t42a3`. */

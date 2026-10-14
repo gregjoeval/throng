@@ -92,10 +92,21 @@ describe("POST /api/tokens", () => {
       createdAt: "2026-10-10T12:00:00.000Z",
       expiresAt: "2026-10-11T12:00:00.000Z",
       revokedAt: null,
+      url: "http://localhost",
     });
     const row = await env.DB.prepare("SELECT * FROM tokens WHERE id = ?").bind(minted["id"]).first<Json>();
     expect(row?.["hash"]).toMatch(/^[0-9a-f]{64}$/u);
     expect(Object.values(row ?? {})).not.toContain(minted["token"]);
+  });
+
+  it("names the platform's public URL when it's configured, not the origin the request came in on", async () => {
+    const { api, env } = setup();
+    const init = { method: "POST", headers: { "Cf-Access-Jwt-Assertion": "valid" } };
+    const res = await api.request("https://throng-web.example/tokens", init, {
+      ...env,
+      PUBLIC_URL: "https://throng.example",
+    });
+    expect(((await res.json()) as Json)["url"]).toBe("https://throng.example");
   });
 
   it("accepts an alias and an expiry of up to 7 days", async () => {

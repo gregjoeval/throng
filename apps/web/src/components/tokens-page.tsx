@@ -42,7 +42,7 @@ export function TokensPage() {
 
 /** Mints a token for an alias (empty: the user as themselves) that expires in 1 to `MAX_DAYS` days. */
 function MintForm({ onMinted }: { onMinted: (minted: MintedToken) => void }) {
-  const [alias, setAlias] = useState("claude");
+  const [alias, setAlias] = useState("agent");
   const [days, setDays] = useState(String(DEFAULT_TOKEN_TTL_SECONDS / DAY_SECONDS));
   const queryClient = useQueryClient();
   const mint = useMutation({

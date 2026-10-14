@@ -46,13 +46,13 @@ describe("the tokens page", () => {
     expect(await screen.findByRole("heading", { name: "Tokens" })).toBeInTheDocument();
   });
 
-  it("mints a token for claude for a day by default, and shows it with the setup to paste", async () => {
+  it("mints a token for the alias agent for a day by default, and shows it with the setup to paste", async () => {
     const mints: unknown[] = [];
     server.use(...serveTokens([], mints));
     const { user } = await renderApp("/tokens");
-    expect(within(mintForm()).getByLabelText("Alias")).toHaveValue("claude");
+    expect(within(mintForm()).getByLabelText("Alias")).toHaveValue("agent");
     await user.click(within(mintForm()).getByRole("button", { name: "Mint token" }));
-    await waitFor(() => expect(mints).toEqual([{ alias: "claude", expiresIn: DAY }]));
+    await waitFor(() => expect(mints).toEqual([{ alias: "agent", expiresIn: DAY }]));
     const minted = await screen.findByRole("region", { name: "Your new token" });
     expect(within(minted).getByText("It won't be shown again: copy it now.")).toBeInTheDocument();
     expect(within(minted).getByText(PLAINTEXT)).toBeInTheDocument();
@@ -99,7 +99,7 @@ describe("the tokens page", () => {
     expect(await screen.findByText(PLAINTEXT)).toBeInTheDocument();
     cleanup();
     await renderApp("/tokens");
-    expect(await screen.findByRole("row", { name: /claude/u })).toBeInTheDocument();
+    expect(await screen.findByRole("row", { name: /agent/u })).toBeInTheDocument();
     expect(screen.queryByText(PLAINTEXT)).toBeNull();
   });
 
@@ -190,7 +190,7 @@ describe("the tokens list", () => {
     expect(await screen.findByText("No tokens yet")).toBeInTheDocument();
     await user.click(within(mintForm()).getByRole("button", { name: "Mint token" }));
     const rows = await screen.findAllByRole("row");
-    expect(within(rows[1] as HTMLElement).getAllByRole("cell")[0]).toHaveTextContent("claude");
+    expect(within(rows[1] as HTMLElement).getAllByRole("cell")[0]).toHaveTextContent("agent");
   });
 
   it("revokes a token once confirmed", async () => {

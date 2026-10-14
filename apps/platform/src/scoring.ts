@@ -235,6 +235,8 @@ export interface StoredRun {
    * someone else wrote that it runs, and that writer's user id. Null otherwise.
    */
   task_check: TaskCheckWriter | null;
+  /** When the owner last started it (ms), after it waited; null if they never did. */
+  owner_started_at: number | null;
   /** For a landing: the approved head it merges, and the attempt that head is on. */
   merge_head: string | null;
   merge_attempt: string | null;
@@ -334,6 +336,7 @@ const PIPELINE_RUN_COLUMNS = [
   "merge_head TEXT",
   "merge_attempt TEXT",
   "task_check TEXT",
+  "owner_started_at INTEGER",
 ];
 /** Columns `pipeline_heads` gained after its first version: whether the owner pushed the head. */
 const PIPELINE_HEAD_COLUMNS = ["owners_push INTEGER NOT NULL DEFAULT 0"];
@@ -629,11 +632,12 @@ export class PipelineRuns {
     const instanceId = run.started_at === null ? run.instance_id : `${run.instance_id}-started`;
     const [row] = this.#sql.exec<RunRow>(
       `UPDATE pipeline_runs SET status = 'queued', trusted = 1, trigger = 'start', user_id = ?, alias = ?,
-         instance_id = ?, started_at = NULL, torn_down = 0, containers = NULL
+         instance_id = ?, started_at = NULL, torn_down = 0, containers = NULL, owner_started_at = ?
        WHERE id = ? AND status = 'waiting' RETURNING *`,
       owner.user.id,
       owner.alias,
       instanceId,
+      this.#ms(),
       run.id,
     );
     if (row === undefined) throw new Error(`run ${run.id} isn't waiting`);
@@ -793,16 +797,11 @@ export class PipelineRuns {
   }
 
   /**
-   * Takes trust from a run of the owner's push, unless the owner started it: it runs task check
-   * `taskCheck.name`, which `taskCheck.writer` wrote and not the owner. It then holds no secret and
-   * saves no cache.
+   * Takes trust from a run: it runs task check `taskCheck.name`, which `taskCheck.writer` wrote and
+   * not the owner (see `TaskStore.runDefinitions`). It then holds no secret and saves no cache.
    */
   distrust(id: number, taskCheck: TaskCheckWriter): void {
-    this.#sql.exec(
-      "UPDATE pipeline_runs SET trusted = 0, task_check = ? WHERE id = ? AND trigger != 'start'",
-      JSON.stringify(taskCheck),
-      id,
-    );
+    this.#sql.exec("UPDATE pipeline_runs SET trusted = 0, task_check = ? WHERE id = ?", JSON.stringify(taskCheck), id);
   }
 
   /**

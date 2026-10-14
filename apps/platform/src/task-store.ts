@@ -636,7 +636,7 @@ export class TaskStore {
         input.attemptLimit ?? null,
         storedDefinitions({ checks: input.checks ?? [], metrics: input.metrics ?? [] }),
         storedSelection(input.selection ?? null),
-        JSON.stringify(checkWriters(input.checks ?? [], [], [], checkEditor(project, actor))),
+        JSON.stringify(checkWriters(input.checks ?? [], [], [], this.#checkEditor(project, actor))),
       );
       this.#journal(actor, "created", number, null);
       return this.#task(number);
@@ -656,12 +656,18 @@ export class TaskStore {
     return row === undefined ? NO_TASK_DEFINITIONS : toTask(row).definitions;
   }
 
+  /** Who writes the task checks `actor` sets now: the owner when it's them, as for a push (`isMaintainer`). */
+  #checkEditor(project: ProjectContext, actor: Actor): Omit<CheckWriter, "name"> {
+    return { user: actor.user.id, owner: isMaintainer(project, actor), at: this.#now().getTime() };
+  }
+
   /**
    * For run `id`'s Workflow, as it reads its config: what its line's task defines over the project's
    * config (`definitionsOf`). A run of the owner's push that would run a task check someone else
    * wrote stops being trusted here, recording which check and who wrote it, as the check runs from
    * the setups' snapshot and could read what they left behind. A run the owner started stays trusted
-   * whoever wrote its task's checks: Start was the owner's review.
+   * whoever wrote its task's checks before they started it, as Start was the owner's review of them;
+   * a check someone else changed since takes its trust the same way, and it waits for the owner again.
    */
   runDefinitions(id: number): TaskDefinitions {
     return this.#sql.transaction(() => {
@@ -671,8 +677,9 @@ export class TaskStore {
       const [row] = number === undefined ? [] : this.#sql.exec<TaskRow>("SELECT * FROM tasks WHERE number = ?", number);
       if (row === undefined) return NO_TASK_DEFINITIONS;
       const task = toTask(row);
-      const foreign = task.check_writers.find((writer) => !writer.owner);
-      if (run.trusted && run.trigger !== "start" && foreign !== undefined) {
+      const reviewed = run.trigger === "start" ? (run.owner_started_at ?? 0) : null;
+      const foreign = task.check_writers.find((w) => !w.owner && (reviewed === null || w.at > reviewed));
+      if (run.trusted && foreign !== undefined) {
         this.runs.distrust(id, { name: foreign.name, writer: foreign.user });
       }
       return task.definitions;
@@ -732,7 +739,7 @@ export class TaskStore {
       edited.checks,
       current.definitions.checks,
       current.check_writers,
-      checkEditor(project, actor),
+      this.#checkEditor(project, actor),
     );
     const redefining = definitions !== storedDefinitions(current.definitions);
     // A rescore could withdraw a candidate, and a new policy could end the vote's say.
@@ -3595,7 +3602,7 @@ function toTask(row: TaskRow): StoredTask {
     definitions,
     check_writers:
       row.check_writers === null
-        ? definitions.checks.map((check) => ({ name: check.name, user: row.creator, owner: false }))
+        ? definitions.checks.map((check) => ({ name: check.name, user: row.creator, owner: false, at: 0 }))
         : (JSON.parse(row.check_writers) as CheckWriter[]),
     selection: row.selection === null ? null : (JSON.parse(row.selection) as SelectionPolicy),
   };
@@ -3711,11 +3718,6 @@ function mayGrant(project: ProjectContext, actor: Actor): void {
   if (!isOwnerAsThemselves(project, actor)) {
     throw new ServiceError("forbidden", "only the project owner, acting as themselves, may");
   }
-}
-
-/** Who writes the task checks `actor` sets: the owner when it's them, as for a push (`isMaintainer`). */
-function checkEditor(project: ProjectContext, actor: Actor): Omit<CheckWriter, "name"> {
-  return { user: actor.user.id, owner: isMaintainer(project, actor) };
 }
 
 /** The attempt's author, or one of their aliases, holds its claim. */

@@ -133,6 +133,8 @@ export interface CheckWriter {
   name: string;
   user: string;
   owner: boolean;
+  /** When they wrote it (ms); 0 for a check saved before writers were. */
+  at: number;
 }
 
 /**

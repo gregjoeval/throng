@@ -57,6 +57,9 @@ class FakeWorkflow implements PipelineWorkflowBinding {
 }
 
 function setup() {
+  let clock = new Date("2026-10-10T12:00:00.000Z");
+  /** Moves the store's clock on by a second. */
+  const tick = () => void (clock = new Date(clock.getTime() + 1000));
   const repos = new FakeRepos();
   void repos.create(ORIGIN, { defaultBranch: "main" });
   const base = repos.commit(ORIGIN, { files: { "README.md": "hi\n" }, message: "init" });
@@ -66,7 +69,7 @@ function setup() {
   const store = new TaskStore({
     sql,
     repos,
-    now: () => new Date("2026-10-10T12:00:00.000Z"),
+    now: () => clock,
     runner: { workflow, teardown: async (id, containers) => void tornDown.push([id, containers]) },
     keyring: keyringFrom(KEYRING),
   });
@@ -94,7 +97,7 @@ function setup() {
   /** A task by ada with one draft attempt by ada. */
   const draft = async (): Promise<AttemptInput> => at(await drafts(), 0);
 
-  return { repos, base, sql, store, workflow, tornDown, journal, runs, commit, pushed, drafts, draft };
+  return { repos, base, sql, tick, store, workflow, tornDown, journal, runs, commit, pushed, drafts, draft };
 }
 
 async function code(promise: Promise<unknown>): Promise<string> {
@@ -1166,13 +1169,38 @@ describe("trust and a task's checks", () => {
     expect(t.store.sealedSecretsFor(run.id, ["DEPLOY"])).toMatchObject({ sealed: [{ name: "DEPLOY" }] });
   });
 
+  it("takes trust from a started run whose task checks someone else changed since the owner started it", async () => {
+    const t = setup();
+    const { task, run } = await ownersPushOn(t, ada);
+    t.store.pipelinePlanned(run.id, [], DEPLOYS);
+    t.tick();
+    await t.store.startRun(PROJECT, owner, { run: run.id, sha: defined(run.sha) });
+    await t.store.runs.drain();
+    t.tick();
+    await t.store.editTask(PROJECT, ada, { task, checks: [{ name: "lint", command: "cat ~/.npmrc" }] });
+    t.store.runDefinitions(run.id);
+    expect(t.store.runs.getRun(run.id)).toMatchObject({
+      trusted: false,
+      trigger: "start",
+      task_check: { name: "lint", writer: ada.user.id },
+    });
+    expect(t.store.pipelinePlanned(run.id, [], DEPLOYS)).toEqual({ kind: "waiting" });
+
+    // Started again, after the change, the owner has reviewed it.
+    t.tick();
+    await t.store.startRun(PROJECT, owner, { run: run.id, sha: defined(run.sha) });
+    await t.store.runs.drain();
+    t.store.runDefinitions(run.id);
+    expect(t.store.runs.getRun(run.id)).toMatchObject({ status: "running", trusted: true });
+  });
+
   it("takes a check from before writers were recorded as its task's creator's", async () => {
     const t = setup();
     t.repos.commit(ORIGIN, { files: { ".throng/config.yml": DEPLOY_CONFIG } });
     const task = t.store.createTask(PROJECT, owner, { title: "Fix it", checks: [LINT] });
     t.sql.exec("UPDATE tasks SET check_writers = NULL WHERE number = ?", task.number);
     expect(t.store.getTask(PROJECT, owner, { task: task.number }).check_writers).toEqual([
-      { name: "lint", user: owner.user.id, owner: false },
+      { name: "lint", user: owner.user.id, owner: false, at: 0 },
     ]);
   });
 
@@ -1180,19 +1208,21 @@ describe("trust and a task's checks", () => {
     const t = setup();
     const task = t.store.createTask(PROJECT, ada, { title: "Fix it", checks: [LINT] }).number;
     const writers = () => t.store.getTask(PROJECT, owner, { task }).check_writers;
-    const adas = { name: "lint", user: ada.user.id, owner: false };
+    const at0 = Date.parse("2026-10-10T12:00:00.000Z");
+    const adas = { name: "lint", user: ada.user.id, owner: false, at: at0 };
     expect(writers()).toEqual([adas]);
 
     await t.store.editTask(PROJECT, owner, { task, title: "Fix it now" });
     await t.store.editTask(PROJECT, owner, { task, checks: [{ name: "lint", command: "npm run lint" }] });
     expect(writers()).toEqual([adas]);
 
+    t.tick();
     const ownersAlias = actor("owner001", "claude");
     await t.store.editTask(PROJECT, ownersAlias, {
       task,
       checks: [{ name: "lint", command: "npm run lint -- --fix" }],
     });
-    const owners = { name: "lint", user: owner.user.id, owner: true };
+    const owners = { name: "lint", user: owner.user.id, owner: true, at: at0 + 1000 };
     expect(writers()).toEqual([owners]);
 
     await t.store.editTask(PROJECT, ada, {
@@ -1202,7 +1232,7 @@ describe("trust and a task's checks", () => {
         { name: "types", command: "npm run typecheck" },
       ],
     });
-    expect(writers()).toEqual([owners, { name: "types", user: ada.user.id, owner: false }]);
+    expect(writers()).toEqual([owners, { name: "types", user: ada.user.id, owner: false, at: at0 + 1000 }]);
   });
 });
 

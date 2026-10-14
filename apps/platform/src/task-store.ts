@@ -2060,7 +2060,7 @@ export class TaskStore {
    * names, as the settings are now, or the first that's gone or no longer allowed in the run's
    * pipeline. Throws for a run that isn't trusted or running, which may hold none.
    */
-  pipelineSecrets(id: number, names: readonly string[]): ReturnType<Secrets["sealedFor"]> {
+  sealedSecretsFor(id: number, names: readonly string[]): ReturnType<Secrets["sealedFor"]> {
     const run = this.scoring.getRun(id);
     if (run?.status !== "running" || !run.trusted) throw new Error(`run ${id} may hold no secrets`);
     return this.#secrets.sealedFor(names, run.pipeline);

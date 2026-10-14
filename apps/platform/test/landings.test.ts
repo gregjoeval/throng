@@ -291,7 +291,7 @@ describe("starting a landing", () => {
     expect(verdict).toEqual({ kind: "waiting" });
     expect(store.scoring.getRun(held.id)).toMatchObject({ status: "waiting", trusted: false, secrets: ["DEPLOY"] });
     expect(mr(t1.task)).toMatchObject({ state: "pending", position: null, last_dequeue: null });
-    expect(() => store.pipelineSecrets(held.id, ["DEPLOY"])).toThrow(/may hold no secrets/u);
+    expect(() => store.sealedSecretsFor(held.id, ["DEPLOY"])).toThrow(/may hold no secrets/u);
     // The queue moves on without it, and asking again doesn't queue it.
     await drain();
     expect(mr(t2.task).state).toBe("landing");
@@ -322,7 +322,7 @@ describe("starting a landing", () => {
     });
     await store.putSecret(PROJECT, owner, { name: "PROD", pipelines: ["main"] });
     expect(store.pipelinePlanned(landing().id, [], named)).toEqual({ kind: "start" });
-    expect(store.pipelineSecrets(landing().id, ["PROD"])).toMatchObject({ sealed: [{ name: "PROD" }] });
+    expect(store.sealedSecretsFor(landing().id, ["PROD"])).toMatchObject({ sealed: [{ name: "PROD" }] });
   });
 });
 

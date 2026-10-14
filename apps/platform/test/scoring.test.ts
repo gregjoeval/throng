@@ -977,14 +977,14 @@ describe("trust and secrets", () => {
     const own = await opened(t, owner);
     const adas = await opened(t, ada);
     await t.store.scoring.drain();
-    const loaded = t.store.pipelineSecrets(at(t.runs(own), 0).id, ["DEPLOY"]);
+    const loaded = t.store.sealedSecretsFor(at(t.runs(own), 0).id, ["DEPLOY"]);
     if (!("sealed" in loaded)) throw new Error(loaded.error);
     expect(JSON.stringify(loaded)).not.toContain("deploy-token-0123");
     expect(await openSealed(keyringFrom(KEYRING), PROJECT.id, at(loaded.sealed, 0))).toBe("deploy-token-0123");
-    expect(() => t.store.pipelineSecrets(at(t.runs(adas), 0).id, ["DEPLOY"])).toThrow(/may hold no secrets/u);
+    expect(() => t.store.sealedSecretsFor(at(t.runs(adas), 0).id, ["DEPLOY"])).toThrow(/may hold no secrets/u);
 
     t.store.deleteSecret(PROJECT, owner, { name: "DEPLOY" });
-    expect(t.store.pipelineSecrets(at(t.runs(own), 0).id, ["DEPLOY"])).toEqual({
+    expect(t.store.sealedSecretsFor(at(t.runs(own), 0).id, ["DEPLOY"])).toEqual({
       secret: "DEPLOY",
       error: "secret DEPLOY has no value in the project settings",
     });
@@ -1031,7 +1031,7 @@ describe("starting a waiting run", () => {
     });
     expect(at(t.runs(ref), 0).status).toBe("running");
     expect(t.store.pipelinePlanned(run.id, [], DEPLOYS)).toEqual({ kind: "start" });
-    expect(t.store.pipelineSecrets(run.id, ["DEPLOY"])).toMatchObject({ sealed: [{ name: "DEPLOY" }] });
+    expect(t.store.sealedSecretsFor(run.id, ["DEPLOY"])).toMatchObject({ sealed: [{ name: "DEPLOY" }] });
   });
 
   it("is the owner's alone, acting as themselves", async () => {

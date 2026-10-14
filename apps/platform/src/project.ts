@@ -122,11 +122,11 @@ export class ProjectCoordinator extends DurableObject<Env> {
 
   /**
    * Called by a trusted run's Pipeline Workflow in the step that starts a container: the sealed values
-   * of the secrets it names, or why one can't be had (see `TaskStore.pipelineSecrets`). The step opens
+   * of the secrets it names, or why one can't be had (see `TaskStore.sealedSecretsFor`). The step opens
    * them; they're never persisted.
    */
   pipelineSecrets(run: number, names: string[]): { sealed: SealedSecret[] } | SecretRefusal {
-    return this.#tasks.pipelineSecrets(run, names);
+    return this.#tasks.sealedSecretsFor(run, names);
   }
 
   /**

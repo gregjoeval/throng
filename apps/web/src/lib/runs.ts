@@ -1,6 +1,7 @@
 // What the runs pages show about a pipeline run, in the platform's own values: labels, how long it
 // took, where its line links, and its outcome's steps in the sections the run page shows them in.
 
+import { LANDING_STEPS } from "@throng/platform/landing";
 import { parseAttemptRef, parseTaskRef, taskRef } from "@throng/platform/task-refs";
 import type { ProjectRef, Run, RunWithOutcome } from "@/lib/api";
 import { shortSha } from "@/lib/commits";
@@ -77,10 +78,15 @@ export function lineHref(projectRef: ProjectRef, run: Pick<Run, "line" | "sha">)
 /** What starting a run waiting for the owner means: the head it runs, the attempt that's on, and the secrets it holds. */
 export type Waiting = NonNullable<Run["waiting"]>;
 
-/** Where a waiting run's diff is: the commit it would run, looked up in the attempt it's on. */
+/**
+ * Where a waiting run's diff is: everything Start would run, not just its head's last commit, so no
+ * change hides in an earlier one. An attempt's or task branch's head is compared from its base (where
+ * it meets its task branch or `main`); a held landing's approved head, which has none, from `main`, as
+ * is a head that shares no history with its base. Looked up in the attempt it's on.
+ */
 export function waitingHref(projectRef: ProjectRef, waiting: Waiting): string {
   const attempt = waiting.attempt === null ? {} : { attempt: waiting.attempt };
-  return buildPath({ view: "commit", ...projectRef, sha: waiting.head, ...attempt });
+  return buildPath({ view: "compare", ...projectRef, from: waiting.base ?? "main", to: waiting.head, ...attempt });
 }
 
 /**
@@ -99,10 +105,9 @@ export function runHead(run: Pick<Run, "sha">): string {
   return run.sha === null ? "—" : shortSha(run.sha);
 }
 
-/** Throng's own steps of a landing, which the run page shows between the checks and the post-gate steps. */
-const LANDING_STEPS = new Set(["merge", "land"]);
-
-const isLanding = (step: RunStep) => step.source === "platform" && LANDING_STEPS.has(step.name);
+/** Whether a step is Throng's own of a landing, which the run page shows between the checks and the post-gate steps. */
+const isLanding = (step: RunStep) =>
+  step.source === "platform" && (LANDING_STEPS as readonly string[]).includes(step.name);
 
 /** One group of checks: its name, or null for the checks in none. */
 export interface CheckGroup {

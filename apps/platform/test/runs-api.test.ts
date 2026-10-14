@@ -65,12 +65,11 @@ async function setup() {
   const queue = () => store(projectId).scoring;
 
   /**
-   * Queues a run on `line` at a new head, as ada; returns its id. Only attempt lines request runs so
-   * far, so the row is written as the queue writes one.
+   * Queues a run on `line` at `sha` (a new head unless given), as ada; returns its id. Only attempt
+   * lines request runs so far, so the row is written as the queue writes one.
    */
   let heads = 0;
-  const run = (line: string, trigger: ScoringTrigger = "push") => {
-    const sha = (++heads).toString(16).padStart(40, "0");
+  const run = (line: string, trigger: ScoringTrigger = "push", sha = (++heads).toString(16).padStart(40, "0")) => {
     const [row] = sql(projectId).exec<{ id: number }>(
       `INSERT INTO pipeline_runs (project, line, sha, pipeline, trigger, user_id, status, instance_id, created_at)
        VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?) RETURNING id`,
@@ -92,7 +91,20 @@ async function setup() {
   };
   const setStatus = (id: number, status: string) =>
     sql(projectId).exec("UPDATE pipeline_runs SET status = ? WHERE id = ?", status, id);
-  return { call, greg, ada, tokenFor, run, finish, setStatus, queue, stopped, base: "/projects/greg/throng" };
+  return {
+    call,
+    greg,
+    ada,
+    tokenFor,
+    run,
+    finish,
+    setStatus,
+    queue,
+    stopped,
+    repos,
+    projectId,
+    base: "/projects/greg/throng",
+  };
 }
 
 describe("GET /projects/{owner}/{project}/runs", () => {
@@ -201,9 +213,9 @@ describe("GET /projects/{owner}/{project}/runs/{runId}", () => {
   });
 });
 
-/** A run on `t1a1` waiting for the owner, naming DEPLOY; returns its id and head. */
-async function waitingRun(t: Awaited<ReturnType<typeof setup>>) {
-  const id = t.run("t1a1");
+/** A run on `t1a1` waiting for the owner, naming DEPLOY, at `head` or a new one; returns its id and head. */
+async function waitingRun(t: Awaited<ReturnType<typeof setup>>, head?: string) {
+  const id = t.run("t1a1", "push", head);
   const sha = defined(t.queue().getRun(id)?.sha);
   t.queue().moveHead("t1a1", sha, false);
   await t.queue().drain();
@@ -219,10 +231,23 @@ describe("POST /projects/{owner}/{project}/runs/{runId}/start", () => {
     expect(res.body).toMatchObject({
       status: "waiting",
       cancellable: true,
-      waiting: { head: sha, attempt: "t1a1", secrets: ["DEPLOY"] },
+      waiting: { head: sha, attempt: "t1a1", base: null, secrets: ["DEPLOY"] },
     });
     const listed = await t.call("GET", `${t.base}/runs?status=waiting`, t.ada);
-    expect(listed.body["runs"][0]["waiting"]).toEqual({ head: sha, attempt: "t1a1", secrets: ["DEPLOY"] });
+    expect(listed.body["runs"][0]["waiting"]).toEqual({ head: sha, attempt: "t1a1", base: null, secrets: ["DEPLOY"] });
+  });
+
+  it("gives a waiting run's base, so the owner reviews every commit Start would run, not just the head", async () => {
+    const t = await setup();
+    const origin = `${t.projectId}-main`;
+    const fork = `${t.projectId}-t1a1`;
+    const main = t.repos.commit(origin, { files: { "a.txt": "1\n" } }).hash;
+    await t.repos.fork(origin, fork);
+    t.repos.commit(fork, { files: { "a.txt": "2\n" } });
+    const head = t.repos.commit(fork, { files: { "a.txt": "3\n" } }).hash;
+    const { id } = await waitingRun(t, head);
+    const res = await t.call("GET", `${t.base}/runs/${id}`, t.ada);
+    expect(res.body["waiting"]).toEqual({ head, attempt: "t1a1", base: main, secrets: ["DEPLOY"] });
   });
 
   it("starts it for the owner at the head they name: queued again, trusted, triggered `start`", async () => {

@@ -8,6 +8,7 @@ import { useState } from "react";
 import type { ReactNode } from "react";
 import { CommitFiles } from "@/components/commit-files";
 import { RelativeTime } from "@/components/commit-meta";
+import { ConflictFiles } from "@/components/conflict-files";
 import { Lane } from "@/components/lane";
 import { useMaySelect } from "@/components/selection";
 import { ErrorState, Loading } from "@/components/states";
@@ -16,6 +17,7 @@ import { Button } from "@/components/ui/button";
 import {
   actOnMergeRequest,
   compareQuery,
+  dequeueConflictDiffQuery,
   dequeueQuery,
   mergeRequestQuery,
   TASK_POLL_MS,
@@ -265,21 +267,20 @@ function Dequeued({ projectRef, task, mr, at }: InTask & { mr: MergeRequest; at:
       <p>{reasonText({ reason }, mr.attempt)}</p>
       {detailed && dequeue.isPending ? <Loading label="Loading details…" /> : null}
       {dequeue.isError ? <ErrorState error={dequeue.error} /> : null}
-      {dequeue.isSuccess ? <DequeueDetails dequeue={dequeue.data} /> : null}
+      {dequeue.isSuccess ? <DequeueDetails projectRef={projectRef} task={task} at={at} dequeue={dequeue.data} /> : null}
     </section>
   );
 }
 
-function DequeueDetails({ dequeue }: { dequeue: Dequeue }) {
+function DequeueDetails({ projectRef, task, at, dequeue }: InTask & { at: string; dequeue: Dequeue }) {
   const { details } = dequeue;
   if (details === null) return null;
   if ("files" in details) {
     return (
-      <div className="flex flex-col gap-3">
-        {details.files.map((file) => (
-          <ConflictFile key={file.path} attempt={details.attempt} file={file} />
-        ))}
-      </div>
+      <ConflictFiles
+        details={details}
+        diffQuery={(path, side) => dequeueConflictDiffQuery(projectRef, task.ref, at, path, side)}
+      />
     );
   }
   if ("steps" in details) {
@@ -308,57 +309,5 @@ function DequeueDetails({ dequeue }: { dequeue: Dequeue }) {
       {details.step === undefined ? null : <span className="font-mono">{details.step}: </span>}
       {details.error}
     </p>
-  );
-}
-
-type ConflictFileDetails = Extract<NonNullable<Dequeue["details"]>, { files: unknown }>["files"][number];
-
-const CONFLICT_LABELS: Record<ConflictFileDetails["type"], string> = {
-  content: "Both changed it",
-  modifyDelete: "Deleted on one side, changed on the other",
-  addAdd: "Both added it",
-  rename: "Renamed differently on each side",
-};
-
-/** One conflicting file: its type, and each hunk's three sides. */
-function ConflictFile({ attempt, file }: { attempt: string; file: ConflictFileDetails }) {
-  return (
-    <section aria-label={`Conflict in ${file.path}`} className="flex flex-col gap-2 rounded-lg border px-3 py-2">
-      <h4 className="flex flex-wrap items-center gap-2">
-        <span className="font-mono">{file.path}</span>
-        <span className="text-xs text-muted-foreground">{CONFLICT_LABELS[file.type]}</span>
-      </h4>
-      {file.truncated ? (
-        <p role="note" className="text-muted-foreground">
-          Its hunks were left out: they were too large to show.
-        </p>
-      ) : null}
-      {(file.hunks ?? []).map((hunk) => (
-        <table
-          key={hunk.startLine}
-          aria-label={`Hunk at line ${hunk.startLine}`}
-          className="w-full table-fixed text-xs"
-        >
-          <thead>
-            <tr>
-              {["Base", "main", attempt].map((side) => (
-                <th key={side} className="px-2 py-1 text-left font-medium text-muted-foreground">
-                  {side}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              {[hunk.base, hunk.main, hunk.attempt].map((lines, i) => (
-                <td key={i} className="border px-2 py-1 align-top">
-                  <pre className="overflow-x-auto whitespace-pre">{lines.join("\n")}</pre>
-                </td>
-              ))}
-            </tr>
-          </tbody>
-        </table>
-      ))}
-    </section>
   );
 }

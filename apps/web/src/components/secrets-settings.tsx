@@ -28,6 +28,12 @@ export function SecretsSettings({ projectRef }: { projectRef: ProjectRef }) {
   const secrets = useQuery(secretsQuery(projectRef));
   const [editing, setEditing] = useState<Editing>(null);
   const close = () => setEditing(null);
+  const edited =
+    editing?.kind === "edit" && secrets.isSuccess
+      ? secrets.data.secrets.find((s) => s.name === editing.name)
+      : undefined;
+  // The secret being edited is gone, deleted elsewhere: its form closes rather than become a new one's.
+  if (editing?.kind === "edit" && secrets.isSuccess && edited === undefined) setEditing(null);
 
   return (
     <section aria-labelledby="secrets-heading" className="flex flex-col gap-3">
@@ -78,20 +84,15 @@ export function SecretsSettings({ projectRef }: { projectRef: ProjectRef }) {
             </tbody>
           </table>
         ))}
-      {editing?.kind === "edit" && secrets.isSuccess && (
-        <SecretForm
-          key={editing.name}
-          projectRef={projectRef}
-          secret={secrets.data.secrets.find((s) => s.name === editing.name)}
-          onDone={close}
-        />
+      {edited === undefined ? null : (
+        <SecretForm key={edited.name} projectRef={projectRef} secret={edited} onDone={close} />
       )}
     </section>
   );
 }
 
-/** The setups and checks naming a secret: `setup deps, check test`. */
-const steps = (use: SecretUse) => use.steps.join(", ");
+/** The setups, checks and post-gate steps naming a secret: `setup deps, check test`. */
+const namedBy = (use: SecretUse) => use.steps.join(", ");
 
 /** The secrets `main`'s config names that have no value: every run naming one fails before it starts. */
 function Unset({ uses }: { uses: SecretUse[] }) {
@@ -102,7 +103,7 @@ function Unset({ uses }: { uses: SecretUse[] }) {
       <ul className="mt-1 list-disc pl-5">
         {uses.map((use) => (
           <li key={use.name}>
-            <span className="font-mono">{use.name}</span>, named by <span className="font-mono">{steps(use)}</span>
+            <span className="font-mono">{use.name}</span>, named by <span className="font-mono">{namedBy(use)}</span>
           </li>
         ))}
       </ul>
@@ -147,7 +148,7 @@ function SecretRow({
           <span className="text-muted-foreground">Not named</span>
         ) : (
           <div className="flex flex-col gap-1">
-            <span className="font-mono">{steps(use)}</span>
+            <span className="font-mono">{namedBy(use)}</span>
             {use.notAllowedIn.length > 0 && (
               <span className="text-amber-700 dark:text-amber-400">
                 Not allowed in {use.notAllowedIn.join(" or ")}: runs there fail

@@ -14,6 +14,7 @@ import { Route as OwnerProjectIndexRouteImport } from './routes/$owner/$project/
 import { Route as OwnerProjectSettingsRouteImport } from './routes/$owner/$project/settings'
 import { Route as OwnerProjectCommitShaRouteImport } from './routes/$owner/$project/commit/$sha'
 import { Route as OwnerProjectCommitsRefRouteImport } from './routes/$owner/$project/commits/$ref'
+import { Route as OwnerProjectCompareRangeRouteImport } from './routes/$owner/$project/compare/$range'
 import { Route as OwnerProjectRunsIndexRouteImport } from './routes/$owner/$project/runs/index'
 import { Route as OwnerProjectRunsRunRouteImport } from './routes/$owner/$project/runs/$run'
 import { Route as OwnerProjectTasksIndexRouteImport } from './routes/$owner/$project/tasks/index'
@@ -47,6 +48,12 @@ const OwnerProjectCommitsRefRoute = OwnerProjectCommitsRefRouteImport.update({
   path: '/$owner/$project/commits/$ref',
   getParentRoute: () => rootRouteImport,
 } as any)
+const OwnerProjectCompareRangeRoute =
+  OwnerProjectCompareRangeRouteImport.update({
+    id: '/$owner/$project/compare/$range',
+    path: '/$owner/$project/compare/$range',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const OwnerProjectRunsIndexRoute = OwnerProjectRunsIndexRouteImport.update({
   id: '/$owner/$project/runs/',
   path: '/$owner/$project/runs/',
@@ -91,6 +98,7 @@ export interface FileRoutesByFullPath {
   '/$owner/$project/': typeof OwnerProjectIndexRoute
   '/$owner/$project/commit/$sha': typeof OwnerProjectCommitShaRoute
   '/$owner/$project/commits/$ref': typeof OwnerProjectCommitsRefRoute
+  '/$owner/$project/compare/$range': typeof OwnerProjectCompareRangeRoute
   '/$owner/$project/runs/$run': typeof OwnerProjectRunsRunRoute
   '/$owner/$project/tasks/$t': typeof OwnerProjectTasksTRoute
   '/$owner/$project/runs/': typeof OwnerProjectRunsIndexRoute
@@ -105,6 +113,7 @@ export interface FileRoutesByTo {
   '/$owner/$project': typeof OwnerProjectIndexRoute
   '/$owner/$project/commit/$sha': typeof OwnerProjectCommitShaRoute
   '/$owner/$project/commits/$ref': typeof OwnerProjectCommitsRefRoute
+  '/$owner/$project/compare/$range': typeof OwnerProjectCompareRangeRoute
   '/$owner/$project/runs/$run': typeof OwnerProjectRunsRunRoute
   '/$owner/$project/tasks/$t': typeof OwnerProjectTasksTRoute
   '/$owner/$project/runs': typeof OwnerProjectRunsIndexRoute
@@ -120,6 +129,7 @@ export interface FileRoutesById {
   '/$owner/$project/': typeof OwnerProjectIndexRoute
   '/$owner/$project/commit/$sha': typeof OwnerProjectCommitShaRoute
   '/$owner/$project/commits/$ref': typeof OwnerProjectCommitsRefRoute
+  '/$owner/$project/compare/$range': typeof OwnerProjectCompareRangeRoute
   '/$owner/$project/runs/$run': typeof OwnerProjectRunsRunRoute
   '/$owner/$project/tasks/$t': typeof OwnerProjectTasksTRoute
   '/$owner/$project/runs/': typeof OwnerProjectRunsIndexRoute
@@ -136,6 +146,7 @@ export interface FileRouteTypes {
     | '/$owner/$project/'
     | '/$owner/$project/commit/$sha'
     | '/$owner/$project/commits/$ref'
+    | '/$owner/$project/compare/$range'
     | '/$owner/$project/runs/$run'
     | '/$owner/$project/tasks/$t'
     | '/$owner/$project/runs/'
@@ -150,6 +161,7 @@ export interface FileRouteTypes {
     | '/$owner/$project'
     | '/$owner/$project/commit/$sha'
     | '/$owner/$project/commits/$ref'
+    | '/$owner/$project/compare/$range'
     | '/$owner/$project/runs/$run'
     | '/$owner/$project/tasks/$t'
     | '/$owner/$project/runs'
@@ -164,6 +176,7 @@ export interface FileRouteTypes {
     | '/$owner/$project/'
     | '/$owner/$project/commit/$sha'
     | '/$owner/$project/commits/$ref'
+    | '/$owner/$project/compare/$range'
     | '/$owner/$project/runs/$run'
     | '/$owner/$project/tasks/$t'
     | '/$owner/$project/runs/'
@@ -179,6 +192,7 @@ export interface RootRouteChildren {
   OwnerProjectIndexRoute: typeof OwnerProjectIndexRoute
   OwnerProjectCommitShaRoute: typeof OwnerProjectCommitShaRoute
   OwnerProjectCommitsRefRoute: typeof OwnerProjectCommitsRefRoute
+  OwnerProjectCompareRangeRoute: typeof OwnerProjectCompareRangeRoute
   OwnerProjectRunsRunRoute: typeof OwnerProjectRunsRunRoute
   OwnerProjectTasksTRoute: typeof OwnerProjectTasksTRoute
   OwnerProjectRunsIndexRoute: typeof OwnerProjectRunsIndexRoute
@@ -223,6 +237,13 @@ declare module '@tanstack/react-router' {
       path: '/$owner/$project/commits/$ref'
       fullPath: '/$owner/$project/commits/$ref'
       preLoaderRoute: typeof OwnerProjectCommitsRefRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/$owner/$project/compare/$range': {
+      id: '/$owner/$project/compare/$range'
+      path: '/$owner/$project/compare/$range'
+      fullPath: '/$owner/$project/compare/$range'
+      preLoaderRoute: typeof OwnerProjectCompareRangeRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/$owner/$project/runs/': {
@@ -283,6 +304,7 @@ const rootRouteChildren: RootRouteChildren = {
   OwnerProjectIndexRoute: OwnerProjectIndexRoute,
   OwnerProjectCommitShaRoute: OwnerProjectCommitShaRoute,
   OwnerProjectCommitsRefRoute: OwnerProjectCommitsRefRoute,
+  OwnerProjectCompareRangeRoute: OwnerProjectCompareRangeRoute,
   OwnerProjectRunsRunRoute: OwnerProjectRunsRunRoute,
   OwnerProjectTasksTRoute: OwnerProjectTasksTRoute,
   OwnerProjectRunsIndexRoute: OwnerProjectRunsIndexRoute,

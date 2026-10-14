@@ -1,11 +1,22 @@
-// The route for a merge request's latest dequeue, `/api/projects/{owner}/{project}/tasks/{t}/
-// merge-request/dequeue`: why, the landing's run behind it, and the details that run holds. Mounted
-// by `api.ts`. Like the other merge request reads, it takes a bearer token or throng-web's forwarded
-// identity. The run's own routes serve its steps and logs.
+// The routes for a merge request's latest dequeue, under `/api/projects/{owner}/{project}/tasks/{t}/
+// merge-request/dequeue`: why, the landing's run behind it, and the details that run holds; and each
+// conflicting file's display diffs. Mounted by `api.ts`. Like the other merge request reads, they take
+// a bearer token or throng-web's forwarded identity. The run's own routes serve its steps and logs.
 
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import type { AccessBindings } from "./access.ts";
-import { json, ProjectPathSchema, requestTaskService } from "./api-shared.ts";
+import {
+  CONFLICT_DIFF_DESCRIPTION,
+  conflictDiffResponse,
+  ConflictSideQuerySchema,
+  diffContent,
+  FileDiffSchema,
+  json,
+  ProjectPathSchema,
+  requestTaskService,
+  TAIL,
+  tailedRoutes,
+} from "./api-shared.ts";
 import type { AuthEnv, bearerOrForwarded } from "./auth.ts";
 import { CONFLICT_CAPS, CONFLICT_TYPES } from "./conflicts.ts";
 import { errorBody, errorResponse } from "./errors.ts";
@@ -134,6 +145,7 @@ const errors = {
 const taskPath = ({ t, ...rest }: { owner: string; project: string; t: string }) => ({ ...rest, task: t });
 
 export function dequeueRoutes({ auth, repos, tasks }: DequeueOptions) {
+  const base = "/projects/{owner}/{project}/tasks/{t}/merge-request/dequeue";
   const service = requestTaskService(repos, tasks);
 
   const api = new OpenAPIHono<AuthEnv>({
@@ -143,26 +155,57 @@ export function dequeueRoutes({ auth, repos, tasks }: DequeueOptions) {
     },
   });
 
-  return api.openapi(
-    createRoute({
-      method: "get",
-      path: "/projects/{owner}/{project}/tasks/{t}/merge-request/dequeue",
-      operationId: "getMergeRequestDequeue",
-      tags: ["Merge queue"],
-      summary: "Get a merge request's latest dequeue, with its details",
-      description:
-        "Why the task's latest merge request last left the queue without landing, the landing's run behind it, " +
-        "and the details that run holds: every conflicting path with its blobs and hunks, the setups and checks " +
-        "that failed its gate, or the error that ended it.",
-      security,
-      middleware: [auth] as const,
-      request: { params: TaskPathSchema },
-      responses: {
-        200: { description: "The latest dequeue.", ...json(DequeueSchema) },
-        ...errors,
-        404: errorResponse("No such project or task, or its merge request was never dequeued."),
+  const tailed = tailedRoutes(api);
+
+  return api
+    .openapi(
+      createRoute({
+        method: "get",
+        path: base,
+        operationId: "getMergeRequestDequeue",
+        tags: ["Merge queue"],
+        summary: "Get a merge request's latest dequeue, with its details",
+        description:
+          "Why the task's latest merge request last left the queue without landing, the landing's run behind it, " +
+          "and the details that run holds: every conflicting path with its blobs and hunks, the setups and checks " +
+          "that failed its gate, or the error that ended it.",
+        security,
+        middleware: [auth] as const,
+        request: { params: TaskPathSchema },
+        responses: {
+          200: { description: "The latest dequeue.", ...json(DequeueSchema) },
+          ...errors,
+          404: errorResponse("No such project or task, or its merge request was never dequeued."),
+        },
+      }),
+      async (c) => c.json(await service(c).getDequeue(c.var.actor, taskPath(c.req.valid("param"))), 200),
+    )
+    .openapi(
+      tailed(
+        createRoute({
+          method: "get",
+          path: `${base}/files/${TAIL}/diff`,
+          operationId: "getMergeRequestConflictDiff",
+          tags: ["Merge queue"],
+          summary: "Diff a conflicting file from the merge base to one side",
+          description: `One conflicting file of the latest \`conflict\` dequeue, ${CONFLICT_DIFF_DESCRIPTION}`,
+          security,
+          middleware: [auth] as const,
+          request: {
+            params: TaskPathSchema.extend({ path: z.string().openapi({ example: "src/app.ts" }) }),
+            query: ConflictSideQuerySchema,
+          },
+          responses: {
+            200: { description: "The file's diff.", content: diffContent(FileDiffSchema) },
+            ...errors,
+            404: errorResponse("No such project or task, or the latest dequeue has no conflict in that path."),
+          },
+        }),
+      ),
+      async (c) => {
+        const { path, ...params } = c.req.valid("param");
+        const found = await service(c).dequeueConflictFile(c.var.actor, { ...taskPath(params), path });
+        return (await conflictDiffResponse(c, repos(c.env), found, c.req.valid("query").side)) as never;
       },
-    }),
-    async (c) => c.json(await service(c).getDequeue(c.var.actor, taskPath(c.req.valid("param"))), 200),
-  );
+    );
 }

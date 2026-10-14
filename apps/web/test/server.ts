@@ -306,6 +306,20 @@ export function serveCompare(filesFor: (to: string, from: string) => FileDiff[],
   });
 }
 
+/**
+ * Each conflicting file's diff under `route` (`…/files/<path>/diff?side=`), recording `path?side=` as
+ * asked. Main's side adds one line and the attempt's two, to tell them apart.
+ */
+export function serveConflictDiffs(route: string, asked: string[] = []) {
+  return http.get(`*/api/projects/:owner/:project/${route}/files/*`, ({ request }) => {
+    const url = new URL(request.url);
+    const path = decodeURIComponent(url.pathname.split("/files/")[1]?.replace(/\/diff$/u, "") ?? "");
+    const side = url.searchParams.get("side");
+    asked.push(`${path}?side=${side}`);
+    return HttpResponse.json({ ...addedFile(path), additions: side === "main" ? 1 : 2 });
+  });
+}
+
 /** `main`'s head in `serveRefs` unless given another. */
 export const MAIN = "3a1e".padEnd(40, "0");
 

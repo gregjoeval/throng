@@ -6,7 +6,8 @@ import { Link } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 import { RefSwitcher } from "@/components/ref-switcher";
 import { ErrorState, Loading } from "@/components/states";
-import { meQuery, projectQuery } from "@/lib/api";
+import { projectQuery } from "@/lib/api";
+import { useIsOwner } from "@/lib/owner";
 import { attemptHint, buildPath, splitPath } from "@/lib/paths";
 import type { BrowseLocation, ProjectLocation } from "@/lib/paths";
 import { cn } from "@/lib/utils";
@@ -19,6 +20,7 @@ const SECTIONS: Record<ProjectLocation["view"], "code" | "commits" | "tasks" | "
   raw: "code",
   commits: "commits",
   commit: "commits",
+  compare: "commits",
   tasks: "tasks",
   task: "tasks",
   runs: "runs",
@@ -28,8 +30,7 @@ const SECTIONS: Record<ProjectLocation["view"], "code" | "commits" | "tasks" | "
 
 export function ProjectView({ location, children }: { location: ProjectLocation; children: ReactNode }) {
   const project = useQuery(projectQuery({ owner: location.owner, project: location.project }));
-  const me = useQuery(meQuery);
-  const isOwner = me.isSuccess && project.isSuccess && me.data.user.id === project.data.owner.id;
+  const isOwner = useIsOwner({ owner: location.owner, project: location.project });
   const { owner } = location;
   const ref = "ref" in location ? location.ref : "main";
   const home = buildPath({ view: "home", owner, project: location.project });

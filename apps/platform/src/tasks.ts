@@ -2,10 +2,11 @@
 // machine in the project's Durable Object (`task-store.ts`), where the permission checks sit next
 // to the state they guard. Answers carry users as `{id, handle}`, resolved from D1 at read time.
 
-import { currentBase, readTaskBranch } from "./base.ts";
+import { currentBase, lineBase, readTaskBranch } from "./base.ts";
 import type { Base } from "./base.ts";
-import { loadConfig, namedSecrets, selectionPolicy } from "./config.ts";
+import { configSecrets, loadConfig, selectionPolicy } from "./config.ts";
 import type { CheckConfig, MetricConfig, SelectionPolicy, VoteEligibility } from "./config.ts";
+import type { ConflictDetails, ConflictFile } from "./conflicts.ts";
 import { ServiceError } from "./errors.ts";
 import { attemptRemote } from "./git-remotes.ts";
 import type { ProjectPath } from "./git-remotes.ts";
@@ -13,6 +14,7 @@ import type { DequeueDetails } from "./landing.ts";
 import type { DequeueReason, StoredMergeRequest } from "./merge-requests.ts";
 import type { Pipeline } from "./pipelines.ts";
 import { resolveProject } from "./projects.ts";
+import { forkRepo, originRepo } from "./repos.ts";
 import type { Repos } from "./repos.ts";
 import type { Gate, ScoringResult } from "./results.ts";
 import type { RunOutcome, RunStep } from "./run-outcome.ts";
@@ -252,9 +254,23 @@ export interface Run {
   cancellable: boolean;
   /**
    * While it waits for the owner: the head Start names, the attempt that head is on (null for a task
-   * branch's), and the secrets it would hold once started. Null otherwise.
+   * branch's), the commit to diff that head from to review it, and the secrets it would hold once
+   * started. Null otherwise.
    */
-  waiting: { head: string; attempt: string | null; secrets: string[] } | null;
+  waiting: Waiting | null;
+}
+
+/** What starting a run waiting for the owner means. */
+export interface Waiting {
+  head: string;
+  attempt: string | null;
+  /**
+   * Where to diff `head` from to review it: an attempt's base, or where a task branch meets `main`.
+   * Null for a merge request's landing, whose approved head is diffed from `main`, and when they
+   * share no history.
+   */
+  base: string | null;
+  secrets: string[];
 }
 
 /** A run with how it ended: its outcome (and the slice scoring reads) once `done`, its error once `errored`. */
@@ -264,9 +280,25 @@ export interface RunDetail extends Run {
   result: ScoringResult | null;
 }
 
-/** A run's outcome as the API shows it: each step says which checks it waited for. */
-export interface PublicRunOutcome extends Omit<RunOutcome, "steps"> {
+/**
+ * A run's outcome as the API shows it: each step says which checks it waited for, and a landing's
+ * `landed` says what landed or carries the conflict that stopped it.
+ */
+export interface PublicRunOutcome extends Omit<RunOutcome, "steps" | "landed" | "conflict"> {
   steps: (RunStep & { after: string[] })[];
+  landed?: PublicLanded;
+}
+
+/** What a landing's run landed: the commit, or the conflict its merge hit. */
+export type PublicLanded = { kind: "landed"; sha: string } | { kind: "conflict"; details: ConflictDetails };
+
+/** A conflicting file of a landing's run, and the repos its blobs can be read from. */
+export interface ConflictFileSource {
+  file: ConflictFile;
+  /** The origin, which holds the base's and `main`'s blobs. */
+  origin: string;
+  /** The approved head's fork, which holds its blobs while the attempt is active; the origin has them once it's archived. */
+  fork: string;
 }
 
 /** A page of a project's runs, newest first, with the cursor of the next. */
@@ -376,6 +408,28 @@ export function taskService({ db, repos, backend, origin }: TaskServiceDeps) {
     return list.map((a) => publicAttempt(a, users, attemptRemote(origin, path, a.fork)));
   };
 
+  /**
+   * Reads what rendering runs of project `ctx` needs beyond the runs: who asked for each and, while
+   * one waits, where to diff its head from. Returns the renderer for `list`'s runs, by index.
+   */
+  const runRenderer = async (ctx: ProjectContext, list: StoredRun[]) => {
+    const [users, bases] = await Promise.all([
+      handles(
+        db,
+        list.map((r) => r.user_id),
+      ),
+      Promise.all(list.map((r) => waitingBase(repos, ctx.id, r))),
+    ]);
+    return (run: StoredRun, i: number) => publicRun(run, users, bases[i] ?? null);
+  };
+  /** Renders runs of project `ctx` as the API lists them. */
+  const runs = (ctx: ProjectContext) => async (list: StoredRun[]) => list.map(await runRenderer(ctx, list));
+  /** Renders runs of project `ctx` as `runs` does, each with its outcome or error. */
+  const details = (ctx: ProjectContext) => async (list: StoredRun[]) => {
+    const render = await runRenderer(ctx, list);
+    return list.map((run, i) => runDetail(run, render(run, i)));
+  };
+
   /** A task transition: resolves the project and task reference, then runs `method`. */
   const taskMove =
     (method: "closeTask" | "reopenTask" | "obsoleteTask" | "restoreTask") =>
@@ -396,8 +450,9 @@ export function taskService({ db, repos, backend, origin }: TaskServiceDeps) {
   const scoringRequest =
     (method: "scoreNow" | "rescore") =>
     async (actor: Actor, input: AttemptPath): Promise<ScoringAnswer> => {
-      const request = await invoke(method, await project(input), actor, attemptRefOf(input.attempt));
-      return publicScoring(request, await handles(db, [request.run.user_id]));
+      const ctx = await project(input);
+      const request = await invoke(method, ctx, actor, attemptRefOf(input.attempt));
+      return publicScoring(request, await one(request.run, runs(ctx)));
     };
 
   const mergeRequest = async (mr: StoredMergeRequest): Promise<MergeRequest> =>
@@ -595,18 +650,27 @@ export function taskService({ db, repos, backend, origin }: TaskServiceDeps) {
 
     /** The attempt's scoring runs, newest first. Any signed-in user may read them. */
     async listScoringRuns(actor: Actor, input: AttemptPath): Promise<RunDetail[]> {
-      const runs = await invoke("listScoringRuns", await project(input), actor, attemptRefOf(input.attempt));
-      const users = await handles(
-        db,
-        runs.map((r) => r.user_id),
-      );
-      return runs.map((r) => runDetail(r, users));
+      const ctx = await project(input);
+      return details(ctx)(await invoke("listScoringRuns", ctx, actor, attemptRefOf(input.attempt)));
     },
 
     /** One of the project's runs, with its outcome. Any signed-in user may read it. */
-    async getScoringRun(actor: Actor, input: ProjectPath & { run: number }): Promise<RunDetail> {
-      const run = await invoke("getScoringRun", await project(input), actor, { run: input.run });
-      return runDetail(run, await handles(db, [run.user_id]));
+    async getRun(actor: Actor, input: ProjectPath & { run: number }): Promise<RunDetail> {
+      const ctx = await project(input);
+      return one(await invoke("getScoringRun", ctx, actor, { run: input.run }), details(ctx));
+    },
+
+    /**
+     * One conflicting file of the conflict a landing's run hit, with the repos its blobs are in. Any
+     * signed-in user may read it.
+     */
+    async runConflictFile(
+      actor: Actor,
+      input: ProjectPath & { run: number; path: string },
+    ): Promise<ConflictFileSource> {
+      const ctx = await project(input);
+      const run = await invoke("getScoringRun", ctx, actor, { run: input.run });
+      return conflictFile(ctx, run.outcome?.conflict ?? null, input.path);
     },
 
     /** A page of the project's runs on every line, newest first. Any signed-in user may read them. */
@@ -615,8 +679,9 @@ export function taskService({ db, repos, backend, origin }: TaskServiceDeps) {
       input: ProjectPath & Omit<RunsQuery, "before"> & { cursor?: number | undefined },
     ): Promise<RunsList> {
       const { line, status, cursor, limit } = input;
-      const page = await invoke("listRuns", await project(input), actor, { line, status, before: cursor, limit });
-      return { runs: await publicRuns(db, page.runs), next: page.next };
+      const ctx = await project(input);
+      const page = await invoke("listRuns", ctx, actor, { line, status, before: cursor, limit });
+      return { runs: await runs(ctx)(page.runs), next: page.next };
     },
 
     /**
@@ -628,24 +693,24 @@ export function taskService({ db, repos, backend, origin }: TaskServiceDeps) {
       const ctx = await project(input);
       try {
         const { settled, ...run } = await invoke("waitForRun", ctx, actor, { run: input.run, wait: input.wait });
-        return { ...runDetail(run, await handles(db, [run.user_id])), settled };
+        return { ...(await one(run, details(ctx))), settled };
       } catch (error) {
         if (!droppedByReset(error)) throw error;
         const run = await invoke("getScoringRun", ctx, actor, { run: input.run });
-        return { ...runDetail(run, await handles(db, [run.user_id])), settled: runSettled(run) };
+        return { ...(await one(run, details(ctx))), settled: runSettled(run) };
       }
     },
 
     /** Cancels a run that can be cancelled. Only the project owner may. */
     async cancelRun(actor: Actor, input: ProjectPath & { run: number }): Promise<RunDetail> {
-      const run = await invoke("cancelRun", await project(input), actor, { run: input.run });
-      return runDetail(run, await handles(db, [run.user_id]));
+      const ctx = await project(input);
+      return one(await invoke("cancelRun", ctx, actor, { run: input.run }), details(ctx));
     },
 
     /** Starts a run waiting for the owner at the head `sha` they reviewed. Only the owner acting as themselves may. */
     async startRun(actor: Actor, input: ProjectPath & { run: number; sha: string }): Promise<RunDetail> {
-      const run = await invoke("startRun", await project(input), actor, { run: input.run, sha: input.sha });
-      return runDetail(run, await handles(db, [run.user_id]));
+      const ctx = await project(input);
+      return one(await invoke("startRun", ctx, actor, { run: input.run, sha: input.sha }), details(ctx));
     },
 
     /**
@@ -705,6 +770,16 @@ export function taskService({ db, repos, backend, origin }: TaskServiceDeps) {
     },
 
     /**
+     * One conflicting file of the task's merge request's latest dequeue, when that is a conflict, with
+     * the repos its blobs are in. Any signed-in user may read it.
+     */
+    async dequeueConflictFile(actor: Actor, input: TaskPath & { path: string }): Promise<ConflictFileSource> {
+      const ctx = await project(input);
+      const { details: found } = await invoke("getDequeue", ctx, actor, { task: taskNumber(input.task) });
+      return conflictFile(ctx, found !== null && "files" in found ? found : null, input.path);
+    },
+
+    /**
      * Opens a vote on the task among its passing attempts, under the `vote` selection policy, with an
      * optional deadline for ballots. The task's creator or the project owner may.
      */
@@ -754,14 +829,7 @@ export function taskService({ db, repos, backend, origin }: TaskServiceDeps) {
     async listSecrets(actor: Actor, input: ProjectPath): Promise<{ secrets: SecretSummary[]; uses: SecretUse[] }> {
       const ctx = await project(input);
       const secrets = await invoke("listSecrets", ctx, actor);
-      const config = await loadConfig(repos, ctx.id);
-      return {
-        secrets,
-        uses: secretUses(
-          config.kind === "valid" ? namedSecrets({ ...config.config, steps: config.config.pipelines.main.steps }) : [],
-          secrets,
-        ),
-      };
+      return { secrets, uses: secretUses(configSecrets(await loadConfig(repos, ctx.id)), secrets) };
     },
 
     /** Sets a secret's value, its pipelines, or both. */
@@ -777,6 +845,13 @@ export function taskService({ db, repos, backend, origin }: TaskServiceDeps) {
 }
 
 export type TaskService = ReturnType<typeof taskService>;
+
+/** The conflicting file at `path` of `conflict` in project `ctx`, with the repos its blobs are in. */
+function conflictFile(ctx: ProjectContext, conflict: ConflictDetails | null, path: string): ConflictFileSource {
+  const file = conflict?.files.find((f) => f.path === path);
+  if (conflict === null || file === undefined) throw new ServiceError("notFound", `no conflict in ${path}`);
+  return { file, origin: originRepo(ctx.id), fork: forkRepo(ctx.id, conflict.attempt) };
+}
 
 /** Renders one item with a renderer for lists. */
 async function one<T, U>(item: T, render: (list: T[]) => Promise<U[]>): Promise<U> {
@@ -934,15 +1009,12 @@ function publicVote(v: VoteDetail, users: Map<string, string>): Vote {
   };
 }
 
-function publicScoring(request: ScoringRequest, users: Map<string, string>): ScoringAnswer {
-  return {
-    queued: request.queued,
-    reason: request.queued ? null : request.reason,
-    run: publicRun(request.run, users),
-  };
+function publicScoring(request: ScoringRequest, run: Run): ScoringAnswer {
+  return { queued: request.queued, reason: request.queued ? null : request.reason, run };
 }
 
-function publicRun(run: StoredRun, users: Map<string, string>): Run {
+/** A run as the API lists it; `base` is where to diff its head from while it waits (`waitingBase`). */
+function publicRun(run: StoredRun, users: Map<string, string>, base: string | null): Run {
   return {
     id: run.id,
     line: run.line,
@@ -959,34 +1031,45 @@ function publicRun(run: StoredRun, users: Map<string, string>): Run {
     superseded: run.superseded,
     gate: run.outcome?.gate ?? null,
     cancellable: cancellable(run),
-    waiting: waitingFor(run),
+    waiting: waitingFor(run, base),
   };
 }
 
 /** What starting a run waiting for the owner means: the head it runs, the attempt that's on, and the secrets it holds. */
-function waitingFor(run: StoredRun): Run["waiting"] {
+function waitingFor(run: StoredRun, base: string | null): Run["waiting"] {
   if (run.status !== "waiting") return null;
   const head = run.sha ?? run.merge_head;
   if (head === null) return null;
   const attempt = isAttemptRef(run.line) ? run.line : run.merge_attempt;
-  return { head, attempt, secrets: run.secrets ?? [] };
+  return { head, attempt, base, secrets: run.secrets ?? [] };
 }
 
-function runDetail(run: StoredRun, users: Map<string, string>): RunDetail {
-  const outcome =
-    run.outcome === null
-      ? null
-      : { ...run.outcome, steps: run.outcome.steps.map((step) => ({ ...step, after: step.after ?? [] })) };
-  return { ...publicRun(run, users), error: run.error, outcome, result: run.result };
+/**
+ * Where to diff a waiting run's head from (`Waiting.base`): its line's base at that head. Null for
+ * any other run, and for a landing, which has no head of its own until it lands.
+ */
+async function waitingBase(repos: Repos, project: string, run: StoredRun): Promise<string | null> {
+  if (run.status !== "waiting" || run.sha === null) return null;
+  return (await lineBase(repos, project, { line: run.line, head: run.sha }))?.sha ?? null;
 }
 
-/** Runs as the API lists them, with the users who asked for them. */
-async function publicRuns(db: Database, runs: StoredRun[]): Promise<Run[]> {
-  const users = await handles(
-    db,
-    runs.map((r) => r.user_id),
-  );
-  return runs.map((r) => publicRun(r, users));
+/** `run` with its outcome or error; `listed` is the run as `publicRun` renders it. */
+function runDetail(run: StoredRun, listed: Run): RunDetail {
+  return {
+    ...listed,
+    error: run.error,
+    outcome: run.outcome === null ? null : publicOutcome(run.outcome),
+    result: run.result,
+  };
+}
+
+/** A stored outcome as the API shows it: each step's `after`, and a landing's `landed` keyed on what happened. */
+function publicOutcome({ steps, landed, conflict, ...rest }: RunOutcome): PublicRunOutcome {
+  const shown = { ...rest, steps: steps.map((step) => ({ ...step, after: step.after ?? [] })) };
+  if (landed === undefined) return shown;
+  if (landed !== "conflict") return { ...shown, landed: { kind: "landed", sha: landed.sha } };
+  if (conflict === undefined) throw new Error("a landing that conflicted kept no conflict");
+  return { ...shown, landed: { kind: "conflict", details: conflict } };
 }
 
 /** An attempt's scoring status for polling, with its current result once its head has one. */

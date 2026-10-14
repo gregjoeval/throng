@@ -81,8 +81,8 @@ What a push to one of a project's repos runs: its setups, then its checks, then 
 _Avoid_: Workflow, CI, job
 
 **Pipeline run**:
-One execution of a pipeline for one pushed head.
-_Avoid_: Build, job, run (on its own)
+One execution of a pipeline for one pushed head. Where nothing else that runs is in view, as in the API's `…/runs` routes, the MCP tools `list_runs` and `get_run`, the Runs tab and "Run 7", it is a run for short.
+_Avoid_: Build, job, run (on its own, where a step or check could be meant)
 
 **Line**:
 What a project's pipeline runs follow as it moves: an attempt's fork, a task's task branch, or `origin/main`. Each pipeline run belongs to one line, and a newer head on a line replaces the runs still waiting on it.

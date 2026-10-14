@@ -12,9 +12,14 @@ import {
   AttemptLimitSchema,
   BallotSchema,
   CloseVoteSchema,
+  CONFLICT_DIFF_DESCRIPTION,
+  conflictDiffResponse,
+  ConflictSideQuerySchema,
   CreateAttemptsSchema,
   CreateTaskSchema,
+  diffContent,
   EditAttemptSchema,
+  FileDiffSchema,
   HandOffSchema,
   json,
   OpenVoteSchema,
@@ -28,6 +33,8 @@ import {
   SelectionPolicyInputSchema,
   SelectionSchema,
   StartRunSchema,
+  TAIL,
+  tailedRoutes,
   TaskChecksInputSchema,
   TaskMetricsInputSchema,
   VoteCandidateSchema,
@@ -68,6 +75,7 @@ import { CHECK_OUTCOMES, GATES } from "./results.ts";
 import { STEP_KINDS, STEP_OUTCOMES } from "./run-outcome.ts";
 import { ATTEMPT_SCORING_STATUSES, RUN_STATUSES, SCORING_TRIGGERS } from "./scoring.ts";
 import { secretsRoutes } from "./secrets-api.ts";
+import { SECRET_NAME } from "./secrets.ts";
 import { ATTEMPT_STATES, TASK_STATES } from "./task-store.ts";
 import type { TaskBackend } from "./tasks.ts";
 import { DEFAULT_TOKEN_TTL_SECONDS, MAX_TOKEN_TTL_SECONDS, tokenService } from "./tokens.ts";
@@ -209,7 +217,9 @@ const MetricSchema = z
       "string never ranks.",
   });
 
-const SecretNamesSchema = z.array(z.string()).openapi({
+const SecretNameSchema = z.string().regex(SECRET_NAME);
+
+const SecretNamesSchema = z.array(SecretNameSchema).openapi({
   description:
     "The secrets it uses, by name. A trusted run's container holds each one the project settings allow in its " +
     "pipeline; a task's check names none.",
@@ -552,7 +562,16 @@ const RunSchema = z
           description: "The attempt `head` is on: the run's own line, or a landing's source attempt; null otherwise.",
           example: "t42a3",
         }),
-        secrets: z.array(z.string()).openapi({ description: "The secrets it would hold once started, by name." }),
+        base: z
+          .string()
+          .nullable()
+          .openapi({
+            description:
+              "Where to diff `head` from to review it (`compare/{base}...{head}`): an attempt's base, or where a task " +
+              "branch meets `main`. Null for a merge request's landing, whose approved head is diffed from `main`, and " +
+              "when they share no history.",
+          }),
+        secrets: z.array(SecretNameSchema).openapi({ description: "The secrets it would hold once started, by name." }),
       })
       .nullable()
       .openapi({
@@ -710,14 +729,22 @@ const RunOutcomeSchema = ScoringResultSchema.pick({ base: true, config: true, ga
         "has Throng's `merge` after `_diff` and `land` before the post-gate steps.",
     }),
     landed: z
-      .union([z.object({ sha: z.string() }), z.literal("conflict")])
+      .discriminatedUnion("kind", [
+        z.object({ kind: z.literal("landed"), sha: z.string().openapi({ description: "The commit it landed." }) }),
+        z.object({
+          kind: z.literal("conflict"),
+          details: ConflictDetailsSchema.openapi({
+            description:
+              "The conflict its `merge` hit, file by file; `GET …/runs/{runId}/conflict/files/{path}/diff` diffs a " +
+              "file from the merge base to either side.",
+          }),
+        }),
+      ])
       .optional()
       .openapi({
-        description: "For a landing: the commit it landed, or `conflict` when its merge conflicted; absent otherwise.",
+        description:
+          "For a landing: what it landed, or the conflict that stopped it; absent otherwise, and when its gate failed.",
       }),
-    conflict: ConflictDetailsSchema.optional().openapi({
-      description: "For a landing whose merge conflicted: the conflict, file by file.",
-    }),
   })
   .openapi("RunOutcome");
 
@@ -1177,6 +1204,7 @@ export function apiRoutes(options: ApiOptions = {}) {
       return undefined;
     },
   });
+  const tailed = tailedRoutes(api);
 
   api.openAPIRegistry.registerComponent("securitySchemes", "bearer", {
     type: "http",
@@ -1826,7 +1854,36 @@ export function apiRoutes(options: ApiOptions = {}) {
       }),
       async (c) => {
         const { runId, ...path } = c.req.valid("param");
-        return c.json(await tasks(c).getScoringRun(c.var.actor, { ...path, run: runId }), 200);
+        return c.json(await tasks(c).getRun(c.var.actor, { ...path, run: runId }), 200);
+      },
+    )
+    .openapi(
+      tailed(
+        createRoute({
+          method: "get",
+          path: `/projects/{owner}/{project}/runs/{runId}/conflict/files/${TAIL}/diff`,
+          operationId: "getRunConflictDiff",
+          tags: ["Runs"],
+          summary: "Diff a landing's conflicting file from the merge base to one side",
+          description: `One conflicting file of the conflict a landing's \`merge\` hit, ${CONFLICT_DIFF_DESCRIPTION}`,
+          security: bearerOrWeb,
+          middleware: [browser] as const,
+          request: {
+            params: RunPathSchema.extend({ path: z.string().openapi({ example: "src/app.ts" }) }),
+            query: ConflictSideQuerySchema,
+          },
+          responses: {
+            200: { description: "The file's diff.", content: diffContent(FileDiffSchema) },
+            400: errorResponse("The run id or the side is invalid."),
+            401: unauthorizedBearer,
+            404: errorResponse("No such project or run, or the run's merge didn't conflict in that path."),
+          },
+        }),
+      ),
+      async (c) => {
+        const { runId, path, ...project } = c.req.valid("param");
+        const found = await tasks(c).runConflictFile(c.var.actor, { ...project, run: runId, path });
+        return (await conflictDiffResponse(c, reposFor(c.env), found, c.req.valid("query").side)) as never;
       },
     )
     .openapi(

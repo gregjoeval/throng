@@ -16,6 +16,7 @@ import {
   result,
   runDetail,
   serveCompare,
+  serveConflictDiffs,
   server,
   serveTasks,
   task,
@@ -215,14 +216,18 @@ const CONFLICT: Dequeue = {
   },
 };
 
-/** The dequeue handler. */
-function serveDequeue(dequeue: Dequeue) {
-  return [http.get("*/api/projects/:owner/:project/tasks/:t/merge-request/dequeue", () => HttpResponse.json(dequeue))];
+/** The dequeue handler, and each conflicting file's diff, recording `path?side=` as asked. */
+function serveDequeue(dequeue: Dequeue, asked: string[] = []) {
+  return [
+    http.get("*/api/projects/:owner/:project/tasks/:t/merge-request/dequeue", () => HttpResponse.json(dequeue)),
+    serveConflictDiffs("tasks/:t/merge-request/dequeue", asked),
+  ];
 }
 
 describe("a dequeued merge request", () => {
-  it("lists each conflicting file with its type and its hunks side by side, and links its run", async () => {
-    server.use(...serveDequeue(CONFLICT));
+  it("lists each conflicting file with its type, its hunks side by side and both sides' diffs, and links its run", async () => {
+    const asked: string[] = [];
+    server.use(...serveDequeue(CONFLICT, asked));
     await openMergeRequest(mergeRequest({ lastDequeue: { reason: "conflict", run: 9, at: CONFLICT.at } }));
     const dequeue = await within(view()).findByRole("region", { name: "Dequeued" });
     expect(dequeue).toHaveTextContent("It conflicted with main");
@@ -241,11 +246,20 @@ describe("a dequeued merge request", () => {
         .getAllByRole("cell")
         .map((c) => c.textContent),
     ).toEqual(["const a = 1;", "const a = 2;", "const a = 3;"]);
+    const toMain = within(file).getByRole("region", { name: "Base → main" });
+    expect(await within(toMain).findByRole("listitem", { name: "src/a.ts" })).toHaveTextContent("+1");
+    const toAttempt = within(file).getByRole("region", { name: "Base → t1a1" });
+    expect(await within(toAttempt).findByRole("listitem", { name: "src/a.ts" })).toHaveTextContent("+2");
 
+    // A file too large for hunks still shows its diff to each side.
     const big = within(dequeue).getByRole("region", { name: "Conflict in big.json" });
     expect(big).toHaveTextContent("Deleted on one side, changed on the other");
     expect(within(big).getByRole("note")).toHaveTextContent("Its hunks were left out: they were too large to show.");
     expect(within(big).queryByRole("table")).toBeNull();
+    await within(within(big).getByRole("region", { name: "Base → t1a1" })).findByRole("listitem", { name: "big.json" });
+    await expect
+      .poll(() => asked.toSorted())
+      .toEqual(["big.json?side=attempt", "big.json?side=main", "src/a.ts?side=attempt", "src/a.ts?side=main"]);
   });
 
   it("lists the setups and checks that failed its landing's gate, and links its run", async () => {

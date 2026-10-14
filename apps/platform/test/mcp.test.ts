@@ -606,6 +606,20 @@ describe("/mcp", () => {
     expect((await call(ada, "get_log", { project, run, step: "lint" })).summary).toMatch(/^notFound: /u);
   });
 
+  it("takes get_log's old `name` for `step`, and refuses a call naming neither", async () => {
+    const { ada, logs, projectId, project } = await withProject();
+    await call(ada, "start_attempts", { project, task: "t1" });
+    const run = (await call(ada, "score_now", { project, attempt: "t1a1" })).data["run"]["id"] as number;
+    logs.objects.set(`logs/${projectId}/t1a1/${run}/test.log`, "1 passed\n");
+
+    expect((await call(ada, "get_log", { project, run, name: "test" })).data).toMatchObject({
+      step: "test",
+      text: "1 passed\n",
+    });
+    expect((await call(ada, "get_log", { project, run, step: "test", name: "lint" })).data["text"]).toBe("1 passed\n");
+    expect((await call(ada, "get_log", { project, run })).summary).toMatch(/^invalidRequest: /u);
+  });
+
   it("lists the project's runs, filtered and paged, and gets one with its steps", async () => {
     const { ada, project, projectId, store } = await withProject();
     await call(ada, "start_attempts", { project, task: "t1", count: 2 });

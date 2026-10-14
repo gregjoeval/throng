@@ -870,6 +870,15 @@ export function pipelineConfig(config: ConfigResult, pipeline: Pipeline): Config
 }
 
 /**
+ * Every secret the project's `config` names (see `namedSecrets`): its setups', every check's and
+ * `main`'s post-gate steps'. What the secrets settings flag against. None for a config that isn't valid.
+ */
+export function configSecrets(config: ConfigResult): NamedSecrets[] {
+  if (config.kind !== "valid") return [];
+  return namedSecrets({ ...config.config, steps: config.config.pipelines.main.steps });
+}
+
+/**
  * The secrets a run of `pipeline` names under the project's `config` (see `namedSecrets`): those of
  * its setups, the checks it runs and its post-gate steps. None for a config that isn't valid, which
  * runs nothing.

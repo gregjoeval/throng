@@ -48,10 +48,15 @@ export function linkTarget(value: MetricValue | null): string | null {
   return protocol === "https:" || protocol === "http:" ? value : null;
 }
 
+/** A metric's link: a `url` metric's value when `linkTarget` can link it, else null. */
+export function metricLink(metric: MetricResult): string | null {
+  return metric.type === "string" && metric.format === "url" ? linkTarget(metric.value) : null;
+}
+
 /** Every `url` metric of a result that `linkTarget` can link, by name, in the result's order. */
 export function urlLinks(result: Result | undefined): { name: string; href: string }[] {
   return Object.entries(result?.metrics ?? {}).flatMap(([name, metric]) => {
-    const href = metric.type === "string" && metric.format === "url" ? linkTarget(metric.value) : null;
+    const href = metricLink(metric);
     return href === null ? [] : [{ name, href }];
   });
 }

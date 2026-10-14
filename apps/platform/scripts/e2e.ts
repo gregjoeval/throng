@@ -165,15 +165,14 @@ interface ListedRun {
 interface WaitingRun extends ListedRun {
   trusted: boolean;
   startedAt: string | null;
-  waiting: { head: string; attempt: string | null; secrets: string[] } | null;
+  waiting: { head: string; attempt: string | null; base: string | null; secrets: string[] } | null;
 }
 
 /** A run's outcome as `GET …/runs/{runId}` gives it, as far as the scenarios read it. */
 interface RunOutcome {
   outcome: {
     steps: { name: string; kind: string; outcome: string; log: string | null; notes: string[] }[];
-    landed?: { sha: string } | "conflict";
-    conflict?: Dequeue["details"];
+    landed?: { kind: "landed"; sha: string } | { kind: "conflict"; details: Dequeue["details"] };
   } | null;
 }
 
@@ -510,11 +509,12 @@ async function conflict(): Promise<void> {
   // The landing's run ended at its `merge`, and keeps the conflict.
   const conflicted = await throng<ListedRun & RunOutcome>(p, "GET", `/runs/${runId}`);
   assert(
-    conflicted.trigger === "merge" && conflicted.sha === null && conflicted.outcome?.landed === "conflict",
+    conflicted.trigger === "merge" && conflicted.sha === null && conflicted.outcome?.landed?.kind === "conflict",
     `unexpected conflicted run ${JSON.stringify({ ...conflicted, outcome: undefined })}`,
   );
+  const landed = conflicted.outcome.landed;
   assert(
-    JSON.stringify(conflicted.outcome?.conflict) === JSON.stringify(details),
+    landed.kind === "conflict" && JSON.stringify(landed.details) === JSON.stringify(details),
     "the run's conflict isn't the dequeue's",
   );
 
@@ -1441,7 +1441,7 @@ pipelines:
   assert(log.includes("value ***\n") && !log.includes(value), `expected the log to show only the mask:\n${log}`);
 
   assert(
-    detail.outcome?.landed !== "conflict" && detail.outcome?.landed?.sha === landed,
+    detail.outcome?.landed?.kind === "landed" && detail.outcome.landed.sha === landed,
     `expected the run to have landed ${landed}: ${JSON.stringify(detail.outcome?.landed)}`,
   );
   await fetchMain(p);

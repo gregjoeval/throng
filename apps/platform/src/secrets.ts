@@ -357,11 +357,12 @@ export function maskedDeep<T>(value: T, mask: (text: string) => string): T {
 
 /**
  * Where `main`'s config names a secret, for its settings: each name, the steps naming it, and what
- * would stop a run handing it to them. Every setup and check runs in every pipeline.
+ * would stop a run handing it to them. Every setup and check runs in every pipeline; a post-gate
+ * step only in `main`.
  */
 export interface SecretUse {
   name: string;
-  /** The steps naming it, as a run's errors name them: `setup deps`, `check test`. */
+  /** The steps naming it, as a run's errors name them: `setup deps`, `check test`, `step deploy`. */
   steps: string[];
   /** Whether it has a value in the settings. */
   hasValue: boolean;
@@ -369,22 +370,28 @@ export interface SecretUse {
   notAllowedIn: Pipeline[];
 }
 
-/** Each secret the config's setups and checks name (see `namedSecrets`), by name, against the settings. */
+/** Each secret the config's setups, checks and post-gate steps name (see `namedSecrets`), by name, against the settings. */
 export function secretUses(named: readonly NamedSecrets[], secrets: readonly SecretSummary[]): SecretUse[] {
-  const steps = new Map<string, string[]>();
-  for (const { step, secrets: names } of named) {
-    for (const name of names) steps.set(name, [...(steps.get(name) ?? []), step]);
+  const uses = new Map<string, { steps: string[]; pipelines: Set<Pipeline> }>();
+  for (const { step, secrets: names, pipeline } of named) {
+    for (const name of names) {
+      const use = uses.get(name) ?? { steps: [], pipelines: new Set<Pipeline>() };
+      use.steps.push(step);
+      for (const runs of pipeline === undefined ? PIPELINES : [pipeline]) use.pipelines.add(runs);
+      uses.set(name, use);
+    }
   }
   const byName = new Map(secrets.map((secret) => [secret.name, secret]));
-  return [...steps]
+  return [...uses]
     .toSorted(([a], [b]) => a.localeCompare(b))
-    .map(([name, used]) => {
+    .map(([name, use]) => {
       const found = byName.get(name);
       return {
         name,
-        steps: used,
+        steps: use.steps,
         hasValue: found !== undefined,
-        notAllowedIn: found === undefined ? [] : PIPELINES.filter((p) => !found.pipelines.includes(p)),
+        notAllowedIn:
+          found === undefined ? [] : PIPELINES.filter((p) => use.pipelines.has(p) && !found.pipelines.includes(p)),
       };
     });
 }

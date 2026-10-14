@@ -743,7 +743,13 @@ export function taskService({ db, repos, backend, origin }: TaskServiceDeps) {
       const ctx = await project(input);
       const secrets = await invoke("listSecrets", ctx, actor);
       const config = await loadConfig(repos, ctx.id);
-      return { secrets, uses: secretUses(config.kind === "valid" ? namedSecrets(config.config) : [], secrets) };
+      return {
+        secrets,
+        uses: secretUses(
+          config.kind === "valid" ? namedSecrets({ ...config.config, steps: config.config.pipelines.main.steps }) : [],
+          secrets,
+        ),
+      };
     },
 
     /** Sets a secret's value, its pipelines, or both. */

@@ -91,6 +91,8 @@ interface Behaviour {
   secrets?: Record<string, string>;
   /** Secrets gone from the settings by the time a step loads them, though the plan found them. */
   gone?: string[];
+  /** How many loads of the run's secrets find those in `gone` still there; none by default. */
+  goneAfter?: number;
   /** What the project answers the plan: start, by default. */
   verdict?: PlanVerdict;
   /** Each post-gate step's command's exit. */
@@ -140,6 +142,7 @@ const KEYRING = JSON.stringify({ current: "k1", keys: { k1: btoa("k".repeat(32))
 /** A secret's value with characters its base64 and URL encoding both change. */
 const DEPLOY = "dep/loy+tok=en&more?";
 const NPM = "npm-token-0123456789";
+const PROD = "prod token/for main=1";
 
 /** Every form of `value` masking hides: itself, its base64 with and without padding, and its URL encoding. */
 function forms(value: string): string[] {
@@ -150,6 +153,11 @@ function forms(value: string): string[] {
 /** The secrets a container's env holds: everything but the run's `THRONG_*` variables. */
 function heldIn(env: Record<string, string> | undefined): string[] {
   return Object.entries(env ?? {}).flatMap(([name, value]) => (name.startsWith("THRONG_") ? [] : [value]));
+}
+
+/** The secrets an env holds, by name: everything but the run's `THRONG_*` variables. */
+function secretsOf(env: Record<string, string> | undefined): Record<string, string> {
+  return Object.fromEntries(Object.entries(env ?? {}).filter(([name]) => !name.startsWith("THRONG_")));
 }
 
 /** What a container prints of the secrets it holds: each in every form. */
@@ -184,6 +192,8 @@ async function pipeline(behaviour: Behaviour = {}) {
   /** What the Workflow persists: its params, each step's name and config, and what each step returned or threw. */
   const persisted: unknown[] = [behaviour.payload ?? params];
   const held = new Map<string, string[]>();
+  /** The env each post-gate step's command ran with, by container. */
+  const commandEnvs = new Map<string, Record<string, string> | undefined>();
   const loads: string[][] = [];
   /** How many times each post-gate step's container was readied, and each command that ran, in order. */
   const readied = new Map<string, number>();
@@ -220,7 +230,11 @@ async function pipeline(behaviour: Behaviour = {}) {
             const from = started.get(container)?.from ?? "image";
             // A post-gate step's command runs in the container its ready step started, as it started.
             const command = container.startsWith("step:") && !script.includes("touch step.ready");
-            if (!command) {
+            if (command) {
+              // Its command gets its env as it runs, on top of whatever the container held when readied.
+              commandEnvs.set(container, options.env);
+              held.set(container, [...(held.get(container) ?? []), ...heldIn(options.env)]);
+            } else {
               started.set(container, { from, access: options.access, size: options.size, env: options.env });
               held.set(container, heldIn(options.env));
             }
@@ -334,7 +348,8 @@ async function pipeline(behaviour: Behaviour = {}) {
           const sealed = [];
           for (const name of names) {
             const value = behaviour.secrets?.[name];
-            if (value === undefined || behaviour.gone?.includes(name)) {
+            const gone = behaviour.gone?.includes(name) === true && loads.length > (behaviour.goneAfter ?? 0);
+            if (value === undefined || gone) {
               return { secret: name, error: `secret ${name} has no value in the project settings` };
             }
             const { ciphertext, iv, keyId } = await sealSecret(keyring, "abc123", name, value);
@@ -388,6 +403,7 @@ async function pipeline(behaviour: Behaviour = {}) {
     stored,
     persisted,
     loads,
+    commandEnvs,
     commands,
     readied,
     planned: planned as string[] | null,
@@ -662,11 +678,29 @@ checks:
   - { name: lint, command: npm run lint }
   - { name: deploy, command: npm run deploy, secrets: [DEPLOY_TOKEN], after: lint }
 `;
-const SECRETS = { NPM_TOKEN: NPM, DEPLOY_TOKEN: DEPLOY };
+const SECRETS = { NPM_TOKEN: NPM, DEPLOY_TOKEN: DEPLOY, PROD_TOKEN: PROD };
 const secretsRun = (behaviour: Behaviour = {}) => pipeline({ config: SECRET_CONFIG, secrets: SECRETS, ...behaviour });
 
-/** Whether `text` holds any form of either secret. */
-const leaks = (text: string) => [...forms(DEPLOY), ...forms(NPM)].some((form) => text.includes(form));
+/**
+ * A config whose setup names a secret, and whose `main` names one for all its post-gate steps,
+ * which `deploy` adds its own to. Its check names none.
+ */
+const STEP_SECRET_CONFIG = `setup:
+  - { name: deps, command: npm ci, secrets: [NPM_TOKEN] }
+checks:
+  - { name: lint, command: npm run lint }
+pipelines:
+  main:
+    secrets: [PROD_TOKEN]
+    steps:
+      - { name: migrate, command: npm run migrate }
+      - { name: deploy, command: npm run deploy, secrets: [DEPLOY_TOKEN] }
+`;
+const stepSecretsRun = (behaviour: Behaviour = {}) =>
+  pipeline({ config: STEP_SECRET_CONFIG, secrets: SECRETS, payload: { ...params, line: "main" }, ...behaviour });
+
+/** Whether `text` holds any form of any secret. */
+const leaks = (text: string) => [DEPLOY, NPM, PROD].flatMap(forms).some((form) => text.includes(form));
 
 describe("PipelineWorkflow secrets", () => {
   it("names the secrets each setup and check names in its plan, by name only", async () => {
@@ -679,11 +713,9 @@ describe("PipelineWorkflow secrets", () => {
 
   it("gives each container of a trusted run only the secrets named for it, loaded as it starts", async () => {
     const { started, loads, events } = await secretsRun();
-    const secretsOf = (container: string) =>
-      Object.fromEntries(Object.entries(started.get(container)?.env ?? {}).filter(([k]) => !k.startsWith("THRONG_")));
-    expect(secretsOf("setup")).toEqual({ NPM_TOKEN: NPM });
-    expect(secretsOf("check:lint")).toEqual({});
-    expect(secretsOf("check:deploy")).toEqual({ DEPLOY_TOKEN: DEPLOY });
+    expect(secretsOf(started.get("setup")?.env)).toEqual({ NPM_TOKEN: NPM });
+    expect(secretsOf(started.get("check:lint")?.env)).toEqual({});
+    expect(secretsOf(started.get("check:deploy")?.env)).toEqual({ DEPLOY_TOKEN: DEPLOY });
     expect(started.get("check:deploy")?.env).toMatchObject({ THRONG_RUN: "7" });
     // Loaded per container, not for the run: none for a check that names none.
     expect(loads).toEqual([["NPM_TOKEN"], ["DEPLOY_TOKEN"]]);
@@ -717,6 +749,98 @@ describe("PipelineWorkflow secrets", () => {
       expect(heldIn(started.get("setup")?.env)).toContain(NPM);
       expect(leaks(JSON.stringify([persisted, report, returned]))).toBeFalsy();
     }
+    // And `main`'s post-gate steps, readied in one step and run in the next.
+    for (const behaviour of [
+      {},
+      { snapshot: null },
+      { gone: ["DEPLOY_TOKEN"], goneAfter: 2 },
+      { lost: "deploy" },
+      { unready: { step: "deploy", times: 1 } },
+      { postGate: { migrate: 1 } },
+    ]) {
+      const { persisted, report, returned, commandEnvs } = await stepSecretsRun(behaviour);
+      expect(heldIn(commandEnvs.get("step:migrate"))).toEqual([PROD]);
+      expect(leaks(JSON.stringify([persisted, report, returned]))).toBeFalsy();
+    }
+  });
+
+  it("names main's post-gate steps' secrets in its plan, its pipeline's added to each step's, by name only", async () => {
+    const { named } = await stepSecretsRun();
+    expect(named).toEqual([
+      { step: "setup deps", secrets: ["NPM_TOKEN"] },
+      { step: "step migrate", secrets: ["PROD_TOKEN"], pipeline: "main" },
+      { step: "step deploy", secrets: ["PROD_TOKEN", "DEPLOY_TOKEN"], pipeline: "main" },
+    ]);
+    // A task branch runs `default`, which has no post-gate steps: main's secrets are never named there.
+    const branch = await stepSecretsRun({ payload: { ...params, line: "t1" } });
+    expect(branch.named).toEqual([{ step: "setup deps", secrets: ["NPM_TOKEN"] }]);
+    expect(branch.loads).toEqual([["NPM_TOKEN"]]);
+  });
+
+  it("gives each post-gate step's command only its own secrets, loaded as it starts, never its ready step", async () => {
+    const { started, commandEnvs, loads, events } = await stepSecretsRun();
+    // Main's secrets reach neither the setups nor the checks.
+    expect(secretsOf(started.get("setup")?.env)).toEqual({ NPM_TOKEN: NPM });
+    expect(secretsOf(started.get("check:lint")?.env)).toEqual({});
+    // Readied from the snapshot, the container holds nothing until its command runs.
+    expect(secretsOf(started.get("step:migrate")?.env)).toEqual({});
+    expect(secretsOf(started.get("step:deploy")?.env)).toEqual({});
+    expect(secretsOf(commandEnvs.get("step:migrate"))).toEqual({ PROD_TOKEN: PROD });
+    expect(secretsOf(commandEnvs.get("step:deploy"))).toEqual({ PROD_TOKEN: PROD, DEPLOY_TOKEN: DEPLOY });
+    expect(commandEnvs.get("step:deploy")).toMatchObject({ THRONG_PIPELINE: "main", THRONG_RUN: "7" });
+    expect(loads).toEqual([["NPM_TOKEN"], ["PROD_TOKEN"], ["PROD_TOKEN", "DEPLOY_TOKEN"]]);
+    expect(events.indexOf("run step:deploy")).toBeGreaterThan(events.indexOf("destroy step:migrate"));
+  });
+
+  it("gives a post-gate step's container that re-runs the setups their secrets, and its command only its own", async () => {
+    const { started, commandEnvs, stored } = await stepSecretsRun({ snapshot: null });
+    expect(heldIn(started.get("step:migrate")?.env)).toEqual([NPM]);
+    expect(heldIn(commandEnvs.get("step:migrate"))).toEqual([PROD]);
+    // The setups' output in the step's log is masked too.
+    const log = stored.get("logs/abc123/main/7/step.migrate.log") ?? "";
+    expect(log).toContain("***");
+    expect(leaks(log)).toBeFalsy();
+  });
+
+  it("masks what a post-gate step held in its stored log and its errors", async () => {
+    const { stored } = await stepSecretsRun();
+    const log = stored.get("logs/abc123/main/7/step.deploy.log") ?? "";
+    expect(log).toMatch(/^step:deploy step\.deploy\n\*\*\*( \*\*\*)+\n/u);
+    for (const text of stored.values()) expect(leaks(text)).toBeFalsy();
+
+    const lost = await stepSecretsRun({ lost: "deploy" });
+    expect(lost.report).toMatchObject({
+      status: "errored",
+      error: expect.stringContaining("step deploy gave no result"),
+    });
+    expect(leaks(JSON.stringify(lost.report))).toBeFalsy();
+  });
+
+  it("fails a post-gate step whose secret is gone as its command starts, naming it, and runs none after it", async () => {
+    // Found by the setup's load and migrate's; gone by deploy's.
+    const { commands, events, report } = await stepSecretsRun({ gone: ["PROD_TOKEN"], goneAfter: 2 });
+    expect(commands).toEqual(["migrate"]);
+    expect(events).toContain("destroy step:deploy");
+    const outcome = outcomeOf(report);
+    expect(outcome.steps.filter((s) => s.kind === "step").map((s) => [s.name, s.outcome, s.notes])).toEqual([
+      ["migrate", "passed", []],
+      ["deploy", "errored", ["secret PROD_TOKEN has no value in the project settings"]],
+    ]);
+    expect(report?.status).toBe("done");
+  });
+
+  it("fails a post-gate step whose container can't re-run the setups for a secret gone, naming it", async () => {
+    const { commands, readied, report } = await stepSecretsRun({ snapshot: null, gone: ["NPM_TOKEN"], goneAfter: 2 });
+    expect(commands).toEqual([]);
+    expect(readied.get("migrate")).toBeUndefined();
+    expect(
+      outcomeOf(report)
+        .steps.filter((s) => s.kind === "step")
+        .map((s) => [s.name, s.outcome, s.notes]),
+    ).toEqual([
+      ["migrate", "errored", ["secret NPM_TOKEN has no value in the project settings"]],
+      ["deploy", "skipped", ["skipped: step migrate didn't pass"]],
+    ]);
   });
 
   it("ends the run errored before any container starts when the project refuses its plan", async () => {
@@ -1004,6 +1128,23 @@ checks:
     const { started } = await land({}, { snapshot: null });
     expect(started.get("setup")?.env).toMatchObject({ THRONG_PIPELINE: "main", THRONG_LINE: "main", THRONG_SHA: "" });
     expect(started.get("step:deploy")?.env).toMatchObject({ THRONG_SHA: LANDED });
+  });
+
+  it("gives the merged tree's post-gate steps their secrets once it landed, and its merge and land none", async () => {
+    const { started, commandEnvs, loads, events, named } = await land(
+      { merged: STEP_SECRET_CONFIG },
+      { secrets: SECRETS },
+    );
+    expect(named).toContainEqual({ step: "step deploy", secrets: ["PROD_TOKEN", "DEPLOY_TOKEN"], pipeline: "main" });
+    for (const container of ["merge", "land", "setup", "check:lint", "step:deploy"]) {
+      expect(
+        heldIn(started.get(container)?.env).filter((value) => value !== NPM),
+        container,
+      ).toEqual([]);
+    }
+    expect(heldIn(commandEnvs.get("step:deploy"))).toEqual([PROD, DEPLOY]);
+    expect(loads).toEqual([["NPM_TOKEN"], ["PROD_TOKEN"], ["PROD_TOKEN", "DEPLOY_TOKEN"]]);
+    expect(events.indexOf("run step:migrate")).toBeGreaterThan(events.indexOf("landed"));
   });
 
   it("ends `conflict` at a conflicting merge, keeping the conflict, starting nothing more", async () => {

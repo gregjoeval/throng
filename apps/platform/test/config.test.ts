@@ -617,6 +617,31 @@ pipelines:
     ]);
   });
 
+  it("reads the secrets each post-gate step names, main's own added to every step's, each once", () => {
+    const result = parseConfig(`setup:
+  - { name: deps, command: npm ci, secrets: [NPM_TOKEN] }
+pipelines:
+  main:
+    secrets: [CLOUDFLARE_PROD]
+    steps:
+      - { name: migrate, command: pnpm db:migrate }
+      - { name: deploy, command: pnpm deploy, secrets: [SENTRY_TOKEN, CLOUDFLARE_PROD] }
+`);
+    expect(result.kind === "valid" && result.config.pipelines.main.steps.map((s) => s.secrets)).toEqual([
+      ["CLOUDFLARE_PROD"],
+      ["CLOUDFLARE_PROD", "SENTRY_TOKEN"],
+    ]);
+    // A pipeline's secrets reach only its steps, never the setups or checks every pipeline shares.
+    expect(result.kind === "valid" && result.config.setup.map((s) => s.secrets)).toEqual([["NPM_TOKEN"]]);
+    expect(
+      result.kind === "valid" && namedSecrets({ ...result.config, steps: result.config.pipelines.main.steps }),
+    ).toEqual([
+      { step: "setup deps", secrets: ["NPM_TOKEN"] },
+      { step: "step migrate", secrets: ["CLOUDFLARE_PROD"], pipeline: "main" },
+      { step: "step deploy", secrets: ["CLOUDFLARE_PROD", "SENTRY_TOKEN"], pipeline: "main" },
+    ]);
+  });
+
   it("reads each check's group, each pipeline's groups and main's post-gate steps, in order", () => {
     const result = parseConfig(`checks:
   - { name: lint, command: x, group: verify }
@@ -640,8 +665,8 @@ pipelines:
       main: {
         groups: ["verify"],
         steps: [
-          { name: "migrate", command: "pnpm db:migrate", caches: [] },
-          { name: "deploy", command: "pnpm deploy", caches: [] },
+          { name: "migrate", command: "pnpm db:migrate", secrets: [], caches: [] },
+          { name: "deploy", command: "pnpm deploy", secrets: [], caches: [] },
         ],
       },
     });
@@ -694,6 +719,21 @@ pipelines:
       "steps on default",
       "pipelines:\n  default:\n    steps: [{ name: deploy, command: x }]\n",
       "pipelines.default.steps: only main has post-gate steps; default runs on attempts and task branches",
+    ],
+    [
+      "secrets on default, which has no steps",
+      "pipelines:\n  default:\n    secrets: [CLOUDFLARE_PROD]\n",
+      "pipelines.default.secrets: a pipeline's secrets only reach its own steps, and it has none; name them on the setups or checks that use them",
+    ],
+    [
+      "secrets on main with no steps",
+      "pipelines:\n  main:\n    secrets: [CLOUDFLARE_PROD]\n",
+      "pipelines.main.secrets: a pipeline's secrets only reach its own steps, and it has none; name them on the setups or checks that use them",
+    ],
+    [
+      "a lowercase secret's name on a step",
+      "pipelines:\n  main:\n    steps:\n      - { name: deploy, command: x, secrets: [prod] }\n",
+      "pipelines.main.steps[0].secrets[0]: a secret's name is up to 128 uppercase letters, digits and underscores, not starting with a digit",
     ],
     [
       "a step named like a check",

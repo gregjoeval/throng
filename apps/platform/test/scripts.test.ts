@@ -198,7 +198,12 @@ describe("setupScript", () => {
 });
 
 describe("post-gate step scripts", () => {
-  const deploy = { name: "deploy", command: "echo deploying >> ../deploys && test -f built && echo done", caches: [] };
+  const deploy = {
+    name: "deploy",
+    command: "echo deploying >> ../deploys && test -f built && echo done",
+    secrets: [],
+    caches: [],
+  };
 
   it("readies a step's container from the setups' snapshot, then runs its command once in the tree", () => {
     const head = attemptHead();
@@ -229,7 +234,7 @@ describe("post-gate step scripts", () => {
     );
     runScript<StepReady>(stepReadyScript(fork, head, [], deploy), sandbox);
     expect(
-      runScript<StepRun>(stepScript({ name: "deploy", command: "exit 4", caches: [] }, 60_000), sandbox),
+      runScript<StepRun>(stepScript({ name: "deploy", command: "exit 4", secrets: [], caches: [] }, 60_000), sandbox),
     ).toMatchObject({
       exit: 4,
     });

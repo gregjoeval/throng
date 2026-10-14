@@ -122,6 +122,11 @@ export interface CheckConfig {
 export interface StepConfig {
   name: string;
   command: string;
+  /**
+   * The secrets it uses, by name, its pipeline's added to its own: in a trusted run, its command
+   * holds them. A pipeline's secrets reach only its steps, never the setups or checks.
+   */
+  secrets: string[];
   /** The caches it uses, by name: restored before it runs, and saved once it passed. */
   caches: string[];
 }
@@ -408,20 +413,31 @@ export function checkConfig(check: z.infer<typeof CheckSchema>, source: ConfigLa
   };
 }
 
-/** The secrets one setup or check names, with the step as a run's errors name it: `setup deps`, `check test`. */
+/**
+ * The secrets one setup, check or post-gate step names, with the step as a run's errors name it:
+ * `setup deps`, `check test`, `step deploy`. A post-gate step runs only in `pipeline`; a setup or
+ * check has none, as every pipeline may run it.
+ */
 export interface NamedSecrets {
   step: string;
   secrets: string[];
+  pipeline?: Pipeline;
 }
 
-/** The secrets each setup and check names, in run order, leaving out those that name none. */
+/** The secrets each setup, check and `main` post-gate step names, in run order, leaving out those that name none. */
 export function namedSecrets(stages: {
   setup: readonly Pick<SetupConfig, "name" | "secrets">[];
   checks: readonly Pick<CheckConfig, "name" | "secrets">[];
+  steps?: readonly Pick<StepConfig, "name" | "secrets">[];
 }): NamedSecrets[] {
   return [
     ...stages.setup.map((setup) => ({ step: `setup ${setup.name}`, secrets: setup.secrets })),
     ...stages.checks.map((check) => ({ step: `check ${check.name}`, secrets: check.secrets })),
+    ...(stages.steps ?? []).map((step) => ({
+      step: `step ${step.name}`,
+      secrets: step.secrets,
+      pipeline: "main" as const,
+    })),
   ].filter((named) => named.secrets.length > 0);
 }
 
@@ -443,7 +459,7 @@ const AfterSchema = z
   .optional()
   .transform((after) => (after === undefined ? [] : [after].flat()));
 
-/** The secrets a setup or check uses: their names, each once; none by default. */
+/** The secrets a setup, check, post-gate step or pipeline uses: their names, each once; none by default. */
 const SecretsSchema = z
   .array(
     z.string({ error: "must be a secret's name" }).superRefine((text, ctx) => {
@@ -614,6 +630,7 @@ const StepSchema = z.strictObject(
   {
     name: name("step name"),
     command,
+    secrets: SecretsSchema,
     caches: CachesSchema,
     after: z.never({ error: "only checks take after; steps run in order" }).optional(),
     group: NO_GROUP.optional(),
@@ -630,12 +647,26 @@ const SKIP = z.never({
   error: "skip is gone: give checks groups, and list the groups this pipeline runs under groups",
 });
 
-/** A pipeline as a config writes it; only `main` has post-gate steps. */
+/**
+ * A pipeline as a config writes it; only `main` has post-gate steps. Its `secrets` are added to each
+ * of its steps', so a pipeline naming any needs steps.
+ */
 const pipelineSchema = (steps: z.ZodType<z.infer<typeof StepSchema>[] | undefined>) =>
-  z.strictObject(
-    { groups: GroupsSchema.optional(), skip: SKIP.optional(), steps },
-    { error: "a pipeline must be a mapping" },
-  );
+  z
+    .strictObject(
+      { groups: GroupsSchema.optional(), skip: SKIP.optional(), secrets: SecretsSchema, steps },
+      { error: "a pipeline must be a mapping" },
+    )
+    .superRefine((pipeline, ctx) => {
+      if (pipeline.secrets.length > 0 && (pipeline.steps ?? []).length === 0) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["secrets"],
+          message:
+            "a pipeline's secrets only reach its own steps, and it has none; name them on the setups or checks that use them",
+        });
+      }
+    });
 
 /** The pipelines a config may set, and no other: there are no per-branch pipelines. */
 const PipelinesSchema = z
@@ -806,6 +837,7 @@ export function parseConfig(text: string | null): ConfigResult {
           steps: (config.pipelines?.main?.steps ?? []).map((step) => ({
             name: step.name,
             command: step.command,
+            secrets: [...new Set([...(config.pipelines?.main?.secrets ?? []), ...step.secrets])],
             caches: step.caches,
           })),
         },

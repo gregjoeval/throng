@@ -116,6 +116,18 @@ describe("a step's secrets", () => {
       { name: "PROD_TOKEN", steps: ["check deploy"], hasValue: true, notAllowedIn: ["default"] },
     ]);
   });
+
+  it("flags a secret only main's post-gate steps name as not allowed in main alone", async () => {
+    const store = await secrets();
+    const named = [
+      { step: "step migrate", secrets: ["PROD_TOKEN"], pipeline: "main" as const },
+      { step: "step deploy", secrets: ["DEPLOY_TOKEN", "PROD_TOKEN"], pipeline: "main" as const },
+    ];
+    expect(secretUses(named, store.list())).toEqual([
+      { name: "DEPLOY_TOKEN", steps: ["step deploy"], hasValue: true, notAllowedIn: ["main"] },
+      { name: "PROD_TOKEN", steps: ["step migrate", "step deploy"], hasValue: true, notAllowedIn: [] },
+    ]);
+  });
 });
 
 describe("masking", () => {

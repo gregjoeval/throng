@@ -37,14 +37,14 @@ const SecretUseSchema = z
   .object({
     name: z.string().openapi({ example: "CLOUDFLARE_PREVIEW" }),
     steps: z.array(z.string()).openapi({
-      description: "The setups and checks in `main`'s config naming it, as a run's errors name them.",
+      description: "The setups, checks and post-gate steps in `main`'s config naming it, as a run's errors name them.",
       example: ["check preview"],
     }),
     hasValue: z.boolean().openapi({ description: "False when no secret has this name: every run naming it fails." }),
     notAllowedIn: z.array(z.enum(PIPELINES)).openapi({
       description:
         "The pipelines that run those steps but the secret isn't allowed in: their runs fail. Every setup and " +
-        "check runs in every pipeline.",
+        "check runs in every pipeline; a post-gate step only in `main`.",
       example: ["main"],
     }),
   })

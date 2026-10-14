@@ -184,12 +184,17 @@ export function pipelineOutcome(
   return { base: result.base, config: result.config, gate: result.gate, steps, metrics: result.metrics };
 }
 
-/** How one post-gate step's command went, and whether its log was stored. */
+/**
+ * How one post-gate step's command went, and whether its log was stored. One whose command never
+ * started, because a secret it was to hold is gone or no longer allowed, has no exit, and says so
+ * in `error`.
+ */
 export interface PostGateRun {
-  exit: number;
+  exit: number | null;
   durationMs: number;
   logged: boolean;
   notes: string[];
+  error?: string;
 }
 
 /**
@@ -215,13 +220,14 @@ export function withPostGateSteps(
         log: null,
       };
     }
-    const ended = ranOutcome(run.exit, run.durationMs, POST_GATE_STEP_TIMEOUT_MS);
+    const ended = run.error === undefined ? ranOutcome(run.exit, run.durationMs, POST_GATE_STEP_TIMEOUT_MS) : "errored";
     if (ended !== "passed") stopped = `skipped: step ${name} didn't pass`;
+    const notes = run.error === undefined ? run.notes : [run.error, ...run.notes];
     return {
       ...step,
       outcome: STEP_OUTCOME[ended],
       durationMs: run.durationMs,
-      notes: ended === "timedOut" ? ["timed out", ...run.notes] : run.notes,
+      notes: ended === "timedOut" ? ["timed out", ...notes] : notes,
       log: run.logged ? stepLogName(name) : null,
     };
   });

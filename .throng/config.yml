@@ -1,0 +1,19 @@
+# How Throng scores an attempt at itself (see apps/platform/README.md, "How a run runs"). Only the web
+# app is checked: the platform's tests and e2e are left to CI, so a run stays short.
+caches:
+  # pnpm needs its metadata cache too: a store alone fails `pnpm install --offline` with ERR_PNPM_NO_OFFLINE_META.
+  pnpm: { path: [~/.local/share/pnpm/store, ~/.cache/pnpm], key: pnpm-lock.yaml }
+  # The pnpm version `packageManager` pins, which corepack fetches.
+  corepack: { path: [~/.cache/node/corepack], key: package.json }
+setup:
+  # The Sandbox image is plain Node, so corepack installs the pinned pnpm first.
+  - name: deps
+    command: corepack enable pnpm && pnpm install --frozen-lockfile --prefer-offline
+    caches: [pnpm, corepack]
+checks:
+  - { name: typecheck, command: pnpm --filter @throng/web typecheck }
+  - { name: test, command: pnpm --filter @throng/web test }
+  - { name: lint, command: pnpm lint }
+  - { name: format, command: pnpm fmt:check }
+sandbox:
+  size: standard-2

@@ -730,16 +730,21 @@ export class ScoringQueue {
       if (free <= 0) return [];
       // One run per line: its oldest queued one that is ready, when none is running there.
       const lines = new Set<string>();
-      const rows = this.#sql
+      const rows: StoredRun[] = [];
+      const queued = this.#sql
         .exec<RunRow>(
           `SELECT * FROM pipeline_runs q WHERE status = 'queued' AND NOT EXISTS (
              SELECT 1 FROM pipeline_runs r WHERE r.status = 'running' AND r.line = q.line
            ) ORDER BY line = ? DESC, id`,
           MAIN_LINE,
         )
-        .map(toRun)
-        .filter((run) => this.#ready(run) && !lines.has(run.line) && Boolean(lines.add(run.line)))
-        .slice(0, free);
+        .map(toRun);
+      for (const run of queued) {
+        if (rows.length === free) break;
+        if (lines.has(run.line) || !this.#ready(run)) continue;
+        lines.add(run.line);
+        rows.push(run);
+      }
       for (const run of rows) {
         this.#sql.exec("UPDATE pipeline_runs SET status = 'running', started_at = ? WHERE id = ?", this.#ms(), run.id);
         this.#journal("scoringStarted", run, { instanceId: run.instance_id });
@@ -876,7 +881,10 @@ export class ScoringQueue {
 
   /** What the run's Workflow is started with: a landing's says what it merges. */
   #params(run: StoredRun): PipelineParams | LandingRunParams {
-    if (run.merge_request === null) return { project: run.project, line: run.line, sha: run.sha ?? "", run: run.id };
+    if (run.merge_request === null) {
+      if (run.sha === null) throw new Error(`run ${run.id} has no head`);
+      return { project: run.project, line: run.line, sha: run.sha, run: run.id };
+    }
     if (this.#landing === null) throw new Error(`run ${run.id} is a landing, and nothing says what it lands`);
     return { project: run.project, line: run.line, sha: null, run: run.id, landing: this.#landing(run) };
   }

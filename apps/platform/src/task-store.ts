@@ -1014,7 +1014,7 @@ export class TaskStore {
         if ("error" in refused) throw invalidState(`can't start run ${run.id}: ${step}: ${refused.error}`);
       }
       const started = this.scoring.start(run, actor);
-      const mr = run.merge_request === null ? null : this.mergeRequests.get(run.merge_request);
+      const mr = this.#landingMergeRequest(run);
       if (mr !== null) this.mergeRequests.enqueue(actor, mr);
       return started;
     });
@@ -1026,7 +1026,7 @@ export class TaskStore {
       throw invalidState(`run ${run.id} is ${run.status}; only a waiting run can be started`);
     const head = run.sha ?? run.merge_head;
     if (head !== sha) throw invalidState(`run ${run.id} waits on ${head ?? "no head"}, not ${sha}`);
-    const mr = run.merge_request === null ? null : this.mergeRequests.get(run.merge_request);
+    const mr = this.#landingMergeRequest(run);
     if (mr === null) {
       const now = this.scoring.statusFor(run.line).sha;
       if (now !== sha)
@@ -2046,7 +2046,7 @@ export class TaskStore {
       // A landing no owner approved that names a secret was held for the owner before it joined the
       // queue, unless only its merged tree's config names one: it leaves the queue to wait for the
       // owner there, so it holds up no other landing.
-      const mr = run.merge_request === null ? null : this.mergeRequests.get(run.merge_request);
+      const mr = this.#landingMergeRequest(run);
       if (mr !== null) this.mergeRequests.holdForOwner(mr);
       return { kind: "waiting" };
     });
@@ -2626,15 +2626,20 @@ export class TaskStore {
     this.mergeRequests.dequeue(null, mr, { reason, run: run.id }, moved ? "needsReview" : "pending");
   }
 
+  /** A landing's run's merge request; null for any other run. */
+  #landingMergeRequest(run: Pick<StoredRun, "merge_request">): StoredMergeRequest | null {
+    return run.merge_request === null ? null : this.mergeRequests.get(run.merge_request);
+  }
+
   /** Whether the landing's merge request is still open and landing. */
   #landingCurrent(run: StoredRun): boolean {
-    const mr = run.merge_request === null ? null : this.mergeRequests.get(run.merge_request);
+    const mr = this.#landingMergeRequest(run);
     return mr?.state === "landing";
   }
 
   /** Whether the landing's merge request is still in the queue: landing, or queued behind the one landing. */
   #inQueue(run: StoredRun): boolean {
-    const mr = run.merge_request === null ? null : this.mergeRequests.get(run.merge_request);
+    const mr = this.#landingMergeRequest(run);
     return mr?.state === "landing" || mr?.state === "queued";
   }
 
@@ -2686,7 +2691,7 @@ export class TaskStore {
 
   /** What a landing's Workflow is told of its merge: the approved head, who approved it and who co-authored it. */
   #landingParams(run: StoredRun): LandingParams {
-    const mr = run.merge_request === null ? null : this.mergeRequests.get(run.merge_request);
+    const mr = this.#landingMergeRequest(run);
     if (mr === null) throw new Error(`run ${run.id} lands no merge request`);
     const coAuthors = this.#sql.exec<{ user: string; alias: string }>(
       `SELECT user_id AS user, alias FROM journal WHERE kind = 'pushed' AND task = ? AND attempt = ?
@@ -2870,7 +2875,7 @@ export class TaskStore {
   #releaseHeld(): boolean {
     let changed = false;
     for (const run of this.scoring.heldLandings()) {
-      const mr = run.merge_request === null ? null : this.mergeRequests.get(run.merge_request);
+      const mr = this.#landingMergeRequest(run);
       const current =
         mr !== null &&
         this.#queueable(mr) &&

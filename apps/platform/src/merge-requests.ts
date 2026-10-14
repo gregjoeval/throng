@@ -33,6 +33,7 @@ export type MergeRequestEvent =
   | "queued"
   | "landing"
   | "dequeued"
+  | "heldForOwner"
   | "needsReview"
   | "merged"
   | "cancelled";
@@ -319,6 +320,16 @@ export class MergeRequests {
   startLanding(actor: Actor | null, mr: StoredMergeRequest): StoredMergeRequest {
     this.#sql.exec("UPDATE merge_requests SET state = 'landing' WHERE id = ?", mr.id);
     this.#journal(actor, "landing", mr, { head: mr.approved_head });
+    return this.#get(mr.id);
+  }
+
+  /**
+   * landing → pending, out of the queue but not held after a dequeue: its landing waits for the
+   * owner, whose start queues it again.
+   */
+  holdForOwner(mr: StoredMergeRequest): StoredMergeRequest {
+    this.#sql.exec("UPDATE merge_requests SET state = 'pending', queued_at = NULL WHERE id = ?", mr.id);
+    this.#journal(null, "heldForOwner", mr, { head: mr.approved_head });
     return this.#get(mr.id);
   }
 

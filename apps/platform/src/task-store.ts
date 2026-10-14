@@ -2024,7 +2024,8 @@ export class TaskStore {
    * may start (`ScoringQueue.planned`), then checks the secrets each of its setups and checks names
    * (`named`) against the settings. A secret with no value or not allowed in the run's pipeline
    * refuses the run, naming the step and the secret. An untrusted run that names any secret waits
-   * for the owner instead of starting; one that names none, and a trusted one, go ahead.
+   * for the owner instead of starting, and a landing's merge request leaves the queue meanwhile; one
+   * that names none, and a trusted one, go ahead.
    */
   pipelinePlanned(id: number, containers: readonly string[], named: readonly NamedSecrets[]): PlanVerdict {
     const verdict = this.#sql.transaction((): PlanVerdict => {
@@ -2037,14 +2038,12 @@ export class TaskStore {
       }
       const names = [...new Set(named.flatMap((n) => n.secrets))];
       if (names.length === 0 || run.trusted) return { kind: "start" };
-      // A landing no owner approved that names a secret was held for the owner before it joined the
-      // queue, unless only its merged tree's config names one: a landing that waits would hold up the
-      // queue, so it is dequeued, and lands once the owner approves it, which trusts it.
-      if (run.merge_request !== null) {
-        const error = `a landing only the project owner approved may hold secrets, and this one names ${names.join(", ")}`;
-        return { kind: "refused", error };
-      }
       this.scoring.wait(run, names);
+      // A landing no owner approved that names a secret was held for the owner before it joined the
+      // queue, unless only its merged tree's config names one: it leaves the queue to wait for the
+      // owner there, so it holds up no other landing.
+      const mr = run.merge_request === null ? null : this.mergeRequests.get(run.merge_request);
+      if (mr !== null) this.mergeRequests.holdForOwner(mr);
       return { kind: "waiting" };
     });
     // A run waiting for the owner has settled: `wait_for_run` answers.
@@ -2806,16 +2805,18 @@ export class TaskStore {
    * approved whose `main` run would name a secret (`main`, which the caller read when the approver
    * isn't the owner) is held for the owner instead: its landing waits until the owner starts it,
    * which queues it as a trusted run. When the caller couldn't say what `main` names, it joins the
-   * queue, and its landing's plan refuses it if it names one. Returns the merge request as it is
-   * afterwards.
+   * queue, and its landing's plan holds it for the owner if its merged tree names one; it stays held
+   * at that head. Returns the merge request as it is afterwards.
    */
   #evaluate(actor: Actor | null, mr: StoredMergeRequest, main: MainSecrets | null = null): StoredMergeRequest {
     this.#releaseHeld();
     if (!this.#queueable(mr)) return mr;
     if (!this.mergeRequests.ownerApproved(mr)) {
-      // A landing no owner approved holds no secret: one `main` would hand some waits for the owner.
+      // A landing no owner approved holds no secret: one `main` would hand some waits for the owner,
+      // and so does one whose plan found its merged tree's config names some (it began to run).
       const held = this.#heldLanding(mr);
-      if (main === null ? held !== null : main.names.length > 0) {
+      const heldAtPlan = held !== null && held.started_at !== null;
+      if (main === null || heldAtPlan ? held !== null : main.names.length > 0) {
         if (held === null && main !== null) {
           this.scoring.holdLanding({ ...this.#landingRequest(main.project, mr), secrets: main.names });
         }

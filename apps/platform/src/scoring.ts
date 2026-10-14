@@ -604,7 +604,8 @@ export class ScoringQueue {
    * ended when it began to wait; a held landing has had none, and keeps its id.
    */
   start(run: StoredRun, owner: Actor): StoredRun {
-    const instanceId = run.merge_request === null ? `${run.instance_id}-started` : run.instance_id;
+    // A run that waited after its Workflow began needs a new instance; a landing held before it ran has none yet.
+    const instanceId = run.started_at === null ? run.instance_id : `${run.instance_id}-started`;
     const [row] = this.#sql.exec<RunRow>(
       `UPDATE pipeline_runs SET status = 'queued', trusted = 1, trigger = 'start', user_id = ?, alias = ?,
          instance_id = ?, started_at = NULL, torn_down = 0, containers = NULL

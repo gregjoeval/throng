@@ -280,15 +280,34 @@ describe("starting a landing", () => {
     expect(landing()).toMatchObject({ status: "running", merge_request: mr(t2.task).id });
   });
 
-  it("refuses the plan of a landing no owner approved that names a secret, which dequeues it", async () => {
-    const { store, drain, queued, mr, landing } = setup();
+  it("holds for the owner a landing no owner approved whose merged tree names a secret, out of the queue", async () => {
+    const { store, drain, queued, mr, landing, workflow, land } = setup();
     await store.putSecret(PROJECT, owner, { name: "DEPLOY", value: "deploy-token-0123", pipelines: ["main"] });
     const t1 = await queued("Ada's", ada);
+    const t2 = await queued("Owner's");
     await drain();
-    const verdict = store.pipelinePlanned(landing().id, [], [{ step: "check deploy", secrets: ["DEPLOY"] }]);
-    expect(verdict).toMatchObject({ kind: "refused" });
-    store.pipelineFinished(landing().id, { status: "errored", error: verdict.kind === "refused" ? verdict.error : "" });
-    expect(mr(t1.task)).toMatchObject({ state: "pending", last_dequeue: { reason: "errored" } });
+    const held = landing();
+    const verdict = store.pipelinePlanned(held.id, [], [{ step: "check deploy", secrets: ["DEPLOY"] }]);
+    expect(verdict).toEqual({ kind: "waiting" });
+    expect(store.scoring.getRun(held.id)).toMatchObject({ status: "waiting", trusted: false, secrets: ["DEPLOY"] });
+    expect(mr(t1.task)).toMatchObject({ state: "pending", position: null, last_dequeue: null });
+    expect(() => store.pipelineSecrets(held.id, ["DEPLOY"])).toThrow(/may hold no secrets/u);
+    // The queue moves on without it, and asking again doesn't queue it.
+    await drain();
+    expect(mr(t2.task).state).toBe("landing");
+    await store.approveMergeRequest(PROJECT, ada, { task: t1.task });
+    expect(mr(t1.task).state).toBe("pending");
+    await land();
+
+    const started = await store.startRun(PROJECT, owner, { run: held.id, sha: mr(t1.task).approved_head });
+    expect(started).toMatchObject({ status: "queued", trusted: true, instance_id: `${held.instance_id}-started` });
+    expect(mr(t1.task).state).toBe("queued");
+    await drain();
+    expect(mr(t1.task).state).toBe("landing");
+    expect(workflow.created.at(-1)).toMatchObject({ id: `${held.instance_id}-started`, params: { run: held.id } });
+    expect(store.pipelinePlanned(held.id, [], [{ step: "check deploy", secrets: ["DEPLOY"] }])).toEqual({
+      kind: "start",
+    });
   });
 
   it("lets a landing the owner approved hand its post-gate steps a secret allowed in main, and only there", async () => {
@@ -304,19 +323,6 @@ describe("starting a landing", () => {
     await store.putSecret(PROJECT, owner, { name: "PROD", pipelines: ["main"] });
     expect(store.pipelinePlanned(landing().id, [], named)).toEqual({ kind: "start" });
     expect(store.pipelineSecrets(landing().id, ["PROD"])).toMatchObject({ sealed: [{ name: "PROD" }] });
-  });
-
-  it("refuses the plan of a landing no owner approved whose post-gate step names a secret", async () => {
-    const { store, drain, queued, landing } = setup();
-    await store.putSecret(PROJECT, owner, { name: "PROD", value: "prod-token-0123", pipelines: ["main"] });
-    await queued("Ada's", ada);
-    await drain();
-    const verdict = store.pipelinePlanned(landing().id, [], [{ step: "step deploy", secrets: ["PROD"] }]);
-    expect(verdict).toEqual({
-      kind: "refused",
-      error: "a landing only the project owner approved may hold secrets, and this one names PROD",
-    });
-    expect(() => store.pipelineSecrets(landing().id, ["PROD"])).toThrow(/may hold no secrets/u);
   });
 });
 

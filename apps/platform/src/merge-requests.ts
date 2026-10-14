@@ -9,7 +9,7 @@
 //   cancel, or the source attempt ending, from any open state ─► cancelled
 
 import { normaliseDequeue } from "./casing.ts";
-import { renameColumns } from "./columns.ts";
+import { addColumns, renameColumns } from "./columns.ts";
 import type { ConflictDetails } from "./conflicts.ts";
 import type { ErroredDetails, FailedChecksDetails, LandingOutcome } from "./landing.ts";
 import type { Sql } from "./task-store.ts";
@@ -138,6 +138,11 @@ const SCHEMA = [
   `CREATE UNIQUE INDEX IF NOT EXISTS merge_requests_open_task ON merge_requests (task)
     WHERE state IN ('pending', 'queued', 'landing', 'needsReview')`,
 ];
+/**
+ * Columns `merge_requests` gained after its first version: whether the project owner (as themselves
+ * or under an alias) made the latest approval, so landing it is the owner's merge.
+ */
+const MERGE_REQUEST_COLUMNS = ["approved_by_owner INTEGER NOT NULL DEFAULT 0"];
 /** `merge_requests` columns named before an actor's alias was called an alias. */
 const RENAMES = [
   ["approved_by_agent", "approved_by_alias"],
@@ -182,6 +187,16 @@ export class MergeRequests {
     if (index?.sql.includes("needs_review") === true) sql.exec("DROP INDEX merge_requests_open_task");
     for (const statement of SCHEMA) sql.exec(statement);
     renameColumns(sql, "merge_requests", RENAMES);
+    addColumns(sql, "merge_requests", MERGE_REQUEST_COLUMNS);
+  }
+
+  /** Whether the project owner made the merge request's latest approval: landing it is the owner's merge. */
+  ownerApproved(mr: StoredMergeRequest): boolean {
+    const [row] = this.#sql.exec<{ approved_by_owner: number }>(
+      "SELECT approved_by_owner FROM merge_requests WHERE id = ?",
+      mr.id,
+    );
+    return row?.approved_by_owner === 1;
   }
 
   /** The task's open merge request, if any. */
@@ -235,18 +250,22 @@ export class MergeRequests {
       .map((row, i) => this.#toMergeRequest(row, i + 1));
   }
 
-  /** Creates a task's merge request from a selection, approving `head`, and moves it to `pending`. */
-  select(actor: Actor, input: { task: number; attempt: number; head: string }): StoredMergeRequest {
+  /**
+   * Creates a task's merge request from a selection, approving `head`, and moves it to `pending`.
+   * `byOwner` says whether `actor` is the project's owner.
+   */
+  select(actor: Actor, input: { task: number; attempt: number; head: string; byOwner: boolean }): StoredMergeRequest {
     const at = this.#stamp();
     const [row] = this.#sql.exec<MergeRequestRow>(
       `INSERT INTO merge_requests (task, attempt, state, approved_head, approved_by_user, approved_by_alias,
-         approved_at, created_at, created_by_user, created_by_alias)
-       VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+         approved_by_owner, approved_at, created_at, created_by_user, created_by_alias)
+       VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
       input.task,
       input.attempt,
       input.head,
       actor.user.id,
       actor.alias,
+      input.byOwner ? 1 : 0,
       at,
       at,
       actor.user.id,
@@ -259,14 +278,18 @@ export class MergeRequests {
     return mr;
   }
 
-  /** Approves `head`, moving the merge request to `pending` and releasing any hold. */
-  approve(actor: Actor, mr: StoredMergeRequest, head: string): StoredMergeRequest {
+  /**
+   * Approves `head`, moving the merge request to `pending` and releasing any hold. `byOwner` says
+   * whether `actor` is the project's owner.
+   */
+  approve(actor: Actor, mr: StoredMergeRequest, head: string, byOwner: boolean): StoredMergeRequest {
     this.#sql.exec(
       `UPDATE merge_requests SET state = 'pending', approved_head = ?, approved_by_user = ?, approved_by_alias = ?,
-         approved_at = ?, held = 0 WHERE id = ?`,
+         approved_by_owner = ?, approved_at = ?, held = 0 WHERE id = ?`,
       head,
       actor.user.id,
       actor.alias,
+      byOwner ? 1 : 0,
       this.#stamp(),
       mr.id,
     );

@@ -34,6 +34,14 @@ export function parseRepoName(name: string): RepoName | null {
   return null;
 }
 
+/**
+ * The repo a line's head is in: an attempt's fork for an attempt (`t42a3`), else the origin, which
+ * holds `main` and every task branch (`refs/tasks/t42`).
+ */
+export function lineRepo(project: string, line: string): string {
+  return isAttemptRef(line) ? forkRepo(project, line) : originRepo(project);
+}
+
 function repoName(project: string, suffix: string): string {
   if (!PROJECT_ID.test(project)) throw new Error(`not a project id: ${project}`);
   const name = `${project}-${suffix}`;

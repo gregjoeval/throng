@@ -109,7 +109,7 @@ export class LandingWorkflow extends WorkflowEntrypoint<Env, LandingParams> {
   /** Steps 1 to 3. Null when the DO refused the push claim: the landing was stopped. */
   async #land(instanceId: string, params: LandingParams, step: WorkflowStep): Promise<LandingOutcome | null> {
     const ref = attemptRef(params.task, params.attempt);
-    const repos = { project: params.project, attempt: ref };
+    const repos = { project: params.project, line: ref };
     const tenMinutes = { retries: STEP_RETRIES, timeout: "10 minutes" } as const;
 
     // The check container starts at the conflict check, before the merged tree's config is known, and

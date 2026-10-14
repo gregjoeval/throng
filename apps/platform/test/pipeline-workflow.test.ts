@@ -28,7 +28,7 @@ vi.mock("../src/artifacts", () => ({
     readFile: async (repo: string) => ({ text: async () => (repo === "abc123-main" ? configs.main : "") }),
   }),
 }));
-vi.mock("../src/base", () => ({ attemptBase: async () => null }));
+vi.mock("../src/base", () => ({ lineBase: async () => null }));
 
 interface Snapshot {
   id: string;
@@ -79,6 +79,12 @@ interface Behaviour {
   gone?: string[];
   /** What the project answers the plan: start, by default. */
   verdict?: PlanVerdict;
+  /** Each post-gate step's command's exit. */
+  postGate?: Record<string, number>;
+  /** A post-gate step whose container fails as infrastructure this many times while being readied. */
+  unready?: { step: string; times: number };
+  /** A post-gate step whose container is lost once readied, before its command runs. */
+  lost?: string;
 }
 
 /** The keyring the project's secrets are sealed under, as `SECRETS_KEYRING` holds it. */
@@ -124,6 +130,9 @@ async function pipeline(behaviour: Behaviour = {}) {
   const persisted: unknown[] = [behaviour.payload ?? params];
   const held = new Map<string, string[]>();
   const loads: string[][] = [];
+  /** How many times each post-gate step's container was readied, and each command that ran, in order. */
+  const readied = new Map<string, number>();
+  const commands: string[] = [];
   let planned: string[] | null = null;
   let named: NamedSecrets[] | null = null;
   let report: RunReport | null = null;
@@ -153,10 +162,28 @@ async function pipeline(behaviour: Behaviour = {}) {
               return { exitCode: 0, stdout: `${container} ${log}\n${leaked}`, stderr: "" };
             }
             const from = started.get(container)?.from ?? "image";
-            started.set(container, { from, access: options.access, size: options.size, env: options.env });
-            held.set(container, heldIn(options.env));
+            // A post-gate step's command runs in the container its ready step started, as it started.
+            const command = container.startsWith("step:") && !script.includes("touch step.ready");
+            if (!command) {
+              started.set(container, { from, access: options.access, size: options.size, env: options.env });
+              held.set(container, heldIn(options.env));
+            }
             running.add(container);
             events.push(`run ${container}`);
+            if (container.startsWith("step:")) {
+              const postGate = container.slice("step:".length);
+              if (!command) {
+                const unready = behaviour.unready?.step === postGate ? behaviour.unready : null;
+                const tries = (readied.get(postGate) ?? 0) + 1;
+                readied.set(postGate, tries);
+                if (unready !== null && tries <= unready.times)
+                  return { exitCode: 10, stdout: "", stderr: "fetch failed" };
+                return result({ setupsRerun: from === "image" });
+              }
+              if (behaviour.lost === postGate) return { exitCode: 18, stdout: "", stderr: "" };
+              commands.push(postGate);
+              return result({ exit: behaviour.postGate?.[postGate] ?? 0, durationMs: 4 });
+            }
             if (container === "setup") {
               let failed = false;
               const setups = setupNamesOf(configs.main).map((setup) => {
@@ -233,6 +260,8 @@ async function pipeline(behaviour: Behaviour = {}) {
     stored,
     persisted,
     loads,
+    commands,
+    readied,
     planned: planned as string[] | null,
     named: named as NamedSecrets[] | null,
     report: report as RunReport | null,
@@ -603,6 +632,148 @@ describe("PipelineWorkflow secrets", () => {
       ["deploy", "skipped", ["skipped: setup deps failed"]],
     ]);
     expect(outcome.gate).toBe("failed");
+  });
+});
+
+/** A config whose `main` runs the `verify` group and two post-gate steps; `preview` is in no group. */
+const MAIN_CONFIG = `sandbox: { size: standard-2 }
+setup:
+  - { name: deps, command: npm ci }
+checks:
+  - { name: lint, command: npm run lint, group: verify }
+  - { name: test, command: npm test, group: verify }
+  - { name: preview, command: npm run preview, after: test }
+pipelines:
+  main:
+    groups: [verify]
+    steps:
+      - { name: migrate, command: npm run migrate }
+      - { name: deploy, command: npm run deploy }
+`;
+
+describe("PipelineWorkflow on a task branch and main", () => {
+  const onMain = { ...params, line: "main" };
+  const onTaskBranch = { ...params, line: "t1" };
+
+  it.each([
+    ["main", onMain],
+    ["a task branch", onTaskBranch],
+  ])("gives every container on %s one read grant on the origin, which holds its line", async (_, payload) => {
+    const { started } = await pipeline({ config: MAIN_CONFIG, payload, snapshot: null });
+    expect(started.size).toBeGreaterThan(0);
+    for (const container of started.values()) {
+      expect(container.access.grants).toEqual([
+        { remote: "https://artifacts.invalid/abc123-main.git", token: "read:abc123-main", access: "read" },
+      ]);
+    }
+  });
+
+  it("takes the pipeline from the line: main on main, default on a task branch", async () => {
+    const main = await pipeline({ config: MAIN_CONFIG, payload: onMain });
+    expect(main.started.get("setup")?.env).toMatchObject({ THRONG_PIPELINE: "main", THRONG_LINE: "main" });
+    const branch = await pipeline({ config: MAIN_CONFIG, payload: onTaskBranch });
+    expect(branch.started.get("setup")?.env).toMatchObject({ THRONG_PIPELINE: "default", THRONG_LINE: "t1" });
+  });
+
+  it("runs only the checks in main's groups on main, and every check on any other line", async () => {
+    const main = await pipeline({ config: MAIN_CONFIG, payload: onMain });
+    expect(
+      outcomeOf(main.report)
+        .steps.filter((s) => s.kind === "check")
+        .map((s) => [s.name, s.group]),
+    ).toEqual([
+      ["_diff", null],
+      ["lint", "verify"],
+      ["test", "verify"],
+    ]);
+    const branch = await pipeline({ config: MAIN_CONFIG, payload: onTaskBranch });
+    expect(
+      outcomeOf(branch.report)
+        .steps.filter((s) => s.kind === "check")
+        .map((s) => s.name),
+    ).toEqual(["_diff", "lint", "test", "preview"]);
+    // Only `main` has post-gate steps.
+    expect(outcomeOf(branch.report).steps.some((s) => s.kind === "step")).toBeFalsy();
+  });
+
+  it("runs main's post-gate steps in order after the gate, each in its own container restored from the snapshot", async () => {
+    const { events, planned, started, commands, report, stored } = await pipeline({
+      config: MAIN_CONFIG,
+      payload: onMain,
+    });
+    expect(planned).toEqual([
+      `${INSTANCE}/setup`,
+      `${INSTANCE}/check:lint`,
+      `${INSTANCE}/check:test`,
+      `${INSTANCE}/step:migrate`,
+      `${INSTANCE}/step:deploy`,
+    ]);
+    expect(commands).toEqual(["migrate", "deploy"]);
+    expect(events.indexOf("restore step:migrate snap-1")).toBeGreaterThan(events.indexOf("destroy check:test"));
+    expect(events.indexOf("restore step:deploy snap-1")).toBeGreaterThan(events.indexOf("destroy step:migrate"));
+    expect(started.get("step:deploy")).toMatchObject({ from: "snapshot", env: { THRONG_PIPELINE: "main" } });
+    expect(outcomeOf(report).steps.map((s) => [s.name, s.kind, s.outcome, s.log])).toEqual([
+      ["_diff", "check", "passed", null],
+      ["deps", "setup", "passed", "setup.1"],
+      ["lint", "check", "passed", "lint"],
+      ["test", "check", "passed", "test"],
+      ["migrate", "step", "passed", "step.migrate"],
+      ["deploy", "step", "passed", "step.deploy"],
+    ]);
+    expect(stored.get("logs/abc123/main/7/step.deploy.log")).toBe(
+      "step:deploy step.deploy\n== throng ==\nsandbox: standard-2\n",
+    );
+  });
+
+  it("stops at the first post-gate step that fails, skipping the rest and saying why", async () => {
+    const { commands, report } = await pipeline({ config: MAIN_CONFIG, payload: onMain, postGate: { migrate: 1 } });
+    expect(commands).toEqual(["migrate"]);
+    const outcome = outcomeOf(report);
+    expect(outcome.steps.filter((s) => s.kind === "step").map((s) => [s.name, s.outcome, s.notes])).toEqual([
+      ["migrate", "failed", []],
+      ["deploy", "skipped", ["skipped: step migrate didn't pass"]],
+    ]);
+    // The gate is the setups' and checks' alone.
+    expect(outcome.gate).toBe("passed");
+  });
+
+  it("runs no post-gate step when the gate fails", async () => {
+    const { commands, events, report } = await pipeline({ config: MAIN_CONFIG, payload: onMain, checks: { test: 1 } });
+    expect(commands).toEqual([]);
+    expect(events.some((e) => e.includes("step:"))).toBeFalsy();
+    expect(
+      outcomeOf(report)
+        .steps.filter((s) => s.kind === "step")
+        .map((s) => [s.name, s.outcome, s.notes]),
+    ).toEqual([
+      ["migrate", "skipped", ["skipped: the gate failed"]],
+      ["deploy", "skipped", ["skipped: the gate failed"]],
+    ]);
+  });
+
+  it("notes a post-gate step that had to re-run the setups", async () => {
+    const { report } = await pipeline({ config: MAIN_CONFIG, payload: onMain, snapshot: null });
+    expect(outcomeOf(report).steps.find((s) => s.name === "deploy")?.notes).toEqual([
+      "setups re-run in this step's container: the run took no snapshot of them",
+    ]);
+  });
+
+  it("retries a post-gate step whose container failed before its command started", async () => {
+    const { commands, readied, report } = await pipeline({
+      config: MAIN_CONFIG,
+      payload: onMain,
+      unready: { step: "deploy", times: 2 },
+    });
+    expect(readied.get("deploy")).toBe(3);
+    expect(commands).toEqual(["migrate", "deploy"]);
+    expect(report?.status).toBe("done");
+  });
+
+  it("never runs a post-gate step's command twice: an infrastructure error once it started ends the run errored", async () => {
+    const { commands, persisted, report } = await pipeline({ config: MAIN_CONFIG, payload: onMain, lost: "migrate" });
+    expect(commands).toEqual([]);
+    expect(persisted.filter((p) => p === "step migrate")).toHaveLength(1);
+    expect(report).toMatchObject({ status: "errored", error: expect.stringContaining("step migrate gave no result") });
   });
 });
 

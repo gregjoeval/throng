@@ -7,8 +7,16 @@ import { parseConfig } from "../src/config.ts";
 import type { ConfigResult, SetupConfig } from "../src/config.ts";
 import { buildResult, checkOrder, MAX_OUTPUT_BYTES, scorePlan } from "../src/results.ts";
 import type { PlannedCheck, PlannedMetric, RawScore } from "../src/results.ts";
-import { checkScript, parseResult, RERUN_SETUP_FAILED_EXIT, setupScript } from "../src/scripts.ts";
-import type { CheckRun, SetupResult } from "../src/scripts.ts";
+import {
+  checkScript,
+  parseResult,
+  RERUN_SETUP_FAILED_EXIT,
+  setupScript,
+  STEP_NOT_READY_EXIT,
+  stepReadyScript,
+  stepScript,
+} from "../src/scripts.ts";
+import type { CheckRun, SetupResult, StepReady, StepRun } from "../src/scripts.ts";
 import { NO_TASK_DEFINITIONS, taskDefinitionsFrom, withTask } from "../src/task-definitions.ts";
 import { at } from "./support/defined.ts";
 
@@ -163,6 +171,17 @@ describe("setupScript", () => {
     expect(() => execFileSync("test", ["-e", join(sandbox, "setup.done")])).toThrow();
   });
 
+  it("checks out a task branch's head from the origin, where it's only under refs/tasks", () => {
+    commit("t.txt", "a test\n", "the task's test");
+    const head = git(work, "rev-parse", "HEAD");
+    git(work, "push", "-q", origin, "HEAD:refs/tasks/t1");
+    git(work, "reset", "-q", "--hard", "HEAD~1");
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    const ran = runScript<SetupResult>(setupScript(origin, { sha: head, base: null }, setup("cat t.txt")), sandbox);
+    expect(ran.setups.map((s) => s.exit)).toEqual([0]);
+    expect(cat(join(sandbox, "logs/setup.1.log"))).toBe("a test\n");
+  });
+
   it("is idempotent: rerunning in the same directory gives the same result", () => {
     const head = attemptHead();
     const sandbox = mkdtempSync(join(root, "sandbox-"));
@@ -171,6 +190,54 @@ describe("setupScript", () => {
     const second = runScript<SetupResult>(script, sandbox);
     expect(first.setups.map((s) => s.exit)).toEqual([0]);
     expect(second.setups.map((s) => s.exit)).toEqual([0]);
+  });
+});
+
+describe("post-gate step scripts", () => {
+  const deploy = { name: "deploy", command: "echo deploying >> ../deploys && test -f built && echo done" };
+
+  it("readies a step's container from the setups' snapshot, then runs its command once in the tree", () => {
+    const head = attemptHead();
+    const setups = setup("echo ran >> ../setups && touch built");
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    runScript<SetupResult>(setupScript(fork, { sha: head, base: null }, setups), sandbox);
+    expect(runScript<StepReady>(stepReadyScript(fork, head, setups, deploy), sandbox)).toEqual({ setupsRerun: false });
+    expect(runScript<StepRun>(stepScript(deploy, 60_000), sandbox)).toMatchObject({ exit: 0 });
+    expect(cat(join(sandbox, "setups"))).toBe("ran\n");
+    expect(cat(join(sandbox, "deploys"))).toBe("deploying\n");
+    expect(cat(join(sandbox, "logs/step.deploy.log"))).toBe("done\n");
+  });
+
+  it("readies a fresh container by fetching the head and running the setups, their output at the top of the log", () => {
+    const head = attemptHead();
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    const setups = setup("echo installing && touch built");
+    expect(runScript<StepReady>(stepReadyScript(fork, head, setups, deploy), sandbox)).toEqual({ setupsRerun: true });
+    expect(runScript<StepRun>(stepScript(deploy, 60_000), sandbox)).toMatchObject({ exit: 0 });
+    expect(cat(join(sandbox, "logs/step.deploy.log"))).toBe("== throng: setup s1 ==\ninstalling\ndone\n");
+  });
+
+  it("reports a failed command's exit, and refuses to run in a container that wasn't readied", () => {
+    const head = attemptHead();
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    expect(() => execFileSync("bash", ["-c", stepScript(deploy, 60_000)], { cwd: sandbox, env: ENV })).toThrow(
+      expect.objectContaining({ status: STEP_NOT_READY_EXIT }),
+    );
+    runScript<StepReady>(stepReadyScript(fork, head, [], deploy), sandbox);
+    expect(runScript<StepRun>(stepScript({ name: "deploy", command: "exit 4" }, 60_000), sandbox)).toMatchObject({
+      exit: 4,
+    });
+  });
+
+  it("never runs a step's command twice in one readied container", () => {
+    const head = attemptHead();
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    runScript<StepReady>(stepReadyScript(fork, head, setup("touch built"), deploy), sandbox);
+    runScript<StepRun>(stepScript(deploy, 60_000), sandbox);
+    expect(() => execFileSync("bash", ["-c", stepScript(deploy, 60_000)], { cwd: sandbox, env: ENV })).toThrow(
+      expect.objectContaining({ status: STEP_NOT_READY_EXIT }),
+    );
+    expect(cat(join(sandbox, "deploys"))).toBe("deploying\n");
   });
 });
 

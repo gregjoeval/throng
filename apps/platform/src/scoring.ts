@@ -1,15 +1,16 @@
-// Scoring requests and the queue that turns them into Scoring Workflow runs. See the spec's "When
-// scoring runs" section. The task store decides when an attempt's head should be scored and calls
-// `request`; the queue keeps one pipeline run per request in the project Durable Object's SQLite,
-// keyed on its line (`t42a3` for an attempt; see "Lines and the run key" in #257):
+// Pipeline run requests and the queue that turns them into Pipeline Workflow runs. The task store
+// decides when a line's head should run and calls `request`: an attempt's push (`t42a3`), a task
+// branch's (`t42`), or `main` moving. The queue keeps one pipeline run per request in the project
+// Durable Object's SQLite, keyed on its line (see "Lines and the run key" in #257):
 //
 // - a head that is already queued or running isn't queued again, and one with a `done` run isn't
 //   either, unless the request is a rescore. A rescore of a running head queues one follow-up
 //   behind it, since the running run may have read the task's definitions before they changed;
-// - a newer head on a line cancels its queued or running run, so newest head wins;
-// - one run per line runs at a time, and at most `SCORING_CAP` runs are running per project, less
-//   the slot the merge queue's landing holds (it counts toward the cap and goes first); the rest
-//   wait, oldest first.
+// - a newer head on a line cancels its queued or running run, so newest head wins; on `main` it
+//   replaces a queued run only, and the running one, which may be deploying, runs to its end;
+// - one run per line runs at a time, and at most `SCORING_CAP` runs are running per project. The
+//   merge queue's landing holds a slot first, then a `main` run takes one, then follows, then
+//   task-branch and attempt runs, oldest first.
 //
 // It also tracks each line's head, moved by every push and scoring request, so a result for an
 // older head is superseded and the attempt's `scoring` status is about its current head.
@@ -19,7 +20,7 @@
 
 import { normaliseResult } from "./casing.ts";
 import { addColumns, renameColumns } from "./columns.ts";
-import { forkRepo } from "./repos.ts";
+import type { Pipeline } from "./pipelines.ts";
 import { upgradeResult } from "./results.ts";
 import type { ScoringResult, StoredResult } from "./results.ts";
 import { runOutcome, scoringResult } from "./run-outcome.ts";
@@ -77,11 +78,8 @@ export function cancellable(run: Pick<StoredRun, "status" | "pipeline">): boolea
   return run.status === "queued" || run.status === "waiting" || (run.status === "running" && run.pipeline !== "main");
 }
 
-export const PIPELINES = ["default", "main"] as const;
-export type Pipeline = (typeof PIPELINES)[number];
-
-/** The line whose runs run the `main` pipeline. */
-const MAIN_LINE = "main";
+/** The line whose runs run the `main` pipeline: the origin's `main`. */
+export const MAIN_LINE = "main";
 
 /** The pipeline a line runs, which comes from the line and never from the tree: `main` runs `main`, every other line `default`. */
 export function pipelineFor(line: string): Pipeline {
@@ -414,8 +412,12 @@ export class ScoringQueue {
         );
         if (newer !== undefined) return { queued: false, reason: "a newer push is queued", run: toRun(newer) };
       }
-      // Whatever happens to this head, runs for older heads are superseded now.
-      for (const older of live.filter((r) => r.sha !== input.sha)) this.#cancel(older, { superseded_by: input.sha });
+      // Whatever happens to this head, runs for older heads are superseded now; on `main`, only those
+      // that haven't started: a running `main` run may be deploying, and runs to its end.
+      const superseded = live.filter(
+        (r) => r.sha !== input.sha && (input.line !== MAIN_LINE || r.status !== "running"),
+      );
+      for (const older of superseded) this.#cancel(older, { superseded_by: input.sha });
       if (input.trigger !== "rescore") {
         const [done] = this.#sql.exec<RunRow>(
           "SELECT * FROM pipeline_runs WHERE line = ? AND sha = ? AND status = 'done' ORDER BY id DESC",
@@ -443,7 +445,7 @@ export class ScoringQueue {
       );
       if (row === undefined) throw new Error("pipeline run insert returned no row");
       // The id makes the instance id unique, so a rescore of a head gets its own Workflow.
-      const instanceId = `${forkRepo(input.project, row.line)}-${input.sha.slice(0, 12)}-${row.id}`;
+      const instanceId = `${input.project}-${row.line}-${input.sha.slice(0, 12)}-${row.id}`;
       this.#sql.exec("UPDATE pipeline_runs SET instance_id = ? WHERE id = ?", instanceId, row.id);
       const run = toRun({ ...row, instance_id: instanceId });
       this.#journal("scoringQueued", run, { trigger: input.trigger });
@@ -472,6 +474,17 @@ export class ScoringQueue {
     return n;
   }
 
+  /** Whether a `main` run would start at the next drain: one is queued, and none is running. */
+  mainStartable(): boolean {
+    const [row] = this.#sql.exec<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM pipeline_runs q WHERE line = ? AND status = 'queued' AND NOT EXISTS (
+         SELECT 1 FROM pipeline_runs r WHERE r.line = q.line AND r.status = 'running'
+       )`,
+      MAIN_LINE,
+    );
+    return (row?.n ?? 0) > 0;
+  }
+
   /** The newest run id on the line, or 0; what a request's `readSince` compares against. */
   latestRunId(line: string): number {
     const [row] = this.#sql.exec<{ id: number | null }>("SELECT MAX(id) AS id FROM pipeline_runs WHERE line = ?", line);
@@ -479,9 +492,10 @@ export class ScoringQueue {
   }
 
   /**
-   * Stops cancelled runs that had started, then starts queued runs while there are free slots; a
-   * run queued behind its line's running run (a rescore) waits for it to end. Rows are claimed before
-   * any await, so drains that overlap never start or stop a run twice.
+   * Stops cancelled runs that had started, then starts queued runs while there are free slots, a
+   * `main` run first and then the rest oldest first; a run queued behind its line's running run (a
+   * rescore, or `main`'s next head) waits for it to end. Rows are claimed before any await, so
+   * drains that overlap never start or stop a run twice.
    */
   async drain(): Promise<void> {
     if (this.#runner === null) return;
@@ -503,7 +517,8 @@ export class ScoringQueue {
         .exec<RunRow>(
           `SELECT * FROM pipeline_runs q WHERE status = 'queued' AND NOT EXISTS (
              SELECT 1 FROM pipeline_runs r WHERE r.status = 'running' AND r.line = q.line
-           ) ORDER BY id LIMIT ?`,
+           ) ORDER BY line = ? DESC, id LIMIT ?`,
+          MAIN_LINE,
           free,
         )
         .map(toRun);
@@ -653,6 +668,7 @@ export class ScoringQueue {
   #journal(kind: string, run: StoredRun, extra: Record<string, unknown>): void {
     const detail = { ref: run.line, run: run.id, sha: run.sha, ...extra };
     const attempt = parseAttemptRef(run.line);
+    const task = attempt?.task ?? (run.line === MAIN_LINE ? null : parseTaskRef(run.line));
     this.#sql.exec(
       "INSERT INTO journal (at, kind, detail, user_id, alias, task, attempt) VALUES (?, ?, ?, ?, ?, ?, ?)",
       this.#ms(),
@@ -660,7 +676,7 @@ export class ScoringQueue {
       JSON.stringify(detail),
       run.user_id,
       run.alias,
-      attempt?.task ?? null,
+      task,
       attempt?.number ?? null,
     );
   }

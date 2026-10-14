@@ -8,6 +8,7 @@ const grants: RunGrants = {
   originWrite: { remote: remote("demo"), token: "origin-write", access: "write" },
   forkRead: { remote: remote("demo--a1"), token: "fork-read", access: "read" },
   forkWrite: { remote: remote("demo--a1"), token: "fork-write", access: "write" },
+  lineRead: { remote: remote("demo--a1"), token: "line-read", access: "read" },
 };
 
 describe("grantsForRole", () => {
@@ -17,7 +18,8 @@ describe("grantsForRole", () => {
       expect({ role, writes }).toEqual({ role, writes: writes && !RUNS_REPO_CODE[role] });
     }
     expect(grantsForRole("land", grants).map((g) => g.token)).toEqual(["origin-write", "fork-read"]);
-    expect(grantsForRole("pipeline", grants).map((g) => g.token)).toEqual(["fork-read"]);
+    // A pipeline container reads its line's repo alone: an attempt's fork, or the origin for a task branch or `main`.
+    expect(grantsForRole("pipeline", grants).map((g) => g.token)).toEqual(["line-read"]);
     expect(grantsForRole("follow", grants).map((g) => g.token)).toEqual(["origin-read", "fork-write"]);
   });
 });

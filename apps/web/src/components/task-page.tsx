@@ -11,6 +11,7 @@ import { MergeRequestSummary, MergeRequestView } from "@/components/merge-reques
 import { SingleAttemptView } from "@/components/single-attempt";
 import { EmptyState, ErrorState, Loading } from "@/components/states";
 import { TaskActions } from "@/components/task-actions";
+import { TaskBranchRuns } from "@/components/task-branch-runs";
 import { mergeRequestQuery, taskAttemptsQuery, taskQuery } from "@/lib/api";
 import type { ProjectRef } from "@/lib/api";
 import { buildPath } from "@/lib/paths";
@@ -164,10 +165,19 @@ function Ended({
   );
 }
 
-/** The merged merge request's banner and approval; nothing while it loads or if it can't be read. */
+/**
+ * The merged merge request's banner and approval, with the task branch's runs beside it; nothing
+ * while it loads or if it can't be read.
+ */
 function MergedSummary({ projectRef, task }: TaskAt & { task: Task }) {
   const mr = useQuery(mergeRequestQuery(projectRef, task.ref));
-  return mr.data === undefined ? null : <MergeRequestSummary mr={mr.data} />;
+  if (mr.data === undefined) return null;
+  return (
+    <>
+      <MergeRequestSummary mr={mr.data} />
+      <TaskBranchRuns projectRef={projectRef} task={task} />
+    </>
+  );
 }
 
 function EndedLinks({

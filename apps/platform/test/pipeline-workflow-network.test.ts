@@ -16,7 +16,7 @@ const binding = vi.hoisted(() => ({ repos: null as unknown }));
 
 vi.mock("cloudflare:workers", () => import("./support/cloudflare-workers.ts"));
 vi.mock("../src/artifacts", () => ({ reposFor: () => binding.repos }));
-vi.mock("../src/base", () => ({ attemptBase: async () => null }));
+vi.mock("../src/base", () => ({ lineBase: async () => null }));
 
 // Imported by a computed path: the module is Worker code, which this project's Node typecheck can't
 // follow (`cloudflare:workers`), so it is typed here by what the test calls.

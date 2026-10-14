@@ -212,6 +212,31 @@ describe("the Sandbox cap", () => {
     await follow(t1a1, (current) => ({ kind: "current", head: current }));
     expect(followWorkflow.created.map((c) => c.params.attempt)).toEqual([1, 2, 3]);
   });
+
+  it("starts a main run ahead of follows, and follows ahead of the task branch's run", async () => {
+    const { store, drain, t1a1, moveTaskBranch, scoreLatest, followWorkflow } = await setup();
+    await store.createAttempts(PROJECT, bob, { task: 1, count: 2 });
+    await drain();
+    store.scoring.request({
+      project: PROJECT.id,
+      line: "main",
+      sha: "1".repeat(40),
+      trigger: "push",
+      actor: null,
+      ownersPush: true,
+    });
+    moveTaskBranch();
+    await drain();
+    // t1a1's run and `main`'s hold two slots; one follow takes the third, and the task branch waits.
+    expect(store.scoring.listRuns("main").map((r) => r.status)).toEqual(["running"]);
+    expect(followWorkflow.created.map((c) => c.params.attempt)).toEqual([1]);
+    expect(store.scoring.listRuns("t1").map((r) => r.status)).toEqual(["queued"]);
+
+    scoreLatest(t1a1);
+    await drain();
+    expect(followWorkflow.created.map((c) => c.params.attempt)).toEqual([1, 2]);
+    expect(store.scoring.listRuns("t1").map((r) => r.status)).toEqual(["queued"]);
+  });
 });
 
 describe("a clean update", () => {
@@ -280,7 +305,11 @@ describe("a conflict", () => {
     const scoring = attempt(t1a1).scoring;
     await follow(t1a1, (before) => ({ kind: "conflict", head: before }));
     expect(attempt(t1a1)).toMatchObject({ needs_update: true, scoring });
-    expect(journal().at(-1)).toMatchObject({ kind: "needsUpdate", attempt: 1, detail: { taskBranch: head } });
+    expect(journal().findLast((e) => e.attempt === 1)).toMatchObject({
+      kind: "needsUpdate",
+      attempt: 1,
+      detail: { taskBranch: head },
+    });
 
     // The author merges the task branch and pushes; a follow checks the push and finds it current.
     await push(t1a1);
@@ -465,12 +494,14 @@ describe("a merge request's source", () => {
 
 describe("ended attempts", () => {
   it("doesn't follow a closed attempt, and catches it up when it reopens", async () => {
-    const { store, drain, t1a2, moveTaskBranch, started, follow, merged, attempt } = await setup();
+    const { store, drain, t1a2, moveTaskBranch, started, follow, merged, attempt, t1a1, scoreLatest } = await setup();
     await store.closeAttempt(PROJECT, bob, t1a2);
     const { head, following } = moveTaskBranch();
     expect(following).toEqual(["t1a1"]);
     await drain();
     expect(started(t1a2)).toBeUndefined();
+    // t1a1's run, its follow and the task branch's run hold every slot; t1a1's run ends.
+    scoreLatest(t1a1);
 
     await store.reopenAttempt(PROJECT, bob, t1a2);
     await drain();

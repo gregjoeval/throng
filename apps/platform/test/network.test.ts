@@ -194,6 +194,7 @@ describe("roleAccess", () => {
     originWrite: repoGrant("p1-main", "write", "origin-write"),
     forkRead: repoGrant("p1-t1a1", "read", "fork-read"),
     forkWrite: repoGrant("p1-t1a1", "write", "fork-write"),
+    lineRead: repoGrant("p1-t1a1", "read", "line-read"),
   };
   it("opens network.allow and the registry only to containers that run repository code", () => {
     const allow = ["api.github.com"];

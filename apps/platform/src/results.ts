@@ -13,6 +13,8 @@ export type CheckOutcome = (typeof CHECK_OUTCOMES)[number];
 
 /** Longest a `setup` command may run; the spec gives setup no timeout of its own. */
 export const SETUP_TIMEOUT_MS = DEFAULT_CHECK_TIMEOUT_MS;
+/** Longest a post-gate step's command may run. */
+export const POST_GATE_STEP_TIMEOUT_MS = DEFAULT_CHECK_TIMEOUT_MS;
 /** The parse guard: largest output file in `$THRONG_OUTPUT` the score script parses. */
 export const MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
 /** Exit codes `timeout` gives a command it stopped: TERM (124), then KILL after the grace (128 + 9). */

@@ -8,7 +8,7 @@ import type { RepoCodeRole, RoleGrants, RunGrants, SandboxRole } from "./grants"
 import { LOG_CONTENT_TYPE, MISSING_LOG_EXIT, readLogScript, sandboxNote, withNotes } from "./logs";
 import { NO_NETWORK, roleAccess } from "./network";
 import type { NetworkAccess } from "./network";
-import { forkRepo, originRepo } from "./repos";
+import { forkRepo, lineRepo, originRepo } from "./repos";
 import { scorePlan, scoreTimeoutMs } from "./results";
 import type { ScorePlan } from "./results";
 import type { RunResult, SandboxSnapshot } from "./sandbox";
@@ -18,10 +18,13 @@ const TOKEN_TTL_SECONDS = 30 * 60;
 export const STEP_RETRIES = { limit: 2, delay: "5 seconds", backoff: "constant" } as const;
 /** What a container may reach while its logs are read: nothing. It is already running by then. */
 const NO_ACCESS = { grants: [], ...NO_NETWORK };
-/** The repos a run's grants are for: the project's origin and one attempt's fork (`t42a3`). */
+/**
+ * The repos a run's grants are for: the project's origin, and its line's (`t42a3`, `t42` or `main`):
+ * a fork grant is only for an attempt's line.
+ */
 export interface RunRepos {
   project: string;
-  attempt: string;
+  line: string;
 }
 
 /**
@@ -120,17 +123,22 @@ export async function runInSandbox<R extends SandboxRole>(
 /** Mints the named grants for the run's origin and fork. */
 async function mintGrants<K extends keyof RunGrants>(
   env: Env,
-  { project, attempt }: RunRepos,
+  { project, line }: RunRepos,
   names: readonly K[],
 ): Promise<Pick<RunGrants, K>> {
   const repos = reposFor(env);
-  const repoNames = { origin: originRepo(project), fork: forkRepo(project, attempt) };
+  const repoNames = {
+    origin: () => originRepo(project),
+    fork: () => forkRepo(project, line),
+    line: () => lineRepo(project, line),
+  };
   const minted = await Promise.all(
     names.map(async (name) => {
       const { repo, access } = GRANT_SOURCES[name];
+      const repoName = repoNames[repo]();
       const [info, token] = await Promise.all([
-        repos.get(repoNames[repo]),
-        repos.mintToken(repoNames[repo], access, TOKEN_TTL_SECONDS),
+        repos.get(repoName),
+        repos.mintToken(repoName, access, TOKEN_TTL_SECONDS),
       ]);
       return [name, { remote: info.remote, token: token.token, access }] as const;
     }),

@@ -228,6 +228,12 @@ const ConfigCheckSchema = z
       example: ["typecheck"],
     }),
     secrets: SecretNamesSchema,
+    group: ConfigNameSchema.nullable().openapi({
+      description:
+        "The one group it is in, which a pipeline's `groups` choose it by; null outside one, and always for a " +
+        "task's check, which runs on every attempt of its task.",
+      example: "verify",
+    }),
     source: ConfigLayerSchema,
   })
   .openapi("Check", {
@@ -817,6 +823,33 @@ const RunLogPathSchema = RunPathSchema.extend({
   }),
 });
 
+const ConfigStepSchema = z
+  .object({
+    name: ConfigNameSchema.openapi({ example: "deploy" }),
+    command: z.string().openapi({ example: "pnpm deploy" }),
+  })
+  .openapi("Step", {
+    description:
+      "A post-gate step `main`'s config declares: a command run once the gate passes, in order with the others, " +
+      "each in its own container. The first that fails stops the rest.",
+  });
+
+const ConfigPipelineSchema = z
+  .object({
+    groups: z
+      .array(ConfigNameSchema)
+      .nullable()
+      .openapi({
+        description:
+          "The groups whose checks it runs; null to run every check. A task's checks always run on its attempts.",
+        example: ["verify"],
+      }),
+    steps: z
+      .array(ConfigStepSchema)
+      .openapi({ description: "Run in order once the gate passes; only `main` has any." }),
+  })
+  .openapi("PipelineConfig");
+
 const ConfigSchema = z
   .object({
     setup: z.array(ConfigSetupSchema).openapi({ description: "Run once, in order, before the checks." }),
@@ -835,6 +868,9 @@ const ConfigSchema = z
         description: `The size of the containers that run the project's code; \`${DEFAULT_SANDBOX_SIZE}\` unless set.`,
       }),
     }),
+    pipelines: z
+      .object({ default: ConfigPipelineSchema, main: ConfigPipelineSchema })
+      .openapi({ description: "What each pipeline runs: `main` on `main`, `default` on attempts and task branches." }),
   })
   .openapi("Config");
 

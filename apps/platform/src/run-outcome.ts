@@ -2,9 +2,15 @@
 // "Run storage"). Runs store it; an attempt's scoring reads a slice of it, the `ScoringResult` that
 // lanes, the arena and votes have always read.
 
-import type { ConfigResult, Source } from "./config.ts";
-import { setupLogName } from "./logs.ts";
-import { buildResult, DIFF_CHECK, checkOutcome as ranOutcome, SETUP_TIMEOUT_MS } from "./results.ts";
+import type { ConfigResult, Source, StepConfig } from "./config.ts";
+import { setupLogName, stepLogName } from "./logs.ts";
+import {
+  buildResult,
+  DIFF_CHECK,
+  POST_GATE_STEP_TIMEOUT_MS,
+  checkOutcome as ranOutcome,
+  SETUP_TIMEOUT_MS,
+} from "./results.ts";
 import type { CheckOutcome, RawScore, ScoringResult } from "./results.ts";
 
 export const STEP_KINDS = ["setup", "check", "step"] as const;
@@ -32,7 +38,7 @@ export interface RunStep {
 }
 
 export interface RunOutcome extends Pick<ScoringResult, "base" | "config" | "gate" | "metrics"> {
-  /** Every step in run order: `_diff`, the setups, then the checks. */
+  /** Every step in run order: `_diff`, the setups, the checks, then any post-gate steps. */
   steps: RunStep[];
 }
 
@@ -143,12 +149,13 @@ export function pipelineOutcome(
       log: logs.includes(log) ? log : null,
     };
   });
+  const configuredChecks = new Map(configured?.checks.map((check) => [check.name, check]));
   const after = new Map(configured?.checks.map((check) => [check.name, check.after]));
   const checks = result.checks.map((check): RunStep => ({
     name: check.name,
     kind: "check",
     source: check.source,
-    group: null,
+    group: configuredChecks.get(check.name)?.group ?? null,
     ...(check.source === "platform" ? {} : { after: after.get(check.name) ?? [] }),
     outcome: STEP_OUTCOME[check.outcome],
     durationMs: check.durationMs,
@@ -161,6 +168,50 @@ export function pipelineOutcome(
     ...checks.filter((check) => check.name !== DIFF_CHECK),
   ];
   return { base: result.base, config: result.config, gate: result.gate, steps, metrics: result.metrics };
+}
+
+/** How one post-gate step's command went, and whether its log was stored. */
+export interface PostGateRun {
+  exit: number;
+  durationMs: number;
+  logged: boolean;
+  notes: string[];
+}
+
+/**
+ * The run's outcome with its post-gate steps after its checks, in order: each that ran with how it
+ * went, and every one after a failed gate or a step that didn't pass `skipped`, saying why. The gate
+ * is the setups' and checks' alone.
+ */
+export function withPostGateSteps(
+  outcome: RunOutcome,
+  steps: readonly StepConfig[],
+  ran: ReadonlyMap<string, PostGateRun>,
+): RunOutcome {
+  let stopped = outcome.gate === "passed" ? null : "skipped: the gate failed";
+  const after = steps.map(({ name }): RunStep => {
+    const step = { name, kind: "step" as const, source: "project" as const, group: null };
+    const run = ran.get(name);
+    if (stopped !== null || run === undefined) {
+      return {
+        ...step,
+        outcome: "skipped",
+        durationMs: 0,
+        notes: [stopped ?? "skipped: the run didn't report it"],
+        log: null,
+      };
+    }
+    const ended = ranOutcome(run.exit, run.durationMs, POST_GATE_STEP_TIMEOUT_MS);
+    if (ended !== "passed") stopped = `skipped: step ${name} didn't pass`;
+    return {
+      ...step,
+      outcome: STEP_OUTCOME[ended],
+      durationMs: run.durationMs,
+      notes: ended === "timedOut" ? ["timed out", ...run.notes] : run.notes,
+      log: run.logged ? stepLogName(name) : null,
+    };
+  });
+  return { ...outcome, steps: [...outcome.steps, ...after] };
 }
 
 /**

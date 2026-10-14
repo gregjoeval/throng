@@ -534,7 +534,8 @@ function mcpServer({ repos, tasks, logs, diffCache }: Deps, { actor, token, env,
 
   tool(
     "get_dequeue",
-    "Why the task's merge request was last dequeued, with details: for a conflict, each file's three-way hunks.",
+    "Why the task's merge request was last dequeued, and the landing's run behind it (read it with `get_run`), with " +
+      "details: for a conflict, each file's three-way hunks; for failed checks, the steps that failed.",
     onTask,
     async ({ project, task }) => {
       const dequeue = await service.getDequeue(actor, { ...projectPath(project), task });

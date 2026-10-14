@@ -35,7 +35,6 @@ async function setup(selection = "selection: { policy: vote }\n") {
       workflow: { create: async () => ({}), get: async () => ({ terminate: async () => {} }) },
       teardown: async () => {},
     },
-    undefined,
     {
       workflow: {
         create: async ({ params }) => {

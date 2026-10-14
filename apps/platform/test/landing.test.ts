@@ -1,14 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { parseConfig } from "../src/config.ts";
 import {
   actedAlias,
-  failedChecks,
+  conflictOutcome,
+  dequeueDetails,
+  landingOutcome,
   mergeAuthor,
   mergeCommitMessage,
-  retestConfig,
   THRONG_COMMITTER,
 } from "../src/landing.ts";
-import { buildResult } from "../src/results.ts";
+import type { RunOutcome, RunStep } from "../src/run-outcome.ts";
+import type { StoredRun } from "../src/scoring.ts";
 
 const ada = { id: "ada00001", handle: "ada", alias: null };
 
@@ -73,67 +74,101 @@ describe("actedAlias", () => {
   });
 });
 
-describe("retestConfig", () => {
-  it("skips the retest with no config, or with no checks", () => {
-    expect(retestConfig(parseConfig(null))).toBeNull();
-    expect(retestConfig(parseConfig("setup: [{ name: deps, command: npm ci }]\n"))).toBeNull();
-  });
+const step = (
+  name: string,
+  kind: RunStep["kind"],
+  outcome: RunStep["outcome"],
+  source: RunStep["source"] = "project",
+) => ({ name, kind, source, group: null, outcome, durationMs: 1, notes: [], log: null }) satisfies RunStep;
 
-  it("runs every check, with setup and every metric, as every check that runs must pass", () => {
-    const config = parseConfig(
-      "setup: [{ name: deps, command: npm ci }]\nchecks:\n  - name: lint\n    command: a\n  - name: test\n    command: b\n" +
-        "metrics:\n  - { name: errors, from: lint.out.errors, type: number }\n" +
-        "  - { name: tests, from: test.out.tests, type: number }\n",
-    );
-    const retest = retestConfig(config);
-    expect(retest?.kind === "valid" && retest.config.checks.map((c) => c.name)).toEqual(["lint", "test"]);
-    expect(retest?.kind === "valid" && retest.config.metrics.map((m) => m.name)).toEqual(["errors", "tests"]);
-    expect(retest?.kind === "valid" && retest.config.setup).toEqual([
-      { name: "deps", command: "npm ci", secrets: [], caches: [] },
+const ran: RunOutcome = {
+  base: "b".repeat(40),
+  config: { kind: "valid" },
+  gate: "passed",
+  steps: [
+    step("_diff", "check", "passed", "platform"),
+    step("deps", "setup", "passed"),
+    step("test", "check", "passed"),
+    step("deploy", "step", "passed"),
+  ],
+  metrics: {},
+};
+
+describe("landingOutcome", () => {
+  it("puts `merge` after `_diff` and `land` before the post-gate steps, with what landed", () => {
+    const outcome = landingOutcome(ran, { sha: "e".repeat(40) });
+    expect(outcome.steps.map((s) => [s.name, s.kind, s.source, s.outcome])).toEqual([
+      ["_diff", "check", "platform", "passed"],
+      ["merge", "step", "platform", "passed"],
+      ["deps", "setup", "project", "passed"],
+      ["test", "check", "project", "passed"],
+      ["land", "step", "platform", "passed"],
+      ["deploy", "step", "project", "passed"],
     ]);
+    expect(outcome.landed).toEqual({ sha: "e".repeat(40) });
   });
 
-  it("retests an invalid config, which fails", () => {
-    expect(retestConfig(parseConfig("checks: 3\n"))).toMatchObject({ kind: "invalid" });
+  it("skips `land` when the gate failed, landing nothing", () => {
+    const outcome = landingOutcome({ ...ran, gate: "failed", steps: ran.steps.slice(0, 3) }, null);
+    expect(outcome.steps.at(-1)).toMatchObject({
+      name: "land",
+      outcome: "skipped",
+      notes: ["skipped: the gate failed"],
+    });
+    expect(outcome.landed).toBeUndefined();
   });
 });
 
-describe("failedChecks", () => {
-  it("names each config check that didn't pass, with its stored log, leaving out Throng's own", () => {
-    const config = parseConfig(
-      "checks:\n  - name: test\n    command: a\n  - name: build\n    command: b\n  - name: e2e\n    command: c\n",
-    );
-    const result = buildResult(config, {
-      base: null,
-      shortstat: "",
-      builtinMs: 0,
-      setupFailed: null,
-      checks: [
-        { exit: 0, durationMs: 1, metrics: {} },
-        { exit: 2, durationMs: 1, metrics: {} },
-        { exit: null, durationMs: 0, metrics: {} },
+describe("conflictOutcome", () => {
+  it("fails `merge`, skips `land`, and keeps the conflict", () => {
+    const details = { attempt: "t1a1", head: "a".repeat(40), main: "m".repeat(40), base: null, files: [] };
+    const outcome = conflictOutcome(details);
+    expect(outcome).toMatchObject({ gate: "failed", landed: "conflict", conflict: details });
+    expect(outcome.steps.map((s) => [s.name, s.outcome])).toEqual([
+      ["merge", "failed"],
+      ["land", "skipped"],
+    ]);
+  });
+});
+
+const run = (outcome: RunOutcome | null, error: string | null = null) => ({ outcome, error }) as unknown as StoredRun;
+const at = "2026-10-14T00:00:00.000Z";
+
+describe("dequeueDetails", () => {
+  it("reads a failed gate's failed setups and checks from the run, leaving out what was skipped", () => {
+    const failed: RunOutcome = {
+      ...ran,
+      gate: "failed",
+      steps: [
+        step("deps", "setup", "passed"),
+        step("test", "check", "failed"),
+        step("lint", "check", "errored"),
+        step("e2e", "check", "skipped"),
+        step("land", "step", "skipped", "platform"),
       ],
-    });
-    expect(failedChecks(result, ["test", "build"])).toEqual({
-      checks: [
-        { name: "build", outcome: "failed", log: "build" },
-        { name: "e2e", outcome: "skipped", log: null },
+    };
+    expect(dequeueDetails({ reason: "failedChecks", run: 7, at }, run(failed))).toEqual({
+      steps: [
+        { name: "test", kind: "check", outcome: "failed" },
+        { name: "lint", kind: "check", outcome: "errored" },
       ],
     });
   });
 
-  it("gives an invalid config's error, with no checks", () => {
-    const result = buildResult(parseConfig("checks: 3\n"), {
-      base: null,
-      shortstat: "",
-      builtinMs: 0,
-      setupFailed: null,
-      checks: [],
+  it("reads a conflict, and an error, from the run", () => {
+    const details = { attempt: "t1a1", head: "a".repeat(40), main: "m".repeat(40), base: null, files: [] };
+    expect(dequeueDetails({ reason: "conflict", run: 7, at }, run(conflictOutcome(details)))).toEqual(details);
+    expect(dequeueDetails({ reason: "errored", run: 7, at }, run(null, "land: main moved"))).toEqual({
+      error: "land: main moved",
     });
-    expect(failedChecks(result, [])).toEqual({
-      checks: [],
-      error: expect.stringContaining("checks"),
+  });
+
+  it("reads what a dequeue from before landings were runs kept", () => {
+    const legacy = { checks: [{ name: "test", outcome: "timedOut" as const, log: "test" }] };
+    expect(dequeueDetails({ reason: "failedChecks", run: null, at, details: legacy }, null)).toEqual({
+      steps: [{ name: "test", kind: "check", outcome: "failed" }],
     });
+    expect(dequeueDetails({ reason: "newPush", run: null, at }, null)).toBeNull();
   });
 });
 

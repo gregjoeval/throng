@@ -64,23 +64,6 @@ export function legacyLogKey(
   return `${LOG_PREFIX}${project}/${line}/${sha}/${run}/${name}.log`;
 }
 
-/**
- * Where a landing's retest log is stored: `logs/<projectId>/<t42a3>/<head>/landing-<landingId>/<name>.log`,
- * next to the head's scoring runs and under the same lifecycle rule.
- */
-export function landingLogKey(
-  {
-    project,
-    task,
-    attempt,
-    head,
-    landing,
-  }: { project: string; task: number; attempt: number; head: string; landing: number },
-  name: string,
-): string {
-  return `${LOG_PREFIX}${project}/t${task}a${attempt}/${head}/landing-${landing}/${name}.log`;
-}
-
 /** The `notFound` for a log a run doesn't have: never stored, expired, or a name no log can have. */
 export function missingLog(run: number, name: string): ServiceError {
   return new ServiceError("notFound", `run ${run} has no log ${name}`);
@@ -108,11 +91,6 @@ head -c ${keep} "$f"
 printf '\\n[throng: truncated %d of %d bytes]\\n' $(( size - ${2 * keep} )) "$size"
 tail -c ${keep} "$f"
 `;
-}
-
-/** The logs a plan may write, in run order: each setup, then each check. */
-export function logNames(plan: { setup: readonly unknown[]; checks: { name: string }[] }): string[] {
-  return [...plan.setup.map((_, i) => setupLogName(i + 1)), ...plan.checks.map((check) => check.name)];
 }
 
 /** The note on every log a step wrote: the Sandbox size its container ran at. */

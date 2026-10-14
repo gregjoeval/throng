@@ -4,9 +4,7 @@ import type { CacheEntry, CacheKey, CacheLookup } from "./caches";
 import { camelKeys } from "./casing";
 import type { NamedSecrets } from "./config";
 import type { FollowOutcome } from "./follows";
-import { LANDING_ROLES, sandboxName } from "./grants";
-import type { SandboxRole } from "./grants";
-import type { LandingOutcome } from "./landing";
+import type { LegacyLandingOutcome } from "./landing";
 import { teardownPipeline } from "./pipeline-workflow";
 import type { PlanVerdict, RunReport, ScoringOutcome, ScoringRequest, StoredRun } from "./scoring";
 import { keyringFrom } from "./secrets";
@@ -39,9 +37,10 @@ export interface JournalEntry {
 
 /**
  * One per project: the source of truth for its tasks and attempts (`task-store.ts`), with their
- * rows, per-project counters and journal events for every transition, and for its scoring runs
- * (`scoring.ts`), merge requests and the landings of its merge queue. After every store call and
- * report it drains: stopping and starting Landing Workflows, starting Follow Workflows, then scoring runs.
+ * rows, per-project counters and journal events for every transition, and for its pipeline runs
+ * (`scoring.ts`), merge requests and the landings of its merge queue, which are `main` runs. After
+ * every store call and report it drains: queueing and cancelling landings, starting Follow
+ * Workflows, then starting and stopping pipeline runs.
  * Then, when its tasks or attempts changed, an alarm publishes them to the D1 projection, trying
  * again until it lands. The journal also records the hops the e2e suite reads timings back from.
  */
@@ -59,9 +58,6 @@ export class ProjectCoordinator extends DurableObject<Env> {
         ctx.storage.sql.exec(query, ...(bindings as SqlStorageValue[])).toArray() as T[],
       transaction: (fn) => ctx.storage.transactionSync(fn),
     };
-    const teardown = (roles: readonly SandboxRole[]) => async (instanceId: string) => {
-      await Promise.all(roles.map((role) => env.SANDBOX.getByName(sandboxName(instanceId, role)).destroy()));
-    };
     this.#tasks = new TaskStore({
       sql,
       repos: reposFor(env),
@@ -69,7 +65,6 @@ export class ProjectCoordinator extends DurableObject<Env> {
         workflow: env.PIPELINE,
         teardown: (instanceId, containers) => teardownPipeline(env.SANDBOX, instanceId, containers),
       },
-      landing: { workflow: env.LANDING, teardown: teardown(LANDING_ROLES) },
       follow: { workflow: env.FOLLOW },
       keyring: keyringFrom(env.SECRETS_KEYRING),
       cacheObjects: env.CACHES,
@@ -160,8 +155,11 @@ export class ProjectCoordinator extends DurableObject<Env> {
 
   /** Called by a run's Pipeline Workflow when it ends. Reports from a superseded or cancelled run are discarded. */
   async pipelineFinished(run: number, report: RunReport): Promise<void> {
-    this.#tasks.pipelineFinished(run, report);
-    await this.#drain(this.#tasks.scoring.getRun(run)?.project);
+    try {
+      await this.#tasks.pipelineReported(run, report);
+    } finally {
+      await this.#drain(this.#tasks.scoring.getRun(run)?.project);
+    }
   }
 
   /**
@@ -174,23 +172,59 @@ export class ProjectCoordinator extends DurableObject<Env> {
   }
 
   /**
-   * Called by a Landing Workflow's land step right before it pushes to `main`. False when its merge
-   * request has left the queue: it must not push.
+   * Called by a landing's Pipeline Workflow in its `land` step, right before it pushes to `main`.
+   * False when its merge request has left the queue: it must not push.
    */
-  claimLandingPush(landing: number): boolean {
-    return this.#tasks.claimLandingPush(landing);
+  claimLand(run: number): boolean {
+    return this.#tasks.claimLandingPush(run);
   }
 
   /**
-   * Called by a Landing Workflow when it ends. The landing push is internal: this records it
-   * (`mainAdvanced`) and never scores or creates anything from it. Then the next landing starts.
-   * Reports from a stopped landing are discarded.
+   * Called by a landing's Pipeline Workflow once its `land` step pushed `sha`: the run's head is
+   * now `sha`, and its merge request is merged. The push is the run's own: it asks for no other run.
    */
-  async landingFinished(landing: number, outcome: LandingOutcome): Promise<void> {
+  async pipelineLanded(run: number, sha: string): Promise<void> {
     try {
-      await this.#tasks.landingFinished(landing, outcome);
+      await this.#tasks.pipelineLanded(run, sha);
     } finally {
-      await this.#drain(this.#tasks.landings.get(landing)?.project);
+      await this.#drain(this.#tasks.scoring.getRun(run)?.project);
+    }
+  }
+
+  /** Called by a landing's Pipeline Workflow whose `land` step lost its result: `main`'s head when it is the landing's merge commit. */
+  async landedOnMain(run: number): Promise<string | null> {
+    return this.#tasks.landedOnMain(run);
+  }
+
+  /**
+   * Called by a Landing Workflow's land step under its old code, right before it pushes to `main`.
+   * Kept while one may still be under way. False when its merge request has left the queue.
+   */
+  claimLandingPush(landing: number): boolean {
+    return this.#tasks.claimLegacyLandingPush(landing);
+  }
+
+  /**
+   * Called by a Landing Workflow ending under its old code: records its outcome on its landing's
+   * run. Kept while one may still be under way.
+   */
+  async landingFinished(landing: number, outcome: LegacyLandingOutcome): Promise<void> {
+    try {
+      await this.#tasks.legacyLandingFinished(landing, outcome);
+    } finally {
+      await this.#drain(this.#tasks.scoring.legacyLanding(landing)?.project);
+    }
+  }
+
+  /**
+   * Called by a Landing Workflow that resumed on the Pipeline Workflow's code, its containers gone:
+   * its landing lands again as a run (see `TaskStore.legacyLandingResumed`).
+   */
+  async legacyLandingResumed(landing: number): Promise<void> {
+    try {
+      await this.#tasks.legacyLandingResumed(landing);
+    } finally {
+      await this.#drain(this.#tasks.scoring.legacyLanding(landing)?.project);
     }
   }
 
@@ -258,8 +292,8 @@ export class ProjectCoordinator extends DurableObject<Env> {
   }
 
   /**
-   * Starts and stops landings and scoring runs; a failure here never fails the call that triggered
-   * it. Landings need the project's id, which every call names (a project's DO is named by it), and
+   * Queues and cancels landings, and starts and stops runs; a failure here never fails the call that
+   * triggered it. Landings need the project's id, which every call names (a project's DO is named by it), and
    * is stored once for calls that can't tell, and for alarms. Then sets the alarm that publishes any
    * pending change to the projection, unless one is already set.
    */

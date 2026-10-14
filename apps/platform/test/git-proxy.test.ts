@@ -16,10 +16,11 @@ import type { ProjectContext } from "../src/task-store.ts";
 import { mintToken } from "../src/tokens.ts";
 import type { Actor } from "../src/tokens.ts";
 import { userForEmail } from "../src/users.ts";
-import { conflictDetails, ERRORED } from "./support/conflicts.ts";
+import { conflictDetails } from "./support/conflicts.ts";
 import { testDatabase } from "./support/d1.ts";
 import { at } from "./support/defined.ts";
 import { git, gitEnv, LocalGitHost, serve, tryGit } from "./support/git-host.ts";
+import { conflicted, endLanding, ERRORED } from "./support/landings.ts";
 import { testTaskBackends } from "./support/task-backend.ts";
 
 const cleanups: (() => Promise<void>)[] = [];
@@ -377,8 +378,7 @@ describe("merge request notices on a push to the source attempt", () => {
 
   it("prints a conflict dequeue with its file count once, and that the push needs review", async () => {
     const { commit, dir, dequeueUrl, env, project, store } = await queued();
-    const details = conflictDetails(["a.ts", "b.ts", "c.ts"]);
-    store(project.id).dequeueMergeRequest(project, null, { task: 1, reason: "conflict", details });
+    await endLanding(store(project.id), project.id, conflicted(conflictDetails(["a.ts", "b.ts", "c.ts"])));
 
     const sha = await commit(dir, "fix");
     const pushed = await tryGit(dir, env, "push", "origin", "HEAD:main");
@@ -394,7 +394,7 @@ describe("merge request notices on a push to the source attempt", () => {
 
   it("prints a dequeue without a file count when there is none, on a push that moves no head", async () => {
     const { dir, dequeueUrl, env, project, store } = await queued();
-    store(project.id).dequeueMergeRequest(project, null, { task: 1, reason: "errored", details: ERRORED });
+    await endLanding(store(project.id), project.id, ERRORED);
 
     const pushed = await tryGit(dir, env, "push", "origin", "HEAD:refs/heads/copy");
     expect(pushed.ok).toBeTruthy();

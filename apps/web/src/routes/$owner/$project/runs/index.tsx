@@ -5,7 +5,6 @@ import { ProjectView } from "@/components/project-view";
 import { EmptyState, ErrorState, Loading } from "@/components/states";
 import { runsQuery } from "@/lib/api";
 import type { ProjectRef, Run } from "@/lib/api";
-import { shortSha } from "@/lib/commits";
 import { buildPath, runsSearch } from "@/lib/paths";
 import type { RunsSearch } from "@/lib/paths";
 import {
@@ -14,6 +13,7 @@ import {
   lineHref,
   RUN_STATUS_LABELS,
   runDuration,
+  runHead,
   TRIGGER_LABELS,
   triggeredBy,
 } from "@/lib/runs";
@@ -146,7 +146,7 @@ function RunTable({ projectRef, runs }: { projectRef: ProjectRef; runs: Run[] })
               </td>
               <td className="px-2 py-2">{run.pipeline}</td>
               <td className="px-2 py-2">{TRIGGER_LABELS[run.trigger]}</td>
-              <td className="px-2 py-2 font-mono text-muted-foreground">{shortSha(run.sha)}</td>
+              <td className="px-2 py-2 font-mono text-muted-foreground">{runHead(run)}</td>
               <td className="px-2 py-2">{RUN_STATUS_LABELS[run.status]}</td>
               <td className="px-2 py-2">{run.gate === null ? "—" : GATE_LABELS[run.gate]}</td>
               <td className="px-2 py-2 tabular-nums">{duration === null ? "—" : formatDuration(duration)}</td>

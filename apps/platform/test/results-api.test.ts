@@ -57,7 +57,7 @@ async function setup() {
   };
   const followed: FollowParams[] = [];
   const follow = { workflow: { create: async ({ params }: { params: FollowParams }) => followed.push(params) } };
-  const { backend, store, sql } = testTaskBackends(repos, now, runner, undefined, follow);
+  const { backend, store, sql } = testTaskBackends(repos, now, runner, follow);
   const api = apiRoutes({
     verifierFor: () => verify,
     now,

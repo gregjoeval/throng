@@ -3,6 +3,7 @@
 // lanes, the arena and votes have always read.
 
 import type { ConfigResult, Source, StepConfig } from "./config.ts";
+import type { ConflictDetails } from "./conflicts.ts";
 import { setupLogName, stepLogName } from "./logs.ts";
 import {
   buildResult,
@@ -38,8 +39,15 @@ export interface RunStep {
 }
 
 export interface RunOutcome extends Pick<ScoringResult, "base" | "config" | "gate" | "metrics"> {
-  /** Every step in run order: `_diff`, the setups, the checks, then any post-gate steps. */
+  /**
+   * Every step in run order: `_diff`, the setups, the checks, then any post-gate steps. A landing's
+   * has its `merge` after `_diff` and its `land` before the post-gate steps.
+   */
   steps: RunStep[];
+  /** For a landing: the commit it landed, or `conflict` when its merge conflicted; absent when its gate failed. */
+  landed?: { sha: string } | "conflict";
+  /** For a landing whose merge conflicted: the conflict, file by file. */
+  conflict?: ConflictDetails;
 }
 
 /**

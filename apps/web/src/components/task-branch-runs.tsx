@@ -6,9 +6,8 @@ import { Link } from "@tanstack/react-router";
 import { ErrorState } from "@/components/states";
 import { runsQuery } from "@/lib/api";
 import type { ProjectRef } from "@/lib/api";
-import { shortSha } from "@/lib/commits";
 import { buildPath } from "@/lib/paths";
-import { RUN_STATUS_LABELS } from "@/lib/runs";
+import { RUN_STATUS_LABELS, runHead } from "@/lib/runs";
 import { GATE_LABELS } from "@/lib/tasks";
 import type { Task } from "@/lib/tasks";
 
@@ -42,7 +41,7 @@ export function TaskBranchRuns({ projectRef, task }: { projectRef: ProjectRef; t
             <Link to={buildPath({ view: "run", ...projectRef, run: run.id })} className="font-medium hover:underline">
               Run {run.id}
             </Link>
-            <span className="font-mono text-muted-foreground">{shortSha(run.sha)}</span>
+            <span className="font-mono text-muted-foreground">{runHead(run)}</span>
             <span>{RUN_STATUS_LABELS[run.status]}</span>
             {run.gate === null ? null : <span>Gate {GATE_LABELS[run.gate].toLowerCase()}</span>}
           </li>

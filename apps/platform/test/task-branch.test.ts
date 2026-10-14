@@ -41,7 +41,7 @@ async function setup() {
   const db = testDatabase();
   const followed: FollowParams[] = [];
   const follow = { workflow: { create: async ({ params }: { params: FollowParams }) => followed.push(params) } };
-  const { backend, store } = testTaskBackends(host, now, undefined, undefined, follow);
+  const { backend, store } = testTaskBackends(host, now, undefined, follow);
   const app = new Hono().route("/git", gitRoutes({ repos: () => host, tasks: () => backend, now }));
   const server = await serve(app, { DB: db, ACCESS_TEAM_DOMAIN: "x", ACCESS_AUD: "x" });
   cleanups.push(server.close);

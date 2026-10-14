@@ -2,15 +2,13 @@
 // starts it, running a script in it, and copying its logs to R2.
 
 import { reposFor } from "./artifacts";
-import type { ConfigResult, SandboxSize } from "./config";
+import type { SandboxSize } from "./config";
 import { GRANT_SOURCES, ROLE_GRANTS, sandboxName, TRUSTED_SIZE } from "./grants";
 import type { RepoCodeRole, RoleGrants, RunGrants, SandboxRole } from "./grants";
 import { LOG_CONTENT_TYPE, MISSING_LOG_EXIT, readLogScript, sandboxNote, withNotes } from "./logs";
 import { NO_NETWORK, roleAccess } from "./network";
 import type { NetworkAccess } from "./network";
 import { forkRepo, lineRepo, originRepo } from "./repos";
-import { scorePlan, scoreTimeoutMs } from "./results";
-import type { ScorePlan } from "./results";
 import type { RunResult, SandboxSnapshot, StartOptions } from "./sandbox";
 
 const TOKEN_TTL_SECONDS = 30 * 60;
@@ -25,31 +23,6 @@ const NO_ACCESS = { grants: [], ...NO_NETWORK };
 export interface RunRepos {
   project: string;
   line: string;
-}
-
-/**
- * What the containers that run repository code start with, read from the origin's `main` alone, never
- * from an attempt or a merged tree: the Sandbox size, and the registries and hosts they may reach.
- */
-export interface MainSettings {
-  size: SandboxSize;
-  network: NetworkAccess;
-}
-
-/**
- * What a retest takes from its config: the config itself, the plan it runs and the step's timeout,
- * with `main`'s settings.
- */
-export interface RunSettings extends MainSettings {
-  config: ConfigResult;
-  plan: ScorePlan;
-  timeoutMs: number;
-}
-
-/** The run settings for `config`, under `main`'s settings. */
-export function runSettings(config: ConfigResult, main: MainSettings): RunSettings {
-  const plan = scorePlan(config);
-  return { config, plan, timeoutMs: scoreTimeoutMs(plan), ...main };
 }
 
 /**

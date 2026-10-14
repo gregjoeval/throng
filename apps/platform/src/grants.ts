@@ -15,13 +15,8 @@ export interface GitGrant {
  * container starts, so roles with different grants need different containers. A pipeline run's
  * containers all take the `pipeline` role.
  */
-export const SANDBOX_ROLES = ["pipeline", "check", "land", "follow"] as const;
+export const SANDBOX_ROLES = ["pipeline", "merge", "land", "follow"] as const;
 export type SandboxRole = (typeof SANDBOX_ROLES)[number];
-/**
- * The roles a Landing Workflow starts containers for: the untrusted conflict check and retest, then
- * the trusted land step.
- */
-export const LANDING_ROLES = ["check", "land"] as const satisfies readonly SandboxRole[];
 /** The role a Follow Workflow starts a container for: the trusted merge of a task branch into a fork. */
 export const FOLLOW_ROLES = ["follow"] as const satisfies readonly SandboxRole[];
 
@@ -31,7 +26,7 @@ export const FOLLOW_ROLES = ["follow"] as const satisfies readonly SandboxRole[]
  */
 export const RUNS_REPO_CODE = {
   pipeline: true,
-  check: true,
+  merge: true,
   land: false,
   follow: false,
 } as const satisfies Record<SandboxRole, boolean>;
@@ -67,7 +62,8 @@ export const GRANT_SOURCES: Record<keyof RunGrants, { repo: "origin" | "fork" | 
 export const ROLE_GRANTS = {
   // One read grant on the run's line: an attempt's fork, or the origin for a task branch or `main`.
   pipeline: ["lineRead"],
-  check: ["originRead", "forkRead"],
+  // A landing's merge, and its setups and checks on the merged tree: untrusted, so read grants only.
+  merge: ["originRead", "forkRead"],
   land: ["originWrite", "forkRead"],
   follow: ["originRead", "forkWrite"],
 } as const satisfies Record<SandboxRole, readonly (keyof RunGrants)[]>;
@@ -81,7 +77,7 @@ export function grantsForRole<R extends SandboxRole>(role: R, grants: RoleGrants
   return ROLE_GRANTS[role].map((name) => byName[name] as GitGrant);
 }
 
-/** The container a Landing or Follow Workflow runs `role` in: `<instance>/<role>`. */
+/** The container a Follow Workflow, or a landing's `merge` or `land`, runs `role` in: `<instance>/<role>`. */
 export function sandboxName(instanceId: string, role: SandboxRole): string {
   return `${instanceId}/${role}`;
 }
@@ -101,6 +97,14 @@ export function pipelineSandboxName(instanceId: string, container: PipelineConta
 /** The one container a run's Workflow scored in before each check got its own. */
 export function legacyScoreSandboxName(instanceId: string): string {
   return `${instanceId}/score`;
+}
+
+/**
+ * The containers a landing's run starts besides its plan's: `<instance>/merge` and `<instance>/land`,
+ * and the `<instance>/check` a landing started before landings were runs merged and retested in.
+ */
+export function landingSandboxNames(instanceId: string): string[] {
+  return [sandboxName(instanceId, "merge"), sandboxName(instanceId, "land"), `${instanceId}/check`];
 }
 
 /** Finds the grant covering a git request, refusing pushes on read grants. */

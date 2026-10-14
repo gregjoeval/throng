@@ -16,7 +16,7 @@ import {
   stepReadyScript,
   stepScript,
 } from "../src/scripts.ts";
-import type { CheckRun, SetupResult, StepReady, StepRun } from "../src/scripts.ts";
+import type { Checkout, CheckRun, SetupResult, StepReady, StepRun } from "../src/scripts.ts";
 import { NO_TASK_DEFINITIONS, taskDefinitionsFrom, withTask } from "../src/task-definitions.ts";
 import { at } from "./support/defined.ts";
 
@@ -92,9 +92,12 @@ function attemptHead(): string {
   return head;
 }
 
+/** What a line's containers check out: `sha`, fetched from `remote`. */
+const line = (remote: string, sha: string): Checkout => ({ kind: "line", remote, sha });
+
 /** Runs one check in `sandbox`: one the setup container's snapshot started (it holds `setup.done`), or a fresh one. */
 function runCheck(sandbox: string, head: string, setups: SetupConfig[], planned: PlannedCheck): CheckRun {
-  return runScript<CheckRun>(checkScript(fork, head, setups, planned), sandbox);
+  return runScript<CheckRun>(checkScript(line(fork, head), setups, planned), sandbox);
 }
 
 /**
@@ -104,7 +107,7 @@ function runCheck(sandbox: string, head: string, setups: SetupConfig[], planned:
 function runPipeline(config: ConfigResult, base: string | null, head: string): RawScore {
   const plan = scorePlan(config);
   const setupDir = mkdtempSync(join(root, "setup-"));
-  const ran = runScript<SetupResult>(setupScript(fork, { sha: head, base }, plan.setup), setupDir);
+  const ran = runScript<SetupResult>(setupScript(line(fork, head), base, plan.setup), setupDir);
   const failed = ran.setups.findIndex((s) => s.exit !== 0);
   const exits = new Map<string, number>();
   for (const planned of checkOrder(plan.checks)) {
@@ -130,7 +133,7 @@ describe("setupScript", () => {
     const base = git(origin, "rev-parse", "main");
     const head = attemptHead();
     const sandbox = mkdtempSync(join(root, "sandbox-"));
-    const ran = runScript<SetupResult>(setupScript(fork, { sha: head, base }, []), sandbox);
+    const ran = runScript<SetupResult>(setupScript(line(fork, head), base, []), sandbox);
     expect(ran).toMatchObject({ base, setups: [] });
     expect(ran.shortstat.trim()).toBe("2 files changed, 2 insertions(+), 2 deletions(-)");
     expect(ran.builtinMs).toBeGreaterThanOrEqual(0);
@@ -142,7 +145,7 @@ describe("setupScript", () => {
     git(work, "rm", "-rqf", ".");
     const head = commit("only.txt", "x\ny\n", "unrelated");
     git(work, "push", "-q", fork, "lone:main", "--force");
-    const ran = runScript<SetupResult>(setupScript(fork, { sha: head, base: null }, []));
+    const ran = runScript<SetupResult>(setupScript(line(fork, head), null, []));
     expect(ran.base).toBeNull();
     expect(ran.shortstat.trim()).toBe("1 file changed, 2 insertions(+)");
   });
@@ -151,7 +154,7 @@ describe("setupScript", () => {
     const head = attemptHead();
     const sandbox = mkdtempSync(join(root, "sandbox-"));
     const ran = runScript<SetupResult>(
-      setupScript(fork, { sha: head, base: null }, setup("echo one >> ../order", "echo two >> ../order; echo logged")),
+      setupScript(line(fork, head), null, setup("echo one >> ../order", "echo two >> ../order; echo logged")),
       sandbox,
     );
     expect(ran.setups.map((s) => s.exit)).toEqual([0, 0]);
@@ -163,7 +166,7 @@ describe("setupScript", () => {
     const head = attemptHead();
     const sandbox = mkdtempSync(join(root, "sandbox-"));
     const ran = runScript<SetupResult>(
-      setupScript(fork, { sha: head, base: null }, setup("true", "echo nope >&2; false", "touch ../never")),
+      setupScript(line(fork, head), null, setup("true", "echo nope >&2; false", "touch ../never")),
       sandbox,
     );
     expect(ran.setups.map((s) => s.exit)).toEqual([0, 1, null]);
@@ -178,7 +181,7 @@ describe("setupScript", () => {
     git(work, "push", "-q", origin, "HEAD:refs/tasks/t1");
     git(work, "reset", "-q", "--hard", "HEAD~1");
     const sandbox = mkdtempSync(join(root, "sandbox-"));
-    const ran = runScript<SetupResult>(setupScript(origin, { sha: head, base: null }, setup("cat t.txt")), sandbox);
+    const ran = runScript<SetupResult>(setupScript(line(origin, head), null, setup("cat t.txt")), sandbox);
     expect(ran.setups.map((s) => s.exit)).toEqual([0]);
     expect(cat(join(sandbox, "logs/setup.1.log"))).toBe("a test\n");
   });
@@ -186,7 +189,7 @@ describe("setupScript", () => {
   it("is idempotent: rerunning in the same directory gives the same result", () => {
     const head = attemptHead();
     const sandbox = mkdtempSync(join(root, "sandbox-"));
-    const script = setupScript(fork, { sha: head, base: null }, setup("test ! -e built && touch built"));
+    const script = setupScript(line(fork, head), null, setup("test ! -e built && touch built"));
     const first = runScript<SetupResult>(script, sandbox);
     const second = runScript<SetupResult>(script, sandbox);
     expect(first.setups.map((s) => s.exit)).toEqual([0]);
@@ -201,7 +204,7 @@ describe("post-gate step scripts", () => {
     const head = attemptHead();
     const setups = setup("echo ran >> ../setups && touch built");
     const sandbox = mkdtempSync(join(root, "sandbox-"));
-    runScript<SetupResult>(setupScript(fork, { sha: head, base: null }, setups), sandbox);
+    runScript<SetupResult>(setupScript(line(fork, head), null, setups), sandbox);
     expect(runScript<StepReady>(stepReadyScript(fork, head, setups, deploy), sandbox)).toEqual({ setupsRerun: false });
     expect(runScript<StepRun>(stepScript(deploy, 60_000), sandbox)).toMatchObject({ exit: 0 });
     expect(cat(join(sandbox, "setups"))).toBe("ran\n");
@@ -232,6 +235,20 @@ describe("post-gate step scripts", () => {
     });
   });
 
+  it("moves a landing's restored container from the merged tree to the landed commit, keeping what the setups made", () => {
+    const main = git(origin, "rev-parse", "main");
+    const head = attemptHead();
+    const tree = git(work, "rev-parse", `${head}^{tree}`);
+    const merging: Checkout = { kind: "merge", origin, fork, merge: { head, main, tree } };
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    runScript<SetupResult>(setupScript(merging, main, setup("touch built")), sandbox);
+    // The land step pushed the merge to the origin's `main`: here, the head itself, whose tree is the same.
+    git(work, "push", "-q", origin, "main");
+    expect(runScript<StepReady>(stepReadyScript(origin, head, [], deploy), sandbox)).toEqual({ setupsRerun: false });
+    expect(git(join(sandbox, "tree"), "rev-parse", "HEAD")).toBe(head);
+    expect(runScript<StepRun>(stepScript(deploy, 60_000), sandbox)).toMatchObject({ exit: 0 });
+  });
+
   it("never runs a step's command twice in one readied container", () => {
     const head = attemptHead();
     const sandbox = mkdtempSync(join(root, "sandbox-"));
@@ -244,12 +261,56 @@ describe("post-gate step scripts", () => {
   });
 });
 
+/** `main` moved on after the attempt forked, so the landing merges the two. */
+function diverged(): { main: string; head: string; tree: string } {
+  const head = attemptHead();
+  git(work, "checkout", "-q", "-b", "other", `${head}~2`);
+  const main = commit("c.txt", "main moved\n", "main moves");
+  git(work, "push", "-q", origin, "other:main");
+  const tree = git(work, "merge-tree", "--write-tree", main, head).split("\n")[0] ?? "";
+  return { main, head, tree };
+}
+
+describe("a landing's checkout", () => {
+  it("makes the merge again from the origin and the fork, with `main` and the head as its parents", () => {
+    const merge = diverged();
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    const merging: Checkout = { kind: "merge", origin, fork, merge };
+    const ran = runScript<SetupResult>(
+      setupScript(merging, merge.main, setup("test -f b.txt && test -f c.txt")),
+      sandbox,
+    );
+    expect(ran.setups).toEqual([{ exit: 0, durationMs: expect.any(Number) }]);
+    expect(ran.shortstat.trim()).toBe("2 files changed, 2 insertions(+), 2 deletions(-)");
+    const tree = join(sandbox, "tree");
+    expect(git(tree, "rev-parse", "HEAD^{tree}")).toBe(merge.tree);
+    expect(git(tree, "rev-parse", "HEAD^1", "HEAD^2")).toBe(`${merge.main}\n${merge.head}`);
+  });
+
+  it("runs a check on the merge in a fresh container", () => {
+    const merge = diverged();
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    const merging: Checkout = { kind: "merge", origin, fork, merge };
+    const ran = runScript<CheckRun>(checkScript(merging, [], check("test", "test -f b.txt && test -f c.txt")), sandbox);
+    expect(ran).toMatchObject({ exit: 0, setupsRerun: true });
+  });
+
+  it("fails as infrastructure when the merge doesn't give the tree its merge step recorded", () => {
+    const merge = { ...diverged(), tree: "f".repeat(40) };
+    const merging: Checkout = { kind: "merge", origin, fork, merge };
+    const sandbox = mkdtempSync(join(root, "sandbox-"));
+    expect(() =>
+      execFileSync("bash", ["-c", setupScript(merging, merge.main, [])], { cwd: sandbox, env: ENV, stdio: "pipe" }),
+    ).toThrow(expect.objectContaining({ status: 14 }));
+  });
+});
+
 describe("checkScript", () => {
   it("runs the check in the setups' tree when it starts from their snapshot, without running them again", () => {
     const head = attemptHead();
     const setups = setup("echo ran >> ../setups && touch built");
     const sandbox = mkdtempSync(join(root, "sandbox-"));
-    runScript<SetupResult>(setupScript(fork, { sha: head, base: null }, setups), sandbox);
+    runScript<SetupResult>(setupScript(line(fork, head), null, setups), sandbox);
     const ran = runCheck(sandbox, head, setups, check("test", "test -f built && test -f b.txt"));
     expect(ran).toMatchObject({ exit: 0, setupsRerun: false });
     expect(cat(join(sandbox, "setups"))).toBe("ran\n");
@@ -271,7 +332,7 @@ describe("checkScript", () => {
   it("fails as infrastructure when a setup that passed fails again in its own container", () => {
     const head = attemptHead();
     expect(() =>
-      execFileSync("bash", ["-c", checkScript(fork, head, setup("false"), check("test", "true"))], {
+      execFileSync("bash", ["-c", checkScript(line(fork, head), setup("false"), check("test", "true"))], {
         cwd: mkdtempSync(join(root, "sandbox-")),
         env: ENV,
       }),

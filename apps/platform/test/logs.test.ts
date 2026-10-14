@@ -5,10 +5,8 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   isLogName,
-  landingLogKey,
   legacyLogKey,
   logKey,
-  logNames,
   MAX_LOG_BYTES,
   MISSING_LOG_EXIT,
   readLogScript,
@@ -33,19 +31,7 @@ describe("legacyLogKey", () => {
   });
 });
 
-describe("landingLogKey", () => {
-  it("lays a landing's retest logs out under the approved head, apart from its scoring runs", () => {
-    const landing = { project: "p123", task: 42, attempt: 3, head: SHA, landing: 5 };
-    expect(landingLogKey(landing, "test")).toBe(`logs/p123/t42a3/${SHA}/landing-5/test.log`);
-  });
-});
-
 describe("log names", () => {
-  it("names each setup step and check of a plan, in run order", () => {
-    const plan = { setup: ["npm ci", "npm run gen"], checks: [{ name: "test" }, { name: "setup-1" }] };
-    expect(logNames(plan)).toEqual(["setup.1", "setup.2", "test", "setup-1"]);
-  });
-
   it("can't collide: setup logs use a dot, which check names can't", () => {
     for (const name of [setupLogName(1), "test", "bundle_kb", "a-b"]) expect(isLogName(name)).toBeTruthy();
     for (const name of ["", "../x", "a/b", ".hidden", "Test", "a b"]) expect(isLogName(name)).toBeFalsy();

@@ -210,7 +210,7 @@ describe("roleAccess", () => {
 
   it("adds the origin's .npmrc registries to the npm registry, only for containers that run repository code", () => {
     const registries = ["npm.acme.dev", "registry.npmjs.org"];
-    for (const role of ["pipeline", "check"] as const) {
+    for (const role of ["pipeline", "merge"] as const) {
       expect({
         role,
         registries: roleAccess(role, grants, { allow: [], registries }).registries,
@@ -250,9 +250,9 @@ describe("roleAccess", () => {
     expect(outboundDecision("POST", new URL("https://api.github.com/x"), given)).toEqual({ action: "pass" });
   });
 
-  it("gives a landing's conflict check and retest container read grants on the origin and the fork only", () => {
+  it("gives a landing's merge, setup and check containers read grants on the origin and the fork only", () => {
     const allow = ["api.github.com"];
-    const given = roleAccess("check", grants, { allow, registries: [] });
+    const given = roleAccess("merge", grants, { allow, registries: [] });
     expect(given).toEqual({ grants: [grants.originRead, grants.forkRead], registries: NPM, allow });
     for (const repo of ["p1-main", "p1-t1a1"]) {
       expect(outboundDecision("POST", pushTo(repo), given)).toEqual({ action: "deny" });

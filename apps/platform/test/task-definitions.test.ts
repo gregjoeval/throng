@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { parseConfig } from "../src/config.ts";
 import type { CheckConfig, MetricConfig } from "../src/config.ts";
-import { buildResult, scorePlan, scoreTimeoutMs } from "../src/results.ts";
+import { buildResult, scorePlan } from "../src/results.ts";
 import type { RawScore } from "../src/results.ts";
 import { NO_TASK_DEFINITIONS, taskDefinitionsFrom, withTask } from "../src/task-definitions.ts";
 
@@ -110,7 +110,7 @@ checks:
       ["test", []],
       ["smoke", ["smoked"]],
     ]);
-    expect(scoreTimeoutMs(plan)).toBe(scoreTimeoutMs({ ...plan, checks: plan.checks.slice(0, 1) }) + 60_000);
+    expect(plan.checks.map((check) => check.timeoutMs)).toEqual([expect.any(Number), 60_000]);
 
     const result = buildResult(
       config,

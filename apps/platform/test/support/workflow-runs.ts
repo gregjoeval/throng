@@ -9,7 +9,7 @@ export const result = (value: unknown) => ({
   stderr: "",
 });
 
-/** A score or retest whose one check passed. */
+/** A run whose one check passed. */
 export const PASSED = {
   base: null,
   shortstat: "",

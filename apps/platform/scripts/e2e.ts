@@ -4,10 +4,12 @@
 //
 // Merge queue scenarios, through the product API (`/api`) and the git proxy (`/git`) as the e2e user:
 // zeroconfig (no config: the gate passes with no checks; selecting an attempt closes its sibling, and
-// the merge request lands as a two-parent merge commit with the Throng trailers; both attempts are
-// archived under `refs/attempts/`), conflict (two tasks' attempts edit the same line: the first
-// lands, the second is dequeued with reason `conflict` and the expected hunk; its author merges main
-// and pushes, which moves it to `needsReview`; approved again, it lands), needsreview (a push to a
+// the merge request lands as a two-parent merge commit with the Throng trailers, in one `main` run
+// whose steps are `merge` then `land` and whose head is the landed sha; both attempts are archived
+// under `refs/attempts/`), conflict (two tasks' attempts edit the same line: the first lands, the
+// second is dequeued with reason `conflict`, naming its landing's run, which ended at `merge` and keeps
+// the expected hunk; its author merges main and pushes, which moves it to `needsReview`; approved
+// again, it lands), needsreview (a push to a
 // queued or landing merge request's source dequeues it with `newPush` to `needsReview`, and it
 // doesn't requeue on its own once the new head passes; its check's log notes the default Sandbox size).
 //
@@ -145,13 +147,20 @@ interface ListedRun {
   id: number;
   line: string;
   pipeline: string;
+  /** Null for a landing until it lands. */
+  sha: string | null;
+  trigger: string;
   status: string;
   gate: "passed" | "failed" | null;
 }
 
 /** A run's outcome as `GET …/runs/{runId}` gives it, as far as the scenarios read it. */
 interface RunOutcome {
-  outcome: { steps: { name: string; kind: string; outcome: string; log: string | null; notes: string[] }[] } | null;
+  outcome: {
+    steps: { name: string; kind: string; outcome: string; log: string | null; notes: string[] }[];
+    landed?: { sha: string } | "conflict";
+    conflict?: Dequeue["details"];
+  } | null;
 }
 
 /** What a run reports, as far as the scenarios read it (see `src/results.ts`). */
@@ -201,7 +210,7 @@ interface MergeRequest {
   attempt: string;
   state: "pending" | "queued" | "landing" | "needsReview" | "merged" | "cancelled";
   approvedHead: string;
-  lastDequeue: { reason: string; at: string } | null;
+  lastDequeue: { reason: string; run: number | null; at: string } | null;
   mergeSha: string | null;
 }
 
@@ -214,6 +223,8 @@ interface ConflictHunk {
 
 interface Dequeue {
   reason: string;
+  /** The landing's run behind it. */
+  run: number | null;
   at: string;
   details: {
     attempt: string;
@@ -385,6 +396,27 @@ async function zeroconfig(): Promise<void> {
   const greeting = await git(p.work, "show", `${mainSha}:src/greeting.js`);
   assert(greeting.includes("hello from a1"), "main does not contain the attempt's change");
 
+  // The landing is `main`'s one run: `merge`, then `land`, its head the landed sha.
+  const { runs } = await throng<{ runs: ListedRun[] }>(p, "GET", "/runs?line=main");
+  assert(
+    runs.length === 1 && runs[0]?.trigger === "merge" && runs[0].sha === mainSha,
+    `expected one landing run on main at ${mainSha}: ${JSON.stringify(runs)}`,
+  );
+  const landing = await poll("the landing's run to finish", async () => {
+    const found = await throng<ListedRun & RunOutcome>(p, "GET", `/runs/${runs[0]?.id ?? 0}`);
+    return found.status === "done" ? found : null;
+  });
+  const steps = landing.outcome?.steps.map((s) => [s.name, s.outcome]) ?? [];
+  assert(
+    JSON.stringify(steps) ===
+      JSON.stringify([
+        ["_diff", "passed"],
+        ["merge", "passed"],
+        ["land", "passed"],
+      ]),
+    `unexpected landing steps ${JSON.stringify(steps)}`,
+  );
+
   // Custom refs: the merged attempt and the sibling the selection closed are both archived.
   const task = await throng<{ state: string }>(p, "GET", `/tasks/${t1}`);
   assert(task.state === "closed", `landing left ${t1} ${task.state}`);
@@ -431,8 +463,9 @@ async function conflict(): Promise<void> {
   const attempt = await throng<Attempt>(p, "GET", `/attempts/${a2}`);
   assert(attempt.mergeRequest?.lastDequeue?.reason === "conflict", "the attempt doesn't show the conflict");
 
-  const { reason, details } = await throng<Dequeue>(p, "GET", `/tasks/${t2}/merge-request/dequeue`);
-  assert(reason === "conflict" && details !== null, `unexpected dequeue ${reason}`);
+  const { reason, run: runId, details } = await throng<Dequeue>(p, "GET", `/tasks/${t2}/merge-request/dequeue`);
+  assert(reason === "conflict" && details !== null && runId !== null, `unexpected dequeue ${reason} ${runId}`);
+  assert(dequeued.lastDequeue.run === runId, "the merge request doesn't name the dequeue's run");
   assert(
     details.attempt === a2 && details.head === second && details.main === mainSha && details.base === fixture,
     `unexpected conflict commits ${JSON.stringify({ ...details, files: undefined })}`,
@@ -458,8 +491,16 @@ async function conflict(): Promise<void> {
     JSON.stringify(files) === JSON.stringify(expectedFiles),
     `unexpected conflict files ${JSON.stringify(details.files)}`,
   );
-  const patch = await throngText(p, `/tasks/${t2}/merge-request/dequeue/files/src/greeting.js/diff?side=main`);
-  assert(patch.includes('+export const GREETING = "hello from a1";'), `unexpected main-side diff:\n${patch}`);
+  // The landing's run ended at its `merge`, and keeps the conflict.
+  const conflicted = await throng<ListedRun & RunOutcome>(p, "GET", `/runs/${runId}`);
+  assert(
+    conflicted.trigger === "merge" && conflicted.sha === null && conflicted.outcome?.landed === "conflict",
+    `unexpected conflicted run ${JSON.stringify({ ...conflicted, outcome: undefined })}`,
+  );
+  assert(
+    JSON.stringify(conflicted.outcome?.conflict) === JSON.stringify(details),
+    "the run's conflict isn't the dequeue's",
+  );
 
   // The author merges main into the attempt and pushes; the approved head no longer matches.
   await fetchMain(p);
@@ -503,7 +544,7 @@ async function conflict(): Promise<void> {
 /**
  * A push to a queued or landing merge request's source dequeues it with `newPush` to
  * `needsReview`, and it stays there once the new head passes: only an approval requeues it. A slow
- * check keeps the landing in its retest long enough to push.
+ * check keeps the landing in its checks on the merged tree long enough to push.
  */
 async function needsreview(): Promise<void> {
   const timeline = new Timeline();
@@ -1185,7 +1226,7 @@ checks:
     return detail.outcome?.steps.find((s) => s.name === step)?.notes ?? [];
   };
 
-  // An attempt lands; `main` moving runs `main`, trusted as the owner approved it, and saves.
+  // An attempt lands: its landing is the `main` run, trusted as the owner approved it, and saves.
   const [t1, a1] = ["t1", "t1a1"];
   await createTask(p, t1, "Land a change");
   await createAttempts(p, t1, [a1], timeline);
@@ -1201,7 +1242,7 @@ checks:
   const landed = await mergedSha(p, t1);
   timeline.mark("t1 landed");
   const mainRun = await poll("main's run of the landing", async () => {
-    const { runs } = await throng<{ runs: (ListedRun & { sha: string })[] }>(p, "GET", "/runs?line=main&status=done");
+    const { runs } = await throng<{ runs: ListedRun[] }>(p, "GET", "/runs?line=main&status=done");
     return runs.find((r) => r.sha === landed) ?? null;
   });
   const mainNotes = await notesOf(mainRun.id, "stamp");

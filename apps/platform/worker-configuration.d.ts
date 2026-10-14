@@ -13,7 +13,7 @@ interface __BaseEnv_Env {
 	PROJECT: DurableObjectNamespace<import("./src/index").ProjectCoordinator>;
 	SANDBOX: DurableObjectNamespace<import("./src/index").RunSandbox>;
 	PIPELINE: Workflow<Parameters<import("./src/index").PipelineWorkflow['run']>[0]['payload']>;
-	LANDING: Workflow<Parameters<import("./src/index").LandingWorkflow['run']>[0]['payload']>;
+	LANDING: Workflow<Parameters<import("./src/index").PipelineWorkflow['run']>[0]['payload']>;
 	FOLLOW: Workflow<Parameters<import("./src/index").FollowWorkflow['run']>[0]['payload']>;
 }
 declare namespace Cloudflare {
@@ -33,7 +33,7 @@ declare namespace Cloudflare {
 		PROJECT: DurableObjectNamespace<import("./src/index").ProjectCoordinator>;
 		SANDBOX: DurableObjectNamespace<import("./src/index").RunSandbox>;
 		PIPELINE: Workflow<Parameters<import("./src/index").PipelineWorkflow['run']>[0]['payload']>;
-		LANDING: Workflow<Parameters<import("./src/index").LandingWorkflow['run']>[0]['payload']>;
+		LANDING: Workflow<Parameters<import("./src/index").PipelineWorkflow['run']>[0]['payload']>;
 		FOLLOW: Workflow<Parameters<import("./src/index").FollowWorkflow['run']>[0]['payload']>;
 	}
 	interface Env extends __BaseEnv_Env {}

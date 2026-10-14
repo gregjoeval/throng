@@ -11,7 +11,7 @@
 import { normaliseDequeue } from "./casing.ts";
 import { addColumns, renameColumns } from "./columns.ts";
 import type { ConflictDetails } from "./conflicts.ts";
-import type { ErroredDetails, FailedChecksDetails, LandingOutcome } from "./landing.ts";
+import type { LegacyFailedCheck } from "./landing.ts";
 import type { Sql } from "./task-store.ts";
 import type { Actor } from "./tokens.ts";
 
@@ -43,33 +43,37 @@ export interface ActedBy {
   alias: string | null;
 }
 
+/** The reasons a landing's run dequeues its merge request: its merge conflicted, its gate failed, or it errored. */
+export type LandingDequeueReason = Extract<DequeueReason, "conflict" | "failedChecks" | "errored">;
+
 /**
- * Why a merge request left the queue without landing, with the details its reason carries: the
- * conflict, the checks that failed, or the step that errored. A new push and a cancel carry none.
+ * Why a merge request left the queue without landing: a landing's run that conflicted, failed its
+ * gate or errored, which holds the details; or a new push or a cancel, which carry none.
  */
 export type DequeueCause =
-  | { reason: "conflict"; details: ConflictDetails }
-  | { reason: "failedChecks"; details: FailedChecksDetails }
-  | { reason: "errored"; details: ErroredDetails }
+  | { reason: LandingDequeueReason; run: number }
   | { reason: "newPush" }
   | { reason: "cancelled" };
 
-/** A merge request's last dequeue: its cause, and when. */
-export type Dequeue = DequeueCause & { at: string };
+/**
+ * The details a dequeue kept itself before its landing was a run, which a dequeue stored since
+ * leaves to its run: the conflict, the checks that failed the retest, or the step that errored.
+ */
+export type LegacyDequeueDetails =
+  | ConflictDetails
+  | { checks: LegacyFailedCheck[]; error?: string }
+  | { step: string; error: string };
 
-/** The dequeue a landing outcome other than `landed` records. */
-export function dequeueCause(outcome: Exclude<LandingOutcome, { kind: "landed" }>): DequeueCause {
-  switch (outcome.kind) {
-    case "conflict": {
-      return { reason: "conflict", details: outcome.details };
-    }
-    case "failedChecks": {
-      return { reason: "failedChecks", details: outcome.details };
-    }
-    case "errored": {
-      return { reason: "errored", details: outcome.details };
-    }
-  }
+/**
+ * A merge request's last dequeue: why, the landing's run behind it (null for a new push or a cancel,
+ * and for a dequeue whose landing ran before landings were runs), and when.
+ */
+export interface Dequeue {
+  reason: DequeueReason;
+  run: number | null;
+  at: string;
+  /** Kept by a dequeue stored before landings were runs. */
+  details?: LegacyDequeueDetails;
 }
 
 export interface StoredMergeRequest {
@@ -161,9 +165,10 @@ export interface MergeRequestsDeps {
   ) => void;
 }
 
-/** A stored dequeue, read in camelCase whenever it was stored. */
+/** A stored dequeue, read in camelCase whenever it was stored; one stored before landings were runs names none. */
 function storedDequeue(json: string): Dequeue {
-  return normaliseDequeue(JSON.parse(json) as Dequeue);
+  const dequeue = normaliseDequeue(JSON.parse(json) as Omit<Dequeue, "run"> & { run?: number | null });
+  return { ...dequeue, run: dequeue.run ?? null };
 }
 
 const sqlList = (states: readonly string[]) => states.map((s) => `'${s}'`).join(", ");
@@ -197,6 +202,12 @@ export class MergeRequests {
       mr.id,
     );
     return row?.approved_by_owner === 1;
+  }
+
+  /** The merge request with id `id`, if any. */
+  get(id: number): StoredMergeRequest | null {
+    const [row] = this.#sql.exec<MergeRequestRow>("SELECT * FROM merge_requests WHERE id = ?", id);
+    return row === undefined ? null : this.#toMergeRequest(row);
   }
 
   /** The task's open merge request, if any. */
@@ -323,7 +334,7 @@ export class MergeRequests {
     to: "pending" | "needsReview" | "cancelled",
   ): StoredMergeRequest {
     const { reason } = cause;
-    const dequeue: Dequeue = { ...cause, at: this.#stamp() };
+    const dequeue: Dequeue = { reason, run: "run" in cause ? cause.run : null, at: this.#stamp() };
     this.#sql.exec(
       "UPDATE merge_requests SET state = ?, queued_at = NULL, last_dequeue = ?, dequeue_seen = 0, held = ? WHERE id = ?",
       to,
@@ -331,7 +342,7 @@ export class MergeRequests {
       to === "pending" ? 1 : 0,
       mr.id,
     );
-    this.#journal(actor, "dequeued", mr, { reason, from: mr.state });
+    this.#journal(actor, "dequeued", mr, { reason, from: mr.state, ...("run" in cause ? { run: cause.run } : {}) });
     if (to !== "pending") this.#journal(actor, to, mr, {});
     return this.#get(mr.id);
   }

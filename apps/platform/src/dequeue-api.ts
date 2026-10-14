@@ -1,37 +1,23 @@
-// The routes for a merge request's latest dequeue, under `/api/projects/{owner}/{project}/tasks/{t}/
-// merge-request/dequeue`: its details, each conflicting file's display diffs, and the logs of the
-// retest behind a `failedChecks` dequeue. Mounted by `api.ts`. Like the other merge request reads,
-// they take a bearer token or throng-web's forwarded identity.
+// The route for a merge request's latest dequeue, `/api/projects/{owner}/{project}/tasks/{t}/
+// merge-request/dequeue`: why, the landing's run behind it, and the details that run holds. Mounted
+// by `api.ts`. Like the other merge request reads, it takes a bearer token or throng-web's forwarded
+// identity. The run's own routes serve its steps and logs.
 
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import type { AccessBindings } from "./access.ts";
-import {
-  diffContent,
-  diffResponse,
-  FileDiffSchema,
-  json,
-  ProjectPathSchema,
-  requestTaskService,
-  TAIL,
-  tailedRoutes,
-} from "./api-shared.ts";
+import { json, ProjectPathSchema, requestTaskService } from "./api-shared.ts";
 import type { AuthEnv, bearerOrForwarded } from "./auth.ts";
 import { CONFLICT_CAPS, CONFLICT_TYPES } from "./conflicts.ts";
-import { diffFile } from "./diff.ts";
-import type { FileSide } from "./diff.ts";
-import { errorBody, errorResponse, ServiceError } from "./errors.ts";
-import { FAILED_CHECK_OUTCOMES } from "./landing.ts";
-import { LOG_CONTENT_TYPE } from "./logs.ts";
-import type { LogStore } from "./logs.ts";
+import { errorBody, errorResponse } from "./errors.ts";
 import { DEQUEUE_REASONS } from "./merge-requests.ts";
 import type { Repos } from "./repos.ts";
+import { STEP_KINDS, STEP_OUTCOMES } from "./run-outcome.ts";
 import type { TaskBackend } from "./tasks.ts";
 
 export interface DequeueOptions {
   auth: ReturnType<typeof bearerOrForwarded>;
   repos: (env: AccessBindings) => Repos;
   tasks: (env: AccessBindings) => (projectId: string) => TaskBackend;
-  logs: (env: AccessBindings) => LogStore;
 }
 
 const TaskPathSchema = ProjectPathSchema.extend({
@@ -76,7 +62,8 @@ const ConflictFileSchema = z
   })
   .openapi("ConflictFile");
 
-const ConflictDetailsSchema = z
+/** A landing's conflict: what its `merge` step hit, file by file. A run's outcome and a dequeue both show it. */
+export const ConflictDetailsSchema = z
   .object({
     attempt: z.string().openapi({ example: "t42a3" }),
     head: z.string().openapi({ description: "The approved head that conflicted." }),
@@ -86,41 +73,57 @@ const ConflictDetailsSchema = z
   })
   .openapi("ConflictDetails");
 
-const FailedChecksDetailsSchema = z
+const FailedStepsDetailsSchema = z
   .object({
-    checks: z.array(
-      z.object({
-        name: z.string(),
-        outcome: z.enum(FAILED_CHECK_OUTCOMES),
-        log: z.string().nullable().openapi({ description: "For `GET …/merge-request/dequeue/logs/{name}`." }),
-      }),
-    ),
+    steps: z
+      .array(
+        z.object({
+          name: z.string(),
+          kind: z.enum(STEP_KINDS).openapi({ description: "A setup or a check." }),
+          outcome: z.enum(STEP_OUTCOMES),
+        }),
+      )
+      .openapi({ description: "The setups and checks that didn't pass the landing's gate, in run order." }),
     error: z
       .string()
       .optional()
       .openapi({ description: "The config's errors, when the merged tree's config is invalid." }),
   })
-  .openapi("FailedChecksDetails");
+  .openapi("FailedStepsDetails");
 
 const ErroredDetailsSchema = z
   .object({
-    step: z.string().openapi({ description: "The landing step that kept failing.", example: "conflict check" }),
-    error: z.string(),
+    error: z.string().openapi({ description: "What ended the landing's run." }),
+    step: z.string().optional().openapi({
+      description: "The landing step that kept failing, kept by a dequeue from before landings were runs.",
+      example: "conflict check",
+    }),
   })
   .openapi("ErroredDetails");
 
 const DequeueSchema = z
   .object({
     reason: z.enum(DEQUEUE_REASONS),
+    run: z
+      .number()
+      .int()
+      .nullable()
+      .openapi({
+        description:
+          "The landing's run behind a `conflict`, `failedChecks` or `errored` dequeue, for `GET …/runs/{runId}`; " +
+          "null for `newPush` and `cancelled`, and for a dequeue from before landings were runs.",
+      }),
     at: z.string(),
-    details: z.union([ConflictDetailsSchema, FailedChecksDetailsSchema, ErroredDetailsSchema]).nullable().openapi({
-      description:
-        "By reason: `conflict`, `failedChecks` and `errored` have theirs; `newPush` and `cancelled` have none.",
-    }),
+    details: z
+      .union([ConflictDetailsSchema, FailedStepsDetailsSchema, ErroredDetailsSchema])
+      .nullable()
+      .openapi({
+        description:
+          "From the run, by reason: `conflict`, `failedChecks` and `errored` have theirs; `newPush` and `cancelled` " +
+          "have none.",
+      }),
   })
   .openapi("MergeRequestDequeue");
-
-const SIDES = ["main", "attempt"] as const;
 
 const security: Record<string, string[]>[] = [{ bearer: [] }, { web: [] }];
 const errors = {
@@ -130,7 +133,7 @@ const errors = {
 
 const taskPath = ({ t, ...rest }: { owner: string; project: string; t: string }) => ({ ...rest, task: t });
 
-export function dequeueRoutes({ auth, repos, tasks, logs }: DequeueOptions) {
+export function dequeueRoutes({ auth, repos, tasks }: DequeueOptions) {
   const service = requestTaskService(repos, tasks);
 
   const api = new OpenAPIHono<AuthEnv>({
@@ -140,106 +143,26 @@ export function dequeueRoutes({ auth, repos, tasks, logs }: DequeueOptions) {
     },
   });
 
-  const tailed = tailedRoutes(api);
-
-  const base = "/projects/{owner}/{project}/tasks/{t}/merge-request/dequeue";
-  return api
-    .openapi(
-      createRoute({
-        method: "get",
-        path: base,
-        operationId: "getMergeRequestDequeue",
-        tags: ["Merge queue"],
-        summary: "Get a merge request's latest dequeue, with its details",
-        description:
-          "Why the task's latest merge request last left the queue without landing, and the details: every " +
-          "conflicting path with its blobs and hunks, the checks that failed the retest, or the step that errored.",
-        security,
-        middleware: [auth] as const,
-        request: { params: TaskPathSchema },
-        responses: {
-          200: { description: "The latest dequeue.", ...json(DequeueSchema) },
-          ...errors,
-          404: errorResponse("No such project or task, or its merge request was never dequeued."),
-        },
-      }),
-      async (c) => c.json(await service(c).getDequeue(c.var.actor, taskPath(c.req.valid("param"))), 200),
-    )
-    .openapi(
-      tailed(
-        createRoute({
-          method: "get",
-          path: `${base}/files/${TAIL}/diff`,
-          operationId: "getMergeRequestConflictDiff",
-          tags: ["Merge queue"],
-          summary: "Diff a conflicting file from the merge base to one side",
-          description:
-            "The unified diff of one conflicting file of the latest `conflict` dequeue, from its base blob to " +
-            "`main`'s (`side=main`) or the approved head's (`side=attempt`). A side with no file is a delete; a " +
-            "base with none, an add. The commit diff's per-file caps apply. With `Accept: text/x-diff`, the " +
-            "answer is the patch.",
-          security,
-          middleware: [auth] as const,
-          request: {
-            params: TaskPathSchema.extend({ path: z.string().openapi({ example: "src/app.ts" }) }),
-            query: z.object({ side: z.enum(SIDES) }),
-          },
-          responses: {
-            200: { description: "The file's diff.", content: diffContent(FileDiffSchema) },
-            ...errors,
-            404: errorResponse("No such project or task, or the latest dequeue has no conflict in that path."),
-          },
-        }),
-      ),
-      async (c) => {
-        const { path, ...params } = c.req.valid("param");
-        const { side } = c.req.valid("query");
-        const found = await service(c).getDequeueFile(c.var.actor, { ...taskPath(params), path });
-        const sideOf = (s: "base" | typeof side): FileSide | null => {
-          const hash = found.file.blobs[s];
-          const mode = found.file.modes[s];
-          return hash === null || mode === null ? null : { path, mode, hash };
-        };
-        const old = sideOf("base");
-        const next = sideOf(side);
-        if (old === null && next === null)
-          throw new ServiceError("notFound", `neither the base nor ${side} has ${path}`);
-        const diff = (repo: string) => diffFile(repos(c.env), repo, old, next);
-        // The attempt's blob is in its fork while the attempt is active, and in origin once it's archived.
-        const file =
-          side === "main" ? await diff(found.origin) : await diff(found.fork).catch(() => diff(found.origin));
-        return diffResponse(
-          c,
-          () => file.patch ?? "",
-          () => file,
-        ) as never;
+  return api.openapi(
+    createRoute({
+      method: "get",
+      path: "/projects/{owner}/{project}/tasks/{t}/merge-request/dequeue",
+      operationId: "getMergeRequestDequeue",
+      tags: ["Merge queue"],
+      summary: "Get a merge request's latest dequeue, with its details",
+      description:
+        "Why the task's latest merge request last left the queue without landing, the landing's run behind it, " +
+        "and the details that run holds: every conflicting path with its blobs and hunks, the setups and checks " +
+        "that failed its gate, or the error that ended it.",
+      security,
+      middleware: [auth] as const,
+      request: { params: TaskPathSchema },
+      responses: {
+        200: { description: "The latest dequeue.", ...json(DequeueSchema) },
+        ...errors,
+        404: errorResponse("No such project or task, or its merge request was never dequeued."),
       },
-    )
-    .openapi(
-      createRoute({
-        method: "get",
-        path: `${base}/logs/{name}`,
-        operationId: "getMergeRequestDequeueLog",
-        tags: ["Merge queue"],
-        summary: "Stream a log of the retest behind a failed checks dequeue",
-        description:
-          "For a latest dequeue with reason `failedChecks`: the log a failing check's `log` names, from the " +
-          "landing's retest. Logs expire like scoring runs' do; an expired log is `notFound`.",
-        security,
-        middleware: [auth] as const,
-        request: { params: TaskPathSchema.extend({ name: z.string().openapi({ example: "test" }) }) },
-        responses: {
-          200: { description: "The log.", content: { "text/plain": { schema: z.string() } } },
-          ...errors,
-          404: errorResponse("No such project or task, or the latest dequeue has no such log."),
-        },
-      }),
-      async (c) => {
-        const { name, ...params } = c.req.valid("param");
-        const key = await service(c).dequeueLogKey(c.var.actor, { ...taskPath(params), name });
-        const log = await logs(c.env).get(key);
-        if (log === null) throw new ServiceError("notFound", `the log ${name} has expired`);
-        return c.body(log.body, 200, { "Content-Type": LOG_CONTENT_TYPE }) as never;
-      },
-    );
+    }),
+    async (c) => c.json(await service(c).getDequeue(c.var.actor, taskPath(c.req.valid("param"))), 200),
+  );
 }

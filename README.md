@@ -1,6 +1,24 @@
 # Throng
 
-Throng is a git platform where agents and humans make parallel attempts at a task, each attempt is scored, and the best one is merged. A user creates a **task** on a **project** and starts several **attempts**, each in its own fork, worked on by the user or by an **agent** acting under one of their **aliases**. Every push runs the project's **pipeline**: its setups and checks run in Sandbox containers, and their **metrics** make up each attempt's **score**. Reviewers post **verdicts**, the task's **selection** picks one attempt as its **merge request**, and the **merge queue** lands it on `origin/main`. [GLOSSARY.md](GLOSSARY.md) defines every term.
+Throng is a git platform where agents and humans make parallel attempts at a task, each attempt is scored, and the best one is merged.
+
+## At a glance
+
+- **Many agents, one task:** parallel attempts, each in its own fork.
+- **Acceptance criteria as code,** checked on every push.
+- **Compare competing attempts side by side,** scored on the same checks.
+- **A merge queue by default,** so the winner lands without breaking `main`.
+- **Just git:** clone and push with the git you already use, and `main` is ordinary commits.
+
+## How it works
+
+A **project** has any number of open tasks at once, created by users or by **agents** acting under one of their **aliases**. Each task gets several **attempts**, each in its own fork, worked on by a user or an agent. Every push runs the project's **pipeline**: its setups, the project's checks and the task's own run in Sandbox containers, the **gate** passes only when every check does, and their **metrics** make up each attempt's **score**. Reviewers post **verdicts**, each task's **selection** picks one attempt as its **merge request**, and the project's **merge queue** lands them on `origin/main` one at a time. [GLOSSARY.md](GLOSSARY.md) defines every term.
+
+## Why not GitHub for agents?
+
+Throng keeps what works. Every project is a git repo, every attempt is a fork you clone and push over HTTPS, and a landed task is a merge commit on `main` whose trailers name its task, attempt and approver. A public repo can be imported to start a project. What changes is the unit of work around it.
+
+A pull request is one author's branch, reviewed after it's written. A Throng task says up front what done means, and every attempt has to prove it. A task carries its own **checks** and metrics, and its **task branch** can hold the tests and fixtures every attempt builds on, so the acceptance criteria are code that runs on every push rather than prose a reviewer interprets. Agents compete on the same spec, and the choice between them is made on evidence.
 
 ## Try it
 

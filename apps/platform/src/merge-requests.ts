@@ -85,6 +85,8 @@ export interface StoredMergeRequest {
   state: MergeRequestState;
   approved_head: string;
   approved_by: ActedBy;
+  /** Whether the project owner made its latest approval: landing it is the owner's merge. */
+  approved_by_owner: boolean;
   approved_at: string;
   /** When it last entered the queue, while queued or landing. */
   queued_at: string | null;
@@ -105,6 +107,7 @@ interface MergeRequestRow {
   approved_head: string;
   approved_by_user: string;
   approved_by_alias: string | null;
+  approved_by_owner: number;
   approved_at: string;
   queued_at: string | null;
   /** 1 after a dequeue back to pending, until an approval or a push: it doesn't requeue on its own. */
@@ -167,7 +170,7 @@ export interface MergeRequestsDeps {
 }
 
 /** A stored dequeue, read in camelCase whenever it was stored; one stored before landings were runs names none. */
-function storedDequeue(json: string): Dequeue {
+export function storedDequeue(json: string): Dequeue {
   const dequeue = normaliseDequeue(JSON.parse(json) as Omit<Dequeue, "run"> & { run?: number | null });
   return { ...dequeue, run: dequeue.run ?? null };
 }
@@ -194,15 +197,6 @@ export class MergeRequests {
     for (const statement of SCHEMA) sql.exec(statement);
     renameColumns(sql, "merge_requests", RENAMES);
     addColumns(sql, "merge_requests", MERGE_REQUEST_COLUMNS);
-  }
-
-  /** Whether the project owner made the merge request's latest approval: landing it is the owner's merge. */
-  ownerApproved(mr: StoredMergeRequest): boolean {
-    const [row] = this.#sql.exec<{ approved_by_owner: number }>(
-      "SELECT approved_by_owner FROM merge_requests WHERE id = ?",
-      mr.id,
-    );
-    return row?.approved_by_owner === 1;
   }
 
   /** The merge request with id `id`, if any. */
@@ -407,6 +401,7 @@ export class MergeRequests {
       state: row.state,
       approved_head: row.approved_head,
       approved_by: { user: row.approved_by_user, alias: row.approved_by_alias },
+      approved_by_owner: row.approved_by_owner === 1,
       approved_at: row.approved_at,
       queued_at: row.queued_at,
       position: place,

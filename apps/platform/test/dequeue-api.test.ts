@@ -108,7 +108,7 @@ async function setup() {
 
   const tasks = store(id);
   await tasks.drain(id);
-  const run = at(tasks.scoring.listRuns("t1a1"), -1);
+  const run = at(tasks.runs.listRuns("t1a1"), -1);
   tasks.scoringFinished(run.id, { status: "done", result: passed });
   expect((await call("POST", `${p}/tasks/t1/selection`, ada, { attempt: "t1a1" })).body["state"]).toBe("queued");
   await tasks.drain(id);
@@ -116,7 +116,7 @@ async function setup() {
 
   /** Ends the landing's run the way its Workflow would report it; returns the run's id. */
   const finish = async (report: RunReport) => {
-    const [landing] = tasks.scoring.liveLandings();
+    const [landing] = tasks.runs.liveLandings();
     if (landing === undefined) throw new Error("nothing is landing");
     expect(await tasks.pipelineReported(landing.id, report)).toBeTruthy();
     return landing.id;

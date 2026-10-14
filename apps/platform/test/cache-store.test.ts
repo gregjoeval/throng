@@ -26,7 +26,7 @@ function setup() {
     sql: testSql(),
     repos,
     now: () => new Date(now),
-    scoring: {
+    runner: {
       workflow: {
         create: async ({ params }) => void created.push(params),
         get: async () => ({ terminate: async () => {} }),
@@ -38,15 +38,15 @@ function setup() {
   let sha = 0;
   /** A running run on `line`, trusted or not. */
   const running = async (line: string, trusted = true): Promise<number> => {
-    const request = store.scoring.request({
+    const request = store.runs.request({
       project: PROJECT.id,
       line,
       sha: String(++sha).padStart(40, "0"),
       trigger: "push",
       actor: null,
-      ownersPush: trusted,
+      pushedBy: trusted ? { kind: "maintainer" } : { kind: "other" },
     });
-    await store.scoring.drain();
+    await store.runs.drain();
     return request.run.id;
   };
   /** A trusted run on `line` saves `key`'s entry, as its Workflow does. */

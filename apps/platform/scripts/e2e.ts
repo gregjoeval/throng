@@ -1470,7 +1470,7 @@ async function coalesce(): Promise<void> {
   const first = await commitAndPush(work, fork, "src/greeting.js", (s) => s.replace('"hello"', '"hi"'), "a1: first");
   timeline.mark("first push");
   // Wait until the first check is running, so the second push has something to cancel.
-  await waitFor(project, (e) => e.kind === "scoringStarted" && e.detail.sha === first);
+  await waitFor(project, (e) => e.kind === "runStarted" && e.detail.sha === first);
   timeline.mark("first check started");
   const second = await commitAndPush(
     work,
@@ -1486,7 +1486,7 @@ async function coalesce(): Promise<void> {
   assert(!journal.some((e) => e.kind === "scored" && e.detail.sha === first), "the superseded sha was scored");
   assert(!journal.some((e) => e.kind === "mainAdvanced" && e.detail.head === first), "the superseded sha landed");
   assert(
-    journal.some((e) => e.kind === "scoringCancelled" && e.detail.sha === first),
+    journal.some((e) => e.kind === "runCancelled" && e.detail.sha === first),
     "the first run was not cancelled",
   );
   report(timeline, journal);
@@ -1725,7 +1725,7 @@ async function refs(): Promise<void> {
   // Archive pushes are internal: neither project queued any scoring.
   for (const project of [a.project, b.project]) {
     const kinds = new Set((await settle(project, 5000)).map((e) => e.kind));
-    assert(!kinds.has("scoringQueued"), `${project} queued scoring on an archive push`);
+    assert(!kinds.has("runQueued"), `${project} queued scoring on an archive push`);
   }
   timeline.print();
   await cleanUp(a.project, a.work);
@@ -1796,17 +1796,14 @@ async function commitAndPush(
 function report(timeline: Timeline, journal: JournalEntry[]): void {
   console.log("timeline:");
   timeline.print();
-  const cancelled = journal.filter((e) => e.kind === "scoringCancelled");
+  const cancelled = journal.filter((e) => e.kind === "runCancelled");
   console.log(`cancelled runs: ${cancelled.length}`);
   for (const d of cancelled) console.log(`  ${JSON.stringify(d.detail)}`);
 }
 
 /** Waits for `sha`'s run to finish and returns its result; an errored run fails the scenario. */
 async function scored(project: string, sha: string): Promise<NonNullable<Run["result"]>> {
-  const event = await waitFor(
-    project,
-    (e) => (e.kind === "scored" || e.kind === "scoringErrored") && e.detail.sha === sha,
-  );
+  const event = await waitFor(project, (e) => (e.kind === "scored" || e.kind === "runErrored") && e.detail.sha === sha);
   const found = await api<Run>("GET", `/e2e/projects/${project}/runs/${String(event.detail.run)}`);
   const { result } = found;
   assert(found.status === "done" && result !== null, `run ${found.id} ended ${found.status}: ${found.error ?? ""}`);

@@ -634,8 +634,8 @@ describe("merge request routes", () => {
     expect((await call("GET", `${base}/merge-queue`, bob)).body).toEqual({ queue: [] });
 
     const tasks = store(project["id"]);
-    await tasks.scoring.drain();
-    const run = at(tasks.scoring.listRuns("t1a2"), -1);
+    await tasks.runs.drain();
+    const run = at(tasks.runs.listRuns("t1a2"), -1);
     tasks.scoringFinished(run.id, {
       status: "done",
       result: {
@@ -661,8 +661,8 @@ describe("the task list's summaries", () => {
   /** Finishes the latest run of t1's attempt `attempt` with `gate`. */
   async function finish(env: Env, attempt: number, gate: "passed" | "failed") {
     const tasks = env.store(env.project["id"]);
-    await tasks.scoring.drain();
-    const run = at(tasks.scoring.listRuns(`t1a${attempt}`), -1);
+    await tasks.runs.drain();
+    const run = at(tasks.runs.listRuns(`t1a${attempt}`), -1);
     tasks.scoringFinished(run.id, {
       status: "done",
       result: {

@@ -19,7 +19,7 @@ import { normaliseResult } from "./casing.ts";
 import { addColumns, renameColumns } from "./columns.ts";
 import { forkRepo } from "./repos.ts";
 import { upgradeResult } from "./results.ts";
-import type { LegacyResult, ScoringResult } from "./results.ts";
+import type { ScoringResult, StoredResult } from "./results.ts";
 import { attemptRef } from "./task-refs.ts";
 import type { Sql } from "./task-store.ts";
 import type { Actor } from "./tokens.ts";
@@ -520,7 +520,7 @@ function toRun(row: RunRow): StoredRun {
 
 /** A stored result in the current shape; one stored before runs kept logs has none. */
 function storedResult(json: string): ScoringResult {
-  const result = JSON.parse(json) as Partial<Pick<ScoringResult, "logs">> & (ScoringResult | LegacyResult);
+  const result = JSON.parse(json) as Partial<Pick<ScoringResult, "logs">> & StoredResult;
   return upgradeResult(normaliseResult({ ...result, logs: result.logs ?? [] }));
 }
 

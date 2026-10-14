@@ -149,19 +149,18 @@ export function scoredMetrics({
   };
 }
 
-/** A config check that ran: required, or optional. */
+/** A config check that ran. */
 export function check(
   name: string,
-  required: boolean,
   outcome: Result["checks"][number]["outcome"],
   durationMs = 900,
 ): Result["checks"][number] {
-  return { name, source: "project", required, outcome, durationMs, notes: [] };
+  return { name, source: "project", outcome, durationMs, notes: [] };
 }
 
-/** One of Throng's own checks, `_diff` or `_preview`: never required. */
+/** One of Throng's own checks, `_diff` or `_preview`, which never gate. */
 export function platformCheck(name: string, outcome: Result["checks"][number]["outcome"]): Result["checks"][number] {
-  return { name, source: "platform", required: false, outcome, durationMs: 0, notes: [] };
+  return { name, source: "platform", outcome, durationMs: 0, notes: [] };
 }
 
 /** A done result whose gate passed with a `test` check, its metrics as `scoredMetrics()` gives them. */
@@ -170,7 +169,7 @@ export function result(fields: Partial<Result> = {}): Result {
     base: "b".repeat(40),
     config: { kind: "valid" },
     gate: "passed",
-    checks: [check("test", true, "passed")],
+    checks: [check("test", "passed")],
     metrics: scoredMetrics(),
     logs: [],
     run: 1,

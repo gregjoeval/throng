@@ -58,10 +58,10 @@ const NOTHING_RUN: RawScore = { base: null, shortstat: "", builtinMs: 0, setupFa
  *    container starts:
  *    `git merge-tree` of `main` and the approved head. A conflict ends it `conflict`; a clean merge
  *    records the tree, `main`'s sha and the merged tree's `.throng/config.yml`.
- * 2. Retest, in the same container, only when the merged tree's config has required checks: setup
- *    and the required checks on the merged tree, with the scoring runner, outbound policy and logs, and
- *    the container's access from step 1: the merged tree's files never widen it. A
- *    required check not passing, or an invalid config, ends it `failedChecks`. Reading the merged
+ * 2. Retest, in the same container, only when the merged tree's config has checks: setup and every
+ *    check on the merged tree, with the scoring runner, outbound policy and logs, and the container's
+ *    access from step 1: the merged tree's files never widen it. A failed setup, a check not passing,
+ *    or an invalid config, ends it `failedChecks`. Reading the merged
  *    tree's config rather than `main`'s lets a merge request that fixes a broken config land.
  * 3. Land, in the trusted `land` container (origin write, fork read, no repository code). The `check`
  *    container is destroyed first, so the landing's one Sandbox slot holds one container. It first

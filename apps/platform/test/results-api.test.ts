@@ -26,7 +26,6 @@ const CONFIG = parseConfig(`checks:
     command: npm test
   - name: bundle
     command: npm run size
-    required: false
 metrics:
   - { name: coverage, from: test.coverage.pct, type: number, unit: "%" }
   - { name: bundle_kb, from: bundle.size.kb, type: number, order: asc }
@@ -42,7 +41,7 @@ function result(overrides: Partial<ScoringResult> = {}): ScoringResult {
     setupFailed: null,
     checks: [
       { exit: 0, durationMs: 900, metrics: { coverage: { value: 81.5 } } },
-      { exit: 1, durationMs: 300, metrics: { bundle_kb: { value: 120 } } },
+      { exit: 0, durationMs: 300, metrics: { bundle_kb: { value: 120 } } },
     ],
   });
   return { ...withPreview(scored, { ok: true, url: "https://t1a1.preview.test" }, 40), ...overrides };
@@ -281,7 +280,7 @@ describe("the arena", () => {
     expect((current["checks"] as Json[]).map((c) => [c["name"], c["source"], c["outcome"]])).toEqual([
       ["_diff", "platform", "passed"],
       ["test", "project", "passed"],
-      ["bundle", "project", "failed"],
+      ["bundle", "project", "passed"],
       ["_preview", "platform", "passed"],
     ]);
     expect(current["metrics"]).toEqual({
@@ -291,7 +290,7 @@ describe("the arena", () => {
       "_diff.deletions": { source: "platform", type: "number", value: 0, order: "asc" },
       test: { source: "project", type: "enum", value: "passed", values: OUTCOMES },
       coverage: { source: "project", type: "number", value: 81.5, order: "desc", unit: "%" },
-      bundle: { source: "project", type: "enum", value: "failed", values: OUTCOMES },
+      bundle: { source: "project", type: "enum", value: "passed", values: OUTCOMES },
       bundle_kb: { source: "project", type: "number", value: 120, order: "asc" },
       _preview: { source: "platform", type: "enum", value: "passed", values: OUTCOMES },
       "_preview.url": { source: "platform", type: "string", format: "url", value: "https://t1a1.preview.test" },

@@ -27,8 +27,6 @@ const PREVIEW_CHECK = "_preview";
 export interface CheckResult {
   name: string;
   source: Source;
-  /** Whether the gate needs it to pass. */
-  required: boolean;
   outcome: CheckOutcome;
   durationMs: number;
   /** What the run noticed about the check, such as why it was skipped. */
@@ -62,7 +60,10 @@ export interface ScoringResult {
    */
   base: string | null;
   config: { kind: "none" } | { kind: "valid" } | { kind: "invalid"; error: string };
-  /** Passed when every required check passed, including when there are none; failed on an invalid config. */
+  /**
+   * Passed when setup passed and every check that ran passed, including when there are none; failed on
+   * an invalid config. Throng's own checks never gate.
+   */
   gate: Gate;
   /** Every check in run order: `_diff`, the config's checks, then `_preview`. */
   checks: CheckResult[];
@@ -164,9 +165,12 @@ export function parseShortstat(line: string): { filesChanged: number; additions:
   };
 }
 
-/** Passed when every required check passed; no checks at all passes. */
+/**
+ * Passed when every project and task check passed; no checks at all passes. Throng's own checks never
+ * gate. A check skipped because setup failed, or that the score script didn't report, didn't pass.
+ */
 export function gateFor(checks: CheckResult[]): Gate {
-  return checks.every((c) => !c.required || c.outcome === "passed") ? "passed" : "failed";
+  return checks.every((c) => c.source === "platform" || c.outcome === "passed") ? "passed" : "failed";
 }
 
 /**
@@ -204,7 +208,7 @@ function metricsOf({ check, metrics }: ScoredCheck): Record<string, MetricResult
 }
 
 function platformCheck(name: string, outcome: CheckOutcome, durationMs: number, notes: string[]): CheckResult {
-  return { name, source: "platform", required: false, outcome, durationMs, notes };
+  return { name, source: "platform", outcome, durationMs, notes };
 }
 
 /** One of `_diff`'s sizes: a smaller change is better. */
@@ -326,7 +330,17 @@ function metricResult(metric: MetricConfig, checked: MetricValue): MetricResult 
   }
 }
 
-/** A config check from its run: its outcome and notes, and the metrics read from its output. */
+/** How a metric's note says its check ended. */
+const ENDED: Record<Exclude<CheckOutcome, "passed" | "skipped">, string> = {
+  failed: "failed",
+  timedOut: "timed out",
+  errored: "errored",
+};
+
+/**
+ * A config check from its run: its outcome and notes, and the metrics read from its output. A check
+ * that didn't pass reports no metrics: each is null, saying why.
+ */
 function configScored(
   check: CheckConfig,
   metrics: MetricConfig[],
@@ -336,15 +350,15 @@ function configScored(
   const outcome = checkOutcome(ran?.exit ?? null, ran?.durationMs ?? 0, check.timeoutMs);
   // The score script records an exit for every check it runs, and runs them all unless setup fails.
   const skipNote = `skipped: ${setupFailed === null ? "the score script didn't report it" : `setup command ${setupFailed} failed`}`;
-  const metricValue = (metric: MetricConfig): MetricValue =>
-    outcome === "skipped"
-      ? { value: null, note: `${check.name}: ${check.name} was ${skipNote}` }
-      : checkedValue(metric, ran?.metrics[metric.name]);
+  const metricValue = (metric: MetricConfig): MetricValue => {
+    if (outcome === "passed") return checkedValue(metric, ran?.metrics[metric.name]);
+    const why = outcome === "skipped" ? `was ${skipNote}` : ENDED[outcome];
+    return { value: null, note: `${check.name}: ${check.name} ${why}` };
+  };
   return {
     check: {
       name: check.name,
       source: check.source,
-      required: check.required,
       outcome,
       durationMs: ran?.durationMs ?? 0,
       notes: outcome === "skipped" ? [skipNote] : [],
@@ -370,7 +384,7 @@ export function buildResult(config: ConfigResult, raw: RawScore): ScoringResult 
           configScored(check, config.config.metrics, raw.checks[i], raw.setupFailed),
         )
       : [];
-  const gate = config.kind === "invalid" ? "failed" : gateFor(checks.map((s) => s.check));
+  const gate = config.kind === "invalid" || raw.setupFailed !== null ? "failed" : gateFor(checks.map((s) => s.check));
   const scored = [
     diffScored(parseShortstat(raw.shortstat), raw.builtinMs),
     ...checks,
@@ -398,7 +412,7 @@ const LEGACY_METRIC_NOTE = "converted from an older result, which didn't record 
  * `config` check carrying the error.
  */
 export interface LegacyResult extends Pick<ScoringResult, "base" | "config" | "gate" | "logs"> {
-  checks: (Omit<CheckResult, "source"> & { metrics: Record<string, number>; error?: string })[];
+  checks: (Omit<CheckResult, "source"> & { required: boolean; metrics: Record<string, number>; error?: string })[];
   builtin: { filesChanged: number; additions: number; deletions: number; durationMs: number };
   preview:
     | { status: "none" }
@@ -407,15 +421,25 @@ export interface LegacyResult extends Pick<ScoringResult, "base" | "config" | "g
     | { status: "errored"; error: string };
 }
 
+/** A check as results stored it while a check could be optional: `required` said whether it gated. */
+type OptionalCheck = CheckResult & { required?: boolean };
+
+/** A result as runs have stored it: the current shape, perhaps with `required` on its checks, or a legacy one. */
+export type StoredResult = (Omit<ScoringResult, "checks"> & { checks: OptionalCheck[] }) | LegacyResult;
+
 /**
- * A stored result in the current shape. A legacy one becomes `_diff`, its checks with their metrics
+ * A stored result in the current shape. `required` is dropped from each check, as every check that
+ * runs must pass now; the stored gate stays as it was scored. A legacy one becomes `_diff`, its checks with their metrics
  * as project numbers, and `_preview`; its synthetic `config` check is dropped, as `config` already
  * holds the error. No order or unit was stored, so each number takes a config's default order
  * (higher is better) with a note saying so. A metric named like a check is dropped, as the check's
  * outcome metric holds that name now, with a note on that check.
  */
-export function upgradeResult(stored: ScoringResult | LegacyResult): ScoringResult {
-  if (!("builtin" in stored)) return stored;
+export function upgradeResult(stored: StoredResult): ScoringResult {
+  if (!("builtin" in stored)) {
+    if (!stored.checks.some((check) => "required" in check)) return stored;
+    return { ...stored, checks: stored.checks.map(({ required: _required, ...check }) => check) };
+  }
   const { builtin, preview } = stored;
   const legacyChecks = stored.checks.filter((check) => check.error === undefined);
   const names = new Set(legacyChecks.map((check) => check.name));
@@ -426,7 +450,7 @@ export function upgradeResult(stored: ScoringResult | LegacyResult): ScoringResu
       dropped.set(name, [...(dropped.get(name) ?? []), note]);
     }
   }
-  const checks = legacyChecks.map(({ metrics, error: _error, ...check }): ScoredCheck => ({
+  const checks = legacyChecks.map(({ metrics, error: _error, required: _required, ...check }): ScoredCheck => ({
     check: { ...check, source: "project", notes: [...check.notes, ...(dropped.get(check.name) ?? [])] },
     metrics: Object.fromEntries(
       Object.entries(metrics)

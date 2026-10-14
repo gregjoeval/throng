@@ -286,13 +286,13 @@ describe("the arena's views", () => {
   });
 });
 
-/** The one attempt of the single-attempt view: passing, with a required and an optional check. */
+/** The one attempt of the single-attempt view: passing, with two checks. */
 const only = () =>
   arenaAttempt(1, 1, {
     status: "done",
     result: result({
       metrics: scoredMetrics({ values: { coverage: 81.5 } }),
-      checks: [check("test", true, "passed", 1200), check("lint", false, "failed", 300)],
+      checks: [check("test", "passed", 1200), check("lint", "passed", 300)],
     }),
   });
 
@@ -309,8 +309,8 @@ describe("the single-attempt view", () => {
     expect(await within(lane("t1a1")).findByRole("list", { name: "Files changed" })).toHaveTextContent("11.txt");
     expect(asked).toEqual([`${BASE}...${only().sha}?attempt=t1a1`]);
     const scorecard = within(view).getByRole("region", { name: "Scorecard" });
-    expect(within(scorecard).getByRole("row", { name: /test/u })).toHaveTextContent("testRequiredPassed1.2 s");
-    expect(within(scorecard).getByRole("row", { name: /lint/u })).toHaveTextContent("lintOptionalFailed0.3 s");
+    expect(within(scorecard).getByRole("row", { name: /test/u })).toHaveTextContent("testPassed1.2 s");
+    expect(within(scorecard).getByRole("row", { name: /lint/u })).toHaveTextContent("lintPassed0.3 s");
     expect(scorecard).toHaveTextContent("coverage81.5%");
     expect(scorecard).toHaveTextContent("Files changed1");
     expect(within(view).getByRole("button", { name: "Merge" })).toBeInTheDocument();

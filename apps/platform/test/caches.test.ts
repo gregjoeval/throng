@@ -4,13 +4,16 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  CACHE_ERROR_CHARS,
   cacheKeyHashes,
   cacheObjectKey,
   MAX_KEY_TREE_READS,
   restoreNote,
   restoreScopes,
+  runCachesFrom,
   saveNote,
   saveScope,
+  unkeyedCaches,
 } from "../src/caches.ts";
 import type { RunCache } from "../src/caches.ts";
 import type { CacheConfig } from "../src/config.ts";
@@ -127,12 +130,26 @@ describe("cache scopes", () => {
 });
 
 /** `pnpm` as a run uses it: keyed, restored from main's entry and never saved, unless `fields` say otherwise. */
-const cache = (fields: Partial<Extract<RunCache, { keyHash: string }>> = {}): RunCache => ({
+const cache = (fields: Partial<Extract<RunCache, { kind: "keyed" }>> = {}): RunCache => ({
   ...PNPM,
+  kind: "keyed",
   keyHash: "f00",
   restore: "main",
   save: null,
   ...fields,
+});
+
+describe("a run's caches", () => {
+  it("are keyed as the project looked them up, and unkeyed where it didn't or their keys couldn't be read", () => {
+    const npm = { ...PNPM, name: "npm" };
+    expect(runCachesFrom([PNPM, npm], [{ name: "pnpm", keyHash: "f00", restore: "main", save: null }])).toEqual([
+      { ...PNPM, kind: "keyed", keyHash: "f00", restore: "main", save: null },
+      { ...npm, kind: "unkeyed", error: "the project didn't look it up" },
+    ]);
+    expect(unkeyedCaches([PNPM], new Error("x".repeat(400)))).toEqual([
+      { ...PNPM, kind: "unkeyed", error: "x".repeat(CACHE_ERROR_CHARS) },
+    ]);
+  });
 });
 
 describe("a step's cache notes", () => {
@@ -145,7 +162,7 @@ describe("a step's cache notes", () => {
     expect(restoreNote(cache(), { kind: "failed", error: "exit 2: zstd: corrupted" })).toBe(
       "cache pnpm: miss: the restore failed, so this ran without it (exit 2: zstd: corrupted)",
     );
-    expect(restoreNote({ ...PNPM, error: "tree t is missing" }, null)).toBe(
+    expect(restoreNote({ ...PNPM, kind: "unkeyed", error: "tree t is missing" }, null)).toBe(
       "cache pnpm: miss: its key couldn't be read (tree t is missing)",
     );
   });

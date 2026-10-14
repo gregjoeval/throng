@@ -1,5 +1,6 @@
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import {
+  CACHE_ERROR_CHARS,
   CACHE_TRANSFER_TIMEOUT_MS,
   cacheRestoreScript,
   cacheSaveScript,
@@ -26,8 +27,6 @@ const SNAPSHOT_KEY = "snapshot";
 const CACHE_PART_BYTES = 16 * 1024 * 1024;
 /** Parts uploading while the next fills, so compressing and uploading overlap (#261). */
 const CACHE_PARTS_IN_FLIGHT = 2;
-/** The most of a failed cache command's stderr a note keeps. */
-const CACHE_ERROR_CHARS = 300;
 
 // HTTPS interception re-signs traffic with the Containers CA, and exec() does not inherit the
 // environment from start(), so every command gets this.
@@ -185,11 +184,26 @@ export class RunSandbox extends DurableObject<Env> {
    * Runs a bash script in /workspace, starting the container (with its grants and size) from the
    * image if it isn't running.
    */
-  async run(
-    script: string,
-    { access, size, timeoutMs = COMMAND_TIMEOUT_MS, env = {} }: RunOptions,
-  ): Promise<RunResult> {
+  async run(script: string, options: RunOptions): Promise<RunResult> {
+    const { access, size, timeoutMs = COMMAND_TIMEOUT_MS } = options;
     const startMs = this.#container.running ? 0 : await this.#start({ access, size }, timeoutMs, null);
+    return this.#exec(script, options, startMs);
+  }
+
+  /**
+   * Runs a bash script in /workspace of the container as it's running, never starting it: null when
+   * it isn't running (it was lost, say), with nothing run. For a script that must run where an
+   * earlier one left things, holding what that container was started with.
+   */
+  async runIfRunning(script: string, options: Omit<RunOptions, keyof StartOptions>): Promise<RunResult | null> {
+    return this.#container.running ? this.#exec(script, options, 0) : null;
+  }
+
+  async #exec(
+    script: string,
+    { timeoutMs = COMMAND_TIMEOUT_MS, env = {} }: Pick<RunOptions, "timeoutMs" | "env">,
+    startMs: number,
+  ): Promise<RunResult> {
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), timeoutMs);
     const began = Date.now();
@@ -233,13 +247,15 @@ export class RunSandbox extends DurableObject<Env> {
 
   /**
    * Snapshots the running container's whole filesystem, for other containers to start from, and
-   * keeps it until `releaseSnapshot`. Null under `wrangler dev`, which takes no snapshots. Throws if
-   * the container isn't running, or the snapshot fails.
+   * keeps it until `releaseSnapshot`. One it took before (on a retried step) is released first, so
+   * none is left unreleased. Null under `wrangler dev`, which takes no snapshots. Throws if the
+   * container isn't running, or the snapshot fails.
    */
   async snapshot(): Promise<SandboxSnapshot | null> {
     if (this.#container.images.sandbox?.startsWith(LOCAL_IMAGE_PREFIX) ?? false) return null;
     const { id, size } = await this.#container.snapshotContainer({});
     const snapshot = { id, size };
+    this.releaseSnapshot();
     this.#kv.put(SNAPSHOT_KEY, snapshot);
     return snapshot;
   }

@@ -15,6 +15,7 @@ interface SandboxSnapshot {
 
 interface Sandbox {
   run: (script: string, options: unknown) => Promise<{ exitCode: number; startMs: number }>;
+  runIfRunning: (script: string, options: unknown) => Promise<{ exitCode: number; startMs: number } | null>;
   restore: (snapshot: SandboxSnapshot, options: unknown) => Promise<boolean>;
   snapshot: () => Promise<SandboxSnapshot | null>;
   releaseSnapshot: () => void;
@@ -45,7 +46,11 @@ function sandbox({ image = "registry.cloudflare.com/acct/throng:abc", failStarts
     },
     interceptOutboundHttps: async () => {},
     setInactivityTimeout: async () => {},
-    snapshotContainer: async () => ({ id: "snap-1", size: 400_000_000, name: "" }),
+    snapshots: 0,
+    snapshotContainer: async () => {
+      container.snapshots += 1;
+      return { id: container.snapshots === 1 ? "snap-1" : `snap-${container.snapshots}`, size: 400_000_000, name: "" };
+    },
     exec: async (_cmd: string[], options?: { env?: Record<string, string> }) => {
       if (options?.env === undefined && failing > 0) {
         failing -= 1;
@@ -126,6 +131,31 @@ describe("RunSandbox", () => {
     expect(kv.has("snapshot")).toBeFalsy();
     expect(log.mock.calls).toEqual([[{ event: "sandbox.snapshot_expires", snapshot: "snap-1", size: 400_000_000 }]]);
     log.mockRestore();
+  });
+
+  it("releases the snapshot it took before when it takes another, as a retried setup step does", async () => {
+    const { sandbox: box, kv } = sandbox();
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    await box.run("true", { access: NO_ACCESS, size: "lite" });
+    await box.snapshot();
+    await box.snapshot();
+    expect(kv.get("snapshot")).toEqual({ ...SNAPSHOT, id: "snap-2" });
+    box.releaseSnapshot();
+    expect(log.mock.calls.map(([call]) => (call as { snapshot: string }).snapshot)).toEqual(["snap-1", "snap-2"]);
+    log.mockRestore();
+  });
+
+  it("runs a script in a running container only, never starting one that's gone", async () => {
+    const { sandbox: box, starts, envs, container } = sandbox();
+    expect(await box.runIfRunning("true", { env: { A: "1" } })).toBeNull();
+    expect(starts).toEqual([]);
+    expect(envs).toEqual([]);
+    await box.run("true", { access: NO_ACCESS, size: "lite" });
+    expect(await box.runIfRunning("true", { env: { A: "1" } })).toMatchObject({ exitCode: 0, startMs: 0 });
+    expect(envs.at(-1)).toMatchObject({ A: "1" });
+    container.running = false;
+    expect(await box.runIfRunning("true", {})).toBeNull();
+    expect(starts).toHaveLength(1);
   });
 
   it("snapshots a deployed container, and none under wrangler dev", async () => {

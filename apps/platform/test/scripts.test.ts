@@ -9,6 +9,7 @@ import { buildResult, checkOrder, MAX_OUTPUT_BYTES, scorePlan } from "../src/res
 import type { PlannedCheck, PlannedMetric, RawScore } from "../src/results.ts";
 import {
   checkScript,
+  mergeCheckoutSha,
   parseResult,
   RERUN_SETUP_FAILED_EXIT,
   setupScript,
@@ -16,7 +17,7 @@ import {
   stepReadyScript,
   stepScript,
 } from "../src/scripts.ts";
-import type { Checkout, CheckRun, SetupResult, StepReady, StepRun } from "../src/scripts.ts";
+import type { Checkout, CheckRun, MergeCheckout, SetupResult, StepReady, StepRun } from "../src/scripts.ts";
 import { NO_TASK_DEFINITIONS, taskDefinitionsFrom, withTask } from "../src/task-definitions.ts";
 import { at } from "./support/defined.ts";
 
@@ -244,7 +245,7 @@ describe("post-gate step scripts", () => {
     const main = git(origin, "rev-parse", "main");
     const head = attemptHead();
     const tree = git(work, "rev-parse", `${head}^{tree}`);
-    const merging: Checkout = { kind: "merge", origin, fork, merge: { head, main, tree } };
+    const merging: Checkout = { kind: "merge", origin, fork, merge: { head, main, tree, committedAt: 1 } };
     const sandbox = mkdtempSync(join(root, "sandbox-"));
     runScript<SetupResult>(setupScript(merging, main, setup("touch built")), sandbox);
     // The land step pushed the merge to the origin's `main`: here, the head itself, whose tree is the same.
@@ -267,13 +268,13 @@ describe("post-gate step scripts", () => {
 });
 
 /** `main` moved on after the attempt forked, so the landing merges the two. */
-function diverged(): { main: string; head: string; tree: string } {
+function diverged(): MergeCheckout {
   const head = attemptHead();
   git(work, "checkout", "-q", "-b", "other", `${head}~2`);
   const main = commit("c.txt", "main moved\n", "main moves");
   git(work, "push", "-q", origin, "other:main");
   const tree = git(work, "merge-tree", "--write-tree", main, head).split("\n")[0] ?? "";
-  return { main, head, tree };
+  return { main, head, tree, committedAt: 1_700_000_000 };
 }
 
 describe("a landing's checkout", () => {
@@ -290,6 +291,18 @@ describe("a landing's checkout", () => {
     const tree = join(sandbox, "tree");
     expect(git(tree, "rev-parse", "HEAD^{tree}")).toBe(merge.tree);
     expect(git(tree, "rev-parse", "HEAD^1", "HEAD^2")).toBe(`${merge.main}\n${merge.head}`);
+  });
+
+  it("makes the same merge commit in every container, whose sha the Workflow knows without one", async () => {
+    const merge = diverged();
+    const merging: Checkout = { kind: "merge", origin, fork, merge };
+    const heads = ["setup-", "check-"].map((prefix) => {
+      const sandbox = mkdtempSync(join(root, prefix));
+      runScript<SetupResult>(setupScript(merging, merge.main, []), sandbox);
+      return git(join(sandbox, "tree"), "rev-parse", "HEAD");
+    });
+    expect(heads[1]).toBe(heads[0]);
+    expect(await mergeCheckoutSha(merge)).toBe(heads[0]);
   });
 
   it("runs a check on the merge in a fresh container", () => {

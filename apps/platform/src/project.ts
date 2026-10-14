@@ -153,6 +153,11 @@ export class ProjectCoordinator extends DurableObject<Env> {
     return recorded;
   }
 
+  /** Called by a run's Pipeline Workflow when a save it was let make failed: lets the key go (see `TaskStore.pipelineCacheUnsaved`). */
+  pipelineCacheUnsaved(run: number, entry: Pick<CacheEntry, "scope" | "name" | "keyHash">): void {
+    this.#tasks.pipelineCacheUnsaved(run, entry);
+  }
+
   /** Called by a run's Pipeline Workflow when it ends. Reports from a superseded or cancelled run are discarded. */
   async pipelineFinished(run: number, report: RunReport): Promise<void> {
     try {

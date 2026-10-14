@@ -31,7 +31,7 @@ export function mergeAuthor(approver: Signer): GitIdentity {
   return { name: approver.handle, email: `${approver.id}+${approver.handle}@${NOREPLY_DOMAIN}` };
 }
 
-/** `ada (claude) <ada00001+claude@…>`, or `ada <ada00001+ada@…>` without an alias. */
+/** `ada (agent) <ada00001+agent@…>`, or `ada <ada00001+ada@…>` without an alias. */
 function trailerName({ id, handle, alias }: Signer): string {
   return alias === null
     ? `${handle} <${id}+${handle}@${NOREPLY_DOMAIN}>`

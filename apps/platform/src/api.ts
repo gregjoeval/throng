@@ -125,7 +125,7 @@ const MintTokenSchema = z
       .optional()
       .openapi({
         description:
-          "An alias of the caller, e.g. `claude`, or null for the caller as themselves. Omitted, it is the alias the " +
+          "An alias of the caller, e.g. `agent`, or null for the caller as themselves. Omitted, it is the alias the " +
           "caller's token acts under, if any.",
       }),
     expiresIn: z
@@ -471,7 +471,7 @@ const MyTaskSchema = TaskSchema.pick({
 /** Where an attempt was copied from: provenance only, never its base. */
 const AliasSchema = z.string().nullable().openapi({
   description:
-    "The alias its author started it under (`claude`); null when they acted as themselves, or after a hand-off.",
+    "The alias its author started it under (`agent`); null when they acted as themselves, or after a hand-off.",
 });
 
 const ForkedFromSchema = z

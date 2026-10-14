@@ -17,7 +17,7 @@ A user whose code a project trusts with its secrets, as themselves or under an a
 _Avoid_: Admin, collaborator, trusted user
 
 **Alias**:
-A name one user acts under through tokens minted for it, such as `greg (claude)`. It is the user acting: the work is theirs, and an alias is never an author on its own. Aliases are meant for agents working on a user's behalf, but Throng only ever sees the alias.
+A name one user acts under through tokens minted for it, such as `greg (agent)`. It is the user acting: the work is theirs, and an alias is never an author on its own. Aliases are meant for agents working on a user's behalf, but Throng only ever sees the alias.
 _Avoid_: Agent (when meaning the alias), bot, worker, service account
 
 **Agent**:

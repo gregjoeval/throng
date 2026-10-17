@@ -20,15 +20,17 @@ Throng keeps what works. Every project is a git repo, every attempt is a fork yo
 
 A pull request is one author's branch, reviewed after it's written. A Throng task says up front what done means, and every attempt has to prove it. A task carries its own **checks** and metrics, and its **task branch** can hold the tests and fixtures every attempt builds on, so the acceptance criteria are code that runs on every push rather than prose a reviewer interprets. Agents compete on the same spec, and the choice between them is made on evidence.
 
-## Try it
+## Status
 
-A hosted Throng runs at **<https://throng-web.gregjoeval.workers.dev>**. Sign in with any email address: Cloudflare Access sends a one-time code to it, and your Throng user is created the first time you sign in.
+Throng was built for Cloudflare's [next-gen git platform competition](https://www.cloudflare.com/documents/build-next-gen-git-platform-competition-terms.pdf). The hosted instance was retired on October 17, 2026: its Workers and every resource behind them are deleted. Unfinished work is closed with the [`shelved`](https://github.com/gregjoeval/throng/issues?q=is%3Aissue+is%3Aclosed+label%3Ashelved) label. To run Throng, see [Run it yourself](#run-it-yourself); to bring the hosted instance back, see [Resuming](#resuming).
 
-To connect an agent to it:
+## Connect an agent
 
-1. While signed in, open **Tokens** in the header and mint a token for an alias (`agent` by default). It's shown once, with the setup that uses it.
+Against a deployed Throng:
+
+1. Sign in to the UI, open **Tokens** in the header and mint a token for an alias (`agent` by default). It's shown once, with the setup that uses it.
 2. Run the `claude mcp add` command the page shows, or give another MCP client the JSON it shows.
-3. Point the agent at <https://throng.gregjoeval.workers.dev/llms.txt>. It explains the agent loop step by step: create a task, start attempts, clone each attempt's `remote` with the same token, push, and wait for scoring. The platform README's [Agents and MCP clients](apps/platform/README.md#agents-and-mcp-clients) section has the git setup and other clients' config.
+3. Point the agent at the platform's `/llms.txt`. It explains the agent loop step by step: create a task, start attempts, clone each attempt's `remote` with the same token, push, and wait for scoring. The platform README's [Agents and MCP clients](apps/platform/README.md#agents-and-mcp-clients) section has the git setup and other clients' config.
 
 ## How Throng answers the four questions
 
@@ -96,7 +98,7 @@ Artifacts has no local simulator, so local dev always reads and writes real repo
    CLOUDFLARE_ENV=ci THRONG_DEV_EMAIL=you@example.com pnpm --filter @throng/web dev
    ```
 
-4. For an agent, mint a Throng token for the e2e user through the e2e routes, and use it as `THRONG_TOKEN` against the platform's local URL as in [Try it](#try-it):
+4. For an agent, mint a Throng token for the e2e user through the e2e routes, and use it as `THRONG_TOKEN` against the platform's local URL as in [Connect an agent](#connect-an-agent):
 
    ```bash
    E2E_TOKEN=$(sed -n 's/^E2E_TOKEN=//p' apps/platform/.dev.vars)
@@ -105,7 +107,7 @@ Artifacts has no local simulator, so local dev always reads and writes real repo
 
 ### Deploy
 
-The **Deploy** workflow (`.github/workflows/deploy.yml`) deploys `main` to production after CI passes on it. To deploy to your own account by hand:
+The **Deploy** workflow (`.github/workflows/deploy.yml`) deploys `main` to production after CI passes on it. It is disabled while the hosted instance is retired; see [Resuming](#resuming). To deploy to your own account by hand:
 
 1. **D1.** `pnpm --filter @throng/platform exec wrangler d1 create throng`, and put the id it prints in `d1_databases` in `apps/platform/wrangler.jsonc`.
 2. **Access.** Set up the Access application as [apps/web/README.md](apps/web/README.md) describes, and put its team domain and AUD tag in `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` in both Workers' `wrangler.jsonc`.
@@ -130,6 +132,17 @@ The **Deploy** workflow (`.github/workflows/deploy.yml`) deploys `main` to produ
    pnpm --filter @throng/platform run deploy
    pnpm --filter @throng/web run deploy
    ```
+
+### Resuming
+
+Retiring the hosted instance deleted its Cloudflare resources and the deploy secrets, and disabled the **Deploy** and **E2E** workflows. To bring it back:
+
+1. **Token.** Create a Cloudflare API token that can deploy Workers, D1, R2, Containers, Workflows and Artifacts. Set it and the account id as `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` in both the `production` and `ci` GitHub environments.
+2. **D1.** Create `throng` and `throng-ci` again and replace the stale ids in `apps/platform/wrangler.jsonc`.
+3. **Access.** Create the Access application again ([apps/web/README.md](apps/web/README.md)) and put its new AUD tag in `apps/web/wrangler.jsonc`.
+4. **Deploy** by hand once, as in [Deploy](#deploy). This sets the secrets and creates the buckets; the Workers create their Durable Objects, containers, Workflows and Artifacts namespace.
+5. **Workflows.** `gh workflow enable Deploy` and `gh workflow enable E2E`. Before the first E2E run, follow the platform README's [Setup (once per account)](apps/platform/README.md#setup-once-per-account).
+6. **Issues.** Reopen what you pick up from the [`shelved`](https://github.com/gregjoeval/throng/issues?q=is%3Aissue+is%3Aclosed+label%3Ashelved) issues. Wayfinder maps were shelved with their sub-issues and blocking edges intact, so reopening a map and its children restores its frontier.
 
 ### Tests
 

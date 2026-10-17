@@ -13,3 +13,7 @@ The skills speak in terms of five canonical triage roles. This file maps those r
 When a skill mentions a role (e.g. "apply the AFK-ready triage label"), use the corresponding label string from this table.
 
 Edit the right-hand column to match whatever vocabulary you actually use.
+
+## Shelved
+
+`shelved` is not a triage role. It marks work that was still to do when the hosted instance was retired (#288): each such issue was closed as "not planned" with its triage and `wayfinder:` labels left as they were. To resume one, reopen it and remove `shelved`; its labels already say where it stood. Find them with `is:issue is:closed label:shelved`.
